@@ -189,6 +189,7 @@ class InningsState:
         self.total_balls = 0
         self.over_log = []
         self.partnership_runs = 0
+        self.extras = 0
         self.last_ball_boundary = False
         
         self.current_striker_idx = 0
@@ -422,6 +423,25 @@ def execute_ball_math(match: CricketMatch):
 
     diff = bat_rating - bowl_rating
     
+    # EXTRAS SYSTEM: Wide Check (Skips ball)
+    if random.random() < 0.04 and "Yorker" not in deliv and "Slow" not in deliv:
+        innings.total_runs += 1
+        if not hasattr(innings, 'extras'): innings.extras = 0
+        innings.extras += 1
+        bow_stats.runs_conceded += 1
+        innings.over_log.append("WD")
+        match.last_commentary = f"**{bowler['name']}** bowled a **Wide!**\n💥 **Result:** 1 Extra Run"
+        return
+        
+    # EXTRAS SYSTEM: No Ball Check
+    is_no_ball = False
+    if random.random() < 0.02:
+        is_no_ball = True
+        if not hasattr(innings, 'extras'): innings.extras = 0
+        innings.extras += 1
+        innings.total_runs += 1
+        bow_stats.runs_conceded += 1
+
     dot_weight = max(15.0, 35.0 - diff * 0.4)
     single_weight = 40.0
     boundary_weight = max(2.0, 13.0 + diff * 0.5) 
@@ -461,7 +481,7 @@ def execute_ball_math(match: CricketMatch):
             single_weight *= 1.1
 
     # Base Shot Modifications
-    if shot == "Defensive":
+    if shot in ["Block", "Defensive"]:
         dot_weight *= 2.0
         single_weight *= 0.8
         boundary_weight = 0.2
@@ -515,6 +535,38 @@ def execute_ball_math(match: CricketMatch):
         if is_powerplay:
             boundary_weight *= 1.25
             single_weight *= 0.85
+            
+    four_weight = boundary_weight
+    six_weight = boundary_weight * 0.35
+    
+    # 🚨 THE "CRACKED GAME" OVERPOWERED SHOT FIXES
+    if shot in ["Loft", "Scoop"]:
+        four_weight *= 0.6
+        six_weight *= 3.0    # Massive six potential
+        wicket_weight *= 1.8 # But heavily increased wicket risk!
+        dot_weight *= 0.8
+    elif shot in ["Block", "Defensive"]:
+        four_weight *= 0.1
+        six_weight = 0.0
+    elif shot in ["Drive", "Cut", "Pull", "Flick", "Sweep"]:
+        four_weight *= 1.2
+        six_weight *= 0.5    # Standard shots rarely go for six
+        
+    # 🚨 PACE VARIATION REALISM (Missing Criteria)
+    if "Slow" in deliv:
+        if shot in ["Loft", "Pull", "Sweep", "Scoop"]:
+            wicket_weight *= 1.5 # Deceived by lack of pace
+            six_weight *= 0.5
+    elif "Fast" in deliv:
+        if shot in ["Scoop", "Sweep", "Pull", "Loft"]:
+            wicket_weight *= 1.5 # Rushed for pace
+    elif "Outswing" in deliv:
+        if shot in ["Drive", "Cut"]:
+            wicket_weight *= 1.4 # Outside edge risk
+            four_weight *= 1.2   # Rewarding if gap is found
+    elif "Inswing" in deliv:
+        if shot in ["Drive", "Flick", "Sweep"]:
+            wicket_weight *= 1.4 # Bowled / LBW risk
 
     choices = ["dot", "single", "two", "three", "four", "six", "wicket"]
     weights = [
@@ -522,16 +574,17 @@ def execute_ball_math(match: CricketMatch):
         single_weight, 
         single_weight * 0.3, 
         single_weight * 0.05, 
-        boundary_weight, 
-        boundary_weight * 0.4, 
+        four_weight, 
+        six_weight, 
         wicket_weight
     ]
     
     outcome = random.choices(choices, weights=weights)[0]
     
+    if is_no_ball and outcome == "wicket":
+        outcome = "dot"
+    
     b_stats.balls_faced += 1
-    bow_stats.balls_bowled += 1
-    innings.total_balls += 1
     innings.last_ball_boundary = False
     outcome_text = ""
 
@@ -540,21 +593,39 @@ def execute_ball_math(match: CricketMatch):
         innings.partnership_runs = 0
         d_types = ["Bowled", "Caught", "LBW"]
         
-        if bad_shot_selection and "Yorker" in deliv:
+        # Smart Dismissal Context
+        if "Outswing" in deliv and shot in ["Drive", "Cut"]:
+            dismissal_type = "Caught Behind"
+        elif "Inswing" in deliv and shot in ["Drive", "Flick"]:
+            dismissal_type = random.choice(["Bowled", "LBW"])
+        elif "Slow" in deliv and shot in ["Loft", "Pull", "Scoop"]:
+            dismissal_type = "Caught"
+        elif bad_shot_selection and "Yorker" in deliv:
             dismissal_type = "Bowled"
         elif bad_shot_selection and "Bouncer" in deliv:
+            dismissal_type = "Caught"
+        elif shot in ["Loft", "Scoop"]:
             dismissal_type = "Caught"
         else:
             dismissal_type = random.choice(d_types)
             
         if dismissal_type == "Bowled":
             b_stats.dismissal = f"b. {bowler['name']}"
+        elif dismissal_type == "LBW":
+            b_stats.dismissal = f"lbw b. {bowler['name']}"
+        elif dismissal_type == "Caught Behind":
+            b_stats.dismissal = f"c. Keeper b. {bowler['name']}"
         else:
             b_stats.dismissal = f"c. Fielder b. {bowler['name']}"
             
         bow_stats.wickets_taken += 1
         innings.over_log.append("🔴")
-        outcome_text = f"WICKET! ({dismissal_type})"
+        outcome_text = f"WICKET! ({dismissal_type.upper()})"
+        
+        match.prev_striker_idx = innings.current_striker_idx
+        if dismissal_type in ["LBW", "Caught Behind"] and match.simulation_mode == "interactive":
+            match.pending_drs = True
+            match.drs_dismissal = dismissal_type
         
         if innings.wickets < 10:
             innings.current_striker_idx = innings.next_batter_idx
@@ -563,27 +634,45 @@ def execute_ball_math(match: CricketMatch):
         runs_map = {"dot": 0, "single": 1, "two": 2, "three": 3, "four": 4, "six": 6}
         runs = runs_map[outcome]
         
-        innings.total_runs += runs
-        innings.partnership_runs += runs
-        
-        if runs in [4, 6]:
+        is_bye = False
+        if runs == 0 and random.random() < 0.05:
+            is_bye = True
+            runs = random.choice([1, 2, 4])
+            innings.total_runs += runs
+            if not hasattr(innings, 'extras'): innings.extras = 0
+            innings.extras += runs
+            outcome_text = f"{runs} Leg Byes"
+            log_entry = f"{runs}LB"
+        else:
+            innings.total_runs += runs
+            innings.partnership_runs += runs
+            b_stats.runs_scored += runs
+            bow_stats.runs_conceded += runs
+            if runs > 0:
+                outcome_text = f"{runs} Runs"
+            else:
+                outcome_text = "Dot Ball"
+                
+            emoji_map = {0: "⚪", 1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "🟢", 6: "🔵"}
+            log_entry = emoji_map[runs]
+            
+        if is_no_ball:
+            log_entry = "NB" + (log_entry if runs > 0 and not is_bye else "")
+            outcome_text += " (NO BALL)"
+            
+        if runs in [4, 6] and not is_bye:
             innings.last_ball_boundary = True
             
-        b_stats.runs_scored += runs
-        bow_stats.runs_conceded += runs
+        innings.over_log.append(log_entry)
         
-        emoji_map = {0: "⚪", 1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "🟢", 6: "🔵"}
-        innings.over_log.append(emoji_map[runs])
-        
-        if runs > 0:
-            outcome_text = f"{runs} Runs"
-        else:
-            outcome_text = "Dot Ball"
-            
         # Rotate strike on odd runs
         if runs in [1, 3]:
             innings.current_striker_idx, innings.current_non_striker_idx = innings.current_non_striker_idx, innings.current_striker_idx
 
+    if not is_no_ball:
+        bow_stats.balls_bowled += 1
+        innings.total_balls += 1
+        
     match.last_commentary = f"**{bowler['name']}** bowled a **{deliv}**\n**{striker['name']}** played: **{shot}**\n💥 **Result:** {outcome_text}"
 
 # ==========================================
@@ -670,7 +759,7 @@ def render_embed_scoreboard(match: CricketMatch) -> discord.Embed:
         if stats.dismissal == "not out":
             is_stk = "*" if idx == innings.current_striker_idx else ""
             sr = (stats.runs_scored / stats.balls_faced * 100) if stats.balls_faced > 0 else 0.0
-            b_table += f"{(p_item['name'][:18] + is_stk):<20}{stats.runs_scored:<5}{stats.balls_faced:<5}{sr:.1f}\n"
+            b_table += f"{p_item['name'][:18]:<18}{is_stk:<2}{stats.runs_scored:<5}{stats.balls_faced:<5}{sr:<5.1f}\n"
     table_str = f"```text\n{b_table}```"
 
     # 3. Match Stats Line
@@ -725,7 +814,7 @@ def render_full_scorecard_embed(match: CricketMatch, innings_num: int) -> discor
         if stats.balls_faced > 0 or stats.dismissal != "not out":
             sr = (stats.runs_scored / stats.balls_faced * 100) if stats.balls_faced > 0 else 0.0
             status = "not out" if stats.dismissal == "not out" else stats.dismissal
-            b_text += f"{p['name'][:18]:<19} {stats.runs_scored:<4} {stats.balls_faced:<4} {sr:.1f}\n"
+            b_text += f"{p['name'][:18]:<24}{stats.runs_scored:<5}{stats.balls_faced:<5}{sr:<5.1f}\n"
             b_text += f"  └ {status}\n"
     b_text += "```"
     
@@ -735,7 +824,7 @@ def render_full_scorecard_embed(match: CricketMatch, innings_num: int) -> discor
         if stats.balls_bowled > 0:
             o = f"{stats.balls_bowled // 6}.{stats.balls_bowled % 6}"
             eco = (stats.runs_conceded / stats.balls_bowled * 6) if stats.balls_bowled > 0 else 0.0
-            bw_text += f"{p['name'][:18]:<19} {o:<4} {stats.runs_conceded:<4} {stats.wickets_taken:<4} {eco:.1f}\n"
+            bw_text += f"{p['name'][:18]:<24}{o:<5}{stats.runs_conceded:<5}{stats.wickets_taken:<5}{eco:<5.1f}\n"
     bw_text += "```"
     
     embed.add_field(name="Batting", value=b_text, inline=False)
@@ -1137,8 +1226,59 @@ class BattingView(discord.ui.View):
         await interaction.response.edit_message(view=None)
         
         execute_ball_math(self.match)
+        
+        if getattr(self.match, "pending_drs", False):
+            self.match.pending_drs = False
+            msg = await interaction.channel.send(f"🚨 **{self.match.drs_dismissal.upper()} GIVEN!**\n<@{self.uid}>, you have 20 seconds to take a review.", view=None)
+            view = DRSView(self.match, interaction)
+            view.message = msg
+            await msg.edit(view=view)
+            return
+            
         await interaction.channel.send(embed=render_embed_scoreboard(self.match))
         await run_interactive_delivery_sequence(interaction, self.match)
+
+class DRSView(discord.ui.View):
+    def __init__(self, match: CricketMatch, origin_inter: discord.Interaction):
+        super().__init__(timeout=20)
+        self.match = match
+        self.origin_inter = origin_inter
+        
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        uid = self.match.batting_first_id if self.match.current_innings_num == 1 else self.match.bowling_first_id
+        if interaction.user.id != uid:
+            await interaction.response.send_message("Only the batting team can review.", ephemeral=True)
+            return False
+        return True
+        
+    @discord.ui.button(label="T (Review)", style=discord.ButtonStyle.primary, emoji="📺")
+    async def btn_review(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await self.message.edit(view=None)
+        if random.random() < 0.35:
+            await interaction.channel.send("📺 **DRS REVIEW:** Pitching... Impact... Wickets Missing! **DECISION OVERTURNED!** 🟢")
+            innings = self.match.current_innings
+            innings.wickets -= 1
+            innings.next_batter_idx -= 1
+            innings.current_striker_idx = self.match.prev_striker_idx
+            innings.batting_stats[innings.batting_team["players"][innings.current_striker_idx]["name"]].dismissal = "not out"
+            innings.bowling_stats[innings.current_bowler["name"]].wickets_taken -= 1
+            if innings.over_log and innings.over_log[-1] == "🔴":
+                innings.over_log[-1] = "⚪"
+            self.match.last_commentary += "\n📺 **DRS:** Decision Overturned (Not Out)."
+        else:
+            await interaction.channel.send("📺 **DRS REVIEW:** Three Reds! **UMPIRING DECISION UPHELD!** 🔴")
+            self.match.last_commentary += "\n📺 **DRS:** Decision Upheld (Out)."
+        await interaction.channel.send(embed=render_embed_scoreboard(self.match))
+        await run_interactive_delivery_sequence(self.origin_inter, self.match)
+        
+    @discord.ui.button(label="Walk Away", style=discord.ButtonStyle.secondary)
+    async def btn_walk(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await self.message.edit(view=None)
+        await interaction.channel.send("🚶 Batter accepts the decision and walks off.")
+        await interaction.channel.send(embed=render_embed_scoreboard(self.match))
+        await run_interactive_delivery_sequence(self.origin_inter, self.match)
 
 async def run_interactive_delivery_sequence(interaction, match: CricketMatch):
     innings = match.current_innings
@@ -1181,6 +1321,29 @@ async def run_interactive_delivery_sequence(interaction, match: CricketMatch):
 async def prompt_batter_shot(channel, match: CricketMatch, prev=None):
     if match.is_ai_game and match.get_striker_user_id() == match.p2_id:
         execute_ball_math(match)
+            
+        if getattr(match, "pending_drs", False):
+            match.pending_drs = False
+            if random.random() < 0.4:
+                await channel.send("📺 **AI has opted for a DRS Review!**")
+                await asyncio.sleep(2)
+                if random.random() < 0.35:
+                    await channel.send("📺 **DRS REVIEW:** Pitching... Impact... Wickets Missing! **DECISION OVERTURNED!** 🟢")
+                    innings = match.current_innings
+                    innings.wickets -= 1
+                    innings.next_batter_idx -= 1
+                    innings.current_striker_idx = match.prev_striker_idx
+                    innings.batting_stats[innings.batting_team["players"][innings.current_striker_idx]["name"]].dismissal = "not out"
+                    innings.bowling_stats[innings.current_bowler["name"]].wickets_taken -= 1
+                    if innings.over_log and innings.over_log[-1] == "🔴":
+                        innings.over_log[-1] = "⚪"
+                    match.last_commentary += "\n📺 **DRS:** Decision Overturned (Not Out)."
+                else:
+                    await channel.send("📺 **DRS REVIEW:** Three Reds! **UMPIRING DECISION UPHELD!** 🔴")
+                    match.last_commentary += "\n📺 **DRS:** Decision Upheld (Out)."
+            else:
+                await channel.send("🚶 AI Batter accepts the decision and walks off.")
+            
         await channel.send(embed=render_embed_scoreboard(match))
         
         class Dummy: pass
