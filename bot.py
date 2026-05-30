@@ -2,27 +2,23 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import random
-import csv
 import difflib
 import asyncio
 import io
 import os
+import psycopg2
+from psycopg2.extras import DictCursor
 from PIL import Image, ImageDraw, ImageFont
-import json
 from keep_alive import keep_alive
 
 # ==========================================
 # ⚙️ 1. SETUP & CONFIGURATION
 # ==========================================
-
-# 🚨 CHANGE THIS TO YOUR EXACT DISCORD NUMERIC ID
-ADMIN_DISCORD_ID = 1087369198801526836
-# 🚨 INSERT YOUR NEWLY REGENERATED BOT TOKEN HERE
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
+ADMIN_DISCORD_ID = 1087369198801526836 # Your ID
+DB_URL = os.environ.get("DATABASE_URL")
 
 class CricketBot(commands.Bot):
     def __init__(self):
-        # 🚨 FIX: Enable Message Content so the bot can read your team names and XI!
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
@@ -32,55 +28,93 @@ class CricketBot(commands.Bot):
         print("✅ Slash commands synchronized globally.")
 
 bot = CricketBot()
+active_games = {}
+active_setups = {}
+
+# ==========================================
+# 🗄️ 1.5 CLOUD DATABASE & SECURITY
+# ==========================================
+def get_db():
+    return psycopg2.connect(DB_URL, sslmode='require')
+
+def init_db():
+    if not DB_URL:
+        print("⚠️ DATABASE_URL not found. Cloud DB will not work.")
+        return
+    
+    # 1. Create the Tables if they don't exist
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute('''CREATE TABLE IF NOT EXISTS players (
+                name TEXT PRIMARY KEY, bat INTEGER, bowl INTEGER, role TEXT, archetype TEXT
+            )''')
+            cur.execute('''CREATE TABLE IF NOT EXISTS auth_servers (server_id TEXT PRIMARY KEY)''')
+            cur.execute('''CREATE TABLE IF NOT EXISTS auth_admins (admin_id TEXT PRIMARY KEY)''')
+        conn.commit()
+        
+    # 2. Auto-Migrate from CSV to SQL Database!
+    if os.path.exists("players_master.csv"):
+        import csv
+        try:
+            with open("players_master.csv", "r", encoding="utf-8-sig") as f:
+                with get_db() as conn:
+                    with conn.cursor() as cur:
+                        for row in csv.DictReader(f):
+                            cur.execute("SELECT name FROM players WHERE name = %s", (row["Name"].strip(),))
+                            if not cur.fetchone():
+                                cur.execute("INSERT INTO players (name, bat, bowl, role, archetype) VALUES (%s, %s, %s, %s, %s)",
+                                            (row["Name"].strip(), int(row["Bat"]), int(row["Bowl"]), row["Role"].strip(), row["Archetype"].strip()))
+                    conn.commit()
+            print("✅ Legacy CSV data successfully synced to Neon Cloud DB.")
+        except Exception as e: print(f"Migration Error: {e}")
 
 @bot.event
 async def on_ready():
     print(f"🏏 Logged in successfully as {bot.user.name}")
-    
-    # Ensure database file exists upon boot
-    if not os.path.exists("players_master.csv"):
-        with open("players_master.csv", "w", newline="", encoding="utf-8") as f:
-            f.write("Name,Bat,Bowl,Role,Archetype\n")
-        print("✅ Created new players_master.csv database.")
-
-active_games = {}
-# ==========================================
-# 🔐 1.5 SECURITY & AUTHORIZATION
-# ==========================================
+    init_db()
+    print("✅ Cloud Database Connected and Ready.")
 
 def load_auth_servers():
     try:
-        import json
-        with open("auth_servers.json", "r") as f: return json.load(f)
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT server_id FROM auth_servers")
+                return [row[0] for row in cur.fetchall()]
     except: return []
-def save_auth_servers(data):
-    with open("auth_servers.json", "w") as f: json.dump(data, f)
 
 def load_auth_admins():
     try:
-        with open("auth_admins.json", "r") as f: return json.load(f)
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT admin_id FROM auth_admins")
+                return [row[0] for row in cur.fetchall()]
     except: return []
 
-def save_auth_admins(data):
-    with open("auth_admins.json", "w") as f: json.dump(data, f)
-
 @bot.tree.interaction_check
-async def restrict_servers(interaction: discord.Interaction):
-    # 1. The Bot Owner can run commands ANYWHERE
-    if interaction.user.id == ADMIN_DISCORD_ID: 
-        return True
-    
-    # 2. Allow Direct Messages
-    if not interaction.guild: 
-        return True 
-
-    # 3. Check if the server is whitelisted
-    servers = load_auth_servers()
-    if str(interaction.guild.id) not in servers:
-        await interaction.response.send_message("❌ This server is not authorized to use this bot. Please contact the bot owner.", ephemeral=True)
-        return False
-        
+async def global_security_check(interaction: discord.Interaction):
+    if interaction.user.id == ADMIN_DISCORD_ID: return True
+    admins = load_auth_admins()
+    if str(interaction.user.id) in admins: return True
+    if interaction.guild:
+        servers = load_auth_servers()
+        if str(interaction.guild.id) not in servers:
+            await interaction.response.send_message("❌ This server is not authorized to run the bot.", ephemeral=True)
+            return False
     return True
+
+def load_all_players_from_db():
+    players = []
+    try:
+        with get_db() as conn:
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                cur.execute("SELECT * FROM players")
+                for row in cur.fetchall():
+                    players.append({
+                        "name": row["name"], "bat": int(row["bat"]), "bowl": int(row["bowl"]),
+                        "role": row["role"], "archetype": row["archetype"]
+                    })
+    except Exception as e: print(f"DB Load Warning: {e}")
+    return players
 # ==========================================
 # 📊 2. CORE DATA STRUCTURES & FALLBACKS
 # ==========================================
@@ -1192,22 +1226,6 @@ class MatchSetupState:
         self.weather = "Clear"
         self.home_team_id = p1_id
 
-def load_all_players_from_csv():
-    players = []
-    try:
-        # utf-8-sig strips the hidden \ufeff BOM character that causes 0/11 failures
-        with open("players_master.csv", "r", encoding="utf-8-sig") as f:
-            for row in csv.DictReader(f):
-                players.append({
-                    "name": row["Name"].strip(), 
-                    "bat": int(row["Bat"]), 
-                    "bowl": int(row["Bowl"]), 
-                    "role": row["Role"].strip(), 
-                    "archetype": row["Archetype"].strip()
-                })
-    except Exception as e:
-        print(f"CSV Load Warning: {e}")
-    return players
 
 def parse_pasted_roster(raw_text, db_players):
     # Create a lookup map where keys are lowercase for easy matching
@@ -1524,7 +1542,7 @@ async def on_message(message: discord.Message):
 
     elif stage == "awaiting_team1_xi":
         if message.author.id != state.p1_id: return
-        db = load_all_players_from_csv()
+        db = load_all_players_from_db()
         players, missing = parse_pasted_roster(message.content, db)
         
         req_length = 12 if state.impact_player else 11
@@ -1556,7 +1574,7 @@ async def on_message(message: discord.Message):
     elif stage == "awaiting_team2_xi":
         target_id = state.p2_id if state.p2_id else state.p1_id
         if message.author.id != target_id: return
-        db = load_all_players_from_csv()
+        db = load_all_players_from_db()
         players, missing = parse_pasted_roster(message.content, db)
         
         req_length = 12 if state.impact_player else 11
@@ -1615,38 +1633,36 @@ async def endmatch_cmd(interaction: discord.Interaction):
         await interaction.response.send_message("🛑 **Match and setup forcefully terminated.** Memory cleared.")
     else:
         await interaction.response.send_message("⚠️ There is no active match or setup running in this channel.", ephemeral=True)
+# ==========================================
 # 🔍 8. PUBLIC DATABASE SEARCH
 # ==========================================
 
 async def send_player_profile(interaction: discord.Interaction, player: dict):
-    embed = discord.Embed(title=f"🏏 Player Profile: {player['Name']}", color=0x1D4ED8)
-    embed.add_field(name="🔥 Batting", value=f"`{player['Bat']}`", inline=True)
-    embed.add_field(name="🎯 Bowling", value=f"`{player['Bowl']}`", inline=True)
-    embed.add_field(name="📋 Role", value=player["Role"].replace("_", " "), inline=True)
-    embed.add_field(name="🧠 Archetype", value=player["Archetype"], inline=True)
+    embed = discord.Embed(title=f"🏏 Player Profile: {player['name']}", color=0x1D4ED8)
+    embed.add_field(name="🔥 Batting", value=f"`{player['bat']}`", inline=True)
+    embed.add_field(name="🎯 Bowling", value=f"`{player['bowl']}`", inline=True)
+    embed.add_field(name="📋 Role", value=player["role"].replace("_", " "), inline=True)
+    embed.add_field(name="🧠 Archetype", value=player["archetype"], inline=True)
     
     await interaction.followup.send(embed=embed)
 
-@bot.tree.command(name="searchplayer", description="Search for a player with smart AI-style suggestions.")
+@bot.tree.command(name="searchplayer", description="Search for a player in the Cloud DB.")
 async def searchplayer(interaction: discord.Interaction, name: str):
     await interaction.response.defer()
     search_query = name.strip()
-    all_players = []
-    player_names = []
     
-    try:
-        with open("players_master.csv", "r", encoding="utf-8") as f:
-            for row in csv.DictReader(f):
-                all_players.append(row)
-                player_names.append(row["Name"])
-    except FileNotFoundError:
-        return await interaction.followup.send("❌ Error: DB missing.")
+    # 🚨 PULL FROM CLOUD DATABASE
+    all_players = load_all_players_from_db()
+    player_names = [p["name"] for p in all_players]
+    
+    if not all_players:
+        return await interaction.followup.send("❌ Error: Cloud DB is empty or disconnected.")
         
-    exact = next((p for p in all_players if p["Name"].lower() == search_query.lower()), None)
+    exact = next((p for p in all_players if p["name"].lower() == search_query.lower()), None)
     if exact:
         return await send_player_profile(interaction, exact)
 
-    subs = [p for p in all_players if search_query.lower() in p["Name"].lower()]
+    subs = [p for p in all_players if search_query.lower() in p["name"].lower()]
     fuzz = difflib.get_close_matches(search_query, player_names, n=1, cutoff=0.2)
 
     if not subs and not fuzz:
@@ -1655,12 +1671,12 @@ async def searchplayer(interaction: discord.Interaction, name: str):
     if fuzz:
         best_name = fuzz[0] 
     else:
-        best_name = subs[0]["Name"]
+        best_name = subs[0]["name"]
         
     if len(subs) == 1 and not fuzz:
         return await send_player_profile(interaction, subs[0])
 
-    other = [p["Name"] for p in subs if p["Name"] != best_name]
+    other = [p["name"] for p in subs if p["name"] != best_name]
     msg = f"🔍 **Not found exactly.**\n💡 **Best Match:** `{best_name}`\n👉 Rerun: `/searchplayer name: {best_name}`"
     
     if other:
@@ -1686,7 +1702,7 @@ class AddPlayerModal(discord.ui.Modal, title="Add New Player"):
         except:
             return await interaction.response.send_message("❌ Need numbers 0-100.", ephemeral=True)
             
-        await interaction.response.send_message("Select Role/Archetype below:", view=PlayerRoleSelectView(self.p_name.value, bat, bowl), ephemeral=True)
+        await interaction.response.send_message("Select Role/Archetype below:", view=PlayerRoleSelectView(self.p_name.value.strip(), bat, bowl), ephemeral=True)
 
 class PlayerRoleSelectView(discord.ui.View):
     def __init__(self, name, bat, bowl):
@@ -1714,39 +1730,46 @@ class PlayerRoleSelectView(discord.ui.View):
             for c in self.children:
                 c.disabled = True
                 
+            # 🚨 PUSH TO CLOUD DATABASE
             try:
-                with open("players_master.csv", "r", encoding="utf-8") as f:
-                    if any(r["Name"].strip().lower() == self.n.strip().lower() for r in csv.DictReader(f)):
-                        return await inter.followup.send(f"❌ Cancelled: `{self.n}` exists!", ephemeral=True)
-            except:
-                pass
-            
-            with open("players_master.csv", "a", newline="", encoding="utf-8") as f:
-                csv.writer(f).writerow([self.n, self.bat, self.bowl, self.s_role, self.s_arch])
+                with get_db() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT name FROM players WHERE LOWER(name) = LOWER(%s)", (self.n,))
+                        if cur.fetchone():
+                            return await inter.followup.send(f"❌ Cancelled: `{self.n}` already exists in DB!", ephemeral=True)
+                            
+                        cur.execute("INSERT INTO players (name, bat, bowl, role, archetype) VALUES (%s, %s, %s, %s, %s)",
+                                    (self.n, self.bat, self.bowl, self.s_role, self.s_arch))
+                    conn.commit()
+            except Exception as e:
+                return await inter.followup.send(f"❌ DB Error: {e}", ephemeral=True)
                 
-            await inter.followup.send(f"✅ Saved `{self.n}`!", ephemeral=True)
+            await inter.followup.send(f"✅ Saved `{self.n}` to Cloud DB!", ephemeral=True)
 
-@bot.tree.command(name="addplayer", description="[ADMIN] Add player to CSV.")
+@bot.tree.command(name="addplayer", description="[ADMIN] Add player to Cloud DB.")
 async def add_p_cmd(interaction: discord.Interaction):
     admins = load_auth_admins()
     if interaction.user.id != ADMIN_DISCORD_ID and str(interaction.user.id) not in admins: 
         return await interaction.response.send_message("❌ Access Denied: Admin only.", ephemeral=True)
         
     await interaction.response.send_modal(AddPlayerModal())
+
 @bot.tree.command(name="authserver", description="[OWNER] Toggle a server's permission to run the bot.")
 async def auth_server_cmd(interaction: discord.Interaction, guild_id: str):
     if interaction.user.id != ADMIN_DISCORD_ID:
         return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
     
     servers = load_auth_servers()
-    if guild_id in servers:
-        servers.remove(guild_id)
-        save_auth_servers(servers)
-        await interaction.response.send_message(f"🚫 Server `{guild_id}` authorization **revoked**.", ephemeral=True)
-    else:
-        servers.append(guild_id)
-        save_auth_servers(servers)
-        await interaction.response.send_message(f"✅ Server `{guild_id}` is now **authorized** to run the bot.", ephemeral=True)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            if guild_id in servers:
+                cur.execute("DELETE FROM auth_servers WHERE server_id = %s", (guild_id,))
+                msg = f"🚫 Server `{guild_id}` authorization **revoked**."
+            else:
+                cur.execute("INSERT INTO auth_servers (server_id) VALUES (%s)", (guild_id,))
+                msg = f"✅ Server `{guild_id}` is now **authorized** to run the bot."
+        conn.commit()
+    await interaction.response.send_message(msg, ephemeral=True)
 
 @bot.tree.command(name="authadmin", description="[OWNER] Toggle a user's permission to add/update players.")
 async def auth_admin_cmd(interaction: discord.Interaction, user: discord.Member):
@@ -1755,25 +1778,28 @@ async def auth_admin_cmd(interaction: discord.Interaction, user: discord.Member)
     
     admins = load_auth_admins()
     uid = str(user.id)
-    if uid in admins:
-        admins.remove(uid)
-        save_auth_admins(admins)
-        await interaction.response.send_message(f"🚫 Admin permissions **revoked** for {user.mention}.", ephemeral=True)
-    else:
-        admins.append(uid)
-        save_auth_admins(admins)
-        await interaction.response.send_message(f"✅ {user.mention} is now an **Admin** and can add/update players.", ephemeral=True)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            if uid in admins:
+                cur.execute("DELETE FROM auth_admins WHERE admin_id = %s", (uid,))
+                msg = f"🚫 Admin permissions **revoked** for {user.mention}."
+            else:
+                cur.execute("INSERT INTO auth_admins (admin_id) VALUES (%s)", (uid,))
+                msg = f"✅ {user.mention} is now an **Admin** and can add/update players."
+        conn.commit()
+    await interaction.response.send_message(msg, ephemeral=True)
+
 # ==================== UPDATE PLAYER ====================
 
 class UpdatePlayerModal(discord.ui.Modal, title="Update Player"):
-    def __init__(self, cur, all_p):
+    def __init__(self, cur_player, all_p):
         super().__init__()
-        self.cur = cur
+        self.cur = cur_player
         self.all_p = all_p
         
-        self.new_name = discord.ui.TextInput(label="Player Name (Edit to change)", default=cur["Name"], required=True)
-        self.bat_r = discord.ui.TextInput(label="Batting Rating", default=cur["Bat"], required=True)
-        self.bowl_r = discord.ui.TextInput(label="Bowling Rating", default=cur["Bowl"], required=True)
+        self.new_name = discord.ui.TextInput(label="Player Name (Edit to change)", default=self.cur["name"], required=True)
+        self.bat_r = discord.ui.TextInput(label="Batting Rating", default=str(self.cur["bat"]), required=True)
+        self.bowl_r = discord.ui.TextInput(label="Bowling Rating", default=str(self.cur["bowl"]), required=True)
         
         self.add_item(self.new_name)
         self.add_item(self.bat_r)
@@ -1789,11 +1815,11 @@ class UpdatePlayerModal(discord.ui.Modal, title="Update Player"):
         new_n = self.new_name.value.strip()
         
         # Prevent renaming to a player that already exists
-        if new_n.lower() != self.cur["Name"].lower():
-            if any(p["Name"].lower() == new_n.lower() for p in self.all_p):
-                return await inter.response.send_message(f"❌ A player named `{new_n}` already exists!", ephemeral=True)
+        if new_n.lower() != self.cur["name"].lower():
+            if any(p["name"].lower() == new_n.lower() for p in self.all_p):
+                return await inter.response.send_message(f"❌ A player named `{new_n}` already exists in the DB!", ephemeral=True)
                 
-        await inter.response.send_message("Select New Role/Archetype below:", view=UpdateRoleSelectView(self.cur["Name"], new_n, bat, bowl, self.all_p), ephemeral=True)
+        await inter.response.send_message("Select New Role/Archetype below:", view=UpdateRoleSelectView(self.cur["name"], new_n, bat, bowl, self.all_p), ephemeral=True)
 
 class UpdateRoleSelectView(discord.ui.View):
     def __init__(self, old_name, new_name, bat, bowl, all_p):
@@ -1823,44 +1849,42 @@ class UpdateRoleSelectView(discord.ui.View):
             for c in self.children:
                 c.disabled = True
                 
-            for p in self.all_p:
-                if p["Name"] == self.old_name:
-                    p["Name"] = self.new_name
-                    p["Bat"] = str(self.bat)
-                    p["Bowl"] = str(self.bowl)
-                    p["Role"] = self.s_role
-                    p["Archetype"] = self.s_arch
-                    
-            with open("players_master.csv", "w", newline="", encoding="utf-8") as f:
-                w = csv.DictWriter(f, fieldnames=["Name", "Bat", "Bowl", "Role", "Archetype"])
-                w.writeheader()
-                w.writerows(self.all_p)
+            # 🚨 UPDATE THE CLOUD DATABASE
+            try:
+                with get_db() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            UPDATE players 
+                            SET name = %s, bat = %s, bowl = %s, role = %s, archetype = %s 
+                            WHERE name = %s
+                        """, (self.new_name, self.bat, self.bowl, self.s_role, self.s_arch, self.old_name))
+                    conn.commit()
+            except Exception as e:
+                return await inter.followup.send(f"❌ DB Error: {e}", ephemeral=True)
                 
-            await inter.followup.send(f"✅ Successfully updated `{self.new_name}`!", ephemeral=True)
+            await inter.followup.send(f"✅ Successfully updated `{self.new_name}` in the Cloud DB!", ephemeral=True)
 
-@bot.tree.command(name="updateplayer", description="[ADMIN] Update player stats.")
+@bot.tree.command(name="updateplayer", description="[ADMIN] Update player stats in DB.")
 async def up_p_cmd(interaction: discord.Interaction, name: str):
     admins = load_auth_admins()
     if interaction.user.id != ADMIN_DISCORD_ID and str(interaction.user.id) not in admins:
         return await interaction.response.send_message("❌ Access Denied: Admin only.", ephemeral=True)
         
-    all_p = []
-    cur = None
-    
-    try:
-        with open("players_master.csv", "r", encoding="utf-8-sig") as f:
-            for r in csv.DictReader(f):
-                all_p.append(r)
-                if r["Name"].strip().lower() == name.strip().lower():
-                    cur = r
-    except:
-        return await interaction.response.send_message("❌ DB not found.", ephemeral=True)
+    all_p = load_all_players_from_db()
+    cur_player = next((p for p in all_p if p["name"].lower() == name.strip().lower()), None)
         
-    if not cur:
-        return await interaction.response.send_message(f"❌ `{name}` not found in database.", ephemeral=True)
+    if not cur_player:
+        return await interaction.response.send_message(f"❌ `{name}` not found in the database.", ephemeral=True)
         
-    await interaction.response.send_modal(UpdatePlayerModal(cur, all_p))
+    await interaction.response.send_modal(UpdatePlayerModal(cur_player, all_p))
 
-
+# ==========================================
+# 🚀 STARTUP SEQUENCE
+# ==========================================
 keep_alive()
-bot.run("MTUwOTYyNzg1NTM0NzI1NzUzNA.G7_5Ah.NizI-wdiU3J-SGMh9q-qO__MhqeIpx3x2ErWCI")
+
+TOKEN = os.environ.get("DISCORD_TOKEN")
+if not TOKEN:
+    print("🚨 CRITICAL ERROR: DISCORD_TOKEN environment variable is missing from Render!")
+else:
+    bot.run(TOKEN)
