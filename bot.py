@@ -1030,7 +1030,11 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
         )
         
         # Pass channel directly — no more DummyInteraction needed
-        await prompt_new_over_bowler(channel, match)
+        if getattr(match, 'sim_only', False):
+            await channel.send("*Simulating 2nd Innings... ⚙️*")
+            await loop_entire_match_simulation(channel, match)
+        else:
+            await prompt_new_over_bowler(channel, match)
         
     else:
         img_buf = generate_final_score_image(match)
@@ -1401,6 +1405,12 @@ class DRSView(discord.ui.View):
         else:
             await interaction.channel.send("📺 **DRS REVIEW:** Three Reds! **UMPIRING DECISION UPHELD!** 🔴")
             self.match.last_commentary += "\n📺 **DRS:** Decision Upheld (Out)."
+            if getattr(self.match, "pending_next_batter", False):
+                self.match.pending_next_batter = False
+                await interaction.channel.send(embed=render_embed_scoreboard(self.match))
+                await interaction.channel.send(embed=render_wicket_summary(self.match))
+                await prompt_next_batter(interaction, self.match)
+                return
         await interaction.channel.send(embed=render_embed_scoreboard(self.match))
         await run_interactive_delivery_sequence(self.origin_inter, self.match)
         
@@ -1411,6 +1421,12 @@ class DRSView(discord.ui.View):
         await interaction.response.defer()
         await self.message.edit(view=None)
         await interaction.channel.send("🚶 Batter accepts the decision and walks off.")
+        if getattr(self.match, "pending_next_batter", False):
+            self.match.pending_next_batter = False
+            await interaction.channel.send(embed=render_embed_scoreboard(self.match))
+            await interaction.channel.send(embed=render_wicket_summary(self.match))
+            await prompt_next_batter(interaction, self.match)
+            return
         await interaction.channel.send(embed=render_embed_scoreboard(self.match))
         await run_interactive_delivery_sequence(self.origin_inter, self.match)
 
@@ -1518,6 +1534,7 @@ class MatchSetupState:
         self.pitch = "Flat"
         self.weather = "Clear"
         self.home_team_id = p1_id
+        self.sim_only = False
 
 
 def parse_pasted_roster(raw_text, db_players):
@@ -1756,6 +1773,32 @@ async def begin_toss(channel, state):
     match.impact_player = state.impact_player
     active_games[channel.id] = match
 
+    if getattr(state, 'sim_only', False):
+        match.sim_only = True
+        match.simulation_mode = "whole_match"
+        match.verbose = False
+        
+        winner_name = random.choice([match.team1["name"], match.team2["name"]])
+        decision = random.choice(["Bat", "Bowl"])
+        await channel.send(f"🪙 **Toss!** **{winner_name}** wins the toss and elects to **{decision}** first!\n*Simulating match in the background... ⚙️*")
+        
+        if winner_name == match.team1["name"]:
+            match.batting_first_id = match.p1_id
+            match.bowling_first_id = match.p1_id
+            t_bat = match.team1 if decision == "Bat" else match.team2
+            t_bowl = match.team2 if decision == "Bat" else match.team1
+        else:
+            match.batting_first_id = match.p1_id
+            match.bowling_first_id = match.p1_id
+            t_bat = match.team2 if decision == "Bat" else match.team1
+            t_bowl = match.team1 if decision == "Bat" else match.team2
+            
+        match.innings1 = InningsState(t_bat, t_bowl)
+        match.current_innings = match.innings1
+        
+        await loop_entire_match_simulation(channel, match)
+        return
+
     if match.is_ai_game:
         if random.choice([True, False]):
             match.toss_winner = match.p1_id
@@ -1867,7 +1910,7 @@ async def on_message(message: discord.Message):
         del active_setups[channel_id]
         await message.channel.send(f"✅ Team 2 name set: **{state.t2_name}**")
         
-        if state.p2_id is None:
+        if state.p2_id is None and not getattr(state, 'sim_only', False):
             state.t2_roster = TEAMS_DATA["Team 2"]["players"]
             await message.channel.send(f"🤖 AI team **{state.t2_name}** will use the built-in roster.")
             await ask_pitch_and_weather(message.channel, state)
@@ -1918,6 +1961,24 @@ async def match_cmd(interaction: discord.Interaction, opponent: discord.Member =
     
     opp_str = opponent.mention if opponent else "🤖 AI"
     await interaction.response.send_message(f"🏏 **Match Setup**\n**Host:** {interaction.user.mention}\n**Opponent:** {opp_str}\n\nStep 1: Select Format below:", view=FormatSelectView(state, interaction.channel))
+
+@bot.tree.command(name="simulatematch", description="Simulate a full match between two custom teams instantly.")
+async def simulatematch_cmd(interaction: discord.Interaction):
+    if interaction.guild:
+        servers = load_auth_servers()
+        if str(interaction.guild.id) not in servers:
+            return await interaction.response.send_message("❌ This server is not authorized to host matches. Use `/authserver` first.", ephemeral=True)
+
+    if interaction.channel.id in active_games: 
+        return await interaction.response.send_message("❌ A match is already in progress in this channel. Use `/endmatch` to stop it.", ephemeral=True)
+    if interaction.channel.id in active_setups: 
+        return await interaction.response.send_message("❌ A setup is already happening here. Use `/endmatch` to cancel it.", ephemeral=True)
+
+    state = MatchSetupState(interaction.user, None, interaction.user.id, None)
+    state.sim_only = True
+    
+    active_setups[interaction.channel.id] = ("format_selection", state)
+    await interaction.response.send_message(f"⚙️ **Custom Simulation Setup**\n**Host:** {interaction.user.mention}\n\nYou will be prompted to provide the Playing XI for *both* teams.\nStep 1: Select Format below:", view=FormatSelectView(state, interaction.channel))
 
 @bot.tree.command(name="endmatch", description="Force cancel the current match or setup in this channel.")
 async def endmatch_cmd(interaction: discord.Interaction):
