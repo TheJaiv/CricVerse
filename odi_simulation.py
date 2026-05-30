@@ -18,10 +18,10 @@ def get_smart_ai_shot_odi(deliv, innings, is_death_overs, archetype):
     total_balls = innings.total_balls
     is_powerplay = total_balls < 60
     is_middle = 60 <= total_balls < 240
-    is_collapse = innings.wickets >= 4 and total_balls < 180
+    is_collapse = ((innings.wickets >= 3 and total_balls < 120) or (innings.wickets >= 5 and total_balls < 240)) and innings.partnership_runs < 40
 
     if is_collapse:
-        return random.choices(["Block", "Drive", "Flick", "Leave"], weights=[40, 30, 20, 10], k=1)[0]
+        return random.choices(["Block", "Defensive", "Drive", "Leave"], weights=[40, 20, 30, 10], k=1)[0]
         
     if is_death_overs:
         if archetype == "Anchor":
@@ -110,15 +110,17 @@ def execute_ball_math_odi(match):
     elif match.pitch == "Green" and "Pace" in bowler["role"]: bowl_rating += 10
     elif match.pitch == "Flat": bat_rating += 10
 
-    # ODI Batter form progression (Much more realistic pacing)
+    # ODI Batter form progression (Realistic pacing & late fatigue prevents 180+ spam)
     if b_stats.balls_faced < 15:
         bat_rating -= 15
     elif 15 <= b_stats.balls_faced < 40:
         bat_rating -= 5
     elif 40 <= b_stats.balls_faced <= 80:
-        bat_rating += 8
-    elif b_stats.balls_faced > 80:
-        bat_rating += 15
+        bat_rating += 5
+    elif 80 < b_stats.balls_faced <= 120:
+        bat_rating += 10
+    elif b_stats.balls_faced > 120:
+        bat_rating -= 5
         
     # ODI Bowler fatigue
     if bow_stats.balls_bowled >= 42 and "Pace" in bowler["role"]:
@@ -131,17 +133,16 @@ def execute_ball_math_odi(match):
     is_middle = 60 <= total_balls < 240
     is_death_overs = total_balls >= 240
     
+    is_collapse = ((innings.wickets >= 3 and total_balls < 120) or (innings.wickets >= 5 and total_balls < 240)) and innings.partnership_runs < 40
+
     pressure_multiplier = 1.0
-    if match.current_innings_num == 2:
+    if match.current_innings_num == 2 and not is_collapse:
         runs_needed = (match.innings1.total_runs + 1) - innings.total_runs
         balls_left = match.max_balls - total_balls
         if balls_left > 0:
             rrr = (runs_needed / balls_left) * 6
-            # Pressure kicks in earlier in ODIs and heavily increases risk
-            if rrr > 6.5:
-                pressure_multiplier = min(2.0, 1.0 + ((rrr - 6.5) * 0.15))
-
-    is_collapse = innings.wickets >= 4 and total_balls < 180
+            if rrr > 7.0:
+                pressure_multiplier = min(1.6, 1.0 + ((rrr - 7.0) * 0.12))
 
     if match.current_delivery_selection:
         deliv = match.current_delivery_selection
@@ -181,32 +182,32 @@ def execute_ball_math_odi(match):
         bow_stats.runs_conceded += 1
 
     # Baseline ODI Weights - High discipline, lower boundary frequency
-    dot_weight = max(25.0, 55.0 - diff * 0.5)
+    dot_weight = max(25.0, 50.0 - diff * 0.4)
     single_weight = 40.0
-    boundary_weight = max(1.5, 7.5 + diff * 0.35) 
-    wicket_weight = max(0.8, 2.8 - diff * 0.15) 
+    boundary_weight = max(1.5, 7.0 + diff * 0.3) 
+    wicket_weight = max(1.2, 3.0 - diff * 0.1) 
     
-    # Pitch Extreme Modifiers (Making conditions actually matter)
+    # Pitch Extreme Modifiers (Balanced)
     if match.pitch == "Green" and "Pace" in bowler["role"]:
-        wicket_weight *= 1.40
+        wicket_weight *= 1.25
         boundary_weight *= 0.85
     elif match.pitch == "Dusty" and "Spin" in bowler["role"]:
-        wicket_weight *= 1.45
+        wicket_weight *= 1.25
         boundary_weight *= 0.80
-        dot_weight *= 1.20
+        dot_weight *= 1.15
     elif match.pitch == "Flat":
-        boundary_weight *= 1.25
-        wicket_weight *= 0.85
+        boundary_weight *= 1.15
+        wicket_weight *= 0.90
 
     if is_powerplay:
         if "Pace" in bowler["role"]:
-            wicket_weight *= 1.25 # New ball swing/seam
-        boundary_weight *= 1.20 # Infield restrictions
+            wicket_weight *= 1.20 
+        boundary_weight *= 1.15 
         dot_weight *= 1.10
     elif is_middle:
         single_weight *= 1.35 # Strike rotation
         dot_weight *= 0.85
-        boundary_weight *= 0.75 # Field spread out
+        boundary_weight *= 0.80 
 
     bad_shot_selection = False
     perfect_shot_selection = False
@@ -239,11 +240,11 @@ def execute_ball_math_odi(match):
             
         if is_collapse:
             boundary_weight *= 0.5
-            wicket_weight *= 0.5 
+            wicket_weight *= 0.6 
         if is_death_overs or pressure_multiplier > 1.0:
-            active_multiplier = max(1.5, pressure_multiplier) if is_death_overs else pressure_multiplier
+            active_multiplier = max(1.4, pressure_multiplier) if is_death_overs else pressure_multiplier
             boundary_weight *= active_multiplier
-            wicket_weight *= (active_multiplier * 1.35) # High risk when forcing shots under pressure
+            wicket_weight *= (active_multiplier * 1.15) 
             
     four_weight = boundary_weight
     six_weight = boundary_weight * 0.25
