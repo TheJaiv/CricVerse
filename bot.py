@@ -905,7 +905,13 @@ async def loop_entire_match_simulation(interaction, match: CricketMatch):
             break
             
         if innings.total_balls % 6 == 0:
-            innings.current_bowler = get_smart_ai_bowler(innings, match.pitch, match.format_overs)
+            new_bowler = get_smart_ai_bowler(innings, match.pitch, match.format_overs)
+            if not new_bowler:
+                await channel.send("🚨 **CRITICAL ERROR:** Could not find a valid bowler to continue simulation. Match has been stopped.")
+                if channel.id in active_games:
+                    del active_games[channel.id]
+                return
+            innings.current_bowler = new_bowler
             innings.over_log.clear()
             
         execute_ball_math(match)
@@ -960,7 +966,11 @@ async def prompt_new_over_bowler(interaction, match: CricketMatch):
     channel = interaction.channel if hasattr(interaction, 'channel') else interaction
     
     if match.is_ai_game and bowler_uid == match.p2_id:
-        innings.current_bowler = get_smart_ai_bowler(innings, match.pitch, match.format_overs)
+        new_bowler = get_smart_ai_bowler(innings, match.pitch, match.format_overs)
+        if not new_bowler:
+            await channel.send("🚨 **CRITICAL ERROR:** Could not find a valid bowler to proceed. The match cannot continue. Please use `/endmatch`.")
+            return
+        innings.current_bowler = new_bowler
         innings.over_log.clear()
         
         class DummyInt: pass
