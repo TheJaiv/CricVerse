@@ -17,6 +17,8 @@ from odi_simulation import execute_ball_math_odi, get_smart_ai_bowler_odi
 # ==========================================
 ADMIN_DISCORD_ID = 1087369198801526836 # Your ID
 DB_URL = os.environ.get("DATABASE_URL")
+_log_env = os.environ.get("LOG_CHANNEL_ID")
+LOG_CHANNEL_ID = int(_log_env) if _log_env and _log_env.isdigit() else 0
 
 class CricketBot(commands.Bot):
     def __init__(self):
@@ -1316,6 +1318,8 @@ class BattingView(discord.ui.View):
         return True
         
     async def process_action(self, interaction: discord.Interaction, label: str, action_type: str):
+        if getattr(self, "processed", False): return
+        self.processed = True
         self.match.current_shot_selection = label
         await interaction.response.edit_message(view=None)
         
@@ -1344,7 +1348,24 @@ class DRSView(discord.ui.View):
         super().__init__(timeout=20)
         self.match = match
         self.origin_inter = origin_inter
+        self.processed = False
         
+    async def on_timeout(self):
+        if self.processed: return
+        self.processed = True
+        try:
+            await self.message.edit(view=None)
+            await self.message.channel.send("⏱️ **DRS Timer Expired.** The batter accepts the decision and walks.")
+            if getattr(self.match, "pending_next_batter", False):
+                self.match.pending_next_batter = False
+                await self.message.channel.send(embed=render_embed_scoreboard(self.match))
+                await self.message.channel.send(embed=render_wicket_summary(self.match))
+                await prompt_next_batter(self.origin_inter, self.match)
+                return
+            await self.message.channel.send(embed=render_embed_scoreboard(self.match))
+            await run_interactive_delivery_sequence(self.origin_inter, self.match)
+        except: pass
+
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.channel.id not in active_games or active_games[interaction.channel.id] != self.match:
             await interaction.response.send_message("❌ This match has been ended.", ephemeral=True)
@@ -1357,6 +1378,8 @@ class DRSView(discord.ui.View):
         
     @discord.ui.button(label="T (Review)", style=discord.ButtonStyle.primary, emoji="📺")
     async def btn_review(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.processed: return
+        self.processed = True
         await interaction.response.defer()
         await self.message.edit(view=None)
         if random.random() < 0.35:
@@ -1383,6 +1406,8 @@ class DRSView(discord.ui.View):
         
     @discord.ui.button(label="Walk Away", style=discord.ButtonStyle.secondary)
     async def btn_walk(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.processed: return
+        self.processed = True
         await interaction.response.defer()
         await self.message.edit(view=None)
         await interaction.channel.send("🚶 Batter accepts the decision and walks off.")
@@ -1966,6 +1991,20 @@ async def searchplayer(interaction: discord.Interaction, name: str):
 # 🛡️ 9. ADMIN DATABASE CONTROLS 
 # ==========================================
 
+async def log_db_update(action: str, player_name: str, user: discord.User, details: str):
+    if not LOG_CHANNEL_ID: return
+    channel = bot.get_channel(LOG_CHANNEL_ID)
+    if channel:
+        embed = discord.Embed(title=f"📋 Database Log: {action}", color=discord.Color.brand_green())
+        embed.add_field(name="Player", value=player_name, inline=True)
+        embed.add_field(name="Admin", value=user.mention, inline=True)
+        embed.add_field(name="Details", value=f"```text\n{details}\n```", inline=False)
+        embed.timestamp = discord.utils.utcnow()
+        try:
+            await channel.send(embed=embed)
+        except:
+            pass
+
 class AddPlayerModal(discord.ui.Modal, title="Add New Player"):
     p_name = discord.ui.TextInput(label="Player Name", required=True)
     bat_r = discord.ui.TextInput(label="Batting Rating (1-99)", max_length=2, required=True)
@@ -2023,6 +2062,7 @@ class PlayerRoleSelectView(discord.ui.View):
                 return await inter.followup.send(f"❌ DB Error: {e}", ephemeral=True)
                 
             await inter.followup.send(f"✅ Saved `{self.n}` to Cloud DB!", ephemeral=True)
+            await log_db_update("Player Added", self.n, inter.user, f"Bat: {self.bat} | Bowl: {self.bowl}\nRole: {self.s_role}\nArchetype: {self.s_arch}")
 
 @bot.tree.command(name="addplayer", description="[ADMIN] Add player to Cloud DB.")
 async def add_p_cmd(interaction: discord.Interaction):
@@ -2143,6 +2183,9 @@ class UpdateRoleSelectView(discord.ui.View):
                 return await inter.followup.send(f"❌ DB Error: {e}", ephemeral=True)
                 
             await inter.followup.send(f"✅ Successfully updated `{self.new_name}` in the Cloud DB!", ephemeral=True)
+            change_str = f"Old Name: {self.old_name}\n" if self.old_name != self.new_name else ""
+            change_str += f"Bat: {self.bat} | Bowl: {self.bowl}\nRole: {self.s_role}\nArchetype: {self.s_arch}"
+            await log_db_update("Player Updated", self.new_name, inter.user, change_str)
 
 @bot.tree.command(name="updateplayer", description="[ADMIN] Update player stats in DB.")
 async def up_p_cmd(interaction: discord.Interaction, name: str):
