@@ -861,17 +861,11 @@ def render_full_scorecard_embed(match: CricketMatch, innings_num: int) -> discor
     return embed
 
 def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
-    # Canvas (1200x850 for higher res broadcast feel)
-    img = Image.new("RGB", (1200, 850), color=(15, 23, 42)) 
     # Dual-Pane Broadcast Canvas
     img = Image.new("RGB", (1200, 800), color="#FFFFFF") 
     d = ImageDraw.Draw(img)
 
     try:
-        font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 36)
-        font_header = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 24)
-        font_bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20)
-        font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 18)
         font_large = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 48)
         font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 32)
         font_bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 24)
@@ -879,7 +873,6 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
     except:
         font_large = ImageFont.load_default()
         font_title = ImageFont.load_default()
-        font_header = ImageFont.load_default()
         font_bold = ImageFont.load_default()
         font_small = ImageFont.load_default()
 
@@ -894,9 +887,6 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
             
     potm_name = get_player_of_the_match(match) if match.current_innings_num == 2 else ""
     
-    # Title Header
-    title_text = "MATCH SUMMARY"
-    d.text((600 - get_tw(title_text, font_title)//2, 30), title_text, fill="#38BDF8", font=font_title)
     # Colors matching the Blueprint
     c_purple = "#2E1A47"
     c_white = "#FFFFFF"
@@ -904,15 +894,6 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
     c_teal = "#00A896"
     c_grey = "#555555"
 
-    def draw_innings_panel(inn, y_offset, is_yet_to_bat=False, team_name=""):
-        # Sleek Rounded TV Broadcast Panel
-        d.rounded_rectangle([(80, y_offset), (1120, y_offset + 290)], radius=16, fill=(30, 41, 59))
-        
-        if is_yet_to_bat:
-            d.text((120, y_offset + 30), team_name.upper(), fill="#94A3B8", font=font_title)
-            ytb = "YET TO BAT"
-            d.text((600 - get_tw(ytb, font_title)//2, y_offset + 130), ytb, fill="#64748B", font=font_title)
-            return
     # 1. Header (0-100)
     d.rectangle([(450, 0), (750, 100)], fill=c_purple)
     t1_name = match.team1['name'].upper()
@@ -922,11 +903,6 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
     venue_text = "SIMULATION"
     d.text((600 - get_tw(venue_text, font_small)//2, 40), venue_text, fill=c_white, font=font_small)
 
-        ov = f"{inn.total_balls // 6}.{inn.total_balls % 6}"
-        d.text((120, y_offset + 25), inn.batting_team['name'].upper(), fill="#F8FAFC", font=font_title)
-        
-        score_text = f"{inn.total_runs}/{inn.wickets} ({ov})"
-        d.text((1120 - 40 - get_tw(score_text, font_title), y_offset + 25), score_text, fill="#38BDF8", font=font_title)
     # 2. Team Scores (100-200)
     d.rectangle([(0, 100), (1200, 200)], fill=c_blue)
     d.line([(600, 110), (600, 190)], fill=c_white, width=3)
@@ -946,21 +922,6 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
     d.line([(1150, 165), (1120, 135)], fill=c_white, width=8)
     d.line([(1120, 135), (1110, 125)], fill=c_white, width=3)
 
-        d.line([(120, y_offset + 85), (1080, y_offset + 85)], fill=(71, 85, 105), width=2)
-
-        # Batting Headers
-        d.text((120, y_offset + 100), "BATTERS", fill="#94A3B8", font=font_small)
-        d.text((440, y_offset + 100), "R", fill="#94A3B8", font=font_small)
-        d.text((520, y_offset + 100), "B", fill="#94A3B8", font=font_small)
-        d.text((600, y_offset + 100), "SR", fill="#94A3B8", font=font_small)
-
-        # Bowling Headers
-        d.text((700, y_offset + 100), "BOWLERS", fill="#94A3B8", font=font_small)
-        d.text((930, y_offset + 100), "O", fill="#94A3B8", font=font_small)
-        d.text((1000, y_offset + 100), "R", fill="#94A3B8", font=font_small)
-        d.text((1070, y_offset + 100), "W", fill="#94A3B8", font=font_small)
-
-        # Top Batters
     # 3. Batting Statistics (200-440)
     d.line([(600, 210), (600, 430)], fill="#DDDDDD", width=2)
     
@@ -968,30 +929,18 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
         if not inn: return
         top_b = sorted(inn.batting_stats.values(), key=lambda x: x.runs_scored, reverse=True)[:4]
         for idx, b in enumerate(top_b):
-            by = y_offset + 140 + (idx * 35)
-            p_name = b.profile['name'][:18]
-            d.text((120, by), p_name, fill="#F8FAFC", font=font_bold)
             y = 230 + (idx * 50)
             name = b.profile['name'][:18].upper()
             if b.dismissal == "not out": name += "*"
             if potm_name == b.profile['name']: name += " ★"
             d.text((offset_x + 50, y), name, fill=c_purple, font=font_bold)
             
-            # 🔥 POTM Star Highlight
-            if b.profile['name'] == potm_name:
-                nw = get_tw(p_name, font_bold)
-                d.text((120 + nw + 10, by), "★ POTM", fill="#FBBF24", font=font_bold)
             runs = str(b.runs_scored)
             d.text((offset_x + 470 - get_tw(runs, font_bold), y), runs, fill=c_purple, font=font_bold)
             
-            sr = (b.runs_scored / b.balls_faced * 100) if b.balls_faced > 0 else 0.0
-            d.text((440, by), str(b.runs_scored), fill="#F8FAFC", font=font_bold)
-            d.text((520, by), str(b.balls_faced), fill="#CBD5E1", font=font_small)
-            d.text((600, by), f"{sr:.1f}", fill="#CBD5E1", font=font_small)
             balls = str(b.balls_faced)
             d.text((offset_x + 550 - get_tw(balls, font_small), y + 4), balls, fill=c_grey, font=font_small)
 
-        # Top Bowlers
     draw_batters(match.innings1, 0) # Team 1 Batting
     draw_batters(match.innings2 if match.current_innings_num == 2 else None, 600) # Team 2 Batting
 
@@ -1015,45 +964,22 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
     def draw_bowlers(inn, offset_x):
         if not inn: return
         active_bowlers = [b for b in inn.bowling_stats.values() if b.balls_bowled > 0]
-        top_bowl = sorted(active_bowlers, key=lambda x: (x.wickets_taken, -x.runs_conceded), reverse=True)[:4]
         top_bowl = sorted(active_bowlers, key=lambda x: (x.wickets_taken, -x.runs_conceded), reverse=True)[:3]
         for idx, bowl in enumerate(top_bowl):
-            by = y_offset + 140 + (idx * 35)
-            p_name = bowl.profile['name'][:18]
-            d.text((700, by), p_name, fill="#F8FAFC", font=font_bold)
             y = 540 + (idx * 50)
             name = bowl.profile['name'][:18].upper()
             if potm_name == bowl.profile['name']: name += " ★"
             d.text((offset_x + 50, y), name, fill=c_purple, font=font_bold)
             
-            # 🔥 POTM Star Highlight
-            if bowl.profile['name'] == potm_name:
-                nw = get_tw(p_name, font_bold)
-                d.text((700 + nw + 10, by), "★ POTM", fill="#FBBF24", font=font_bold)
-
             wr = f"{bowl.wickets_taken}-{bowl.runs_conceded}"
             d.text((offset_x + 470 - get_tw(wr, font_bold), y), wr, fill=c_purple, font=font_bold)
             
             bovers = f"{bowl.balls_bowled // 6}.{bowl.balls_bowled % 6}"
-            d.text((930, by), bovers, fill="#CBD5E1", font=font_small)
-            d.text((1000, by), str(bowl.runs_conceded), fill="#CBD5E1", font=font_small)
-            d.text((1070, by), str(bowl.wickets_taken), fill="#38BDF8", font=font_bold)
             d.text((offset_x + 550 - get_tw(bovers, font_small), y + 4), bovers, fill=c_grey, font=font_small)
 
-    # Draw Team 1
-    draw_innings_panel(match.innings1, 100)
     draw_bowlers(match.innings2 if match.current_innings_num == 2 else None, 0) # Team 1 Bowling to Team 2
     draw_bowlers(match.innings1, 600) # Team 2 Bowling to Team 1
 
-    # Draw Team 2
-    if match.current_innings_num == 2 and match.innings2 is not None:
-        draw_innings_panel(match.innings2, 420)
-    else:
-        draw_innings_panel(None, 420, is_yet_to_bat=True, team_name=match.team2['name'])
-
-    # Footer Result Box
-    d.rounded_rectangle([(80, 740), (1120, 810)], radius=16, fill=(15, 23, 42), outline=(56, 189, 248), width=2)
-    
     # 6. Footer (Match Result) (700-800)
     d.rectangle([(0, 700), (1200, 800)], fill=c_teal)
         
@@ -1063,16 +989,12 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
         inn1 = match.innings1
         inn2 = match.innings2
         if inn2.total_runs > inn1.total_runs:
-            result_str = f"RESULT: {inn2.batting_team['name'].upper()} WON BY {10 - inn2.wickets} WICKETS"
             result_str = f"{inn2.batting_team['name'].upper()} WON BY {10 - inn2.wickets} WICKETS"
         elif inn1.total_runs > inn2.total_runs:
-            result_str = f"RESULT: {inn1.batting_team['name'].upper()} WON BY {inn1.total_runs - inn2.total_runs} RUNS"
             result_str = f"{inn1.batting_team['name'].upper()} WON BY {inn1.total_runs - inn2.total_runs} RUNS"
         else:
-            result_str = f"RESULT: MATCH TIED - DRAW"
             result_str = "MATCH TIED"
             
-    d.text((600 - get_tw(result_str, font_header)//2, 760), result_str.upper(), fill="#FBBF24", font=font_header)
         if potm_name:
             result_str += f"  |  POTM: {potm_name.upper()}"
             
