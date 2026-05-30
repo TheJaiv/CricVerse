@@ -141,8 +141,23 @@ def execute_ball_math_odi(match):
         balls_left = match.max_balls - total_balls
         if balls_left > 0:
             rrr = (runs_needed / balls_left) * 6
-            if rrr > 7.0:
-                pressure_multiplier = min(1.6, 1.0 + ((rrr - 7.0) * 0.12))
+            
+            # Smart Chasing Phase: Teams delay heavy panic until the later overs
+            if total_balls < 120:  # Overs 1-20
+                threshold = 8.5
+                max_p = 1.20
+                scale = 0.08
+            elif total_balls < 210:  # Overs 21-35
+                threshold = 7.5
+                max_p = 1.40
+                scale = 0.10
+            else:  # Overs 36-50
+                threshold = 6.5
+                max_p = 1.85
+                scale = 0.15
+                
+            if rrr > threshold:
+                pressure_multiplier = min(max_p, 1.0 + ((rrr - threshold) * scale))
 
     if match.current_delivery_selection:
         deliv = match.current_delivery_selection
@@ -196,8 +211,8 @@ def execute_ball_math_odi(match):
         boundary_weight *= 0.80
         dot_weight *= 1.15
     elif match.pitch == "Flat":
-        boundary_weight *= 1.15
-        wicket_weight *= 0.90
+        boundary_weight *= 1.12
+        wicket_weight *= 0.95
 
     if is_powerplay:
         if "Pace" in bowler["role"]:
@@ -241,10 +256,21 @@ def execute_ball_math_odi(match):
         if is_collapse:
             boundary_weight *= 0.5
             wicket_weight *= 0.6 
+            
+        # Massive late assault if they have protected their wickets properly
+        if total_balls >= 240 and innings.wickets <= 4:
+            boundary_weight *= 1.25
+            wicket_weight *= 1.15
+            dot_weight *= 0.7
+            
         if is_death_overs or pressure_multiplier > 1.0:
             active_multiplier = max(1.4, pressure_multiplier) if is_death_overs else pressure_multiplier
             boundary_weight *= active_multiplier
-            wicket_weight *= (active_multiplier * 1.15) 
+            
+            if total_balls < 180:
+                wicket_weight *= (active_multiplier * 1.05) # Calculated risks while building
+            else:
+                wicket_weight *= (active_multiplier * 1.15) # High risks when running out of time
             
     four_weight = boundary_weight
     six_weight = boundary_weight * 0.25
