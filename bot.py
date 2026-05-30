@@ -861,108 +861,126 @@ def render_full_scorecard_embed(match: CricketMatch, innings_num: int) -> discor
     return embed
 
 def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
-    img = Image.new("RGB", (1000, 650), color=(15, 23, 42))
+    # Canvas (1200x850 for higher res broadcast feel)
+    img = Image.new("RGB", (1200, 850), color=(15, 23, 42)) 
     d = ImageDraw.Draw(img)
 
-    # Load fonts with fallback to default if not found
     try:
-        font_bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 18)
-        font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 22)
-        font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 15)
-        font_footer = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 14)
+        font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 36)
+        font_header = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 24)
+        font_bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20)
+        font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 18)
     except:
+        font_title = ImageFont.load_default()
+        font_header = ImageFont.load_default()
         font_bold = ImageFont.load_default()
-        font_title = font_bold
-        font_small = font_bold
-        font_footer = font_bold
-    
-    panel_colors = [
-        (17, 24, 39), 
-        (23, 37, 84), 
-        (49, 46, 129), 
-        (67, 20, 7), 
-        (6, 78, 59), 
-        (74, 4, 78)
-    ]
-    
-    c1 = random.choice(panel_colors)
-    c2 = random.choice([c for c in panel_colors if c != c1])
-    
-    d.rectangle([(100, 130), (900, 330)], fill=c1)
-    d.rectangle([(100, 360), (900, 560)], fill=c2)
+        font_small = ImageFont.load_default()
 
-    # ---------------------------------------------------------
-    # TOP CARD: TEAM 1
-    # ---------------------------------------------------------
-    inn1 = match.innings1
-    ov1 = f"{inn1.total_balls // 6}.{inn1.total_balls % 6}"
-    
-    d.text((120, 145), inn1.batting_team['name'].upper(), fill="#38BDF8", font=font_title)
-    d.text((620, 145), f"SCORE: {inn1.total_runs}/{inn1.wickets} ({ov1} Ov)", fill="#FFFFFF", font=font_title)
-    
-    top_b1 = sorted(inn1.batting_stats.values(), key=lambda x: x.runs_scored, reverse=True)[:4]
-    for idx, b in enumerate(top_b1):
-        y_pos = 195 + (idx * 30)
-        d.text((120, y_pos), f"{b.profile['name'][:15]}", fill="#FFFFFF", font=font_bold)
-        d.text((340, y_pos), f"{b.runs_scored}", fill="#38BDF8", font=font_bold)
-        d.text((390, y_pos), f"({b.balls_faced}b)", fill="#94A3B8", font=font_small)
-        
-    active_bowlers1 = [b for b in inn1.bowling_stats.values() if b.balls_bowled > 0]
-    top_bowl1 = sorted(active_bowlers1, key=lambda x: (x.wickets_taken, -x.runs_conceded), reverse=True)[:4]
-    
-    for idx, bowl in enumerate(top_bowl1):
-        y_pos = 195 + (idx * 30)
-        bovers = f"{bowl.balls_bowled // 6}.{bowl.balls_bowled % 6}"
-        d.text((530, y_pos), f"{bowl.profile['name'][:15]}", fill="#FFFFFF", font=font_bold)
-        d.text((750, y_pos), f"{bowl.wickets_taken}-{bowl.runs_conceded}", fill="#F43F5E", font=font_bold)
-        d.text((820, y_pos), f"({bovers} ov)", fill="#94A3B8", font=font_small)
-
-    # ---------------------------------------------------------
-    # BOTTOM CARD: TEAM 2
-    # ---------------------------------------------------------
-    inn2_exists = match.current_innings_num == 2 and match.innings2 is not None
-    if inn2_exists:
-        inn2 = match.innings2
-        ov2 = f"{inn2.total_balls // 6}.{inn2.total_balls % 6}"
-        
-        d.text((120, 375), inn2.batting_team['name'].upper(), fill="#34D399", font=font_title)
-        d.text((620, 375), f"SCORE: {inn2.total_runs}/{inn2.wickets} ({ov2} Ov)", fill="#FFFFFF", font=font_title)
-        
-        top_b2 = sorted(inn2.batting_stats.values(), key=lambda x: x.runs_scored, reverse=True)[:4]
-        for idx, b in enumerate(top_b2):
-            y_pos = 425 + (idx * 30)
-            d.text((120, y_pos), f"{b.profile['name'][:15]}", fill="#FFFFFF", font=font_bold)
-            d.text((340, y_pos), f"{b.runs_scored}", fill="#34D399", font=font_bold)
-            d.text((390, y_pos), f"({b.balls_faced}b)", fill="#94A3B8", font=font_small)
+    # Helper to get text width dynamically to align elements
+    def get_tw(text, font):
+        if hasattr(font, 'getbbox'):
+            return font.getbbox(text)[2]
+        elif hasattr(d, 'textsize'):
+            return d.textsize(text, font=font)[0]
+        else:
+            return len(text) * 12
             
-        active_bowlers2 = [b for b in inn2.bowling_stats.values() if b.balls_bowled > 0]
-        top_bowl2 = sorted(active_bowlers2, key=lambda x: (x.wickets_taken, -x.runs_conceded), reverse=True)[:4]
-        
-        for idx, bowl in enumerate(top_bowl2):
-            y_pos = 425 + (idx * 30)
-            bovers = f"{bowl.balls_bowled // 6}.{bowl.balls_bowled % 6}"
-            d.text((530, y_pos), f"{bowl.profile['name'][:15]}", fill="#FFFFFF", font=font_bold)
-            d.text((750, y_pos), f"{bowl.wickets_taken}-{bowl.runs_conceded}", fill="#F43F5E", font=font_bold)
-            d.text((820, y_pos), f"({bovers} ov)", fill="#94A3B8", font=font_small)
-    else:
-        d.text((120, 375), match.team2['name'].upper(), fill="#34D399", font=font_title)
-        d.text((450, 450), "YET TO BAT", fill="#64748B", font=font_bold)
+    potm_name = get_player_of_the_match(match) if match.current_innings_num == 2 else ""
+    
+    # Title Header
+    title_text = "MATCH SUMMARY"
+    d.text((600 - get_tw(title_text, font_title)//2, 30), title_text, fill="#38BDF8", font=font_title)
 
-    # ---------------------------------------------------------
-    # MATCH RESULT FOOTER
-    # ---------------------------------------------------------
+    def draw_innings_panel(inn, y_offset, is_yet_to_bat=False, team_name=""):
+        # Sleek Rounded TV Broadcast Panel
+        d.rounded_rectangle([(80, y_offset), (1120, y_offset + 290)], radius=16, fill=(30, 41, 59))
+        
+        if is_yet_to_bat:
+            d.text((120, y_offset + 30), team_name.upper(), fill="#94A3B8", font=font_title)
+            ytb = "YET TO BAT"
+            d.text((600 - get_tw(ytb, font_title)//2, y_offset + 130), ytb, fill="#64748B", font=font_title)
+            return
+
+        ov = f"{inn.total_balls // 6}.{inn.total_balls % 6}"
+        d.text((120, y_offset + 25), inn.batting_team['name'].upper(), fill="#F8FAFC", font=font_title)
+        
+        score_text = f"{inn.total_runs}/{inn.wickets} ({ov})"
+        d.text((1120 - 40 - get_tw(score_text, font_title), y_offset + 25), score_text, fill="#38BDF8", font=font_title)
+
+        d.line([(120, y_offset + 85), (1080, y_offset + 85)], fill=(71, 85, 105), width=2)
+
+        # Batting Headers
+        d.text((120, y_offset + 100), "BATTERS", fill="#94A3B8", font=font_small)
+        d.text((440, y_offset + 100), "R", fill="#94A3B8", font=font_small)
+        d.text((520, y_offset + 100), "B", fill="#94A3B8", font=font_small)
+        d.text((600, y_offset + 100), "SR", fill="#94A3B8", font=font_small)
+
+        # Bowling Headers
+        d.text((700, y_offset + 100), "BOWLERS", fill="#94A3B8", font=font_small)
+        d.text((930, y_offset + 100), "O", fill="#94A3B8", font=font_small)
+        d.text((1000, y_offset + 100), "R", fill="#94A3B8", font=font_small)
+        d.text((1070, y_offset + 100), "W", fill="#94A3B8", font=font_small)
+
+        # Top Batters
+        top_b = sorted(inn.batting_stats.values(), key=lambda x: x.runs_scored, reverse=True)[:4]
+        for idx, b in enumerate(top_b):
+            by = y_offset + 140 + (idx * 35)
+            p_name = b.profile['name'][:18]
+            d.text((120, by), p_name, fill="#F8FAFC", font=font_bold)
+            
+            # 🔥 POTM Star Highlight
+            if b.profile['name'] == potm_name:
+                nw = get_tw(p_name, font_bold)
+                d.text((120 + nw + 10, by), "★ POTM", fill="#FBBF24", font=font_bold)
+            
+            sr = (b.runs_scored / b.balls_faced * 100) if b.balls_faced > 0 else 0.0
+            d.text((440, by), str(b.runs_scored), fill="#F8FAFC", font=font_bold)
+            d.text((520, by), str(b.balls_faced), fill="#CBD5E1", font=font_small)
+            d.text((600, by), f"{sr:.1f}", fill="#CBD5E1", font=font_small)
+
+        # Top Bowlers
+        active_bowlers = [b for b in inn.bowling_stats.values() if b.balls_bowled > 0]
+        top_bowl = sorted(active_bowlers, key=lambda x: (x.wickets_taken, -x.runs_conceded), reverse=True)[:4]
+        for idx, bowl in enumerate(top_bowl):
+            by = y_offset + 140 + (idx * 35)
+            p_name = bowl.profile['name'][:18]
+            d.text((700, by), p_name, fill="#F8FAFC", font=font_bold)
+            
+            # 🔥 POTM Star Highlight
+            if bowl.profile['name'] == potm_name:
+                nw = get_tw(p_name, font_bold)
+                d.text((700 + nw + 10, by), "★ POTM", fill="#FBBF24", font=font_bold)
+
+            bovers = f"{bowl.balls_bowled // 6}.{bowl.balls_bowled % 6}"
+            d.text((930, by), bovers, fill="#CBD5E1", font=font_small)
+            d.text((1000, by), str(bowl.runs_conceded), fill="#CBD5E1", font=font_small)
+            d.text((1070, by), str(bowl.wickets_taken), fill="#38BDF8", font=font_bold)
+
+    # Draw Team 1
+    draw_innings_panel(match.innings1, 100)
+
+    # Draw Team 2
+    if match.current_innings_num == 2 and match.innings2 is not None:
+        draw_innings_panel(match.innings2, 420)
+    else:
+        draw_innings_panel(None, 420, is_yet_to_bat=True, team_name=match.team2['name'])
+
+    # Footer Result Box
+    d.rounded_rectangle([(80, 740), (1120, 810)], radius=16, fill=(15, 23, 42), outline=(56, 189, 248), width=2)
+    
     if match.current_innings_num == 1:
         result_str = f"TARGET SET: {inn1.total_runs + 1} RUNS TO WIN"
     else:
-        potm_name = get_player_of_the_match(match)
+        inn1 = match.innings1
+        inn2 = match.innings2
         if inn2.total_runs > inn1.total_runs:
-            result_str = f"RESULT: {inn2.batting_team['name'].upper()} WON BY {10 - inn2.wickets} WICKETS | POTM: {potm_name}"
+            result_str = f"RESULT: {inn2.batting_team['name'].upper()} WON BY {10 - inn2.wickets} WICKETS"
         elif inn1.total_runs > inn2.total_runs:
-            result_str = f"RESULT: {inn1.batting_team['name'].upper()} WON BY {inn1.total_runs - inn2.total_runs} RUNS | POTM: {potm_name}"
+            result_str = f"RESULT: {inn1.batting_team['name'].upper()} WON BY {inn1.total_runs - inn2.total_runs} RUNS"
         else:
-            result_str = f"RESULT: MATCH TIED - DRAW | POTM: {potm_name}"
+            result_str = f"RESULT: MATCH TIED - DRAW"
             
-    d.text((120, 585), result_str.upper(), fill="#FFFFFF", font=font_footer)
+    d.text((600 - get_tw(result_str, font_header)//2, 760), result_str.upper(), fill="#FBBF24", font=font_header)
     
     buf = io.BytesIO()
     img.save(buf, format="PNG")
