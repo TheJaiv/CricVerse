@@ -986,7 +986,7 @@ async def advance_match_loop(interaction, match: CricketMatch):
             await run_interactive_delivery_sequence(interaction, match)
 
 async def loop_entire_match_simulation(interaction, match: CricketMatch):
-    channel = interaction.channel
+    channel = interaction.channel if hasattr(interaction, 'channel') else interaction
     
     while True:
         innings = match.current_innings
