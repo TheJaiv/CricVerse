@@ -10,6 +10,7 @@ import psycopg2
 from psycopg2.extras import DictCursor
 from PIL import Image, ImageDraw, ImageFont
 from keep_alive import keep_alive
+from odi_simulation import execute_ball_math_odi, get_smart_ai_bowler_odi
 
 # ==========================================
 # ⚙️ 1. SETUP & CONFIGURATION
@@ -285,6 +286,9 @@ def get_smart_ai_shot(deliv, is_collapse, is_death_overs, archetype):
         return random.choices(["Drive", "Cut", "Flick", "Block"], weights=[35, 25, 25, 15], k=1)[0]
 
 def get_smart_ai_bowler(innings, pitch, format_overs=20):
+    if format_overs == 50:
+        return get_smart_ai_bowler_odi(innings, pitch, format_overs)
+        
     valid_bowlers = []
     bowler_quota = max(1, (format_overs + 4) // 5)
     
@@ -357,6 +361,9 @@ def get_smart_ai_bowler(innings, pitch, format_overs=20):
     return random.choices(valid_bowlers, weights=weights, k=1)[0]
 
 def execute_ball_math(match: CricketMatch):
+    if match.format_overs == 50:
+        return execute_ball_math_odi(match)
+        
     innings = match.current_innings
     striker = innings.batting_team["players"][innings.current_striker_idx]
     bowler = innings.current_bowler
@@ -614,9 +621,12 @@ def execute_ball_math(match: CricketMatch):
         elif dismissal_type == "LBW":
             b_stats.dismissal = f"lbw b. {bowler['name']}"
         elif dismissal_type == "Caught Behind":
-            b_stats.dismissal = f"c. Keeper b. {bowler['name']}"
+            wk = next((p["name"] for p in innings.bowling_team["players"] if "WK" in p["role"]), "Keeper")
+            b_stats.dismissal = f"c. {wk} b. {bowler['name']}"
         else:
-            b_stats.dismissal = f"c. Fielder b. {bowler['name']}"
+            fielders = [p["name"] for p in innings.bowling_team["players"] if p["name"] != bowler["name"]]
+            fielder = random.choice(fielders) if fielders else "Fielder"
+            b_stats.dismissal = f"c. {fielder} b. {bowler['name']}"
             
         bow_stats.wickets_taken += 1
         innings.over_log.append("🔴")
