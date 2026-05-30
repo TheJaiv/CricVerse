@@ -969,7 +969,7 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
     d.rounded_rectangle([(80, 740), (1120, 810)], radius=16, fill=(15, 23, 42), outline=(56, 189, 248), width=2)
     
     if match.current_innings_num == 1:
-        result_str = f"TARGET SET: {inn1.total_runs + 1} RUNS TO WIN"
+        result_str = f"TARGET SET: {match.innings1.total_runs + 1} RUNS TO WIN"
     else:
         inn1 = match.innings1
         inn2 = match.innings2
