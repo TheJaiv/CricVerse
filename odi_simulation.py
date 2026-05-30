@@ -180,9 +180,12 @@ def execute_ball_math_odi(match):
 
     # Baseline ODI Weights
     dot_weight = max(20.0, 45.0 - diff * 0.4)
+    dot_weight = max(20.0, 50.0 - diff * 0.4)
     single_weight = 45.0
     boundary_weight = max(2.0, 10.0 + diff * 0.4) 
     wicket_weight = max(1.0, 4.0 - diff * 0.15) 
+    boundary_weight = max(2.0, 9.0 + diff * 0.4) 
+    wicket_weight = max(0.5, 2.2 - diff * 0.12) 
     
     if is_powerplay and "Pace" in bowler["role"]:
         wicket_weight *= 1.3 # New ball swing/seam
@@ -279,9 +282,15 @@ def execute_ball_math_odi(match):
         if dismissal_type in ["LBW", "Caught Behind"] and match.simulation_mode == "interactive":
             match.pending_drs = True
             match.drs_dismissal = dismissal_type
+            
         if innings.wickets < 10:
-            innings.current_striker_idx = innings.next_batter_idx
-            innings.next_batter_idx += 1
+            is_ai_batting = match.is_ai_game and match.get_striker_user_id() == match.p2_id
+            if match.simulation_mode == "whole_match" or is_ai_batting:
+                innings.current_striker_idx = innings.next_batter_idx
+                innings.next_batter_idx += 1
+            else:
+                match.pending_next_batter = True
+                match.out_batter_profile = striker
         match.last_commentary = f"**{bowler['name']}** bowled a **{deliv}**\n**{striker['name']}** played: **{shot}**\n💥 **WICKET! ({dismissal_type.upper()})**"
     else:
         runs = {"dot": 0, "single": 1, "two": 2, "three": 3, "four": 4, "six": 6}[outcome]
