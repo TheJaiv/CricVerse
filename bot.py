@@ -2262,6 +2262,67 @@ async def up_p_cmd(interaction: discord.Interaction, name: str):
         
     await interaction.response.send_modal(UpdatePlayerModal(cur_player, all_p))
 
+@bot.tree.command(name="cleanduplicates", description="[ADMIN] Find and remove duplicate players (case-insensitive) from DB.")
+async def clean_dup_cmd(interaction: discord.Interaction):
+    admins = load_auth_admins()
+    if interaction.user.id != ADMIN_DISCORD_ID and str(interaction.user.id) not in admins:
+        return await interaction.response.send_message("❌ Access Denied: Admin only.", ephemeral=True)
+        
+    await interaction.response.defer(ephemeral=True)
+    try:
+        removed_count = 0
+        removed_names = []
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                # Find duplicates based on lowercase trimmed names
+                cur.execute("""
+                    SELECT ARRAY_AGG(name)
+                    FROM players
+                    GROUP BY LOWER(TRIM(name))
+                    HAVING COUNT(*) > 1
+                """)
+                duplicates = cur.fetchall()
+                for row in duplicates:
+                    names = row[0]
+                    # Keep the first one, delete the rest
+                    to_delete = names[1:] 
+                    cur.execute("DELETE FROM players WHERE name = ANY(%s)", (to_delete,))
+                    removed_count += len(to_delete)
+                    removed_names.extend(to_delete)
+            conn.commit()
+            
+        if removed_count > 0:
+            await interaction.followup.send(f"✅ Removed {removed_count} duplicate player(s):\n" + ", ".join(removed_names))
+            await log_db_update("Database Cleaned", "Duplicates Removed", interaction.user, f"Removed {removed_count} duplicates:\n{', '.join(removed_names)}")
+        else:
+            await interaction.followup.send("✅ Database is already clean. No duplicate players found.")
+    except Exception as e:
+        await interaction.followup.send(f"❌ DB Error: {e}")
+
+@bot.tree.command(name="deleteplayer", description="[ADMIN] Delete a specific player from the Cloud DB.")
+async def del_p_cmd(interaction: discord.Interaction, name: str):
+    admins = load_auth_admins()
+    if interaction.user.id != ADMIN_DISCORD_ID and str(interaction.user.id) not in admins:
+        return await interaction.response.send_message("❌ Access Denied: Admin only.", ephemeral=True)
+        
+    await interaction.response.defer(ephemeral=True)
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT name FROM players WHERE LOWER(TRIM(name)) = LOWER(TRIM(%s))", (name,))
+                found = cur.fetchall()
+                if not found:
+                    return await interaction.followup.send(f"❌ Could not find `{name}` in the database.")
+                
+                to_delete = [row[0] for row in found]
+                cur.execute("DELETE FROM players WHERE name = ANY(%s)", (to_delete,))
+            conn.commit()
+            
+        await interaction.followup.send(f"✅ Successfully deleted `{', '.join(to_delete)}` from the database.")
+        await log_db_update("Player Deleted", name, interaction.user, f"Removed match(es): {', '.join(to_delete)}")
+    except Exception as e:
+        await interaction.followup.send(f"❌ DB Error: {e}")
+
 # ==========================================
 # 🚀 STARTUP SEQUENCE
 # ==========================================
