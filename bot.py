@@ -60,10 +60,11 @@ def init_db():
                 with get_db() as conn:
                     with conn.cursor() as cur:
                         for row in csv.DictReader(f):
-                            cur.execute("SELECT name FROM players WHERE name = %s", (row["Name"].strip(),))
-                            if not cur.fetchone():
-                                cur.execute("INSERT INTO players (name, bat, bowl, role, archetype) VALUES (%s, %s, %s, %s, %s)",
-                                            (row["Name"].strip(), int(row["Bat"]), int(row["Bowl"]), row["Role"].strip(), row["Archetype"].strip()))
+                            cur.execute('''
+                                INSERT INTO players (name, bat, bowl, role, archetype) 
+                                VALUES (%s, %s, %s, %s, %s)
+                                ON CONFLICT (name) DO NOTHING
+                            ''', (row["Name"].strip(), int(row["Bat"]), int(row["Bowl"]), row["Role"].strip(), row["Archetype"].strip()))
                     conn.commit()
             print("✅ Legacy CSV data successfully synced to Neon Cloud DB.")
         except Exception as e: print(f"Migration Error: {e}")
@@ -74,20 +75,28 @@ async def on_ready():
     init_db()
     print("✅ Cloud Database Connected and Ready.")
 
-def load_auth_servers():
+AUTH_CACHE = {"servers": None, "admins": None}
+
+def load_auth_servers(force=False):
+    if not force and AUTH_CACHE["servers"] is not None:
+        return AUTH_CACHE["servers"]
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT server_id FROM auth_servers")
-                return [row[0] for row in cur.fetchall()]
+                AUTH_CACHE["servers"] = [row[0] for row in cur.fetchall()]
+                return AUTH_CACHE["servers"]
     except: return []
 
-def load_auth_admins():
+def load_auth_admins(force=False):
+    if not force and AUTH_CACHE["admins"] is not None:
+        return AUTH_CACHE["admins"]
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT admin_id FROM auth_admins")
-                return [row[0] for row in cur.fetchall()]
+                AUTH_CACHE["admins"] = [row[0] for row in cur.fetchall()]
+                return AUTH_CACHE["admins"]
     except: return []
 
 @bot.tree.interaction_check
@@ -631,72 +640,59 @@ def get_player_of_the_match(match: CricketMatch) -> str:
     return best_player
 
 def render_embed_scoreboard(match: CricketMatch) -> discord.Embed:
-
     innings = match.current_innings
-
     overs = f"{innings.total_balls // 6}.{innings.total_balls % 6}"
-
-   
-
     embed = discord.Embed(title="🏏 Live Scoreboard", color=discord.Color.dark_blue())
 
-   
+    # 1. Header block
+    if match.current_innings_num == 1:
+        t1_name = innings.batting_team['name']
+        t2_name = innings.bowling_team['name']
+        header = f"🏏 **{t1_name}**  {innings.total_runs}/{innings.wickets}  ({overs}/{match.format_overs}.0)\n**{t2_name}**  Yet to Bat"
+    else:
+        t1_name = match.innings2.batting_team['name']
+        t2_name = match.innings1.batting_team['name']
+        t1_overs = f"{match.innings1.total_balls // 6}.{match.innings1.total_balls % 6}"
+        header = f"🏏 **{t1_name}**  {innings.total_runs}/{innings.wickets}  ({overs}/{match.format_overs}.0)\n**{t2_name}**  {match.innings1.total_runs}/{match.innings1.wickets}  ({t1_overs}/{match.format_overs}.0)"
 
-    if match.current_innings_num == 2:
-
-        embed.add_field(name="Innings 1 Target", value=f"{match.innings1.batting_team['name']}: {match.innings1.total_runs}/{match.innings1.wickets}", inline=False)
-
-
-
-    status_title = f"**{innings.batting_team['name']} - {innings.total_runs}/{innings.wickets} ({overs}/20.0 Overs)**"
-
-   
-
+    # 2. Batting block
     b_table = "BATTERS             R    B    SR\n"
-
     for idx, p_item in enumerate(innings.batting_team["players"][:innings.next_batter_idx]):
-
         stats = innings.batting_stats[p_item["name"]]
-
         if stats.dismissal == "not out":
-
-            is_stk = "*" if idx == innings.current_striker_idx else " "
-
+            is_stk = "*" if idx == innings.current_striker_idx else ""
             sr = (stats.runs_scored / stats.balls_faced * 100) if stats.balls_faced > 0 else 0.0
-
-            b_table += f"{p_item['name'][:18]:<19}{is_stk}{stats.runs_scored:<5}{stats.balls_faced:<5}{sr:.1f}\n"
-
+            b_table += f"{(p_item['name'][:18] + is_stk):<20}{stats.runs_scored:<5}{stats.balls_faced:<5}{sr:.1f}\n"
     table_str = f"```text\n{b_table}```"
 
-   
+    # 3. Match Stats Line
+    crr = (innings.total_runs / innings.total_balls * 6) if innings.total_balls > 0 else 0.0
+    if match.current_innings_num == 2:
+        runs_needed = (match.innings1.total_runs + 1) - innings.total_runs
+        balls_left = match.max_balls - innings.total_balls
+        rrr = (runs_needed / balls_left * 6) if balls_left > 0 else 0.0
+        stats_line = f"P'Ship: {innings.partnership_runs}  CRR: {crr:.1f}  RRR: {rrr:.1f}"
+    else:
+        proj = int(crr * match.format_overs)
+        stats_line = f"P'Ship: {innings.partnership_runs}  CRR: {crr:.1f}  Proj: {proj}"
 
+    # 4. Bowling block
     bw_table = "BOWLER              O    R    W\n"
-
     if innings.current_bowler:
-
         cb = innings.current_bowler
-
         cbs = innings.bowling_stats[cb["name"]]
-
         bovers = f"{cbs.balls_bowled // 6}.{cbs.balls_bowled % 6}"
-
         bw_table += f"{cb['name'][:19]:<20}{bovers:<5}{cbs.runs_conceded:<5}{cbs.wickets_taken}\n"
-
     bowler_table_str = f"```text\n{bw_table}```"
 
-   
-
+    # 5. Timeline Assembly
     timeline = " ".join(innings.over_log[-6:]) if innings.over_log else "Starting over..."
-
-
-
-    embed.description = f"{status_title}\n{table_str}\n{bowler_table_str}\n📝 **Last Ball:**\n{match.last_commentary}\n\n**Timeline:** {timeline}"
+    embed.description = f"{header}\n{table_str}**{stats_line}**\n{bowler_table_str}**Timeline**\n{timeline}"
     
     if match.current_innings_num == 2:
         target_needed = (match.innings1.total_runs + 1) - innings.total_runs
         balls_left = match.max_balls - innings.total_balls
         if target_needed > 0 and balls_left > 0:
-            rrr = (target_needed / balls_left) * 6
             embed.set_footer(text=f"Equation: Need {target_needed} runs from {balls_left} balls (RRR: {rrr:.2f})")
             
     return embed
@@ -1769,6 +1765,7 @@ async def auth_server_cmd(interaction: discord.Interaction, guild_id: str):
                 cur.execute("INSERT INTO auth_servers (server_id) VALUES (%s)", (guild_id,))
                 msg = f"✅ Server `{guild_id}` is now **authorized** to run the bot."
         conn.commit()
+        load_auth_servers(force=True)
     await interaction.response.send_message(msg, ephemeral=True)
 
 @bot.tree.command(name="authadmin", description="[OWNER] Toggle a user's permission to add/update players.")
@@ -1787,6 +1784,7 @@ async def auth_admin_cmd(interaction: discord.Interaction, user: discord.Member)
                 cur.execute("INSERT INTO auth_admins (admin_id) VALUES (%s)", (uid,))
                 msg = f"✅ {user.mention} is now an **Admin** and can add/update players."
         conn.commit()
+        load_auth_admins(force=True)
     await interaction.response.send_message(msg, ephemeral=True)
 
 # ==================== UPDATE PLAYER ====================
