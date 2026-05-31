@@ -52,7 +52,6 @@ def init_db():
             cur.execute('''CREATE TABLE IF NOT EXISTS players (
                 name TEXT PRIMARY KEY, bat INTEGER, bowl INTEGER, role TEXT, archetype TEXT
             )''')
-            cur.execute('''CREATE TABLE IF NOT EXISTS auth_servers (server_id TEXT PRIMARY KEY)''')
             cur.execute('''CREATE TABLE IF NOT EXISTS auth_admins (admin_id TEXT PRIMARY KEY)''')
         conn.commit()
         
@@ -78,10 +77,12 @@ def init_db():
 async def on_ready():
     print(f"🏏 Logged in successfully as {bot.user.name}")
     init_db()
+    load_auth_servers() # Pre-cache to prevent 10062 Interaction Timeouts
+    load_auth_admins()  # Pre-cache to prevent 10062 Interaction Timeouts
     print("✅ Cloud Database Connected and Ready.")
 
-AUTH_CACHE = {"admins": None}
 AUTH_CACHE = {"servers": None, "admins": None}
+AUTH_CACHE = {"admins": None}
 
 def load_auth_servers(force=False):
     if not force and AUTH_CACHE["servers"] is not None:
@@ -2284,24 +2285,6 @@ async def add_p_cmd(interaction: discord.Interaction):
         
     await interaction.response.send_modal(AddPlayerModal())
 
-@bot.tree.command(name="authserver", description="[OWNER] Toggle a server's permission to run the bot.")
-async def auth_server_cmd(interaction: discord.Interaction, guild_id: str):
-    if interaction.user.id != ADMIN_DISCORD_ID:
-        return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
-    
-    servers = load_auth_servers()
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            if guild_id in servers:
-                cur.execute("DELETE FROM auth_servers WHERE server_id = %s", (guild_id,))
-                msg = f"🚫 Server `{guild_id}` authorization **revoked**."
-            else:
-                cur.execute("INSERT INTO auth_servers (server_id) VALUES (%s)", (guild_id,))
-                msg = f"✅ Server `{guild_id}` is now **authorized** to run the bot."
-        conn.commit()
-        load_auth_servers(force=True)
-    await interaction.response.send_message(msg, ephemeral=True)
-
 @bot.tree.command(name="set_user_tier", description="[OWNER] Assign a subscription tier to a user.")
 @app_commands.choices(tier=[
     app_commands.Choice(name="Basic (1 Sim/Day | T20/ODI)", value="Basic"),
@@ -2312,19 +2295,7 @@ async def set_user_tier_cmd(interaction: discord.Interaction, user: discord.Memb
     if interaction.user.id != ADMIN_DISCORD_ID:
         return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
     
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            if tier.value == "None":
-                cur.execute("DELETE FROM user_subs WHERE user_id = %s", (str(user.id),))
-                msg = f"🚫 Removed subscription from {user.mention}."
-            else:
-                cur.execute('''
-                    INSERT INTO user_subs (user_id, tier, sims_used, last_reset)
-                    VALUES (%s, %s, 0, CURRENT_DATE)
-                    ON CONFLICT (user_id) DO UPDATE SET tier = EXCLUDED.tier, sims_used = 0, last_reset = CURRENT_DATE
-                ''', (str(user.id), tier.value))
-                msg = f"✅ Assigned **{tier.name}** tier to {user.mention}."
-        conn.commit()
+    msg = update_user_tier(str(user.id), tier.value, tier.name, user.mention)
     await interaction.response.send_message(msg, ephemeral=True)
 
 @bot.tree.command(name="set_server_tier", description="[OWNER] Assign a subscription tier to a server.")
