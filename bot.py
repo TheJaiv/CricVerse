@@ -1740,17 +1740,22 @@ class FormatSelectView(discord.ui.View):
         if val == "custom":
             await interaction.response.send_modal(CustomOversModal(self.state, self.channel))
         else:
-            allowed, reason = consume_quota(str(interaction.user.id), str(interaction.guild.id) if interaction.guild else None, val, str(ADMIN_DISCORD_ID))
+           
+            await interaction.response.defer()
+            allowed, reason = await asyncio.to_thread(consume_quota, str(interaction.user.id), str(interaction.guild.id) if interaction.guild else None, val, str(ADMIN_DISCORD_ID))
             if not allowed:
-                return await interaction.response.send_message(reason, ephemeral=True)
+               
+                return await interaction.followup.send(reason, ephemeral=True)
 
             self.state.format_overs = int(val)
             # 🚨 FIX: Atomic edit prevents the "Already Acknowledged" Crash
             if val == "20":
-                await interaction.response.edit_message(content=f"✅ Format set: **T20 (20 overs)**\n\n🌟 <@{self.state.p1_id}> — Enable **Impact Player** rule?", view=ImpactPlayerView(self.state, self.channel))
+               
+                await interaction.edit_original_response(content=f"✅ Format set: **T20 (20 overs)**\n\n🌟 <@{self.state.p1_id}> — Enable **Impact Player** rule?", view=ImpactPlayerView(self.state, self.channel))
             else:
                 label = {"50": "ODI (50 overs)", "90": "Test (90 overs/innings)"}.get(val, f"{val} overs")
-                await interaction.response.edit_message(content=f"✅ Format set: **{label}**", view=None)
+                
+                await interaction.edit_original_response(content=f"✅ Format set: **{label}**", view=None)
                 await ask_team1_name(self.channel, self.state)
 
 class CustomOversModal(discord.ui.Modal, title="Custom Over Count"):
@@ -1765,13 +1770,17 @@ class CustomOversModal(discord.ui.Modal, title="Custom Over Count"):
             if not (1 <= val <= 90): raise ValueError
         except: return await interaction.response.send_message("❌ Enter a number between 1 and 90.", ephemeral=True)
         
-        allowed, reason = consume_quota(str(interaction.user.id), str(interaction.guild.id) if interaction.guild else None, "custom", str(ADMIN_DISCORD_ID))
+       
+        await interaction.response.defer()
+        allowed, reason = await asyncio.to_thread(consume_quota, str(interaction.user.id), str(interaction.guild.id) if interaction.guild else None, "custom", str(ADMIN_DISCORD_ID))
         if not allowed:
             return await interaction.response.send_message(reason, ephemeral=True)
+            return await interaction.followup.send(reason, ephemeral=True)
 
         self.state.format_overs = val
         # 🚨 FIX: Atomic edit prevents the crash
-        await interaction.response.edit_message(content=f"✅ Format set: **Custom ({val} overs)**", view=None)
+       
+        await interaction.edit_original_response(content=f"✅ Format set: **Custom ({val} overs)**", view=None)
         await ask_team1_name(self.channel, self.state)
 
 class ImpactPlayerView(discord.ui.View):
