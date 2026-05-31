@@ -770,29 +770,34 @@ def render_embed_scoreboard(match: CricketMatch) -> discord.Embed:
     embed = discord.Embed(color=0x2B2D31) # Sleek Dark Mode Discord Color
     
     desc = "## <a:ball:1510370830163640320> LIVE SCOREBOARD\n"
+    desc = "**<a:ball:1510370830163640320> LIVE SCOREBOARD**\n"
 
     if match.current_innings_num == 1:
         t1_name = innings.batting_team['name']
         t2_name = innings.bowling_team['name']
         desc += f"## 🏏 **{t1_name}**  {innings.total_runs}/{innings.wickets}  ({overs}/{match.format_overs}.0)\n"
         desc += f"### **{t2_name}**  Yet to Bat\n"
+        desc += f"### 🏏 **{t1_name}**  {innings.total_runs}/{innings.wickets}  ({overs}/{match.format_overs}.0)\n"
+        desc += f"**{t2_name}**  Yet to Bat\n"
     else:
         t1_name = match.innings2.batting_team['name']
         t2_name = match.innings1.batting_team['name']
         t1_overs = f"{match.innings1.total_balls // 6}.{match.innings1.total_balls % 6}"
         desc += f"## 🏏 **{t1_name}**  {innings.total_runs}/{innings.wickets}  ({overs}/{match.format_overs}.0)\n"
+        desc += f"### 🏏 **{t1_name}**  {innings.total_runs}/{innings.wickets}  ({overs}/{match.format_overs}.0)\n"
         desc += f"### **{t2_name}**  {match.innings1.total_runs}/{match.innings1.wickets}  ({t1_overs}/{match.format_overs}.0)\n"
+        desc += f"**{t2_name}**  {match.innings1.total_runs}/{match.innings1.wickets}  ({t1_overs}/{match.format_overs}.0)\n"
 
     desc += "**-----------------------------------------**\n"
 
-    b_table = f"{'BATTERS':<20}{'R':<5}{'B':<5}{'SR'}\n"
+    # Grid Format: Separate codeblocks perfectly aligned to 34 total characters
+    desc += f"```text\n{'BATTERS':<19}{'R':<5}{'B':<5}{'SR':<5}```\n"
     for idx, p_item in enumerate(innings.batting_team["players"][:innings.next_batter_idx]):
         stats = innings.batting_stats[p_item["name"]]
         if stats.dismissal == "not out":
             is_stk = "*" if idx == innings.current_striker_idx else " "
             sr = (stats.runs_scored / stats.balls_faced * 100) if stats.balls_faced > 0 else 0.0
-            b_table += f"{p_item['name'][:18]:<18}{is_stk:<2}{stats.runs_scored:<5}{stats.balls_faced:<5}{sr:<5.1f}\n"
-    desc += f"```text\n{b_table}```\n"
+            desc += f"```text\n{p_item['name'][:17]:<17}{is_stk:<2}{stats.runs_scored:<5}{stats.balls_faced:<5}{sr:<5.1f}```\n"
 
     crr = (innings.total_runs / innings.total_balls * 6) if innings.total_balls > 0 else 0.0
     if match.current_innings_num == 2:
@@ -806,17 +811,25 @@ def render_embed_scoreboard(match: CricketMatch) -> discord.Embed:
 
     desc += f"{stats_line}\n**-----------------------------------------**\n"
 
-    bw_table = f"{'BOWLER':<20}{'O':<5}{'R':<5}{'W'}\n"
+    desc += f"```text\n{'BOWLER':<20}{'O':<6}{'R':<5}{'W':<3}```\n"
     if innings.current_bowler:
         cb = innings.current_bowler
         cbs = innings.bowling_stats[cb["name"]]
         bovers = f"{cbs.balls_bowled // 6}.{cbs.balls_bowled % 6}"
-        bw_table += f"{cb['name'][:19]:<20}{bovers:<5}{cbs.runs_conceded:<5}{cbs.wickets_taken}\n"
-    desc += f"```text\n{bw_table}```\n**-----------------------------------------**\n"
+        desc += f"```text\n{cb['name'][:19]:<20}{bovers:<6}{cbs.runs_conceded:<5}{cbs.wickets_taken:<3}```\n"
+        
+    desc += "**-----------------------------------------**\n"
 
     timeline_raw = innings.over_log[-6:] if innings.over_log else []
     # Dynamically inject your custom emojis
     timeline_fmt = [item.replace("🟢", ":Four:").replace("🔵", ":six_:").replace("🔴", ":wickett:") for item in timeline_raw]
+    # Dynamically inject the provided animated discord emojis
+    timeline_fmt = [
+        item.replace("🟢", "<a:Four:1510370392223649966>")
+            .replace("🔵", "<a:six_:1510370301429416077>")
+            .replace("🔴", "<a:wickett:1510369641959264429>")
+        for item in timeline_raw
+    ]
     timeline_str = " ".join(timeline_fmt) if timeline_fmt else "Starting over..."
     
     desc += f"**Timeline**\n{timeline_str}\n"
