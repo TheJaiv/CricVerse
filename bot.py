@@ -768,6 +768,7 @@ def render_embed_scoreboard(match: CricketMatch) -> discord.Embed:
     innings = match.current_innings
     overs = f"{innings.total_balls // 6}.{innings.total_balls % 6}"
     embed = discord.Embed(color=0x2B2D31) # Sleek Dark Mode Discord Color
+    embed = discord.Embed(color=0xFFFFFF) # Crisp White Embed Color
     
     desc = "**<a:ball:1510370830163640320> LIVE SCOREBOARD**\n"
 
@@ -786,13 +787,16 @@ def render_embed_scoreboard(match: CricketMatch) -> discord.Embed:
     
     # Inline Codeblock Grid (Tight boxes matching the font size perfectly)
     desc += f"**`{'BATTER':<12}{'R':<4}{'B':<4}{'SR':<6}`**\n"
+    desc += f"**`{'BATTER':<16}{'R':<5}{'B':<5}{'SR':<6}`**\n"
     for idx, p_item in enumerate(innings.batting_team["players"][:innings.next_batter_idx]):
         stats = innings.batting_stats[p_item["name"]]
         if stats.dismissal == "not out":
             is_stk = "*" if idx == innings.current_striker_idx else " "
+            is_stk = "*" if idx == innings.current_striker_idx else ""
             
             sr = (stats.runs_scored / stats.balls_faced * 100) if stats.balls_faced > 0 else 0.0
             desc += f"`{p_item['name'][:11]:<11}{is_stk:<1}{stats.runs_scored:<4}{stats.balls_faced:<4}{sr:<6.1f}`\n"
+            desc += f"`{p_item['name'][:14]:<14}{is_stk:<2}{stats.runs_scored:<5}{stats.balls_faced:<5}{sr:<6.1f}`\n"
 
     crr = (innings.total_runs / innings.total_balls * 6) if innings.total_balls > 0 else 0.0
     if match.current_innings_num == 2:
@@ -805,15 +809,18 @@ def render_embed_scoreboard(match: CricketMatch) -> discord.Embed:
         stats_line = f"`P'Ship: {innings.partnership_runs}  CRR: {crr:.1f}  Proj: {proj}`"
 
     desc += f"{stats_line}\n"
+    desc += f"\n{stats_line}\n\n"
 
     
     # Inline Codeblock for Bowlers
     desc += f"**`{'BOWLER':<13}{'O':<5}{'R':<4}{'W':<4}`**\n"
+    desc += f"**`{'BOWLER':<17}{'O':<5}{'R':<5}{'W':<5}`**\n"
     if innings.current_bowler:
         cb = innings.current_bowler
         cbs = innings.bowling_stats[cb["name"]]
         bovers = f"{cbs.balls_bowled // 6}.{cbs.balls_bowled % 6}"
         desc += f"`{cb['name'][:12]:<13}{bovers:<5}{cbs.runs_conceded:<4}{cbs.wickets_taken:<4}`\n"
+        desc += f"`{cb['name'][:16]:<17}{bovers:<5}{cbs.runs_conceded:<5}{cbs.wickets_taken:<5}`\n"
         
     timeline_raw = innings.over_log[-6:] if innings.over_log else []
     # Dynamically inject the provided animated discord emojis
