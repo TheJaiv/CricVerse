@@ -45,7 +45,7 @@ def check_potential_quota(user_id: str, server_id: str, admin_discord_id: str):
                     u_tier, u_used = u_row["tier"], u_row["sims_used"]
                     if u_tier in ["Basic", "Standard"] and u_used < 1: return True, ""
                 
-                return False, "❌ **Access Denied:** You have exhausted your daily limit, or you do not have an active subscription tier."
+                return False, "❌ **Access Denied:** You have exhausted your daily limit, or you do not have an active subscription tier.Please contact **frenzy_guy** to upgrade."
     except: return False, "Database error."
 
 def consume_quota(user_id: str, server_id: str, format_val: str, admin_discord_id: str):
@@ -74,7 +74,7 @@ def consume_quota(user_id: str, server_id: str, format_val: str, admin_discord_i
                         conn.commit()
                         return True, ""
                     if u_tier == "Basic" and u_used < 1:
-                        if format_val not in ["20", "50"]: return False, "❌ **Basic Tier Restriction:** You can only simulate T20 or ODI formats."
+                        if format_val not in ["20", "50"]: return False, "❌ **Basic Tier Restriction:** You can only simulate T20 or ODI formats.Please contact **frenzy_guy** to upgrade."
                         cur.execute("UPDATE user_subs SET sims_used = sims_used + 1 WHERE user_id = %s", (user_id,))
                         conn.commit()
                         return True, ""
