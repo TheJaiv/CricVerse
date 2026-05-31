@@ -26,7 +26,6 @@ def reset_daily_quotas():
 
 def check_potential_quota(user_id: str, server_id: str, admin_discord_id: str):
     reset_daily_quotas()
-    if user_id == admin_discord_id: return True, ""
     
     try:
         with get_db() as conn:
@@ -50,7 +49,6 @@ def check_potential_quota(user_id: str, server_id: str, admin_discord_id: str):
 
 def consume_quota(user_id: str, server_id: str, format_val: str, admin_discord_id: str):
     reset_daily_quotas()
-    if user_id == admin_discord_id: return True, ""
     
     try:
         with get_db() as conn:
