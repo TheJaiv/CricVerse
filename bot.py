@@ -1774,7 +1774,6 @@ class CustomOversModal(discord.ui.Modal, title="Custom Over Count"):
         await interaction.response.defer()
         allowed, reason = await asyncio.to_thread(consume_quota, str(interaction.user.id), str(interaction.guild.id) if interaction.guild else None, "custom", str(ADMIN_DISCORD_ID))
         if not allowed:
-            return await interaction.response.send_message(reason, ephemeral=True)
             return await interaction.followup.send(reason, ephemeral=True)
 
         self.state.format_overs = val
