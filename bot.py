@@ -785,14 +785,16 @@ def render_embed_scoreboard(match: CricketMatch) -> discord.Embed:
 
     desc += "**-----------------------------------------**\n"
 
-    # Grid Format: Scaled to exactly 24 characters with ANSI bold headers to prevent all mobile text wrapping
-    desc += f"```ansi\n\u001b[1m{'BATTER':<11}{'R':<4}{'B':<4}{'SR':<5}\u001b[0m```\n"
+    # Single ANSI Codeblock for Batters (Removes all gaps between rows)
+    desc += "```ansi\n"
+    desc += f"\u001b[1m{'BATTER':<18}{'R':<5}{'B':<5}{'SR':<6}\u001b[0m\n"
     for idx, p_item in enumerate(innings.batting_team["players"][:innings.next_batter_idx]):
         stats = innings.batting_stats[p_item["name"]]
         if stats.dismissal == "not out":
             is_stk = "*" if idx == innings.current_striker_idx else " "
             sr = (stats.runs_scored / stats.balls_faced * 100) if stats.balls_faced > 0 else 0.0
-            desc += f"```text\n{p_item['name'][:9]:<9}{is_stk:<2}{stats.runs_scored:<4}{stats.balls_faced:<4}{sr:<5.1f}```\n"
+            desc += f"{p_item['name'][:16]:<16}{is_stk:<2}{stats.runs_scored:<5}{stats.balls_faced:<5}{sr:<6.1f}\n"
+    desc += "```\n"
 
     crr = (innings.total_runs / innings.total_balls * 6) if innings.total_balls > 0 else 0.0
     if match.current_innings_num == 2:
@@ -806,12 +808,15 @@ def render_embed_scoreboard(match: CricketMatch) -> discord.Embed:
 
     desc += f"{stats_line}\n**-----------------------------------------**\n"
 
-    desc += f"```ansi\n\u001b[1m{'BOWLER':<11}{'O':<5}{'R':<4}{'W':<4}\u001b[0m```\n"
+    # Single ANSI Codeblock for Bowlers
+    desc += "```ansi\n"
+    desc += f"\u001b[1m{'BOWLER':<18}{'O':<6}{'R':<5}{'W':<5}\u001b[0m\n"
     if innings.current_bowler:
         cb = innings.current_bowler
         cbs = innings.bowling_stats[cb["name"]]
         bovers = f"{cbs.balls_bowled // 6}.{cbs.balls_bowled % 6}"
-        desc += f"```text\n{cb['name'][:10]:<11}{bovers:<5}{cbs.runs_conceded:<4}{cbs.wickets_taken:<4}```\n"
+        desc += f"{cb['name'][:17]:<18}{bovers:<6}{cbs.runs_conceded:<5}{cbs.wickets_taken:<5}\n"
+    desc += "```\n"
         
     desc += "**-----------------------------------------**\n"
 
