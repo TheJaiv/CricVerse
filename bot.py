@@ -805,7 +805,6 @@ def render_embed_scoreboard(match: CricketMatch) -> discord.Embed:
         proj = int(crr * match.format_overs)
         stats_line = f"`P'Ship: {innings.partnership_runs}  CRR: {crr:.1f}  Proj: {proj}`"
 
-    desc += f"{stats_line}\n"
     desc += f"\n{stats_line}\n\n"
 
     
