@@ -792,8 +792,6 @@ def render_embed_scoreboard(match: CricketMatch) -> discord.Embed:
             is_stk = "*" if idx == innings.current_striker_idx else " "
             
             sr = (stats.runs_scored / stats.balls_faced * 100) if stats.balls_faced > 0 else 0.0
-            desc += f"{p_item['name'][:12]:<12}{is_stk:<2}{stats.runs_scored:<4}{stats.balls_faced:<4}{sr:<5.1f}\n"
-            
             desc += f"`{p_item['name'][:11]:<11}{is_stk:<1}{stats.runs_scored:<4}{stats.balls_faced:<4}{sr:<6.1f}`\n"
 
     crr = (innings.total_runs / innings.total_balls * 6) if innings.total_balls > 0 else 0.0
@@ -815,8 +813,6 @@ def render_embed_scoreboard(match: CricketMatch) -> discord.Embed:
         cb = innings.current_bowler
         cbs = innings.bowling_stats[cb["name"]]
         bovers = f"{cbs.balls_bowled // 6}.{cbs.balls_bowled % 6}"
-        desc += f"{cb['name'][:13]:<14}{bovers:<5}{cbs.runs_conceded:<4}{cbs.wickets_taken:<4}\n"
-        
         desc += f"`{cb['name'][:12]:<13}{bovers:<5}{cbs.runs_conceded:<4}{cbs.wickets_taken:<4}`\n"
         
     timeline_raw = innings.over_log[-6:] if innings.over_log else []
