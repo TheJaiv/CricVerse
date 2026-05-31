@@ -1,23 +1,24 @@
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 import random
 import difflib
 import asyncio
 import io
 import os
-import psycopg2
-from psycopg2.extras import DictCursor
 from PIL import Image, ImageDraw, ImageFont
 from keep_alive import keep_alive
 from odi_simulation import execute_ball_math_odi, get_smart_ai_bowler_odi
-from subscription_manager import init_subs_db, check_potential_quota, consume_quota, update_user_tier, update_server_tier
+from subscription_manager import (
+    load_data_from_bin, save_data_to_bin, check_potential_quota, consume_quota, 
+    update_user_tier, update_server_tier, get_auth_admins, toggle_auth_admin, 
+    get_all_players, add_player, update_player, delete_players, clean_duplicate_players
+)
 
 # ==========================================
 # ⚙️ 1. SETUP & CONFIGURATION
 # ==========================================
 ADMIN_DISCORD_ID = 1087369198801526836 # Your ID
-DB_URL = os.environ.get("DATABASE_URL")
 _log_env = os.environ.get("LOG_CHANNEL_ID")
 LOG_CHANNEL_ID = int(_log_env) if _log_env and _log_env.isdigit() else 0
 
@@ -38,74 +39,17 @@ active_setups = {}
 # ==========================================
 # 🗄️ 1.5 CLOUD DATABASE & SECURITY
 # ==========================================
-def get_db():
-    return psycopg2.connect(DB_URL, sslmode='require')
-
-def init_db():
-    if not DB_URL:
-        print("⚠️ DATABASE_URL not found. Cloud DB will not work.")
-        return
-    
-    # 1. Create the Tables if they don't exist
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute('''CREATE TABLE IF NOT EXISTS players (
-                name TEXT PRIMARY KEY, bat INTEGER, bowl INTEGER, role TEXT, archetype TEXT
-            )''')
-            cur.execute('''CREATE TABLE IF NOT EXISTS auth_admins (admin_id TEXT PRIMARY KEY)''')
-        conn.commit()
-        
-    init_subs_db()
-    # 2. Auto-Migrate from CSV to SQL Database!
-    if os.path.exists("players_master.csv"):
-        import csv
-        try:
-            with open("players_master.csv", "r", encoding="utf-8-sig") as f:
-                with get_db() as conn:
-                    with conn.cursor() as cur:
-                        for row in csv.DictReader(f):
-                            cur.execute('''
-                                INSERT INTO players (name, bat, bowl, role, archetype) 
-                                VALUES (%s, %s, %s, %s, %s)
-                                ON CONFLICT (name) DO NOTHING
-                            ''', (row["Name"].strip(), int(row["Bat"]), int(row["Bowl"]), row["Role"].strip(), row["Archetype"].strip()))
-                    conn.commit()
-            print("✅ Legacy CSV data successfully synced to Neon Cloud DB.")
-        except Exception as e: print(f"Migration Error: {e}")
+@tasks.loop(hours=1)
+async def auto_sync_jsonbin():
+    """Automatically backs up memory to JSONBin every hour"""
+    save_data_to_bin()
 
 @bot.event
 async def on_ready():
     print(f"🏏 Logged in successfully as {bot.user.name}")
-    init_db()
-    load_auth_admins()  # Pre-cache to prevent 10062 Interaction Timeouts
-    print("✅ Cloud Database Connected and Ready.")
-
-AUTH_CACHE = {"admins": None}
-
-def load_auth_admins(force=False):
-    if not force and AUTH_CACHE["admins"] is not None:
-        return AUTH_CACHE["admins"]
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT admin_id FROM auth_admins")
-                AUTH_CACHE["admins"] = [row[0] for row in cur.fetchall()]
-                return AUTH_CACHE["admins"]
-    except: return []
-
-def load_all_players_from_db():
-    players = []
-    try:
-        with get_db() as conn:
-            with conn.cursor(cursor_factory=DictCursor) as cur:
-                cur.execute("SELECT * FROM players")
-                for row in cur.fetchall():
-                    players.append({
-                        "name": row["name"], "bat": int(row["bat"]), "bowl": int(row["bowl"]),
-                        "role": row["role"], "archetype": row["archetype"]
-                    })
-    except Exception as e: print(f"DB Load Warning: {e}")
-    return players
+    load_data_from_bin()
+    auto_sync_jsonbin.start()
+    print("✅ Memory Cache Loaded and Ready.")
 # ==========================================
 # 📊 2. CORE DATA STRUCTURES & FALLBACKS
 # ==========================================
@@ -2049,7 +1993,7 @@ async def on_message(message: discord.Message):
 
     elif stage == "awaiting_team1_xi":
         if message.author.id != state.p1_id: return
-        db = load_all_players_from_db()
+        db = get_all_players()
         players, missing = parse_pasted_roster(message.content, db)
         
         req_length = 12 if state.impact_player else 11
@@ -2081,7 +2025,7 @@ async def on_message(message: discord.Message):
     elif stage == "awaiting_team2_xi":
         target_id = state.p2_id if state.p2_id else state.p1_id
         if message.author.id != target_id: return
-        db = load_all_players_from_db()
+        db = get_all_players()
         players, missing = parse_pasted_roster(message.content, db)
         
         req_length = 12 if state.impact_player else 11
@@ -2185,12 +2129,12 @@ async def searchplayer(interaction: discord.Interaction, name: str):
     await interaction.response.defer()
     search_query = name.strip()
     
-    # 🚨 PULL FROM CLOUD DATABASE
-    all_players = load_all_players_from_db()
+    # 🚨 PULL FROM MEMORY CACHE
+    all_players = get_all_players()
     player_names = [p["name"] for p in all_players]
     
     if not all_players:
-        return await interaction.followup.send("❌ Error: Cloud DB is empty or disconnected.")
+        return await interaction.followup.send("❌ Error: Cache is empty.")
         
     exact = next((p for p in all_players if p["name"].lower() == search_query.lower()), None)
     if exact:
@@ -2278,26 +2222,23 @@ class PlayerRoleSelectView(discord.ui.View):
             for c in self.children:
                 c.disabled = True
                 
-            # 🚨 PUSH TO CLOUD DATABASE
-            try:
-                with get_db() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute("SELECT name FROM players WHERE LOWER(name) = LOWER(%s)", (self.n,))
-                        if cur.fetchone():
-                            return await inter.followup.send(f"❌ Cancelled: `{self.n}` already exists in DB!", ephemeral=True)
-                            
-                        cur.execute("INSERT INTO players (name, bat, bowl, role, archetype) VALUES (%s, %s, %s, %s, %s)",
-                                    (self.n, self.bat, self.bowl, self.s_role, self.s_arch))
-                    conn.commit()
-            except Exception as e:
-                return await inter.followup.send(f"❌ DB Error: {e}", ephemeral=True)
+            success = add_player({
+                "name": self.n,
+                "bat": self.bat,
+                "bowl": self.bowl,
+                "role": self.s_role,
+                "archetype": self.s_arch
+            })
+            
+            if not success:
+                return await inter.followup.send(f"❌ Cancelled: `{self.n}` already exists in DB!", ephemeral=True)
                 
-            await inter.followup.send(f"✅ Saved `{self.n}` to Cloud DB!", ephemeral=True)
+            await inter.followup.send(f"✅ Saved `{self.n}` to JSONBin!", ephemeral=True)
             await log_db_update("Player Added", self.n, inter.user, f"Bat: {self.bat} | Bowl: {self.bowl}\nRole: {self.s_role}\nArchetype: {self.s_arch}")
 
 @bot.tree.command(name="addplayer", description="[ADMIN] Add player to Cloud DB.")
 async def add_p_cmd(interaction: discord.Interaction):
-    admins = load_auth_admins()
+    admins = get_auth_admins()
     if interaction.user.id != ADMIN_DISCORD_ID and str(interaction.user.id) not in admins: 
         return await interaction.response.send_message("❌ Access Denied: Admin only.", ephemeral=True)
         
@@ -2336,18 +2277,13 @@ async def auth_admin_cmd(interaction: discord.Interaction, user: discord.Member)
     if interaction.user.id != ADMIN_DISCORD_ID:
         return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
     
-    admins = load_auth_admins()
     uid = str(user.id)
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            if uid in admins:
-                cur.execute("DELETE FROM auth_admins WHERE admin_id = %s", (uid,))
-                msg = f"🚫 Admin permissions **revoked** for {user.mention}."
-            else:
-                cur.execute("INSERT INTO auth_admins (admin_id) VALUES (%s)", (uid,))
-                msg = f"✅ {user.mention} is now an **Admin** and can add/update players."
-        conn.commit()
-        load_auth_admins(force=True)
+    added = toggle_auth_admin(uid)
+    if added:
+        msg = f"✅ {user.mention} is now an **Admin** and can add/update players."
+    else:
+        msg = f"🚫 Admin permissions **revoked** for {user.mention}."
+        
     await interaction.response.send_message(msg, ephemeral=True)
 
 # ==================== UPDATE PLAYER ====================
@@ -2410,31 +2346,26 @@ class UpdateRoleSelectView(discord.ui.View):
             for c in self.children:
                 c.disabled = True
                 
-            # 🚨 UPDATE THE CLOUD DATABASE
-            try:
-                with get_db() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute("""
-                            UPDATE players 
-                            SET name = %s, bat = %s, bowl = %s, role = %s, archetype = %s 
-                            WHERE name = %s
-                        """, (self.new_name, self.bat, self.bowl, self.s_role, self.s_arch, self.old_name))
-                    conn.commit()
-            except Exception as e:
-                return await inter.followup.send(f"❌ DB Error: {e}", ephemeral=True)
-                
-            await inter.followup.send(f"✅ Successfully updated `{self.new_name}` in the Cloud DB!", ephemeral=True)
+            update_player(self.old_name, {
+                "name": self.new_name,
+                "bat": self.bat,
+                "bowl": self.bowl,
+                "role": self.s_role,
+                "archetype": self.s_arch
+            })
+            
+            await inter.followup.send(f"✅ Successfully updated `{self.new_name}` in JSONBin!", ephemeral=True)
             change_str = f"Old Name: {self.old_name}\n" if self.old_name != self.new_name else ""
             change_str += f"Bat: {self.bat} | Bowl: {self.bowl}\nRole: {self.s_role}\nArchetype: {self.s_arch}"
             await log_db_update("Player Updated", self.new_name, inter.user, change_str)
 
 @bot.tree.command(name="updateplayer", description="[ADMIN] Update player stats in DB.")
 async def up_p_cmd(interaction: discord.Interaction, name: str):
-    admins = load_auth_admins()
+    admins = get_auth_admins()
     if interaction.user.id != ADMIN_DISCORD_ID and str(interaction.user.id) not in admins:
         return await interaction.response.send_message("❌ Access Denied: Admin only.", ephemeral=True)
         
-    all_p = load_all_players_from_db()
+    all_p = get_all_players()
     cur_player = next((p for p in all_p if p["name"].lower() == name.strip().lower()), None)
         
     if not cur_player:
@@ -2444,90 +2375,41 @@ async def up_p_cmd(interaction: discord.Interaction, name: str):
 
 @bot.tree.command(name="cleanduplicates", description="[ADMIN] Find and remove duplicate players (case-insensitive) from DB.")
 async def clean_dup_cmd(interaction: discord.Interaction):
-    admins = load_auth_admins()
+    admins = get_auth_admins()
     if interaction.user.id != ADMIN_DISCORD_ID and str(interaction.user.id) not in admins:
         return await interaction.response.send_message("❌ Access Denied: Admin only.", ephemeral=True)
         
     await interaction.response.defer(ephemeral=True)
     try:
-        removed_count = 0
-        removed_names = []
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                # Find duplicates based on lowercase trimmed names
-                cur.execute("""
-                    SELECT ARRAY_AGG(name)
-                    FROM players
-                    GROUP BY LOWER(TRIM(name))
-                    HAVING COUNT(*) > 1
-                """)
-                duplicates = cur.fetchall()
-                for row in duplicates:
-                    names = row[0]
-                    # Keep the first one, delete the rest
-                    to_delete = names[1:] 
-                    cur.execute("DELETE FROM players WHERE name = ANY(%s)", (to_delete,))
-                    removed_count += len(to_delete)
-                    removed_names.extend(to_delete)
-            conn.commit()
+        removed_names = clean_duplicate_players()
             
-        if removed_count > 0:
-            await interaction.followup.send(f"✅ Removed {removed_count} duplicate player(s):\n" + ", ".join(removed_names))
-            await log_db_update("Database Cleaned", "Duplicates Removed", interaction.user, f"Removed {removed_count} duplicates:\n{', '.join(removed_names)}")
+        if removed_names:
+            await interaction.followup.send(f"✅ Removed {len(removed_names)} duplicate player(s):\n" + ", ".join(removed_names[:50]))
+            await log_db_update("Database Cleaned", "Duplicates Removed", interaction.user, f"Removed {len(removed_names)} duplicates:\n{', '.join(removed_names[:50])}")
         else:
             await interaction.followup.send("✅ Database is already clean. No duplicate players found.")
     except Exception as e:
-        await interaction.followup.send(f"❌ DB Error: {e}")
+        await interaction.followup.send(f"❌ Error: {e}")
 
 @bot.tree.command(name="deleteplayer", description="[ADMIN] Delete a specific player from the Cloud DB.")
 async def del_p_cmd(interaction: discord.Interaction, name: str):
-    admins = load_auth_admins()
+    admins = get_auth_admins()
     if interaction.user.id != ADMIN_DISCORD_ID and str(interaction.user.id) not in admins:
         return await interaction.response.send_message("❌ Access Denied: Admin only.", ephemeral=True)
         
     await interaction.response.defer(ephemeral=True)
     try:
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT name FROM players WHERE LOWER(TRIM(name)) = LOWER(TRIM(%s))", (name,))
-                found = cur.fetchall()
-                if not found:
-                    return await interaction.followup.send(f"❌ Could not find `{name}` in the database.")
-                
-                to_delete = [row[0] for row in found]
-                cur.execute("DELETE FROM players WHERE name = ANY(%s)", (to_delete,))
-            conn.commit()
-            
-        await interaction.followup.send(f"✅ Successfully deleted `{', '.join(to_delete)}` from the database.")
-        await log_db_update("Player Deleted", name, interaction.user, f"Removed match(es): {', '.join(to_delete)}")
-    except Exception as e:
-        await interaction.followup.send(f"❌ DB Error: {e}")
-
-@bot.tree.command(name="exportdb", description="[OWNER] Export Cloud DB to JSON file directly in Discord.")
-async def export_db_cmd(interaction: discord.Interaction):
-    if interaction.user.id != ADMIN_DISCORD_ID:
-        return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
+        all_p = get_all_players()
+        found = [p["name"] for p in all_p if p["name"].lower().strip() == name.lower().strip()]
+        if not found:
+            return await interaction.followup.send(f"❌ Could not find `{name}` in the database.")
         
-    await interaction.response.defer(ephemeral=True)
-    try:
-        import json
-        data = {"players": [], "user_subs": [], "server_subs": [], "auth_admins": []}
-        with get_db() as conn:
-            with conn.cursor(cursor_factory=DictCursor) as cur:
-                cur.execute("SELECT * FROM players")
-                data["players"] = [dict(row) for row in cur.fetchall()]
-                cur.execute("SELECT * FROM user_subs")
-                data["user_subs"] = [{**dict(r), 'last_reset': str(r['last_reset'])} for r in cur.fetchall()]
-                cur.execute("SELECT * FROM server_subs")
-                data["server_subs"] = [{**dict(r), 'last_reset': str(r['last_reset'])} for r in cur.fetchall()]
-                cur.execute("SELECT * FROM auth_admins")
-                data["auth_admins"] = [dict(row) for row in cur.fetchall()]
-                
-        json_bytes = io.BytesIO(json.dumps(data, indent=4).encode('utf-8'))
-        file = discord.File(fp=json_bytes, filename="database.json")
-        await interaction.followup.send("✅ Here is your entire database exported as a JSON file:", file=file)
+        delete_players(found)
+            
+        await interaction.followup.send(f"✅ Successfully deleted `{', '.join(found)}` from the database.")
+        await log_db_update("Player Deleted", name, interaction.user, f"Removed player(s): {', '.join(found)}")
     except Exception as e:
-        await interaction.followup.send(f"❌ Error exporting DB: {e}")
+        await interaction.followup.send(f"❌ Error: {e}")
 
 
 # ==========================================
