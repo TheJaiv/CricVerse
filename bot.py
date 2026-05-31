@@ -774,26 +774,24 @@ def render_embed_scoreboard(match: CricketMatch) -> discord.Embed:
     if match.current_innings_num == 1:
         t1_name = innings.batting_team['name']
         t2_name = innings.bowling_team['name']
-        desc += f"**🏏 {t1_name}  {innings.total_runs}/{innings.wickets}**  ({overs}/{match.format_overs}.0)\n"
+        desc += f"### 🏏 {t1_name}  {innings.total_runs}/{innings.wickets}  ({overs}/{match.format_overs}.0)\n"
         desc += f"**{t2_name}**  Yet to Bat\n"
     else:
         t1_name = match.innings2.batting_team['name']
         t2_name = match.innings1.batting_team['name']
         t1_overs = f"{match.innings1.total_balls // 6}.{match.innings1.total_balls % 6}"
-        desc += f"**🏏 {t1_name}  {innings.total_runs}/{innings.wickets}**  ({overs}/{match.format_overs}.0)\n"
-        desc += f"**{t2_name}**  {match.innings1.total_runs}/{match.innings1.wickets}  ({t1_overs}/{match.format_overs}.0)\n"
-
-    desc += "**-----------------------------------------**\n"
+        desc += f"### 🏏 {t1_name}  {innings.total_runs}/{innings.wickets}  ({overs}/{match.format_overs}.0)\n"
+        desc += f"### {t2_name}  {match.innings1.total_runs}/{match.innings1.wickets}  ({t1_overs}/{match.format_overs}.0)\n"
 
     # Single ANSI Codeblock for Batters (Removes all gaps between rows)
     desc += "```ansi\n"
-    desc += f"\u001b[1m{'BATTER':<18}{'R':<5}{'B':<5}{'SR':<6}\u001b[0m\n"
+    desc += f"\u001b[1m{'BATTER':<14}{'R':<4}{'B':<4}{'SR':<5}\u001b[0m\n"
     for idx, p_item in enumerate(innings.batting_team["players"][:innings.next_batter_idx]):
         stats = innings.batting_stats[p_item["name"]]
         if stats.dismissal == "not out":
             is_stk = "*" if idx == innings.current_striker_idx else " "
             sr = (stats.runs_scored / stats.balls_faced * 100) if stats.balls_faced > 0 else 0.0
-            desc += f"{p_item['name'][:16]:<16}{is_stk:<2}{stats.runs_scored:<5}{stats.balls_faced:<5}{sr:<6.1f}\n"
+            desc += f"{p_item['name'][:12]:<12}{is_stk:<2}{stats.runs_scored:<4}{stats.balls_faced:<4}{sr:<5.1f}\n"
     desc += "```\n"
 
     crr = (innings.total_runs / innings.total_balls * 6) if innings.total_balls > 0 else 0.0
@@ -806,20 +804,18 @@ def render_embed_scoreboard(match: CricketMatch) -> discord.Embed:
         proj = int(crr * match.format_overs)
         stats_line = f"`P'Ship: {innings.partnership_runs}  CRR: {crr:.1f}  Proj: {proj}`"
 
-    desc += f"{stats_line}\n**-----------------------------------------**\n"
+    desc += f"{stats_line}\n"
 
     # Single ANSI Codeblock for Bowlers
     desc += "```ansi\n"
-    desc += f"\u001b[1m{'BOWLER':<18}{'O':<6}{'R':<5}{'W':<5}\u001b[0m\n"
+    desc += f"\u001b[1m{'BOWLER':<14}{'O':<5}{'R':<4}{'W':<4}\u001b[0m\n"
     if innings.current_bowler:
         cb = innings.current_bowler
         cbs = innings.bowling_stats[cb["name"]]
         bovers = f"{cbs.balls_bowled // 6}.{cbs.balls_bowled % 6}"
-        desc += f"{cb['name'][:17]:<18}{bovers:<6}{cbs.runs_conceded:<5}{cbs.wickets_taken:<5}\n"
+        desc += f"{cb['name'][:13]:<14}{bovers:<5}{cbs.runs_conceded:<4}{cbs.wickets_taken:<4}\n"
     desc += "```\n"
         
-    desc += "**-----------------------------------------**\n"
-
     timeline_raw = innings.over_log[-6:] if innings.over_log else []
     # Dynamically inject the provided animated discord emojis
     timeline_fmt = [
