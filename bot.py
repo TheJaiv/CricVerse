@@ -888,7 +888,7 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
     potm_name = get_player_of_the_match(match) if match.current_innings_num == 2 else ""
     
     c_white = "#FFFFFF"
-    c_accent = "#39B54A" # Bright Lime Green
+    c_accent = "#39B54A" if match.format_overs == 50 else "#F97316" # Green for ODI, Orange for others
     c_navy = "#0A0F24"   # Deep Navy Blue
     c_grid = "#E8E8E8"   # Faint Light Grey
     c_ball = "#1D4ED8"   # Royal Blue
@@ -970,9 +970,22 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
         t2_name = match.innings1.bowling_team['name'][:18].upper()
     d.text((900 - get_tw(t2_name, font_large)//2, 30), t2_name, fill=c_navy, font=font_large)
 
-    # Center Placeholder Logo
-    d.ellipse([(550, 15), (650, 105)], fill=c_white, outline=c_grid, width=3)
-    d.text((600 - get_tw("LOGO", font_bold)//2, 45), "LOGO", fill=c_grid, font=font_bold)
+    # Center Custom Logo (or Placeholder)
+    try:
+        logo_path = "logo.png" if os.path.exists("logo.png") else "logo.jpg"
+        logo_img = Image.open(logo_path).convert("RGBA")
+        logo_img = logo_img.resize((90, 90), Image.Resampling.LANCZOS)
+        
+        # Create a circular mask to cut the square image
+        mask = Image.new("L", (90, 90), 0)
+        mask_draw = ImageDraw.Draw(mask)
+        mask_draw.ellipse((0, 0, 90, 90), fill=255)
+        
+        img.paste(logo_img, (555, 10), mask)
+        d.ellipse([(555, 10), (645, 100)], outline=c_grid, width=2)
+    except:
+        d.ellipse([(550, 15), (650, 105)], fill=c_white, outline=c_grid, width=3)
+        d.text((600 - get_tw("LOGO", font_bold)//2, 45), "LOGO", fill=c_grid, font=font_bold)
 
     # Green Bar Match Type
     fmt = "ODI" if match.format_overs == 50 else "T20" if match.format_overs == 20 else "CUSTOM"
@@ -980,11 +993,11 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
     d.text((600 - get_tw(m_type, font_bold)//2, 113), m_type, fill=c_navy, font=font_bold)
 
     # Upper Navy Headers (Scores Only)
-    s1_full = f"{match.innings1.total_runs}-{match.innings1.wickets}  ({match.innings1.total_balls // 6}.{match.innings1.total_balls % 6})"
+    s1_full = f"{match.innings1.total_runs}-{match.innings1.wickets}"
     d.text((300 - get_tw(s1_full, font_title)//2, 165), s1_full, fill=c_white, font=font_title)
 
     if match.current_innings_num == 2 and match.innings2:
-        s2_full = f"{match.innings2.total_runs}-{match.innings2.wickets}  ({match.innings2.total_balls // 6}.{match.innings2.total_balls % 6})"
+        s2_full = f"{match.innings2.total_runs}-{match.innings2.wickets}"
     else:
         s2_full = "YET TO BAT"
     d.text((900 - get_tw(s2_full, font_title)//2, 165), s2_full, fill=c_white, font=font_title)
@@ -1015,9 +1028,15 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
     draw_batters(match.innings1, 0) # Team 1 Batting
     draw_batters(match.innings2 if match.current_innings_num == 2 else None, 600) # Team 2 Batting
 
-    # Lower Headers (Bowling Phase)
-    d.text((300 - get_tw("BOWLING", font_title)//2, 495), "BOWLING", fill=c_white, font=font_title)
-    d.text((900 - get_tw("BOWLING", font_title)//2, 495), "BOWLING", fill=c_white, font=font_title)
+    # Lower Headers (Overs Played)
+    o1_text = f"{match.innings1.total_balls // 6}.{match.innings1.total_balls % 6} OVERS"
+    d.text((300 - get_tw(o1_text, font_title)//2, 495), o1_text, fill=c_white, font=font_title)
+
+    if match.current_innings_num == 2 and match.innings2:
+        o2_text = f"{match.innings2.total_balls // 6}.{match.innings2.total_balls % 6} OVERS"
+    else:
+        o2_text = "0.0 OVERS"
+    d.text((900 - get_tw(o2_text, font_title)//2, 495), o2_text, fill=c_white, font=font_title)
     
     def draw_bowlers(inn, offset_x):
         if not inn: return
@@ -1058,7 +1077,7 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
             result_str = "MATCH TIED"
             
         if potm_name:
-            result_str += f"  |  POTM: {potm_name.upper()}"
+            result_str += f" ● POTM: {potm_name.upper()}"
             
     d.text((600 - get_tw(result_str, font_title)//2, 810), result_str, fill=c_navy, font=font_title)
     
