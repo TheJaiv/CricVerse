@@ -785,14 +785,14 @@ def render_embed_scoreboard(match: CricketMatch) -> discord.Embed:
 
     desc += "**-----------------------------------------**\n"
 
-    # Grid Format: Scaled to exactly 29 characters to prevent mobile text wrapping
-    desc += f"```text\n{'BATTERS':<16}{'R':<4}{'B':<4}{'SR':<5}```\n"
+    # Grid Format: Scaled to exactly 24 characters with ANSI bold headers to prevent all mobile text wrapping
+    desc += f"```ansi\n\u001b[1m{'BATTER':<11}{'R':<4}{'B':<4}{'SR':<5}\u001b[0m```\n"
     for idx, p_item in enumerate(innings.batting_team["players"][:innings.next_batter_idx]):
         stats = innings.batting_stats[p_item["name"]]
         if stats.dismissal == "not out":
             is_stk = "*" if idx == innings.current_striker_idx else " "
             sr = (stats.runs_scored / stats.balls_faced * 100) if stats.balls_faced > 0 else 0.0
-            desc += f"```text\n{p_item['name'][:14]:<14}{is_stk:<2}{stats.runs_scored:<4}{stats.balls_faced:<4}{sr:<5.1f}```\n"
+            desc += f"```text\n{p_item['name'][:9]:<9}{is_stk:<2}{stats.runs_scored:<4}{stats.balls_faced:<4}{sr:<5.1f}```\n"
 
     crr = (innings.total_runs / innings.total_balls * 6) if innings.total_balls > 0 else 0.0
     if match.current_innings_num == 2:
@@ -806,12 +806,12 @@ def render_embed_scoreboard(match: CricketMatch) -> discord.Embed:
 
     desc += f"{stats_line}\n**-----------------------------------------**\n"
 
-    desc += f"```text\n{'BOWLER':<16}{'O':<5}{'R':<4}{'W':<3}```\n"
+    desc += f"```ansi\n\u001b[1m{'BOWLER':<11}{'O':<5}{'R':<4}{'W':<4}\u001b[0m```\n"
     if innings.current_bowler:
         cb = innings.current_bowler
         cbs = innings.bowling_stats[cb["name"]]
         bovers = f"{cbs.balls_bowled // 6}.{cbs.balls_bowled % 6}"
-        desc += f"```text\n{cb['name'][:15]:<16}{bovers:<5}{cbs.runs_conceded:<4}{cbs.wickets_taken:<3}```\n"
+        desc += f"```text\n{cb['name'][:10]:<11}{bovers:<5}{cbs.runs_conceded:<4}{cbs.wickets_taken:<4}```\n"
         
     desc += "**-----------------------------------------**\n"
 
