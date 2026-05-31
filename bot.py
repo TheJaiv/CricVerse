@@ -861,8 +861,8 @@ def render_full_scorecard_embed(match: CricketMatch, innings_num: int) -> discor
     return embed
 
 def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
-    # Dual-Pane Broadcast Canvas
-    img = Image.new("RGB", (1200, 800), color="#FFFFFF") 
+    # 1200x850 Symmetrical Grid Canvas
+    img = Image.new("RGB", (1200, 850), color="#FFFFFF") 
     d = ImageDraw.Draw(img)
 
     try:
@@ -887,102 +887,144 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
             
     potm_name = get_player_of_the_match(match) if match.current_innings_num == 2 else ""
     
-    # Colors matching the Blueprint
-    c_purple = "#2E1A47"
     c_white = "#FFFFFF"
-    c_blue = "#4BA3E3"
-    c_teal = "#00A896"
-    c_grey = "#555555"
+    c_accent = "#39B54A" # Bright Lime Green
+    c_navy = "#0A0F24"   # Deep Navy Blue
+    c_grid = "#E8E8E8"   # Faint Light Grey
+    c_ball = "#1D4ED8"   # Royal Blue
+    c_text_grey = "#777777"
 
-    # 1. Header (0-100)
-    d.rectangle([(450, 0), (750, 100)], fill=c_purple)
-    t1_name = match.team1['name'].upper()
-    t2_name = match.team2['name'].upper()
-    d.text((50, 25), t1_name, fill=c_purple, font=font_large)
-    d.text((1150 - get_tw(t2_name, font_large), 25), t2_name, fill=c_purple, font=font_large)
-    venue_text = "SIMULATION"
-    d.text((600 - get_tw(venue_text, font_small)//2, 40), venue_text, fill=c_white, font=font_small)
+    # ==========================================
+    # 1. CORE LAYOUT & BARS
+    # ==========================================
+    
+    # Top Accent Bar
+    d.rectangle([(0, 20), (1200, 30)], fill=c_accent)
+    
+    # Upper Header (Batting)
+    d.rectangle([(0, 30), (1200, 110)], fill=c_navy)
+    d.line([(600, 30), (600, 110)], fill=c_white, width=1) # Center Divider
+    
+    # Lower Header (Bowling)
+    d.rectangle([(0, 460), (1200, 540)], fill=c_navy)
+    d.line([(600, 460), (600, 540)], fill=c_white, width=1) # Center Divider
 
-    # 2. Team Scores (100-200)
-    d.rectangle([(0, 100), (1200, 200)], fill=c_blue)
-    d.line([(600, 110), (600, 190)], fill=c_white, width=3)
+    # Footer
+    d.rectangle([(0, 800), (1200, 850)], fill=c_accent)
     
-    s1 = f"{match.innings1.total_runs}-{match.innings1.wickets}"
-    d.text((300 - get_tw(s1, font_large)//2, 125), s1, fill=c_white, font=font_large)
+    # ==========================================
+    # 2. GRID SYSTEM
+    # ==========================================
     
+    # Vertical Column Lines (Spanning both Upper and Lower Grids)
+    for y_start, y_end in [(110, 460), (540, 800)]:
+        d.line([(600, y_start), (600, y_end)], fill=c_grid, width=2) # Center line
+        d.line([(420, y_start), (420, y_end)], fill=c_grid, width=2) # Left Col 1-2 border
+        d.line([(510, y_start), (510, y_end)], fill=c_grid, width=2) # Left Col 2-3 border
+        d.line([(1020, y_start), (1020, y_end)], fill=c_grid, width=2) # Right Col 4-5 border
+        d.line([(1110, y_start), (1110, y_end)], fill=c_grid, width=2) # Right Col 5-6 border
+        
+    # Horizontal Row Lines (Upper Grid - Batting)
+    for y in range(160, 461, 50): d.line([(0, y), (1200, y)], fill=c_grid, width=1)
+        
+    # Horizontal Row Lines (Lower Grid - Bowling)
+    for y in range(590, 801, 50): d.line([(0, y), (1200, y)], fill=c_grid, width=1)
+        
+    # ==========================================
+    # 3. FLOATING UI ICONS
+    # ==========================================
+    
+    # Upper Icons (Bats)
+    d.rounded_rectangle([(-20, 50), (40, 90)], radius=20, fill=c_white)
+    d.line([(10, 80), (25, 60)], fill=c_accent, width=6)
+    d.line([(25, 60), (32, 55)], fill=c_accent, width=3)
+    
+    d.rounded_rectangle([(1160, 50), (1220, 90)], radius=20, fill=c_white)
+    d.line([(1190, 80), (1175, 60)], fill=c_accent, width=6)
+    d.line([(1175, 60), (1168, 55)], fill=c_accent, width=3)
+
+    # Lower Icons (Balls)
+    d.rounded_rectangle([(-20, 480), (40, 520)], radius=20, fill=c_white)
+    d.ellipse([(5, 485), (35, 515)], fill=c_ball)
+    d.line([(10, 492), (30, 508)], fill=c_white, width=2)
+    d.line([(13, 488), (28, 500)], fill=c_white, width=1)
+    d.line([(13, 500), (28, 512)], fill=c_white, width=1)
+    
+    d.rounded_rectangle([(1160, 480), (1220, 520)], radius=20, fill=c_white)
+    d.ellipse([(1165, 485), (1195, 515)], fill=c_ball)
+    d.line([(1170, 492), (1190, 508)], fill=c_white, width=2)
+    d.line([(1173, 488), (1188, 500)], fill=c_white, width=1)
+    d.line([(1173, 500), (1188, 512)], fill=c_white, width=1)
+
+    # ==========================================
+    # 4. DATA POPULATION
+    # ==========================================
+    
+    # Upper Headers (Team Names & Scores)
+    t1_name = match.innings1.batting_team['name'].upper()
+    s1_full = f"{match.innings1.total_runs}-{match.innings1.wickets}  ({match.innings1.total_balls // 6}.{match.innings1.total_balls % 6})"
+    d.text((60, 55), t1_name[:15], fill=c_white, font=font_title)
+    d.text((580 - get_tw(s1_full, font_title), 55), s1_full, fill=c_white, font=font_title)
+
     if match.current_innings_num == 2 and match.innings2:
-        s2 = f"{match.innings2.total_runs}-{match.innings2.wickets}"
+        t2_name = match.innings2.batting_team['name'].upper()
+        s2_full = f"{match.innings2.total_runs}-{match.innings2.wickets}  ({match.innings2.total_balls // 6}.{match.innings2.total_balls % 6})"
     else:
-        s2 = "YET TO BAT"
-    d.text((900 - get_tw(s2, font_large)//2, 125), s2, fill=c_white, font=font_large)
-    
-    # Simple bat icons on the edges
-    d.line([(50, 165), (80, 135)], fill=c_white, width=8)
-    d.line([(80, 135), (90, 125)], fill=c_white, width=3)
-    d.line([(1150, 165), (1120, 135)], fill=c_white, width=8)
-    d.line([(1120, 135), (1110, 125)], fill=c_white, width=3)
+        t2_name = match.innings1.bowling_team['name'].upper()
+        s2_full = "YET TO BAT"
+    d.text((660, 55), t2_name[:15], fill=c_white, font=font_title)
+    d.text((1180 - get_tw(s2_full, font_title), 55), s2_full, fill=c_white, font=font_title)
 
-    # 3. Batting Statistics (200-440)
-    d.line([(600, 210), (600, 430)], fill="#DDDDDD", width=2)
-    
     def draw_batters(inn, offset_x):
         if not inn: return
-        top_b = sorted(inn.batting_stats.values(), key=lambda x: x.runs_scored, reverse=True)[:4]
+        d.text((offset_x + 60, 125), "BATTER", fill=c_text_grey, font=font_small)
+        d.text((offset_x + 465 - get_tw("R", font_small)//2, 125), "R", fill=c_text_grey, font=font_small)
+        d.text((offset_x + 555 - get_tw("B", font_small)//2, 125), "B", fill=c_text_grey, font=font_small)
+        
+        top_b = sorted(inn.batting_stats.values(), key=lambda x: x.runs_scored, reverse=True)[:6]
         for idx, b in enumerate(top_b):
-            y = 230 + (idx * 50)
-            name = b.profile['name'][:18].upper()
+            y = 175 + (idx * 50)
+            name = b.profile['name'][:16].upper()
             if b.dismissal == "not out": name += "*"
             if potm_name == b.profile['name']: name += " ★"
-            d.text((offset_x + 50, y), name, fill=c_purple, font=font_bold)
+            d.text((offset_x + 60, y), name, fill=c_navy, font=font_bold)
             
             runs = str(b.runs_scored)
-            d.text((offset_x + 470 - get_tw(runs, font_bold), y), runs, fill=c_purple, font=font_bold)
+            d.text((offset_x + 465 - get_tw(runs, font_bold)//2, y), runs, fill=c_navy, font=font_bold)
             
             balls = str(b.balls_faced)
-            d.text((offset_x + 550 - get_tw(balls, font_small), y + 4), balls, fill=c_grey, font=font_small)
+            d.text((offset_x + 555 - get_tw(balls, font_small)//2, y + 4), balls, fill=c_text_grey, font=font_small)
 
     draw_batters(match.innings1, 0) # Team 1 Batting
     draw_batters(match.innings2 if match.current_innings_num == 2 else None, 600) # Team 2 Batting
 
-    # 4. Overs Summary (440-520)
-    d.rectangle([(0, 440), (1200, 520)], fill=c_teal)
-    d.line([(600, 450), (600, 510)], fill=c_white, width=2)
-    
-    o1 = f"{match.innings1.total_balls // 6}.{match.innings1.total_balls % 6} OVERS"
-    d.text((300 - get_tw(o1, font_title)//2, 465), o1, fill=c_white, font=font_title)
-    
-    o2 = f"{match.innings2.total_balls // 6}.{match.innings2.total_balls % 6} OVERS" if match.current_innings_num == 2 else "0.0 OVERS"
-    d.text((900 - get_tw(o2, font_title)//2, 465), o2, fill=c_white, font=font_title)
-
-    # Ball icons
-    d.ellipse([(40, 470), (60, 490)], fill=c_white)
-    d.ellipse([(1140, 470), (1160, 490)], fill=c_white)
-
-    # 5. Bowling Statistics (520-700)
-    d.line([(600, 530), (600, 690)], fill="#DDDDDD", width=2)
+    # Lower Headers (Bowling Phase)
+    d.text((60, 490), f"{match.innings1.bowling_team['name'][:15].upper()} BOWLING", fill=c_white, font=font_title)
+    d.text((660, 490), f"{match.innings1.batting_team['name'][:15].upper()} BOWLING", fill=c_white, font=font_title)
     
     def draw_bowlers(inn, offset_x):
         if not inn: return
+        d.text((offset_x + 60, 555), "BOWLER", fill=c_text_grey, font=font_small)
+        d.text((offset_x + 465 - get_tw("W-R", font_small)//2, 555), "W-R", fill=c_text_grey, font=font_small)
+        d.text((offset_x + 555 - get_tw("O", font_small)//2, 555), "O", fill=c_text_grey, font=font_small)
+        
         active_bowlers = [b for b in inn.bowling_stats.values() if b.balls_bowled > 0]
-        top_bowl = sorted(active_bowlers, key=lambda x: (x.wickets_taken, -x.runs_conceded), reverse=True)[:3]
+        top_bowl = sorted(active_bowlers, key=lambda x: (x.wickets_taken, -x.runs_conceded), reverse=True)[:4]
         for idx, bowl in enumerate(top_bowl):
-            y = 540 + (idx * 50)
-            name = bowl.profile['name'][:18].upper()
+            y = 605 + (idx * 50)
+            name = bowl.profile['name'][:16].upper()
             if potm_name == bowl.profile['name']: name += " ★"
-            d.text((offset_x + 50, y), name, fill=c_purple, font=font_bold)
+            d.text((offset_x + 60, y), name, fill=c_navy, font=font_bold)
             
             wr = f"{bowl.wickets_taken}-{bowl.runs_conceded}"
-            d.text((offset_x + 470 - get_tw(wr, font_bold), y), wr, fill=c_purple, font=font_bold)
+            d.text((offset_x + 465 - get_tw(wr, font_bold)//2, y), wr, fill=c_navy, font=font_bold)
             
             bovers = f"{bowl.balls_bowled // 6}.{bowl.balls_bowled % 6}"
-            d.text((offset_x + 550 - get_tw(bovers, font_small), y + 4), bovers, fill=c_grey, font=font_small)
+            d.text((offset_x + 555 - get_tw(bovers, font_small)//2, y + 4), bovers, fill=c_text_grey, font=font_small)
 
-    draw_bowlers(match.innings2 if match.current_innings_num == 2 else None, 0) # Team 1 Bowling to Team 2
-    draw_bowlers(match.innings1, 600) # Team 2 Bowling to Team 1
+    draw_bowlers(match.innings1, 0) # Team 2 Bowling to Team 1
+    draw_bowlers(match.innings2 if match.current_innings_num == 2 else None, 600) # Team 1 Bowling to Team 2
 
-    # 6. Footer (Match Result) (700-800)
-    d.rectangle([(0, 700), (1200, 800)], fill=c_teal)
-        
     if match.current_innings_num == 1:
         result_str = f"TARGET SET: {match.innings1.total_runs + 1} RUNS TO WIN"
     else:
@@ -998,7 +1040,7 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
         if potm_name:
             result_str += f"  |  POTM: {potm_name.upper()}"
             
-    d.text((600 - get_tw(result_str, font_title)//2, 735), result_str, fill=c_white, font=font_title)
+    d.text((600 - get_tw(result_str, font_title)//2, 810), result_str, fill=c_navy, font=font_title)
     
     buf = io.BytesIO()
     img.save(buf, format="PNG")
