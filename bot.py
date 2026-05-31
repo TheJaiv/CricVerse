@@ -767,58 +767,67 @@ def get_player_of_the_match(match: CricketMatch) -> str:
 def render_embed_scoreboard(match: CricketMatch) -> discord.Embed:
     innings = match.current_innings
     overs = f"{innings.total_balls // 6}.{innings.total_balls % 6}"
-    embed = discord.Embed(title="🏏 Live Scoreboard", color=discord.Color.dark_blue())
+    embed = discord.Embed(color=0x2B2D31) # Sleek Dark Mode Discord Color
+    
+    desc = "## <a:ball:1510370830163640320> LIVE SCOREBOARD\n"
 
-    # 1. Header block
     if match.current_innings_num == 1:
         t1_name = innings.batting_team['name']
         t2_name = innings.bowling_team['name']
-        header = f"🏏 **{t1_name}**  {innings.total_runs}/{innings.wickets}  ({overs}/{match.format_overs}.0)\n**{t2_name}**  Yet to Bat"
+        desc += f"## 🏏 **{t1_name}**  {innings.total_runs}/{innings.wickets}  ({overs}/{match.format_overs}.0)\n"
+        desc += f"### **{t2_name}**  Yet to Bat\n"
     else:
         t1_name = match.innings2.batting_team['name']
         t2_name = match.innings1.batting_team['name']
         t1_overs = f"{match.innings1.total_balls // 6}.{match.innings1.total_balls % 6}"
-        header = f"🏏 **{t1_name}**  {innings.total_runs}/{innings.wickets}  ({overs}/{match.format_overs}.0)\n**{t2_name}**  {match.innings1.total_runs}/{match.innings1.wickets}  ({t1_overs}/{match.format_overs}.0)"
+        desc += f"## 🏏 **{t1_name}**  {innings.total_runs}/{innings.wickets}  ({overs}/{match.format_overs}.0)\n"
+        desc += f"### **{t2_name}**  {match.innings1.total_runs}/{match.innings1.wickets}  ({t1_overs}/{match.format_overs}.0)\n"
 
-    # 2. Batting block
-    b_table = "BATTERS             R    B    SR\n"
+    desc += "**-----------------------------------------**\n"
+
+    b_table = f"{'BATTERS':<20}{'R':<5}{'B':<5}{'SR'}\n"
     for idx, p_item in enumerate(innings.batting_team["players"][:innings.next_batter_idx]):
         stats = innings.batting_stats[p_item["name"]]
         if stats.dismissal == "not out":
-            is_stk = "*" if idx == innings.current_striker_idx else ""
+            is_stk = "*" if idx == innings.current_striker_idx else " "
             sr = (stats.runs_scored / stats.balls_faced * 100) if stats.balls_faced > 0 else 0.0
             b_table += f"{p_item['name'][:18]:<18}{is_stk:<2}{stats.runs_scored:<5}{stats.balls_faced:<5}{sr:<5.1f}\n"
-    table_str = f"```text\n{b_table}```"
+    desc += f"```text\n{b_table}```\n"
 
-    # 3. Match Stats Line
     crr = (innings.total_runs / innings.total_balls * 6) if innings.total_balls > 0 else 0.0
     if match.current_innings_num == 2:
         runs_needed = (match.innings1.total_runs + 1) - innings.total_runs
         balls_left = match.max_balls - innings.total_balls
         rrr = (runs_needed / balls_left * 6) if balls_left > 0 else 0.0
-        stats_line = f"P'Ship: {innings.partnership_runs}  CRR: {crr:.1f}  RRR: {rrr:.1f}"
+        stats_line = f"`P'Ship: {innings.partnership_runs}  CRR: {crr:.1f}  RRR: {rrr:.1f}`"
     else:
         proj = int(crr * match.format_overs)
-        stats_line = f"P'Ship: {innings.partnership_runs}  CRR: {crr:.1f}  Proj: {proj}"
+        stats_line = f"`P'Ship: {innings.partnership_runs}  CRR: {crr:.1f}  Proj: {proj}`"
 
-    # 4. Bowling block
-    bw_table = "BOWLER              O    R    W\n"
+    desc += f"{stats_line}\n**-----------------------------------------**\n"
+
+    bw_table = f"{'BOWLER':<20}{'O':<5}{'R':<5}{'W'}\n"
     if innings.current_bowler:
         cb = innings.current_bowler
         cbs = innings.bowling_stats[cb["name"]]
         bovers = f"{cbs.balls_bowled // 6}.{cbs.balls_bowled % 6}"
         bw_table += f"{cb['name'][:19]:<20}{bovers:<5}{cbs.runs_conceded:<5}{cbs.wickets_taken}\n"
-    bowler_table_str = f"```text\n{bw_table}```"
+    desc += f"```text\n{bw_table}```\n**-----------------------------------------**\n"
 
-    # 5. Timeline Assembly
-    timeline = " ".join(innings.over_log[-6:]) if innings.over_log else "Starting over..."
-    embed.description = f"{header}\n{table_str}**{stats_line}**\n{bowler_table_str}**Timeline**\n{timeline}"
+    timeline_raw = innings.over_log[-6:] if innings.over_log else []
+    # Dynamically inject your custom emojis
+    timeline_fmt = [item.replace("🟢", ":Four:").replace("🔵", ":six_:").replace("🔴", ":wickett:") for item in timeline_raw]
+    timeline_str = " ".join(timeline_fmt) if timeline_fmt else "Starting over..."
+    
+    desc += f"**Timeline**\n{timeline_str}\n"
     
     if match.current_innings_num == 2:
         target_needed = (match.innings1.total_runs + 1) - innings.total_runs
         balls_left = match.max_balls - innings.total_balls
         if target_needed > 0 and balls_left > 0:
-            embed.set_footer(text=f"Equation: Need {target_needed} runs from {balls_left} balls (RRR: {rrr:.2f})")
+            desc += f"-# Equation: Need {target_needed} runs from {balls_left} balls"
+            
+    embed.description = desc
             
     return embed
 
@@ -940,26 +949,40 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
     # ==========================================
     
     # Upper Icons (Bats)
-    d.rounded_rectangle([(-20, 160), (40, 200)], radius=20, fill=c_white)
-    d.line([(10, 190), (25, 170)], fill=c_accent, width=6)
-    d.line([(25, 170), (32, 165)], fill=c_accent, width=3)
+    # Left box: perfectly flush with left edge, rounded on the right
+    d.rounded_rectangle([(0, 140), (60, 220)], radius=15, fill=c_white)
+    d.rectangle([(0, 140), (30, 220)], fill=c_white) # Squares off left edge
+    # Left Bat
+    d.line([(15, 195), (32, 177)], fill=c_accent, width=9) # Blade
+    d.line([(32, 177), (40, 169)], fill=c_accent, width=3) # Handle
+    d.ellipse([(38, 166), (44, 172)], fill=c_accent)       # Handle Knob
     
-    d.rounded_rectangle([(1160, 160), (1220, 200)], radius=20, fill=c_white)
-    d.line([(1190, 190), (1175, 170)], fill=c_accent, width=6)
-    d.line([(1175, 170), (1168, 165)], fill=c_accent, width=3)
+    # Right box: perfectly flush with right edge, rounded on the left
+    d.rounded_rectangle([(1140, 140), (1200, 220)], radius=15, fill=c_white)
+    d.rectangle([(1170, 140), (1200, 220)], fill=c_white) # Squares off right edge
+    # Right Bat
+    d.line([(1185, 195), (1168, 177)], fill=c_accent, width=9) # Blade
+    d.line([(1168, 177), (1160, 169)], fill=c_accent, width=3) # Handle
+    d.ellipse([(1156, 166), (1162, 172)], fill=c_accent)       # Handle Knob
 
     # Lower Icons (Balls)
-    d.rounded_rectangle([(-20, 490), (40, 530)], radius=20, fill=c_white)
-    d.ellipse([(5, 495), (35, 525)], fill=c_ball)
-    d.line([(10, 502), (30, 518)], fill=c_white, width=2)
-    d.line([(13, 498), (28, 510)], fill=c_white, width=1)
-    d.line([(13, 510), (28, 522)], fill=c_white, width=1)
+    # Left box
+    d.rounded_rectangle([(0, 470), (60, 550)], radius=15, fill=c_white)
+    d.rectangle([(0, 470), (30, 550)], fill=c_white)
+    # Left Ball
+    d.ellipse([(15, 495), (45, 525)], fill=c_ball)
+    d.line([(20, 502), (40, 518)], fill=c_white, width=2)
+    d.line([(23, 498), (38, 510)], fill=c_white, width=1)
+    d.line([(23, 510), (38, 522)], fill=c_white, width=1)
     
-    d.rounded_rectangle([(1160, 490), (1220, 530)], radius=20, fill=c_white)
-    d.ellipse([(1165, 495), (1195, 525)], fill=c_ball)
-    d.line([(1170, 502), (1190, 518)], fill=c_white, width=2)
-    d.line([(1173, 498), (1188, 510)], fill=c_white, width=1)
-    d.line([(1173, 510), (1188, 522)], fill=c_white, width=1)
+    # Right box
+    d.rounded_rectangle([(1140, 470), (1200, 550)], radius=15, fill=c_white)
+    d.rectangle([(1170, 470), (1200, 550)], fill=c_white)
+    # Right Ball
+    d.ellipse([(1155, 495), (1185, 525)], fill=c_ball)
+    d.line([(1160, 502), (1180, 518)], fill=c_white, width=2)
+    d.line([(1163, 498), (1178, 510)], fill=c_white, width=1)
+    d.line([(1163, 510), (1178, 522)], fill=c_white, width=1)
 
     # ==========================================
     # 4. DATA POPULATION
