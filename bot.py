@@ -11,6 +11,7 @@ from psycopg2.extras import DictCursor
 from PIL import Image, ImageDraw, ImageFont
 from keep_alive import keep_alive
 from odi_simulation import execute_ball_math_odi, get_smart_ai_bowler_odi
+from subscription_manager import init_subs_db, check_potential_quota, consume_quota, update_user_tier, update_server_tier
 
 # ==========================================
 # ⚙️ 1. SETUP & CONFIGURATION
@@ -55,6 +56,7 @@ def init_db():
             cur.execute('''CREATE TABLE IF NOT EXISTS auth_admins (admin_id TEXT PRIMARY KEY)''')
         conn.commit()
         
+    init_subs_db()
     # 2. Auto-Migrate from CSV to SQL Database!
     if os.path.exists("players_master.csv"):
         import csv
@@ -78,6 +80,7 @@ async def on_ready():
     init_db()
     print("✅ Cloud Database Connected and Ready.")
 
+AUTH_CACHE = {"admins": None}
 AUTH_CACHE = {"servers": None, "admins": None}
 
 def load_auth_servers(force=False):
@@ -101,18 +104,6 @@ def load_auth_admins(force=False):
                 AUTH_CACHE["admins"] = [row[0] for row in cur.fetchall()]
                 return AUTH_CACHE["admins"]
     except: return []
-
-@bot.tree.interaction_check
-async def global_security_check(interaction: discord.Interaction):
-    if interaction.user.id == ADMIN_DISCORD_ID: return True
-    admins = load_auth_admins()
-    if str(interaction.user.id) in admins: return True
-    if interaction.guild:
-        servers = load_auth_servers()
-        if str(interaction.guild.id) not in servers:
-            await interaction.response.send_message("❌ This server is not authorized to run the bot.", ephemeral=True)
-            return False
-    return True
 
 def load_all_players_from_db():
     players = []
@@ -2121,6 +2112,8 @@ async def match_cmd(interaction: discord.Interaction, opponent: discord.Member =
 
 @bot.tree.command(name="simulatematch", description="Simulate a full match between two custom teams instantly.")
 async def simulatematch_cmd(interaction: discord.Interaction):
+    allowed, reason = check_potential_quota(str(interaction.user.id), str(interaction.guild.id) if interaction.guild else None, str(ADMIN_DISCORD_ID))
+    if not allowed: return await interaction.response.send_message(reason, ephemeral=True)
     if interaction.guild:
         servers = load_auth_servers()
         if str(interaction.guild.id) not in servers:
@@ -2306,6 +2299,46 @@ async def auth_server_cmd(interaction: discord.Interaction, guild_id: str):
                 msg = f"✅ Server `{guild_id}` is now **authorized** to run the bot."
         conn.commit()
         load_auth_servers(force=True)
+    await interaction.response.send_message(msg, ephemeral=True)
+
+@bot.tree.command(name="set_user_tier", description="[OWNER] Assign a subscription tier to a user.")
+@app_commands.choices(tier=[
+    app_commands.Choice(name="Basic (1 Sim/Day | T20/ODI)", value="Basic"),
+    app_commands.Choice(name="Standard (1 Sim/Day | All)", value="Standard"),
+    app_commands.Choice(name="None (Remove)", value="None")
+])
+async def set_user_tier_cmd(interaction: discord.Interaction, user: discord.Member, tier: app_commands.Choice[str]):
+    if interaction.user.id != ADMIN_DISCORD_ID:
+        return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
+    
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            if tier.value == "None":
+                cur.execute("DELETE FROM user_subs WHERE user_id = %s", (str(user.id),))
+                msg = f"🚫 Removed subscription from {user.mention}."
+            else:
+                cur.execute('''
+                    INSERT INTO user_subs (user_id, tier, sims_used, last_reset)
+                    VALUES (%s, %s, 0, CURRENT_DATE)
+                    ON CONFLICT (user_id) DO UPDATE SET tier = EXCLUDED.tier, sims_used = 0, last_reset = CURRENT_DATE
+                ''', (str(user.id), tier.value))
+                msg = f"✅ Assigned **{tier.name}** tier to {user.mention}."
+        conn.commit()
+    await interaction.response.send_message(msg, ephemeral=True)
+
+@bot.tree.command(name="set_server_tier", description="[OWNER] Assign a subscription tier to a server.")
+@app_commands.choices(tier=[
+    app_commands.Choice(name="Bronze (10 Sims/Day | All)", value="Bronze"),
+    app_commands.Choice(name="Silver (Unlimited | All)", value="Silver"),
+    app_commands.Choice(name="Gold (Tournament Only)", value="Gold"),
+    app_commands.Choice(name="Diamond (Unlimited + Tournament)", value="Diamond"),
+    app_commands.Choice(name="None (Remove)", value="None")
+])
+async def set_server_tier_cmd(interaction: discord.Interaction, server_id: str, tier: app_commands.Choice[str]):
+    if interaction.user.id != ADMIN_DISCORD_ID:
+        return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
+        
+    msg = update_server_tier(server_id, tier.value, tier.name)
     await interaction.response.send_message(msg, ephemeral=True)
 
 @bot.tree.command(name="authadmin", description="[OWNER] Toggle a user's permission to add/update players.")
