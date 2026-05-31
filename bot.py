@@ -77,23 +77,10 @@ def init_db():
 async def on_ready():
     print(f"🏏 Logged in successfully as {bot.user.name}")
     init_db()
-    load_auth_servers() # Pre-cache to prevent 10062 Interaction Timeouts
     load_auth_admins()  # Pre-cache to prevent 10062 Interaction Timeouts
     print("✅ Cloud Database Connected and Ready.")
 
-AUTH_CACHE = {"servers": None, "admins": None}
 AUTH_CACHE = {"admins": None}
-
-def load_auth_servers(force=False):
-    if not force and AUTH_CACHE["servers"] is not None:
-        return AUTH_CACHE["servers"]
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT server_id FROM auth_servers")
-                AUTH_CACHE["servers"] = [row[0] for row in cur.fetchall()]
-                return AUTH_CACHE["servers"]
-    except: return []
 
 def load_auth_admins(force=False):
     if not force and AUTH_CACHE["admins"] is not None:
