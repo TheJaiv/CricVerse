@@ -888,6 +888,7 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
     potm_name = get_player_of_the_match(match) if match.current_innings_num == 2 else ""
     
     c_white = "#FFFFFF"
+    c_score_bg = "#E0DADE"
     c_accent = "#39B54A" if match.format_overs == 50 else "#F97316" # Green for ODI, Orange for others
     c_navy = "#0A0F24"   # Deep Navy Blue
     c_grid = "#E8E8E8"   # Faint Light Grey
@@ -916,6 +917,10 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
     # 2. GRID SYSTEM
     # ==========================================
     
+    # Grid Backgrounds
+    d.rectangle([(0, 220), (1200, 470)], fill=c_score_bg)
+    d.rectangle([(0, 550), (1200, 800)], fill=c_score_bg)
+    
     # Vertical Column Lines (Spanning both Upper and Lower Grids)
     for y_start, y_end in [(220, 470), (550, 800)]:
         d.line([(600, y_start), (600, y_end)], fill=c_grid, width=2) # Center line
@@ -938,19 +943,29 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
     d.rounded_rectangle([(-20, 160), (40, 200)], radius=20, fill=c_white)
     d.line([(10, 190), (25, 170)], fill=c_accent, width=6)
     d.line([(25, 170), (32, 165)], fill=c_accent, width=3)
+    # Upper Icons (Bats) - Perfectly aligned with Blue Bar height (140 to 220)
+    d.rounded_rectangle([(-40, 140), (40, 220)], radius=40, fill=c_white)
+    d.line([(5, 200), (25, 160)], fill=c_accent, width=8)
+    d.line([(25, 160), (30, 150)], fill=c_accent, width=4)
     
     d.rounded_rectangle([(1160, 160), (1220, 200)], radius=20, fill=c_white)
     d.line([(1190, 190), (1175, 170)], fill=c_accent, width=6)
     d.line([(1175, 170), (1168, 165)], fill=c_accent, width=3)
+    d.rounded_rectangle([(1160, 140), (1240, 220)], radius=40, fill=c_white)
+    d.line([(1195, 200), (1175, 160)], fill=c_accent, width=8)
+    d.line([(1175, 160), (1170, 150)], fill=c_accent, width=4)
 
     # Lower Icons (Balls)
     d.rounded_rectangle([(-20, 490), (40, 530)], radius=20, fill=c_white)
+    # Lower Icons (Balls) - Perfectly aligned with Blue Bar height (470 to 550)
+    d.rounded_rectangle([(-40, 470), (40, 550)], radius=40, fill=c_white)
     d.ellipse([(5, 495), (35, 525)], fill=c_ball)
     d.line([(10, 502), (30, 518)], fill=c_white, width=2)
     d.line([(13, 498), (28, 510)], fill=c_white, width=1)
     d.line([(13, 510), (28, 522)], fill=c_white, width=1)
     
     d.rounded_rectangle([(1160, 490), (1220, 530)], radius=20, fill=c_white)
+    d.rounded_rectangle([(1160, 470), (1240, 550)], radius=40, fill=c_white)
     d.ellipse([(1165, 495), (1195, 525)], fill=c_ball)
     d.line([(1170, 502), (1190, 518)], fill=c_white, width=2)
     d.line([(1173, 498), (1188, 510)], fill=c_white, width=1)
@@ -1077,7 +1092,7 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
             result_str = "MATCH TIED"
             
         if potm_name:
-            result_str += f" ● POTM: {potm_name.upper()}"
+            result_str += f" • POTM: {potm_name.upper()}"
             
     d.text((600 - get_tw(result_str, font_title)//2, 810), result_str, fill=c_navy, font=font_title)
     
