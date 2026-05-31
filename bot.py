@@ -1752,6 +1752,10 @@ class FormatSelectView(discord.ui.View):
         if val == "custom":
             await interaction.response.send_modal(CustomOversModal(self.state, self.channel))
         else:
+            allowed, reason = consume_quota(str(interaction.user.id), str(interaction.guild.id) if interaction.guild else None, val, str(ADMIN_DISCORD_ID))
+            if not allowed:
+                return await interaction.response.send_message(reason, ephemeral=True)
+
             self.state.format_overs = int(val)
             # 🚨 FIX: Atomic edit prevents the "Already Acknowledged" Crash
             if val == "20":
@@ -1773,6 +1777,10 @@ class CustomOversModal(discord.ui.Modal, title="Custom Over Count"):
             if not (1 <= val <= 90): raise ValueError
         except: return await interaction.response.send_message("❌ Enter a number between 1 and 90.", ephemeral=True)
         
+        allowed, reason = consume_quota(str(interaction.user.id), str(interaction.guild.id) if interaction.guild else None, "custom", str(ADMIN_DISCORD_ID))
+        if not allowed:
+            return await interaction.response.send_message(reason, ephemeral=True)
+
         self.state.format_overs = val
         # 🚨 FIX: Atomic edit prevents the crash
         await interaction.response.edit_message(content=f"✅ Format set: **Custom ({val} overs)**", view=None)
@@ -2089,11 +2097,8 @@ async def on_message(message: discord.Message):
 
 @bot.tree.command(name="match", description="Start a new Cricket Match simulation.")
 async def match_cmd(interaction: discord.Interaction, opponent: discord.Member = None):
-    # 🚨 STRICT SERVER CHECK: Applies to EVERYONE now, even the Admin!
-    if interaction.guild:
-        servers = load_auth_servers()
-        if str(interaction.guild.id) not in servers:
-            return await interaction.response.send_message("❌ This server is not authorized to host matches. Use `/authserver` first.", ephemeral=True)
+    allowed, reason = check_potential_quota(str(interaction.user.id), str(interaction.guild.id) if interaction.guild else None, str(ADMIN_DISCORD_ID))
+    if not allowed: return await interaction.response.send_message(reason, ephemeral=True)
 
     if interaction.channel.id in active_games: 
         return await interaction.response.send_message("❌ A match is already in progress in this channel. Use `/endmatch` to stop it.", ephemeral=True)
@@ -2114,10 +2119,6 @@ async def match_cmd(interaction: discord.Interaction, opponent: discord.Member =
 async def simulatematch_cmd(interaction: discord.Interaction):
     allowed, reason = check_potential_quota(str(interaction.user.id), str(interaction.guild.id) if interaction.guild else None, str(ADMIN_DISCORD_ID))
     if not allowed: return await interaction.response.send_message(reason, ephemeral=True)
-    if interaction.guild:
-        servers = load_auth_servers()
-        if str(interaction.guild.id) not in servers:
-            return await interaction.response.send_message("❌ This server is not authorized to host matches. Use `/authserver` first.", ephemeral=True)
 
     if interaction.channel.id in active_games: 
         return await interaction.response.send_message("❌ A match is already in progress in this channel. Use `/endmatch` to stop it.", ephemeral=True)
