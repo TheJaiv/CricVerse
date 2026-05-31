@@ -926,8 +926,9 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
         d.line([(600, y_start), (600, y_end)], fill=c_grid, width=2) # Center line
         d.line([(420, y_start), (420, y_end)], fill=c_grid, width=2) # Left Col 1-2 border
         d.line([(510, y_start), (510, y_end)], fill=c_grid, width=2) # Left Col 2-3 border
-        d.line([(1020, y_start), (1020, y_end)], fill=c_grid, width=2) # Right Col 4-5 border
-        d.line([(1110, y_start), (1110, y_end)], fill=c_grid, width=2) # Right Col 5-6 border
+        
+        d.line([(960, y_start), (960, y_end)], fill=c_grid, width=2) # Right Col 4-5 border
+        d.line([(1050, y_start), (1050, y_end)], fill=c_grid, width=2) # Right Col 5-6 border
         
     # Horizontal Row Lines (Upper Grid - Batting)
     for y in range(270, 471, 50): d.line([(0, y), (1200, y)], fill=c_grid, width=1)
@@ -1023,7 +1024,8 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
 
     def draw_batters(inn, offset_x):
         if not inn: return
-        d.text((offset_x + 60, 235), "BATTER", fill=c_text_grey, font=font_small)
+       
+        d.text((offset_x + 75, 235), "BATTER", fill=c_text_grey, font=font_small)
         d.text((offset_x + 465 - get_tw("R", font_small)//2, 235), "R", fill=c_text_grey, font=font_small)
         d.text((offset_x + 555 - get_tw("B", font_small)//2, 235), "B", fill=c_text_grey, font=font_small)
         
@@ -1032,11 +1034,13 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
             y = 285 + (idx * 50)
             name = b.profile['name'][:16].upper()
             if b.dismissal == "not out": name += "*"
-            d.text((offset_x + 60, y), name, fill=c_navy, font=font_bold)
+          
+            d.text((offset_x + 75, y), name, fill=c_navy, font=font_bold)
             
             if potm_name == b.profile['name']:
                 nw = get_tw(name, font_bold)
-                d.text((offset_x + 60 + nw + 8, y - 4), "★", fill="#FFD700", font=font_title)
+               
+                d.text((offset_x + 75 + nw + 8, y - 4), "★", fill="#FFD700", font=font_title)
             
             runs = str(b.runs_scored)
             d.text((offset_x + 465 - get_tw(runs, font_bold)//2, y), runs, fill=c_navy, font=font_bold)
@@ -1045,7 +1049,8 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
             d.text((offset_x + 555 - get_tw(balls, font_small)//2, y + 4), balls, fill=c_text_grey, font=font_small)
 
     draw_batters(match.innings1, 0) # Team 1 Batting
-    draw_batters(match.innings2 if match.current_innings_num == 2 else None, 600) # Team 2 Batting
+    
+    draw_batters(match.innings2 if match.current_innings_num == 2 else None, 540) # Team 2 Batting
 
     # Lower Headers (Overs Played)
     o1_text = f"{match.innings1.total_balls // 6}.{match.innings1.total_balls % 6} OVERS"
@@ -1059,7 +1064,8 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
     
     def draw_bowlers(inn, offset_x):
         if not inn: return
-        d.text((offset_x + 60, 565), "BOWLER", fill=c_text_grey, font=font_small)
+        
+        d.text((offset_x + 75, 565), "BOWLER", fill=c_text_grey, font=font_small)
         d.text((offset_x + 465 - get_tw("W-R", font_small)//2, 565), "W-R", fill=c_text_grey, font=font_small)
         d.text((offset_x + 555 - get_tw("O", font_small)//2, 565), "O", fill=c_text_grey, font=font_small)
         
@@ -1068,11 +1074,13 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
         for idx, bowl in enumerate(top_bowl):
             y = 615 + (idx * 50)
             name = bowl.profile['name'][:16].upper()
-            d.text((offset_x + 60, y), name, fill=c_navy, font=font_bold)
+           
+            d.text((offset_x + 75, y), name, fill=c_navy, font=font_bold)
             
             if potm_name == bowl.profile['name']:
                 nw = get_tw(name, font_bold)
                 d.text((offset_x + 60 + nw + 8, y - 4), "★", fill="#FFD700", font=font_title)
+                d.text((offset_x + 75 + nw + 8, y - 4), "★", fill="#FFD700", font=font_title)
             
             wr = f"{bowl.wickets_taken}-{bowl.runs_conceded}"
             d.text((offset_x + 465 - get_tw(wr, font_bold)//2, y), wr, fill=c_navy, font=font_bold)
@@ -1081,7 +1089,8 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
             d.text((offset_x + 555 - get_tw(bovers, font_small)//2, y + 4), bovers, fill=c_text_grey, font=font_small)
 
     draw_bowlers(match.innings1, 0) # Team 2 Bowling to Team 1
-    draw_bowlers(match.innings2 if match.current_innings_num == 2 else None, 600) # Team 1 Bowling to Team 2
+    
+    draw_bowlers(match.innings2 if match.current_innings_num == 2 else None, 540) # Team 1 Bowling to Team 2
 
     if match.current_innings_num == 1:
         result_str = f"TARGET SET: {match.innings1.total_runs + 1} RUNS TO WIN"
