@@ -2085,15 +2085,23 @@ async def on_message(message: discord.Message):
 
 @bot.tree.command(name="match", description="Start a new Cricket Match simulation.")
 async def match_cmd(interaction: discord.Interaction, opponent: discord.Member = None):
-    allowed, reason = check_potential_quota(str(interaction.user.id), str(interaction.guild.id) if interaction.guild else None, str(ADMIN_DISCORD_ID))
-    if not allowed: return await interaction.response.send_message(reason, ephemeral=True)
+    
+    # Instantly defer to prevent 10062 timeouts while Cloud DB wakes up
+    await interaction.response.defer()
+    
+    # Run DB check in background thread so bot heartbeat doesn't block
+    allowed, reason = await asyncio.to_thread(check_potential_quota, str(interaction.user.id), str(interaction.guild.id) if interaction.guild else None, str(ADMIN_DISCORD_ID))
+    if not allowed: return await interaction.edit_original_response(content=reason)
 
     if interaction.channel.id in active_games: 
-        return await interaction.response.send_message("❌ A match is already in progress in this channel. Use `/endmatch` to stop it.", ephemeral=True)
+        
+        return await interaction.edit_original_response(content="❌ A match is already in progress in this channel. Use `/endmatch` to stop it.")
     if interaction.channel.id in active_setups: 
-        return await interaction.response.send_message("❌ A setup is already happening here. Use `/endmatch` to cancel it.", ephemeral=True)
+        
+        return await interaction.edit_original_response(content="❌ A setup is already happening here. Use `/endmatch` to cancel it.")
     if opponent and opponent.bot: 
-        return await interaction.response.send_message("❌ Cannot challenge a bot user.", ephemeral=True)
+       
+        return await interaction.edit_original_response(content="❌ Cannot challenge a bot user.")
 
     state = MatchSetupState(interaction.user, opponent, interaction.user.id, opponent.id if opponent else None)
     
@@ -2101,23 +2109,29 @@ async def match_cmd(interaction: discord.Interaction, opponent: discord.Member =
     active_setups[interaction.channel.id] = ("format_selection", state)
     
     opp_str = opponent.mention if opponent else "🤖 AI"
-    await interaction.response.send_message(f"🏏 **Match Setup**\n**Host:** {interaction.user.mention}\n**Opponent:** {opp_str}\n\nStep 1: Select Format below:", view=FormatSelectView(state, interaction.channel))
+    
+    await interaction.edit_original_response(content=f"🏏 **Match Setup**\n**Host:** {interaction.user.mention}\n**Opponent:** {opp_str}\n\nStep 1: Select Format below:", view=FormatSelectView(state, interaction.channel))
 
 @bot.tree.command(name="simulatematch", description="Simulate a full match between two custom teams instantly.")
 async def simulatematch_cmd(interaction: discord.Interaction):
-    allowed, reason = check_potential_quota(str(interaction.user.id), str(interaction.guild.id) if interaction.guild else None, str(ADMIN_DISCORD_ID))
-    if not allowed: return await interaction.response.send_message(reason, ephemeral=True)
+    
+    await interaction.response.defer()
+    allowed, reason = await asyncio.to_thread(check_potential_quota, str(interaction.user.id), str(interaction.guild.id) if interaction.guild else None, str(ADMIN_DISCORD_ID))
+    if not allowed: return await interaction.edit_original_response(content=reason)
 
     if interaction.channel.id in active_games: 
-        return await interaction.response.send_message("❌ A match is already in progress in this channel. Use `/endmatch` to stop it.", ephemeral=True)
+        
+        return await interaction.edit_original_response(content="❌ A match is already in progress in this channel. Use `/endmatch` to stop it.")
     if interaction.channel.id in active_setups: 
-        return await interaction.response.send_message("❌ A setup is already happening here. Use `/endmatch` to cancel it.", ephemeral=True)
+        
+        return await interaction.edit_original_response(content="❌ A setup is already happening here. Use `/endmatch` to cancel it.")
 
     state = MatchSetupState(interaction.user, None, interaction.user.id, None)
     state.sim_only = True
     
     active_setups[interaction.channel.id] = ("format_selection", state)
-    await interaction.response.send_message(f"⚙️ **Custom Simulation Setup**\n**Host:** {interaction.user.mention}\n\nYou will be prompted to provide the Playing XI for *both* teams.\nStep 1: Select Format below:", view=FormatSelectView(state, interaction.channel))
+    
+    await interaction.edit_original_response(content=f"⚙️ **Custom Simulation Setup**\n**Host:** {interaction.user.mention}\n\nYou will be prompted to provide the Playing XI for *both* teams.\nStep 1: Select Format below:", view=FormatSelectView(state, interaction.channel))
 
 @bot.tree.command(name="endmatch", description="Force cancel the current match or setup in this channel.")
 async def endmatch_cmd(interaction: discord.Interaction):
