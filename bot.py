@@ -2503,6 +2503,33 @@ async def del_p_cmd(interaction: discord.Interaction, name: str):
     except Exception as e:
         await interaction.followup.send(f"❌ DB Error: {e}")
 
+@bot.tree.command(name="exportdb", description="[OWNER] Export Cloud DB to JSON file directly in Discord.")
+async def export_db_cmd(interaction: discord.Interaction):
+    if interaction.user.id != ADMIN_DISCORD_ID:
+        return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
+        
+    await interaction.response.defer(ephemeral=True)
+    try:
+        import json
+        data = {"players": [], "user_subs": [], "server_subs": [], "auth_admins": []}
+        with get_db() as conn:
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                cur.execute("SELECT * FROM players")
+                data["players"] = [dict(row) for row in cur.fetchall()]
+                cur.execute("SELECT * FROM user_subs")
+                data["user_subs"] = [{**dict(r), 'last_reset': str(r['last_reset'])} for r in cur.fetchall()]
+                cur.execute("SELECT * FROM server_subs")
+                data["server_subs"] = [{**dict(r), 'last_reset': str(r['last_reset'])} for r in cur.fetchall()]
+                cur.execute("SELECT * FROM auth_admins")
+                data["auth_admins"] = [dict(row) for row in cur.fetchall()]
+                
+        json_bytes = io.BytesIO(json.dumps(data, indent=4).encode('utf-8'))
+        file = discord.File(fp=json_bytes, filename="database.json")
+        await interaction.followup.send("✅ Here is your entire database exported as a JSON file:", file=file)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error exporting DB: {e}")
+
+
 # ==========================================
 # 🚀 STARTUP SEQUENCE
 # ==========================================
