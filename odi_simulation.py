@@ -47,7 +47,7 @@ def get_smart_ai_shot_odi(deliv, innings, is_death_overs, archetype):
             
     return random.choices(["Drive", "Cut", "Flick", "Block"], weights=[35, 25, 25, 15], k=1)[0]
 
-def get_smart_ai_bowler_odi(innings, pitch, format_overs=50):
+def get_smart_ai_bowler_odi(innings, pitch, weather="Clear", format_overs=50):
     valid_bowlers = []
     bowler_quota = 10
     
@@ -72,8 +72,52 @@ def get_smart_ai_bowler_odi(innings, pitch, format_overs=50):
         base_score *= (3.0 if is_frontline else 0.1)
         
         # ODI Pitch Adjustments
-        if pitch == "Dusty" and "Spin" in p["role"]: base_score *= 1.5
-        elif pitch == "Green" and "Pace" in p["role"]: base_score *= 1.5
+        if pitch == "Dusty" and "Spin" in p["role"]: 
+            base_score *= 1.5
+        elif pitch == "Dry" and "Spin" in p["role"] and current_over >= 25: 
+            base_score *= 1.4
+        elif pitch == "Green" and "Pace" in p["role"]: 
+            base_score *= 1.5
+        elif pitch == "Hard" and "Pace" in p["role"] and current_over < 10: 
+            base_score *= 1.4
+        elif pitch == "Cracked":
+            base_score *= 1.3
+        elif pitch == "Damp" and "Pace" in p["role"] and current_over < 15:
+            base_score *= 1.6
+        elif pitch == "Worn" and "Spin" in p["role"] and current_over >= 25:
+            base_score *= 1.5
+        elif pitch == "Dead":
+            base_score *= 0.8
+        elif pitch == "Turning" and "Spin" in p["role"]:
+            base_score *= 2.0
+        elif pitch == "Slow" and "Spin" in p["role"]:
+            base_score *= 1.4
+        elif pitch == "Bouncy" and "Pace" in p["role"]:
+            base_score *= 1.5
+        elif pitch == "Sticky":
+            base_score *= 1.5
+            
+        # Weather Adjustments
+        if weather == "Cloudy" and "Pace" in p["role"] and current_over < 10:
+            base_score *= 1.1
+        elif weather == "Overcast":
+            if "Pace" in p["role"]: base_score *= 1.4
+            elif "Spin" in p["role"]: base_score *= 0.7
+        elif weather == "Humid" and "Pace" in p["role"]:
+            base_score *= 1.2
+        elif weather == "Dry Heat":
+            if "Spin" in p["role"] and current_over >= 25:
+                base_score *= 1.3
+            elif "Pace" in p["role"] and current_over >= 25:
+                base_score *= 0.7
+        elif weather == "Windy" and "Pace" in p["role"]:
+            base_score *= 1.3
+        elif weather in ["Light Rain", "Drizzle"]:
+            if "Spin" in p["role"]: base_score *= 0.6
+            else: base_score *= 0.9
+        elif weather in ["Heavy Rain", "Thunderstorm"]:
+            if "Spin" in p["role"]: base_score *= 0.4
+            else: base_score *= 0.7
         
         # ODI Phase Adjustments
         if current_over < 10: 
@@ -106,9 +150,68 @@ def execute_ball_math_odi(match):
     bat_rating = striker["bat"] * b_stats.form_factor
     bowl_rating = bowler["bowl"] * bow_stats.form_factor
     
-    if match.pitch == "Dusty" and "Spin" in bowler["role"]: bowl_rating += 10
-    elif match.pitch == "Green" and "Pace" in bowler["role"]: bowl_rating += 10
-    elif match.pitch == "Flat": bat_rating += 10
+    if match.pitch == "Flat":
+        bat_rating += 5
+    elif match.pitch == "Green" and "Pace" in bowler["role"]:
+        bowl_rating += 10
+    elif match.pitch == "Dry" and "Spin" in bowler["role"] and innings.total_balls > 150:
+        bowl_rating += 8
+    elif match.pitch == "Dusty":
+        if "Spin" in bowler["role"]: bowl_rating += 12
+        bat_rating -= 3
+    elif match.pitch == "Hard":
+        if "Pace" in bowler["role"] and innings.total_balls < 60: bowl_rating += 8
+        bat_rating += 4
+    elif match.pitch == "Soft":
+        bat_rating -= 5
+    elif match.pitch == "Cracked":
+        bowl_rating += 8
+        bat_rating -= 6
+    elif match.pitch == "Damp":
+        if "Pace" in bowler["role"] and innings.total_balls < 90: bowl_rating += 12
+        if innings.total_balls < 90: bat_rating -= 5
+    elif match.pitch == "Dead":
+        bat_rating += 10
+        bowl_rating -= 5
+    elif match.pitch == "Worn":
+        if "Spin" in bowler["role"] and innings.total_balls > 150: bowl_rating += 10
+        if innings.total_balls > 150: bat_rating -= 3
+    elif match.pitch == "Turning":
+        if "Spin" in bowler["role"]: bowl_rating += 15
+        bat_rating -= 8
+    elif match.pitch == "Two-Paced":
+        bat_rating -= 8
+    elif match.pitch == "Slow":
+        if "Spin" in bowler["role"]: bowl_rating += 8
+        bat_rating -= 6
+    elif match.pitch == "Bouncy":
+        if "Pace" in bowler["role"]: bowl_rating += 10
+        bat_rating -= 2
+    elif match.pitch == "Sticky":
+        bowl_rating += 15
+        bat_rating -= 12
+        
+    # Weather Mechanics
+    if match.weather == "Clear":
+        bat_rating += 3
+    elif match.weather == "Cloudy" and "Pace" in bowler["role"]:
+        bowl_rating += 4
+    elif match.weather == "Overcast":
+        if "Pace" in bowler["role"]: bowl_rating += 12
+        bat_rating -= 5
+    elif match.weather == "Humid" and "Pace" in bowler["role"]:
+        bowl_rating += 8
+    elif match.weather == "Dry Heat":
+        if "Pace" in bowler["role"]: bowl_rating -= 5
+        elif "Spin" in bowler["role"] and innings.total_balls > 150: bowl_rating += 8
+    elif match.weather == "Windy":
+        if "Pace" in bowler["role"]: bowl_rating += 6
+    elif match.weather in ["Light Rain", "Drizzle"]:
+        bowl_rating -= 8
+        bat_rating += 4
+    elif match.weather in ["Heavy Rain", "Thunderstorm"]:
+        bowl_rating -= 12
+        bat_rating += 8
 
     # ODI Batter form progression (Realistic pacing & late fatigue prevents 180+ spam)
     if b_stats.balls_faced < 15:
@@ -137,7 +240,8 @@ def execute_ball_math_odi(match):
 
     pressure_multiplier = 1.0
     if match.current_innings_num == 2 and not is_collapse:
-        runs_needed = (match.innings1.total_runs + 1) - innings.total_runs
+        target = getattr(match, "target", match.innings1.total_runs + 1)
+        runs_needed = target - innings.total_runs
         balls_left = match.max_balls - total_balls
         if balls_left > 0:
             rrr = (runs_needed / balls_left) * 6
@@ -210,9 +314,72 @@ def execute_ball_math_odi(match):
         wicket_weight *= 1.25
         boundary_weight *= 0.80
         dot_weight *= 1.15
+    elif match.pitch == "Dry" and "Spin" in bowler["role"] and total_balls > 150:
+        wicket_weight *= 1.20
+        dot_weight *= 1.10
+    elif match.pitch == "Hard":
+        if total_balls < 60 and "Pace" in bowler["role"]:
+            wicket_weight *= 1.15
+        else:
+            boundary_weight *= 1.05
+    elif match.pitch == "Soft":
+        dot_weight *= 1.30
+        boundary_weight *= 0.75
+    elif match.pitch == "Cracked":
+        wicket_weight *= 1.30
+        boundary_weight *= 0.80
+    elif match.pitch == "Damp":
+        if "Pace" in bowler["role"] and total_balls < 90:
+            wicket_weight *= 1.35
+            boundary_weight *= 0.80
+    elif match.pitch == "Dead":
+        boundary_weight *= 1.20
+        wicket_weight *= 0.80
+    elif match.pitch == "Worn":
+        if "Spin" in bowler["role"] and total_balls > 150:
+            wicket_weight *= 1.30
+            dot_weight *= 1.20
+            boundary_weight *= 0.80
+    elif match.pitch == "Turning":
+        if "Spin" in bowler["role"]:
+            wicket_weight *= 1.45
+            boundary_weight *= 0.65
+            dot_weight *= 1.25
+    elif match.pitch == "Two-Paced":
+        dot_weight *= 1.40
+        boundary_weight *= 0.70
+        wicket_weight *= 1.15
+    elif match.pitch == "Slow":
+        dot_weight *= 1.30
+        boundary_weight *= 0.70
+        if "Spin" in bowler["role"]:
+            wicket_weight *= 1.30
+    elif match.pitch == "Bouncy":
+        if "Pace" in bowler["role"]:
+            wicket_weight *= 1.30
+    elif match.pitch == "Sticky":
+        wicket_weight *= 1.70
+        boundary_weight *= 0.50
+        dot_weight *= 1.50
     elif match.pitch == "Flat":
-        boundary_weight *= 1.12
+        boundary_weight *= 1.10
         wicket_weight *= 0.95
+        
+    # Weather Advanced Modifiers
+    if match.weather == "Overcast":
+        wicket_weight *= 1.20
+        boundary_weight *= 0.85
+    elif match.weather == "Dry Heat":
+        dot_weight *= 1.10
+    elif match.weather == "Windy":
+        wicket_weight *= 1.15
+        boundary_weight *= 0.90
+    elif match.weather in ["Light Rain", "Drizzle"]:
+        wicket_weight *= 0.85
+        boundary_weight *= 1.10
+    elif match.weather in ["Heavy Rain", "Thunderstorm"]:
+        wicket_weight *= 0.70
+        boundary_weight *= 1.25
 
     if is_powerplay:
         if "Pace" in bowler["role"]:
@@ -290,6 +457,12 @@ def execute_ball_math_odi(match):
     elif shot in ["Drive", "Cut", "Pull", "Flick", "Sweep"]:
         four_weight *= 1.2
         six_weight *= 0.3
+        
+    # 🚨 ANTI-OVERCOOK SAFETIES (Prevents stacked conditions from breaking the game)
+    four_weight = max(0.5, min(four_weight, 25.0)) # Hard cap to prevent 450+ scores
+    six_weight = max(0.1, min(six_weight, 15.0))
+    wicket_weight = max(1.0, min(wicket_weight, 25.0)) # Hard cap to prevent 10/10 scenarios
+    dot_weight = max(15.0, dot_weight)
 
     weights = [dot_weight, single_weight, single_weight * 0.4, single_weight * 0.05, four_weight, six_weight, wicket_weight]
     outcome = random.choices(["dot", "single", "two", "three", "four", "six", "wicket"], weights=weights)[0]
