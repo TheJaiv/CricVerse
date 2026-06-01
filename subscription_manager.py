@@ -198,6 +198,19 @@ def add_player(player_dict):
     async_save_to_bin()
     return True
 
+def add_players_bulk(players_list):
+    global DB_CACHE
+    existing_names = {p["name"].lower() for p in DB_CACHE["players"]}
+    added = 0
+    for p in players_list:
+        if p["name"].lower() not in existing_names:
+            DB_CACHE["players"].append(p)
+            existing_names.add(p["name"].lower())
+            added += 1
+    if added > 0:
+        async_save_to_bin()
+    return added
+
 def update_player(old_name, player_dict):
     global DB_CACHE
     DB_CACHE["players"] = [p for p in DB_CACHE["players"] if p["name"].lower() != old_name.lower()]
