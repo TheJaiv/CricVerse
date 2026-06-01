@@ -525,13 +525,19 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
         d.ellipse([(550, 15), (650, 105)], fill=c_white, outline=c_grid, width=3)
         d.text((600 - get_tw("LOGO", font_bold)//2, 45), "LOGO", fill=c_grid, font=font_bold)
 
-    # Green Bar Match Type
+    # Green Bar Match Type (Perfectly Center Aligned)
     if getattr(match, 'is_super_over', False):
-        m_type = "SIMULATION MATCH • SUPER OVER"
+        fmt_text = "SUPER OVER"
     else:
         fmt = "ODI" if match.format_overs == 50 else "T20" if match.format_overs == 20 else "CUSTOM"
-        m_type = f"SIMULATION MATCH • {fmt} ({match.format_overs} OVERS)"
-    d.text((600 - get_tw(m_type, font_bold)//2, 113), m_type, fill=c_navy, font=font_bold)
+        fmt_text = f"{fmt} ({match.format_overs} OVERS)"
+        
+    left_text = "SIMULATION MATCH"
+    dot_text = "•"
+    
+    d.text((600 - get_tw(dot_text, font_bold)//2, 113), dot_text, fill=c_navy, font=font_bold)
+    d.text((585 - get_tw(left_text, font_bold), 113), left_text, fill=c_navy, font=font_bold)
+    d.text((615, 113), fmt_text, fill=c_navy, font=font_bold)
 
     # Upper Navy Headers (Scores Only)
     s1_full = f"{match.innings1.total_runs}-{match.innings1.wickets}"
