@@ -648,6 +648,150 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
     
     return buf
 
+def generate_tournament_score_image(match: CricketMatch) -> io.BytesIO:
+    img = Image.new("RGB", (1200, 900), color="#F4F5F8") # Off-White Base
+    d = ImageDraw.Draw(img)
+
+    try:
+        font_huge = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 52)
+        font_large = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 40)
+        font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 32)
+        font_bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 24)
+        font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20)
+    except:
+        font_huge = font_large = font_title = font_bold = font_small = ImageFont.load_default()
+
+    def get_tw(text, font):
+        if hasattr(font, 'getbbox'): return font.getbbox(text)[2]
+        return len(text) * 12
+        
+    c_offwhite = "#F4F5F8"
+    c_blue = "#0A6496"
+    c_teal = "#00A9BA"
+    c_navy = "#111A3A"
+    c_orange = "#E84135"
+    c_white = "#FFFFFF"
+    
+    # --- GLOBAL CANVAS SHADING ---
+    # Faint geometric polygonal lines to create the subtle shading texture
+    for offset in range(-600, 1500, 150):
+        d.line([(0, offset), (1200, offset + 600)], fill="#EAECEF", width=2)
+        d.line([(1200, offset), (0, offset + 600)], fill="#EAECEF", width=2)
+
+    # --- 1. MAIN TOP HEADER (0 to 135px) ---
+    d.rectangle([(0, 0), (1200, 135)], fill=c_white) # Right zone base
+    # Deep Blue Left Zone with swooping curve
+    d.polygon([(0, 0), (850, 0), (1000, 135), (0, 135)], fill=c_blue)
+    d.ellipse([(700, -100), (1100, 200)], fill=c_blue) # Smooth swoop
+    
+    t1_name = match.team1['name'].upper()
+    t2_name = match.team2['name'].upper()
+    matchup_txt = f"{t1_name} VS {t2_name}"
+    d.text((40, 40), matchup_txt, fill=c_white, font=font_huge)
+    
+    t_name = getattr(match, "tournament_name", "TOURNAMENT").upper()
+    # Simulate text stroke for the cursive/black requirement
+    for x_off, y_off in [(-1,-1), (1,-1), (-1,1), (1,1)]:
+        d.text((800 + x_off, 35 + y_off), "TOURNAMENT", fill=c_white, font=font_bold)
+        d.text((800 + x_off, 75 + y_off), t_name[:15], fill=c_white, font=font_title)
+    d.text((800, 35), "TOURNAMENT", fill="#000000", font=font_bold)
+    d.text((800, 75), t_name[:15], fill="#000000", font=font_title)
+    
+    d.text((1060, 40), "SERVER", fill="#000000", font=font_bold)
+    d.text((1070, 70), "LOGO", fill="#000000", font=font_bold)
+
+    # Helper for Spiky Bursts
+    def draw_burst(y_base):
+        d.polygon([(1100, y_base+90), (1135, y_base+15), (1165, y_base+90)], fill=c_orange)
+        d.polygon([(1150, y_base+90), (1185, y_base+5), (1200, y_base+70)], fill=c_orange)
+        d.polygon([(1090, y_base+90), (1130, y_base+20), (1160, y_base+90)], fill=c_navy)
+        d.polygon([(1140, y_base+90), (1175, y_base+10), (1195, y_base+80)], fill=c_navy)
+        d.polygon([(1170, y_base+90), (1190, y_base+30), (1200, y_base+90)], fill=c_navy)
+
+    # --- 2. UPPER SEPARATOR BAR (135 to 225px) ---
+    d.rectangle([(0, 135), (1200, 225)], fill=c_teal)
+    draw_burst(135)
+    
+    # --- 4. LOWER SEPARATOR BAR (495 to 585px) ---
+    d.rectangle([(0, 495), (1200, 585)], fill=c_teal)
+    draw_burst(495)
+
+    # Helper for Content Areas
+    def draw_team_content(inn, is_upper):
+        if not inn: return
+        y_start = 225 if is_upper else 585
+        
+        score_txt = f"{inn.total_runs}/{inn.wickets}"
+        overs_txt = f"({inn.total_balls // 6}.{inn.total_balls % 6} OVERS)"
+        
+        d.text((40, y_start + 25), inn.batting_team['name'].upper(), fill=c_navy, font=font_large)
+        sw = get_tw(score_txt, font_huge)
+        d.text((1150 - sw, y_start + 15), score_txt, fill=c_blue, font=font_huge)
+        d.text((1150 - sw - get_tw(overs_txt, font_bold) - 15, y_start + 35), overs_txt, fill=c_navy, font=font_bold)
+        
+        # Columns
+        col_y = y_start + 100
+        d.text((40, col_y), "BATTER", fill=c_blue, font=font_small)
+        d.text((350, col_y), "R", fill=c_blue, font=font_small)
+        d.text((430, col_y), "B", fill=c_blue, font=font_small)
+        
+        active_batters = [b for b in inn.batting_stats.values() if b.balls_faced > 0 or b.dismissal != "not out"]
+        for idx, b in enumerate(sorted(active_batters, key=lambda x: x.runs_scored, reverse=True)[:3]):
+            r_y = col_y + 40 + (idx * 40)
+            runs = f"{b.runs_scored}*" if b.dismissal == "not out" else str(b.runs_scored)
+            d.text((40, r_y), b.profile['name'][:18].upper(), fill=c_navy, font=font_bold)
+            d.text((350, r_y), runs, fill=c_navy, font=font_bold)
+            d.text((430, r_y), str(b.balls_faced), fill="#777777", font=font_bold)
+
+        d.text((650, col_y), "BOWLER", fill=c_blue, font=font_small)
+        d.text((950, col_y), "W-R", fill=c_blue, font=font_small)
+        d.text((1050, col_y), "O", fill=c_blue, font=font_small)
+        
+        active_bowlers = [b for b in inn.bowling_stats.values() if b.balls_bowled > 0]
+        for idx, b in enumerate(sorted(active_bowlers, key=lambda x: (x.wickets_taken, -x.runs_conceded), reverse=True)[:3]):
+            r_y = col_y + 40 + (idx * 40)
+            wr = f"{b.wickets_taken}-{b.runs_conceded}"
+            ov = f"{b.balls_bowled // 6}.{b.balls_bowled % 6}"
+            d.text((650, r_y), b.profile['name'][:18].upper(), fill=c_navy, font=font_bold)
+            d.text((950, r_y), wr, fill=c_navy, font=font_bold)
+            d.text((1050, r_y), ov, fill="#777777", font=font_bold)
+
+    # --- 3. UPPER CONTENT AREA (225 to 495px) ---
+    draw_team_content(match.innings1, True)
+    
+    # --- 5. LOWER CONTENT AREA (585 to 855px) ---
+    draw_team_content(match.innings2 if match.current_innings_num == 2 else None, False)
+
+    # Result Text Overlaid on the Lower Separator Bar
+    if match.current_innings_num == 1:
+        result_str = f"TARGET: {match.innings1.total_runs + 1} RUNS"
+    else:
+        inn1, inn2 = match.innings1, match.innings2
+        target = getattr(match, "target", inn1.total_runs + 1)
+        max_w = 2 if getattr(match, 'is_super_over', False) else 10
+        if inn2.total_runs >= target:
+            result_str = f"{inn2.batting_team['name'].upper()} WON BY {max_w - inn2.wickets} WICKETS"
+        elif inn2.total_runs == target - 1:
+            result_str = "MATCH TIED"
+        else:
+            result_str = f"{inn1.batting_team['name'].upper()} WON BY {(target - 1) - inn2.total_runs} RUNS"
+            
+        if getattr(match, "dls_active", False): result_str += " (DLS)"
+        
+        potm_name = get_player_of_the_match(match)
+        if potm_name: result_str += f"  •  POTM: {potm_name.upper()}"
+
+    d.text((40, 525), result_str, fill=c_white, font=font_title)
+
+    # --- 6. BOTTOM FOOTER LINE (855 to 900px) ---
+    d.rectangle([(0, 855), (1200, 900)], fill=c_blue)
+    d.text((40, 863), "SIMULATION ENGINE PRO", fill=c_white, font=font_bold)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
 # ==========================================
 # 🔄 5. MATCH PROGRESSION & LOOPS
 # ==========================================
@@ -797,7 +941,11 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
             else:
                 return await channel.send("🏆 **The Match has TIED!** Do you want to play a Super Over?", view=ODISuperOverPrompt(match))
 
-        img_buf = generate_final_score_image(match)
+        if getattr(match, "tournament_server_id", None):
+            img_buf = generate_tournament_score_image(match)
+        else:
+            img_buf = generate_final_score_image(match)
+            
         file = discord.File(fp=img_buf, filename="final_scoreboard.png")
         embed_full = render_full_scorecard_embed(match, 2)
         
@@ -1339,6 +1487,7 @@ class MatchSetupState:
         self.t2_squad = []
         self.pitch = "Flat"
         self.weather = "Clear"
+        self.tournament_name = "TOURNAMENT"
         self.home_team_id = p1_id
         self.sim_only = False
 
@@ -1697,6 +1846,7 @@ async def begin_toss(channel, state):
     match.tournament_server_id = getattr(state, "tournament_server_id", None)
     match.tournament_match_id = getattr(state, "tournament_match_id", None)
     match.manager_id = getattr(state, "manager_id", None)
+    match.tournament_name = getattr(state, "tournament_name", "TOURNAMENT")
     active_games[channel.id] = match
 
     if getattr(state, 'sim_only', False):
@@ -1953,6 +2103,7 @@ async def on_start_tournament_match(channel, manager_id, tourney, match_data):
     state.tournament_server_id = tourney["server_id"]
     state.tournament_match_id = match_data["match_id"]
     state.manager_id = manager_id
+    state.tournament_name = tourney["name"]
     
     active_setups[channel.id] = ("format_selection", state)
     
