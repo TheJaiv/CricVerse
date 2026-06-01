@@ -55,6 +55,7 @@ def reset_daily_quotas():
     for u in DB_CACHE["user_subs"]:
         if u.get("last_reset") != today:
             u["sims_used"] = 0
+            u["server_daily_used"] = 0
             u["last_reset"] = today
             updated = True
     for s in DB_CACHE["server_subs"]:
@@ -68,44 +69,71 @@ def reset_daily_quotas():
 def check_potential_quota(user_id: str, server_id: str, admin_discord_id: str):
     reset_daily_quotas()
     
+    u_row = next((u for u in DB_CACHE["user_subs"] if u["user_id"] == user_id), None)
+    u_tier = u_row["tier"] if u_row else "Free"
+    u_used = u_row["sims_used"] if u_row else 0
+    u_server_used = u_row.get("server_daily_used", 0) if u_row else 0
+
     if server_id:
         s_row = next((s for s in DB_CACHE["server_subs"] if s["server_id"] == server_id), None)
         if s_row:
             s_tier, s_used = s_row["tier"], s_row["sims_used"]
-            if s_tier in ["Silver", "Diamond"]: return True, ""
+            if s_tier in ["Silver", "Diamond"]: 
+                if u_tier in ["Server Pro", "Standard"]: return True, ""
+                if u_server_used < 7: return True, ""
+                return False, "❌ **Access Denied:** You have hit your 7 matches/day limit on Premium Servers. Contact **frenzy_guy** to upgrade to **Server Pro**!"
             if s_tier == "Bronze" and s_used < 10: return True, ""
             
-    u_row = next((u for u in DB_CACHE["user_subs"] if u["user_id"] == user_id), None)
-    if u_row:
-        u_tier, u_used = u_row["tier"], u_row["sims_used"]
-        if u_tier in ["Basic", "Standard"] and u_used < 1: return True, ""
+    if u_tier in ["Standard", "Basic"] and u_used < 1: return True, ""
+    if u_tier == "Single": return True, ""
         
     return False, "❌ **Access Denied:** You have exhausted your daily limit, or you do not have an active subscription tier. Please contact **frenzy_guy** to gain access or upgrade."
 
 def consume_quota(user_id: str, server_id: str, format_val: str, admin_discord_id: str):
     reset_daily_quotas()
     
+    u_row = next((u for u in DB_CACHE["user_subs"] if u["user_id"] == user_id), None)
+    if not u_row:
+        u_row = {"user_id": user_id, "tier": "Free", "sims_used": 0, "server_daily_used": 0, "last_reset": get_today_str()}
+        DB_CACHE["user_subs"].append(u_row)
+        
+    if "server_daily_used" not in u_row:
+        u_row["server_daily_used"] = 0
+        
+    u_tier = u_row["tier"]
+    u_used = u_row["sims_used"]
+    u_server_used = u_row["server_daily_used"]
+    
     if server_id:
         s_row = next((s for s in DB_CACHE["server_subs"] if s["server_id"] == server_id), None)
         if s_row:
             s_tier, s_used = s_row["tier"], s_row["sims_used"]
-            if s_tier in ["Silver", "Diamond"] or (s_tier == "Bronze" and s_used < 10):
-                s_row["sims_used"] += 1
+            if s_tier in ["Silver", "Diamond"]:
+                if u_tier in ["Server Pro", "Standard"] or u_server_used < 7:
+                    s_row["sims_used"] += 1
+                    if u_tier not in ["Server Pro", "Standard"]:
+                        u_row["server_daily_used"] += 1
+                    async_save_to_bin()
+                    return True, ""
+            elif s_tier == "Bronze" and s_used < 10:
+                s_row["sims_used"] += 1 # Bronze doesn't drain the 7/day premium cap
                 async_save_to_bin()
                 return True, ""
                 
-    u_row = next((u for u in DB_CACHE["user_subs"] if u["user_id"] == user_id), None)
-    if u_row:
-        u_tier, u_used = u_row["tier"], u_row["sims_used"]
-        if u_tier == "Standard" and u_used < 1:
-            u_row["sims_used"] += 1
-            async_save_to_bin()
-            return True, ""
-        if u_tier == "Basic" and u_used < 1:
-            if format_val not in ["20", "50"]: return False, "❌ **Basic Tier Restriction:** You can only simulate T20 or ODI formats. Please contact **frenzy_guy** to upgrade."
-            u_row["sims_used"] += 1
-            async_save_to_bin()
-            return True, ""
+    if u_tier == "Standard" and u_used < 1:
+        u_row["sims_used"] += 1
+        async_save_to_bin()
+        return True, ""
+    if u_tier == "Basic" and u_used < 1:
+        if format_val not in ["20", "50"]: return False, "❌ **Basic Tier Restriction:** You can only simulate T20 or ODI formats."
+        u_row["sims_used"] += 1
+        async_save_to_bin()
+        return True, ""
+    if u_tier == "Single":
+        u_row["tier"] = "Free" # Instantly downgrades them back to Free!
+        u_row["sims_used"] += 1
+        async_save_to_bin()
+        return True, ""
             
     return False, "❌ **Access Denied:** You have exhausted your daily limit, or your tier restricts this format. Please contact **frenzy_guy** to upgrade."
 
@@ -119,6 +147,7 @@ def update_user_tier(user_id: str, tier_value: str, tier_name: str, mention: str
             "user_id": user_id,
             "tier": tier_value,
             "sims_used": 0,
+            "server_daily_used": 0,
             "last_reset": get_today_str()
         })
         msg = f"✅ Assigned **{tier_name}** tier to {mention}."
@@ -200,3 +229,22 @@ def clean_duplicate_players():
         DB_CACHE["players"] = cleaned
         async_save_to_bin()
     return removed_names
+
+def get_tier_status(user_id: str, server_id: str):
+    reset_daily_quotas()
+    
+    u_tier, u_used, u_server_used = "Free", 0, 0
+    u_row = next((u for u in DB_CACHE["user_subs"] if u["user_id"] == user_id), None)
+    if u_row:
+        u_tier = u_row["tier"]
+        u_used = u_row["sims_used"]
+        u_server_used = u_row.get("server_daily_used", 0)
+        
+    s_tier, s_used = "None", 0
+    if server_id:
+        s_row = next((s for s in DB_CACHE["server_subs"] if s["server_id"] == server_id), None)
+        if s_row:
+            s_tier = s_row["tier"]
+            s_used = s_row["sims_used"]
+            
+    return u_tier, u_used, u_server_used, s_tier, s_used
