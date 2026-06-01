@@ -92,18 +92,43 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         save_tournament(tourney)
         await interaction.response.send_message(f"✅ Team **{team_name}** added!\n👤 Owner: {owner.mention}\n*The owner can now use `/tournament submit_squad` to register their players.*")
 
-    @app_commands.command(name="submit_squad", description="[TEAM OWNER] Submit your tournament squad (15 players).")
-    async def submit_squad(self, interaction: discord.Interaction):
+    @app_commands.command(name="remove_team", description="[MANAGER] Remove a team from the tournament.")
+    async def remove_team(self, interaction: discord.Interaction, team_name: str):
+        server_id = str(interaction.guild.id)
+        tourney = get_server_tournament(server_id)
+        
+        if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
+        if not self.is_manager(interaction, tourney): return await interaction.response.send_message("❌ Managers only.", ephemeral=True)
+        if tourney["status"] != "registration": return await interaction.response.send_message("❌ Cannot remove teams after the tournament has started.", ephemeral=True)
+        
+        team_idx = next((i for i, t in enumerate(tourney["teams"]) if t["name"].lower() == team_name.lower()), None)
+        if team_idx is None:
+            return await interaction.response.send_message(f"❌ Team **{team_name}** not found.", ephemeral=True)
+            
+        del tourney["teams"][team_idx]
+        save_tournament(tourney)
+        await interaction.response.send_message(f"✅ Team **{team_name}** has been successfully removed from the tournament.")
+
+    @app_commands.command(name="submit_squad", description="[OWNER/MANAGER] Submit a tournament squad (15 players).")
+    async def submit_squad(self, interaction: discord.Interaction, team_name: str = None):
         server_id = str(interaction.guild.id)
         tourney = get_server_tournament(server_id)
         
         if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
         if tourney["status"] != "registration": return await interaction.response.send_message("❌ Registration is closed.", ephemeral=True)
         
-        team = next((t for t in tourney["teams"] if t["owner_id"] == str(interaction.user.id)), None)
-        if not team: return await interaction.response.send_message("❌ You are not a Team Owner in this tournament.", ephemeral=True)
+        is_mgr = self.is_manager(interaction, tourney)
         
-        await interaction.response.send_message("📋 Please reply to this message with your **15 Player Squad** (One player name per line, matching the database). You have 3 minutes.", ephemeral=True)
+        if team_name:
+            if not is_mgr:
+                return await interaction.response.send_message("❌ Only Managers can use the team_name parameter to submit for others.", ephemeral=True)
+            team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.lower()), None)
+            if not team: return await interaction.response.send_message(f"❌ Team '{team_name}' not found.", ephemeral=True)
+        else:
+            team = next((t for t in tourney["teams"] if t["owner_id"] == str(interaction.user.id)), None)
+            if not team: return await interaction.response.send_message("❌ You do not own a team. Managers must provide the `team_name` parameter.", ephemeral=True)
+        
+        await interaction.response.send_message(f"📋 Please reply to this message with the **15 Player Squad** for **{team['name']}** (One player name per line). You have 3 minutes.", ephemeral=True)
         
         def check(m):
             return m.author.id == interaction.user.id and m.channel.id == interaction.channel.id
