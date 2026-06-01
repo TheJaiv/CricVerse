@@ -632,6 +632,7 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
             result_str = "MATCH TIED"
         else:
             result_str = f"{inn1.batting_team['name'].upper()} WON BY {target - inn2.total_runs} RUNS"
+            result_str = f"{inn1.batting_team['name'].upper()} WON BY {(target - 1) - inn2.total_runs} RUNS"
             
         if getattr(match, "dls_active", False):
             result_str += " (DLS)"
@@ -729,7 +730,7 @@ async def trigger_super_over(channel, match: CricketMatch):
     
     await channel.send("🚨 **SCORES ARE TIED!** 🚨\nGet ready for the **SUPER OVER!**\n*The team that batted second will bat first. Max 2 wickets.*")
     if so_match.sim_only: await loop_entire_match_simulation(channel, so_match)
-    else: await prompt_new_over_bowler(channel, so_match)
+    else: await prompt_over_pacing_hub(channel, so_match)
 
 async def handle_innings_end(interaction_context, match: CricketMatch):
     channel = interaction_context if isinstance(interaction_context, discord.TextChannel) else interaction_context.channel
@@ -779,7 +780,7 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
             await channel.send("*Simulating 2nd Innings... ⚙️*")
             await loop_entire_match_simulation(channel, match)
         else:
-            await prompt_new_over_bowler(channel, match)
+            await prompt_over_pacing_hub(channel, match)
         
     else:
         inn1 = match.innings1
@@ -834,6 +835,16 @@ async def prompt_next_batter(interaction, match: CricketMatch):
     view = discord.ui.View(timeout=120)
     select = discord.ui.Select(placeholder="Select Next Batter...", options=options[:25])
     
+    async def interaction_check(inter: discord.Interaction) -> bool:
+        if inter.channel.id not in active_games or active_games[inter.channel.id] != match:
+            await inter.response.send_message("❌ Match ended.", ephemeral=True)
+            return False
+        if inter.user.id != uid and inter.user.id != getattr(match, "manager_id", None):
+            await inter.response.send_message("Not your turn.", ephemeral=True)
+            return False
+        return True
+    view.interaction_check = interaction_check
+
     async def cb(inter: discord.Interaction):
         sel_name = select.values[0]
         idx = next(i for i, p in enumerate(innings.batting_team["players"]) if p["name"] == sel_name)
@@ -869,9 +880,7 @@ async def prompt_new_over_bowler(interaction, match: CricketMatch):
         class DummyInt: pass
         dummy = DummyInt()
         dummy.channel = channel
-        dummy.response = type('DR', (), {'defer': lambda: None})()
-        
-        await prompt_over_pacing_hub(dummy, match)
+        await run_interactive_delivery_sequence(dummy, match)
         return
 
     actual_bowlers = []
@@ -910,7 +919,8 @@ async def prompt_new_over_bowler(interaction, match: CricketMatch):
         innings.bouncers_in_over = 0
         innings.mystery_bowled_this_over = False
         await inter.response.defer()
-        await prompt_over_pacing_hub(inter, match)
+        await inter.message.edit(view=None)
+        await run_interactive_delivery_sequence(inter, match)
         
     select.callback = b_callback
     view.add_item(select)
@@ -919,7 +929,7 @@ async def prompt_new_over_bowler(interaction, match: CricketMatch):
         if inter.channel.id not in active_games or active_games[inter.channel.id] != match:
             await inter.response.send_message("❌ This match has been ended.", ephemeral=True)
             return False
-        if inter.user.id != bowler_uid:
+        if inter.user.id != bowler_uid and inter.user.id != getattr(match, "manager_id", None):
             await inter.response.send_message("Not your turn.", ephemeral=True)
             return False
         return True
@@ -927,10 +937,11 @@ async def prompt_new_over_bowler(interaction, match: CricketMatch):
     
     await channel.send(f"🏏 <@{bowler_uid}>, select bowler for Over {innings.total_balls // 6 + 1}:", view=view)
 
-async def prompt_over_pacing_hub(interaction: discord.Interaction, match: CricketMatch):
+async def prompt_over_pacing_hub(interaction, match: CricketMatch):
     view = OverControlHubView(match)
     embed = render_embed_scoreboard(match)
-    await interaction.channel.send(f"⚡ <@{match.p1_id}> **Over Hub** - How to progress the next 6 deliveries?", embed=embed, view=view)
+    channel = interaction.channel if hasattr(interaction, 'channel') else interaction
+    await channel.send(f"⚡ <@{match.p1_id}> **Over Hub** - How to progress the next 6 deliveries?", embed=embed, view=view)
 
 class OverControlHubView(discord.ui.View):
     def __init__(self, match: CricketMatch):
@@ -949,18 +960,31 @@ class OverControlHubView(discord.ui.View):
     @discord.ui.button(label="Play Interactive Over", style=discord.ButtonStyle.success)
     async def play_over(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
+        await interaction.message.edit(view=None)
         self.match.simulation_mode = "interactive"
-        await run_interactive_delivery_sequence(interaction, self.match)
+        await prompt_new_over_bowler(interaction, self.match)
         
     @discord.ui.button(label="Simulate 1 Over", style=discord.ButtonStyle.primary)
     async def sim_over(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
+        await interaction.message.edit(view=None)
         innings = self.match.current_innings
         start_runs = innings.total_runs; start_wkts = innings.wickets
         
         prev_mode = self.match.simulation_mode
         self.match.simulation_mode = "whole_match"
         
+        if innings.total_balls % 6 == 0:
+            new_bowler = get_smart_ai_bowler(innings, self.match.pitch, self.match.weather, self.match.format_overs)
+            if not new_bowler:
+                channel = interaction.channel if hasattr(interaction, 'channel') else interaction
+                await channel.send("🚨 **CRITICAL ERROR:** Could not find a valid bowler.")
+                return
+            innings.current_bowler = new_bowler
+            innings.over_log.clear()
+            innings.bouncers_in_over = 0
+            innings.mystery_bowled_this_over = False
+            
         for _ in range(6):
             max_w = 2 if getattr(self.match, 'is_super_over', False) else 10
             if innings.wickets < max_w and innings.total_balls < self.match.max_balls:
@@ -976,6 +1000,7 @@ class OverControlHubView(discord.ui.View):
     @discord.ui.button(label="Simulate Match (Fast)", style=discord.ButtonStyle.danger)
     async def sim_match_fast(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
+        await interaction.message.edit(view=None)
         self.match.simulation_mode = "whole_match"
         self.match.verbose = False # Fast mode: No mid-match spam
         await loop_entire_match_simulation(interaction, self.match)
@@ -983,6 +1008,7 @@ class OverControlHubView(discord.ui.View):
     @discord.ui.button(label="Simulate Match (Verbose)", style=discord.ButtonStyle.secondary)
     async def sim_match_verbose(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
+        await interaction.message.edit(view=None)
         self.match.simulation_mode = "whole_match"
         self.match.verbose = True # Verbose mode: Every over summary
         await loop_entire_match_simulation(interaction, self.match)
@@ -1011,7 +1037,7 @@ class PaceBowlingView(discord.ui.View):
         if interaction.channel.id not in active_games or active_games[interaction.channel.id] != self.match:
             await interaction.response.send_message("❌ This match has been ended.", ephemeral=True)
             return False
-        if interaction.user.id != self.uid:
+        if interaction.user.id != self.uid and interaction.user.id != getattr(self.match, "manager_id", None):
             await interaction.response.send_message("Not your turn.", ephemeral=True)
             return False
         return True
@@ -1053,7 +1079,7 @@ class SpinBowlingView(discord.ui.View):
         if interaction.channel.id not in active_games or active_games[interaction.channel.id] != self.match:
             await interaction.response.send_message("❌ This match has been ended.", ephemeral=True)
             return False
-        if interaction.user.id != self.uid:
+        if interaction.user.id != self.uid and interaction.user.id != getattr(self.match, "manager_id", None):
             await interaction.response.send_message("Not your turn.", ephemeral=True)
             return False
         return True
@@ -1088,7 +1114,7 @@ class BattingView(discord.ui.View):
         if interaction.channel.id not in active_games or active_games[interaction.channel.id] != self.match:
             await interaction.response.send_message("❌ This match has been ended.", ephemeral=True)
             return False
-        if interaction.user.id != self.uid:
+        if interaction.user.id != self.uid and interaction.user.id != getattr(self.match, "manager_id", None):
             await interaction.response.send_message("Not your turn.", ephemeral=True)
             return False
         return True
@@ -1147,7 +1173,7 @@ class DRSView(discord.ui.View):
             await interaction.response.send_message("❌ This match has been ended.", ephemeral=True)
             return False
         uid = self.match.batting_first_id if self.match.current_innings_num == 1 else self.match.bowling_first_id
-        if interaction.user.id != uid:
+        if interaction.user.id != uid and interaction.user.id != getattr(self.match, "manager_id", None):
             await interaction.response.send_message("Only the batting team can review.", ephemeral=True)
             return False
         return True
@@ -1212,7 +1238,7 @@ async def run_interactive_delivery_sequence(interaction, match: CricketMatch):
         
     if getattr(match, "over_completed", False):
         match.over_completed = False
-        await prompt_new_over_bowler(interaction, match)
+        await prompt_over_pacing_hub(interaction, match)
         return
         
     channel = interaction.channel if hasattr(interaction, 'channel') else interaction
@@ -1710,7 +1736,7 @@ async def begin_toss(channel, state):
             match.bowling_first_id = match.p1_id if ai_choice == "Bat" else match.p2_id
             match.innings1 = InningsState(match.team2 if ai_choice == "Bat" else match.team1, match.team1 if ai_choice == "Bat" else match.team2)
             match.current_innings = match.innings1
-            await prompt_new_over_bowler(channel, match)
+            await prompt_over_pacing_hub(channel, match)
     else:
         await channel.send(f"🪙 **Toss Time!** <@{match.p2_id}> — call the coin!", view=TossCallView(match))
 
@@ -1760,7 +1786,7 @@ class TossDecisionView(discord.ui.View):
         self.match.current_innings = self.match.innings1
         await interaction.response.defer()
         await interaction.message.edit(view=None)
-        await prompt_new_over_bowler(interaction.channel, self.match)
+        await prompt_over_pacing_hub(interaction, self.match)
     @discord.ui.button(label="🏏 Bat First", style=discord.ButtonStyle.success)
     async def bat(self, interaction, button): await self.finalize_toss(interaction, "Bat")
     @discord.ui.button(label="🎯 Bowl First", style=discord.ButtonStyle.danger)
