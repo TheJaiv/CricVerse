@@ -33,6 +33,8 @@ class CricketBot(commands.Bot):
     
     async def setup_hook(self):
         self.remove_command("help")
+        from tournament_manager import TournamentCog
+        await self.add_cog(TournamentCog(self))
         await self.tree.sync()
         print("✅ Slash commands synchronized globally.")
 
@@ -674,6 +676,8 @@ async def loop_entire_match_simulation(interaction, match: CricketMatch):
                 return
             innings.current_bowler = new_bowler
             innings.over_log.clear()
+            innings.bouncers_in_over = 0
+            innings.mystery_bowled_this_over = False
             
         execute_ball_math(match)
         
@@ -850,6 +854,8 @@ async def prompt_new_over_bowler(interaction, match: CricketMatch):
             return
         innings.current_bowler = new_bowler
         innings.over_log.clear()
+        innings.bouncers_in_over = 0
+        innings.mystery_bowled_this_over = False
         
         class DummyInt: pass
         dummy = DummyInt()
@@ -892,6 +898,8 @@ async def prompt_new_over_bowler(interaction, match: CricketMatch):
             
         innings.current_bowler = next(p for p in innings.bowling_team["players"] if p["name"] == b_name)
         innings.over_log.clear()
+        innings.bouncers_in_over = 0
+        innings.mystery_bowled_this_over = False
         await inter.response.defer()
         await prompt_over_pacing_hub(inter, match)
         
@@ -1020,6 +1028,8 @@ class SpinBowlingView(discord.ui.View):
         self.match = match
         self.uid = match.get_bowler_user_id()
         
+        mystery_used = getattr(match.current_innings, "mystery_bowled_this_over", False)
+        
         if spin_type == "off":
             opts = ["Off spin", "Carrom", "Arm ball", "Doosra", "Top spin", "Mystery"]
         else:
@@ -1027,7 +1037,8 @@ class SpinBowlingView(discord.ui.View):
             
         for idx, spin in enumerate(opts):
             row = 0 if idx < 3 else 1
-            self.add_item(ActionButton(spin, discord.ButtonStyle.primary, row, "spin"))
+            disabled = (spin == "Mystery" and mystery_used)
+            self.add_item(ActionButton(spin, discord.ButtonStyle.primary, row, "spin", disabled=disabled))
             
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.channel.id not in active_games or active_games[interaction.channel.id] != self.match:
@@ -1039,6 +1050,8 @@ class SpinBowlingView(discord.ui.View):
         return True
         
     async def process_action(self, interaction: discord.Interaction, label: str, action_type: str):
+        if label == "Mystery":
+            self.match.current_innings.mystery_bowled_this_over = True
         self.match.current_delivery_selection = label
         await interaction.response.edit_message(view=None)
         await prompt_batter_shot(interaction.channel, self.match, interaction)
@@ -1188,7 +1201,8 @@ async def run_interactive_delivery_sequence(interaction, match: CricketMatch):
         await handle_innings_end(interaction, match)
         return
         
-    if innings.total_balls > 0 and innings.total_balls % 6 == 0 and len(innings.over_log) > 0:
+    if getattr(match, "over_completed", False):
+        match.over_completed = False
         await prompt_new_over_bowler(interaction, match)
         return
         
@@ -1202,7 +1216,11 @@ async def run_interactive_delivery_sequence(interaction, match: CricketMatch):
                 opts = ["Off spin", "Carrom", "Arm ball", "Doosra", "Top spin", "Mystery"]
             else:
                 opts = ["Leg spin", "Googly", "Flipper", "Drifter", "Slider", "Mystery"]
+            if getattr(innings, "mystery_bowled_this_over", False):
+                opts.remove("Mystery")
             match.current_delivery_selection = random.choice(opts)
+            if match.current_delivery_selection == "Mystery":
+                innings.mystery_bowled_this_over = True
         else:
             var = random.choice(['Inswing', 'Outswing', 'Fast', 'Slow'])
             length = random.choice(['Bouncer', 'Full', 'Good', 'Yorker'])
@@ -1424,7 +1442,7 @@ async def ask_team1_name(channel, state):
     active_setups[channel.id] = ("awaiting_team1_name", state)
 
 async def ask_team1_xi(channel, state):
-    await channel.send(f"📋 <@{state.p1_id}> — Type your **Playing XI** (one player per line):\n```text\nVirat Kohli\nRohit Sharma\n...```")
+    await channel.send(f"📋 <@{state.p1_id}> — Type your **Playing XI** (one per line) OR type `default` for a built-in team:\n```text\nVirat Kohli\nRohit Sharma\n...```")
     active_setups[channel.id] = ("awaiting_team1_xi", state)
 
 async def ask_team2_name(channel, state):
@@ -1434,7 +1452,7 @@ async def ask_team2_name(channel, state):
 
 async def ask_team2_xi(channel, state):
     target_id = state.p2_id if state.p2_id else state.p1_id
-    await channel.send(f"📋 <@{target_id}> — Type **Team 2's Playing XI** (one player per line):\n```text\nPlayer Name\n...```")
+    await channel.send(f"📋 <@{target_id}> — Type **Team 2's Playing XI** (one per line) OR type `default` for a built-in team:\n```text\nPlayer Name\n...```")
     active_setups[channel.id] = ("awaiting_team2_xi", state)
 
 
@@ -1674,10 +1692,17 @@ async def on_message(message: discord.Message):
 
     elif stage == "awaiting_team1_xi":
         if message.author.id != state.p1_id: return
-        db = get_all_players()
-        players, missing = parse_pasted_roster(message.content, db)
         
         req_length = 12 if state.impact_player else 11
+        if message.content.strip().lower() == "default":
+            players = list(TEAMS_DATA["Team 1"]["players"])
+            if state.impact_player and len(players) < 12:
+                players.append({"name": "Extra Batter", "bat": 80, "bowl": 10, "archetype": "Standard", "role": "Batter"})
+            missing = []
+        else:
+            db = get_all_players()
+            players, missing = parse_pasted_roster(message.content, db)
+            
         if missing or len(players) < req_length:
             err = f"❌ **Roster Validation Failed ({len(players)}/{req_length} Found)**\n\n"
             if players: err += f"✅ **Accepted:** {', '.join([p['name'] for p in players])}\n"
@@ -1706,10 +1731,17 @@ async def on_message(message: discord.Message):
     elif stage == "awaiting_team2_xi":
         target_id = state.p2_id if state.p2_id else state.p1_id
         if message.author.id != target_id: return
-        db = get_all_players()
-        players, missing = parse_pasted_roster(message.content, db)
         
         req_length = 12 if state.impact_player else 11
+        if message.content.strip().lower() == "default":
+            players = list(TEAMS_DATA["Team 2"]["players"])
+            if state.impact_player and len(players) < 12:
+                players.append({"name": "Extra Bowler", "bat": 20, "bowl": 80, "archetype": "Standard", "role": "Bowler_Pace"})
+            missing = []
+        else:
+            db = get_all_players()
+            players, missing = parse_pasted_roster(message.content, db)
+            
         if missing or len(players) < req_length:
             err = f"❌ **Roster Validation Failed ({len(players)}/{req_length} Found)**\n\n"
             if players: err += f"✅ **Accepted:** {', '.join([p['name'] for p in players])}\n"
