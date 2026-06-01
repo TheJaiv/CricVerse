@@ -4,7 +4,7 @@ from discord.ext import commands
 import itertools
 import difflib
 import asyncio
-from subscription_manager import DB_CACHE, async_save_to_bin, get_all_players
+from subscription_manager import DB_CACHE, async_save_to_bin, get_all_players, get_tier_status
 
 def get_server_tournament(server_id: str):
     if "tournaments" not in DB_CACHE:
@@ -39,6 +39,11 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             return await interaction.response.send_message("❌ Only Server Admins can initialize a tournament.", ephemeral=True)
             
         server_id = str(interaction.guild.id)
+        
+        _, _, _, s_tier, _ = get_tier_status(str(interaction.user.id), server_id)
+        if s_tier not in ["Gold", "Diamond"]:
+            return await interaction.response.send_message("❌ **Access Denied:** Only servers with an active **Gold** or **Diamond** tier can host tournaments! Contact the bot owner to upgrade.", ephemeral=True)
+
         if get_server_tournament(server_id):
             return await interaction.response.send_message("❌ A tournament already exists in this server! Use `/tournament status` to check.", ephemeral=True)
             
