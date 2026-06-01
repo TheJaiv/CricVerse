@@ -489,13 +489,14 @@ def execute_ball_math_odi(match):
             b_stats.dismissal = f"c. {fielder} b. {bowler['name']}"
             
         bow_stats.wickets_taken += 1
-        innings.over_log.append("🔴")
+        innings.over_log.append("<a:wickett:1510369641959264429>")
         match.prev_striker_idx = innings.current_striker_idx
         if dismissal_type in ["LBW", "Caught Behind"] and match.simulation_mode == "interactive":
             match.pending_drs = True
             match.drs_dismissal = dismissal_type
             
-        if innings.wickets < 10:
+        max_wickets = 2 if getattr(match, "is_super_over", False) else 10
+        if innings.wickets < max_wickets:
             is_ai_batting = match.is_ai_game and match.get_striker_user_id() == match.p2_id
             if match.simulation_mode == "whole_match" or is_ai_batting:
                 innings.current_striker_idx = innings.next_batter_idx
@@ -510,7 +511,7 @@ def execute_ball_math_odi(match):
         innings.partnership_runs += runs
         b_stats.runs_scored += runs
         bow_stats.runs_conceded += runs
-        innings.over_log.append({0: "⚪", 1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "🟢", 6: "🔵"}[runs])
+        innings.over_log.append({0: "<a:0run:1510601371483897896>", 1: "<a:1run:1510600760570679356>", 2: "<a:2runs:1510601044818788403>", 3: "<a:3runs:1510600945053073508>", 4: "<a:4runs:1510600613556125787>", 6: "<a:6runs:1510600650613063761>"}[runs])
         if runs in [1, 3]: innings.current_striker_idx, innings.current_non_striker_idx = innings.current_non_striker_idx, innings.current_striker_idx
         match.last_commentary = f"**{bowler['name']}** bowled a **{deliv}**\n**{striker['name']}** played: **{shot}**\n💥 **Result:** {runs} Runs"
 
