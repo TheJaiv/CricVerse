@@ -2,6 +2,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 import random
+import csv
 import difflib
 import asyncio
 import io
@@ -13,7 +14,7 @@ from t20_simulation import execute_ball_math_t20, get_smart_ai_bowler_t20
 from subscription_manager import (
     load_data_from_bin, save_data_to_bin, check_potential_quota, consume_quota, 
     update_user_tier, update_server_tier, get_auth_admins, toggle_auth_admin, 
-    get_all_players, add_player, update_player, delete_players, clean_duplicate_players,
+    get_all_players, add_player, add_players_bulk, update_player, delete_players, clean_duplicate_players,
     get_tier_status, is_channel_restricted, toggle_restricted_channel
 )
 
@@ -2021,6 +2022,40 @@ async def add_p_cmd(interaction: discord.Interaction):
         return await interaction.response.send_message("❌ Access Denied: Admin only.", ephemeral=True)
         
     await interaction.response.send_modal(AddPlayerModal())
+
+@bot.tree.command(name="sync_csv", description="[OWNER] Sync missing players from players_master.csv to Cloud DB.")
+async def sync_csv_cmd(interaction: discord.Interaction):
+    if interaction.user.id != ADMIN_DISCORD_ID:
+        return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
+    
+    await interaction.response.defer(ephemeral=True)
+    
+    if not os.path.exists("players_master.csv"):
+        return await interaction.followup.send("❌ Error: `players_master.csv` not found.")
+        
+    try:
+        new_players = []
+        with open("players_master.csv", "r", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                new_players.append({
+                    "name": row["Name"].strip(),
+                    "bat": int(row["Bat"]),
+                    "bowl": int(row["Bowl"]),
+                    "role": row["Role"].strip(),
+                    "archetype": row["Archetype"].strip()
+                })
+                
+        added_count = add_players_bulk(new_players)
+        
+        if added_count > 0:
+            await interaction.followup.send(f"✅ Sync complete! Added **{added_count}** new players to the JSONBin database.")
+            await log_db_update("CSV Sync", "Batch Import", interaction.user, f"Added {added_count} new players from CSV.")
+        else:
+            await interaction.followup.send("✅ Sync complete! No new players found in CSV (database is already up to date).")
+            
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error during sync: {e}")
 
 @bot.tree.command(name="set_user_tier", description="[OWNER] Assign a subscription tier to a user.")
 @app_commands.choices(tier=[
