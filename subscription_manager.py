@@ -16,7 +16,8 @@ DB_CACHE = {
     "user_subs": [],
     "server_subs": [],
     "auth_admins": [],
-    "restricted_channels": []
+    "restricted_channels": [],
+    "tournaments": []
 }
 
 def load_data_from_bin():
@@ -32,6 +33,7 @@ def load_data_from_bin():
             DB_CACHE["server_subs"] = data.get("server_subs", [])
             DB_CACHE["auth_admins"] = data.get("auth_admins", [])
             DB_CACHE["restricted_channels"] = data.get("restricted_channels", [])
+            DB_CACHE["tournaments"] = data.get("tournaments", [])
             print(f"✅ Loaded {len(DB_CACHE['players'])} players & subscriptions from JSONBin!")
         else:
             print(f"❌ Failed to load from JSONBin: {res.text}")
