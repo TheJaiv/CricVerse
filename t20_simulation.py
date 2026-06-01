@@ -254,7 +254,7 @@ def execute_ball_math_t20(match):
             if rrr > 11.0:
                 pressure_multiplier = min(1.4, 1.0 + ((rrr - 11.0) * 0.05))
 
-    is_collapse = innings.over_log[-18:].count("🔴") >= 2 and innings.partnership_runs < 25
+    is_collapse = innings.over_log[-18:].count("<a:wickett:1510369641959264429>") >= 2 and innings.partnership_runs < 25
     is_set_partnership = innings.partnership_runs >= 30
     has_wickets_in_hand = innings.total_balls >= (match.max_balls - 42) and innings.wickets <= 3
 
@@ -476,7 +476,7 @@ def execute_ball_math_t20(match):
             b_stats.dismissal = f"c. {fielder} b. {bowler['name']}"
             
         bow_stats.wickets_taken += 1
-        innings.over_log.append("🔴")
+        innings.over_log.append("<a:wickett:1510369641959264429>")
         outcome_text = f"WICKET! ({dismissal_type.upper()})"
         
         match.prev_striker_idx = innings.current_striker_idx
@@ -484,7 +484,8 @@ def execute_ball_math_t20(match):
             match.pending_drs = True
             match.drs_dismissal = dismissal_type
         
-        if innings.wickets < 10:
+        max_wickets = 2 if getattr(match, "is_super_over", False) else 10
+        if innings.wickets < max_wickets:
             is_ai_batting = match.is_ai_game and match.get_striker_user_id() == match.p2_id
             if match.simulation_mode == "whole_match" or is_ai_batting:
                 innings.current_striker_idx = innings.next_batter_idx
@@ -512,7 +513,7 @@ def execute_ball_math_t20(match):
             bow_stats.runs_conceded += runs
             outcome_text = f"{runs} Runs" if runs > 0 else "Dot Ball"
                 
-            emoji_map = {0: "⚪", 1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "🟢", 6: "🔵"}
+            emoji_map = {0: "<a:0run:1510601371483897896>", 1: "<a:1run:1510600760570679356>", 2: "<a:2runs:1510601044818788403>", 3: "<a:3runs:1510600945053073508>", 4: "<a:4runs:1510600613556125787>", 6: "<a:6runs:1510600650613063761>"}
             log_entry = emoji_map[runs]
             
         if is_no_ball:
