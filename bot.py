@@ -13,7 +13,8 @@ from t20_simulation import execute_ball_math_t20, get_smart_ai_bowler_t20
 from subscription_manager import (
     load_data_from_bin, save_data_to_bin, check_potential_quota, consume_quota, 
     update_user_tier, update_server_tier, get_auth_admins, toggle_auth_admin, 
-    get_all_players, add_player, update_player, delete_players, clean_duplicate_players
+    get_all_players, add_player, update_player, delete_players, clean_duplicate_players,
+    get_tier_status
 )
 
 # ==========================================
@@ -307,14 +308,7 @@ def render_embed_scoreboard(match: CricketMatch) -> discord.Embed:
         desc += f"`{cb['name'][:16]:<17}{bovers:<5}{cbs.runs_conceded:<5}{cbs.wickets_taken:<5}`\n"
         
     timeline_raw = innings.over_log[-6:] if innings.over_log else []
-    # Dynamically inject the provided animated discord emojis
-    timeline_fmt = [
-        item.replace("🟢", "<a:Four:1510370392223649966>")
-            .replace("🔵", "<a:six_:1510370301429416077>")
-            .replace("🔴", "<a:wickett:1510369641959264429>")
-        for item in timeline_raw
-    ]
-    timeline_str = " ".join(timeline_fmt) if timeline_fmt else "Starting over..."
+    timeline_str = " ".join(timeline_raw) if timeline_raw else "Starting over..."
     
     desc += f"**Timeline**\n{timeline_str}\n"
     
@@ -402,7 +396,14 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
     
     c_white = "#FFFFFF"
     c_score_bg = "#FFFFFF"
-    c_accent = "#39B54A" if match.format_overs == 50 else "#F97316" # Green for ODI, Orange for others
+    if getattr(match, 'is_super_over', False):
+        c_accent = "#FFD700" # Gold for Super Over
+    elif match.format_overs == 50:
+        c_accent = "#39B54A" # Green for ODI
+    elif match.format_overs == 20:
+        c_accent = "#F97316" # Orange for T20
+    else:
+        c_accent = "#00B4D8" # Cyan for Custom
     c_navy = "#0A0F24"   # Deep Navy Blue
     c_grid = "#E8E8E8"   # Faint Light Grey
     c_ball = c_accent    # Adaptive color based on format
@@ -521,8 +522,11 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
         d.text((600 - get_tw("LOGO", font_bold)//2, 45), "LOGO", fill=c_grid, font=font_bold)
 
     # Green Bar Match Type
-    fmt = "ODI" if match.format_overs == 50 else "T20" if match.format_overs == 20 else "CUSTOM"
-    m_type = f"SIMULATION MATCH • {fmt} ({match.format_overs} OVERS)"
+    if getattr(match, 'is_super_over', False):
+        m_type = "SIMULATION MATCH • SUPER OVER"
+    else:
+        fmt = "ODI" if match.format_overs == 50 else "T20" if match.format_overs == 20 else "CUSTOM"
+        m_type = f"SIMULATION MATCH • {fmt} ({match.format_overs} OVERS)"
     d.text((600 - get_tw(m_type, font_bold)//2, 113), m_type, fill=c_navy, font=font_bold)
 
     # Upper Navy Headers (Scores Only)
@@ -611,8 +615,9 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
         inn1 = match.innings1
         inn2 = match.innings2
         target = getattr(match, "target", inn1.total_runs + 1)
+        max_w = 2 if getattr(match, 'is_super_over', False) else 10
         if inn2.total_runs >= target:
-            result_str = f"{inn2.batting_team['name'].upper()} WON BY {10 - inn2.wickets} WICKETS"
+            result_str = f"{inn2.batting_team['name'].upper()} WON BY {max_w - inn2.wickets} WICKETS"
         elif inn2.total_runs == target - 1:
             result_str = "MATCH TIED"
         else:
@@ -639,7 +644,8 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
 async def advance_match_loop(interaction, match: CricketMatch):
     innings = match.current_innings
     
-    if innings.wickets >= 10 or innings.total_balls >= match.max_balls or (match.current_innings_num == 2 and innings.total_runs >= getattr(match, "target", match.innings1.total_runs + 1)):
+    max_w = 2 if getattr(match, 'is_super_over', False) else 10
+    if innings.wickets >= max_w or innings.total_balls >= match.max_balls or (match.current_innings_num == 2 and innings.total_runs >= getattr(match, "target", match.innings1.total_runs + 1)):
         await handle_innings_end(interaction, match)
     else:
         if match.simulation_mode == "whole_match":
@@ -652,7 +658,8 @@ async def loop_entire_match_simulation(interaction, match: CricketMatch):
     
     while True:
         innings = match.current_innings
-        if innings.wickets >= 10 or innings.total_balls >= match.max_balls or (match.current_innings_num == 2 and innings.total_runs >= getattr(match, "target", match.innings1.total_runs + 1)):
+        max_w = 2 if getattr(match, 'is_super_over', False) else 10
+        if innings.wickets >= max_w or innings.total_balls >= match.max_balls or (match.current_innings_num == 2 and innings.total_runs >= getattr(match, "target", match.innings1.total_runs + 1)):
             await handle_innings_end(interaction, match)
             break
             
@@ -672,6 +679,45 @@ async def loop_entire_match_simulation(interaction, match: CricketMatch):
         if getattr(match, 'verbose', False) and innings.total_balls % 6 == 0:
             await channel.send(embed=render_embed_scoreboard(match))
             await asyncio.sleep(0.5)
+            
+class ODISuperOverPrompt(discord.ui.View):
+    def __init__(self, match):
+        super().__init__(timeout=120)
+        self.match = match
+        
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.match.p1_id:
+            await interaction.response.send_message("Only the Host can decide.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Play Super Over", style=discord.ButtonStyle.success)
+    async def yes_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await interaction.message.edit(view=None)
+        await trigger_super_over(interaction.channel, self.match)
+
+    @discord.ui.button(label="End as Tie", style=discord.ButtonStyle.danger)
+    async def no_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await interaction.message.edit(view=None)
+        self.match.tie_accepted = True
+        await handle_innings_end(interaction, self.match)
+
+async def trigger_super_over(channel, match: CricketMatch):
+    so_match = CricketMatch(match.p1, match.p2, match.p1_id, match.p2_id, match.team1, match.team2, format_overs=1, pitch=match.pitch, weather=match.weather)
+    so_match.is_super_over = True
+    so_match.sim_only = getattr(match, 'sim_only', False)
+    so_match.verbose = getattr(match, 'verbose', True)
+    so_match.batting_first_id = match.bowling_first_id
+    so_match.bowling_first_id = match.batting_first_id
+    so_match.innings1 = InningsState(match.innings2.batting_team, match.innings1.batting_team)
+    so_match.current_innings = so_match.innings1
+    active_games[channel.id] = so_match
+    
+    await channel.send("🚨 **SCORES ARE TIED!** 🚨\nGet ready for the **SUPER OVER!**\n*The team that batted second will bat first. Max 2 wickets.*")
+    if so_match.sim_only: await loop_entire_match_simulation(channel, so_match)
+    else: await prompt_new_over_bowler(channel, so_match)
 
 async def handle_innings_end(interaction_context, match: CricketMatch):
     channel = interaction_context if isinstance(interaction_context, discord.TextChannel) else interaction_context.channel
@@ -724,6 +770,20 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
             await prompt_new_over_bowler(channel, match)
         
     else:
+        inn1 = match.innings1
+        inn2 = match.innings2
+        target = getattr(match, "target", inn1.total_runs + 1)
+        is_tied = (inn2.total_runs == target - 1)
+        
+        if is_tied and not getattr(match, "tie_accepted", False):
+            if getattr(match, "is_super_over", False):
+                await channel.send("🤯 **THE SUPER OVER IS TIED!** We are going to ANOTHER Super Over!")
+                return await trigger_super_over(channel, match)
+            if match.format_overs != 50:
+                return await trigger_super_over(channel, match)
+            else:
+                return await channel.send("🏆 **The Match has TIED!** Do you want to play a Super Over?", view=ODISuperOverPrompt(match))
+
         img_buf = generate_final_score_image(match)
         file = discord.File(fp=img_buf, filename="final_scoreboard.png")
         embed_full = render_full_scorecard_embed(match, 2)
@@ -883,7 +943,8 @@ class OverControlHubView(discord.ui.View):
         self.match.simulation_mode = "whole_match"
         
         for _ in range(6):
-            if innings.wickets < 10 and innings.total_balls < self.match.max_balls:
+            max_w = 2 if getattr(self.match, 'is_super_over', False) else 10
+            if innings.wickets < max_w and innings.total_balls < self.match.max_balls:
                 if self.match.current_innings_num == 2 and innings.total_runs >= getattr(self.match, "target", self.match.innings1.total_runs + 1): break
                 execute_ball_math(self.match)
                 
@@ -1086,8 +1147,8 @@ class DRSView(discord.ui.View):
             innings.current_striker_idx = self.match.prev_striker_idx
             innings.batting_stats[innings.batting_team["players"][innings.current_striker_idx]["name"]].dismissal = "not out"
             innings.bowling_stats[innings.current_bowler["name"]].wickets_taken -= 1
-            if innings.over_log and innings.over_log[-1] == "🔴":
-                innings.over_log[-1] = "⚪"
+            if innings.over_log and innings.over_log[-1] == "<a:wickett:1510369641959264429>":
+                innings.over_log[-1] = "<a:0run:1510601371483897896>"
             self.match.last_commentary += "\n📺 **DRS:** Decision Overturned (Not Out)."
         else:
             await interaction.channel.send("📺 **DRS REVIEW:** Three Reds! **UMPIRING DECISION UPHELD!** 🔴")
@@ -1120,7 +1181,8 @@ class DRSView(discord.ui.View):
 async def run_interactive_delivery_sequence(interaction, match: CricketMatch):
     innings = match.current_innings
     
-    if innings.wickets >= 10 or innings.total_balls >= match.max_balls or (match.current_innings_num == 2 and innings.total_runs >= getattr(match, "target", match.innings1.total_runs + 1)):
+    max_w = 2 if getattr(match, 'is_super_over', False) else 10
+    if innings.wickets >= max_w or innings.total_balls >= match.max_balls or (match.current_innings_num == 2 and innings.total_runs >= getattr(match, "target", match.innings1.total_runs + 1)):
         await handle_innings_end(interaction, match)
         return
         
@@ -1175,8 +1237,8 @@ async def prompt_batter_shot(channel, match: CricketMatch, prev=None):
                     innings.current_striker_idx = match.prev_striker_idx
                     innings.batting_stats[innings.batting_team["players"][innings.current_striker_idx]["name"]].dismissal = "not out"
                     innings.bowling_stats[innings.current_bowler["name"]].wickets_taken -= 1
-                    if innings.over_log and innings.over_log[-1] == "🔴":
-                        innings.over_log[-1] = "⚪"
+                    if innings.over_log and innings.over_log[-1] == "<a:wickett:1510369641959264429>":
+                        innings.over_log[-1] = "<a:0run:1510601371483897896>"
                     match.last_commentary += "\n📺 **DRS:** Decision Overturned (Not Out)."
                 else:
                     await channel.send("📺 **DRS REVIEW:** Three Reds! **UMPIRING DECISION UPHELD!** 🔴")
@@ -1728,6 +1790,53 @@ async def endmatch_cmd(interaction: discord.Interaction):
         await interaction.response.send_message("🛑 **Match and setup forcefully terminated.** Memory cleared.")
     else:
         await interaction.response.send_message("⚠️ There is no active match or setup running in this channel.", ephemeral=True)
+
+class HelpView(discord.ui.View):
+    def __init__(self, pages):
+        super().__init__(timeout=180)
+        self.pages = pages
+        self.current_page = 0
+        self.update_buttons()
+
+    def update_buttons(self):
+        self.prev_button.disabled = self.current_page == 0
+        self.next_button.disabled = self.current_page == len(self.pages) - 1
+
+    @discord.ui.button(label="◀️ Prev", style=discord.ButtonStyle.secondary)
+    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page -= 1
+        self.update_buttons()
+        await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
+
+    @discord.ui.button(label="Next ▶️", style=discord.ButtonStyle.primary)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page += 1
+        self.update_buttons()
+        await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
+
+@bot.tree.command(name="help", description="Show the list of bot commands and how to use them.")
+async def help_cmd(interaction: discord.Interaction):
+    embed1 = discord.Embed(title="🏏 Help - Playing Matches (1/3)", color=discord.Color.green())
+    embed1.add_field(name="`/match [opponent]`", value="Start an interactive match. Challenge a user or play vs AI.", inline=False)
+    embed1.add_field(name="`/simulatematch`", value="Instantly simulate a custom match with AI teams.", inline=False)
+    embed1.add_field(name="`/endmatch`", value="Force stop the current match in the channel.", inline=False)
+    embed1.add_field(name="`/my_tier`", value="Check your current subscription tier and daily match limits.", inline=False)
+
+    embed2 = discord.Embed(title="🔍 Help - Players & DB (2/3)", color=discord.Color.blue())
+    embed2.add_field(name="`/searchplayer [name]`", value="Search for a player in the database to see stats & roles.", inline=False)
+    embed2.add_field(name="📋 How to enter Playing XI?", value="Copy and paste a list of 11 player names (one per line) from the database when prompted.", inline=False)
+    embed2.add_field(name="🏟️ Conditions", value="Choose from 15 Pitches and 10 Weather conditions, dynamically affecting the simulation engine!", inline=False)
+    
+    embed3 = discord.Embed(title="🛡️ Help - Admin Settings (3/3)", color=discord.Color.red())
+    embed3.add_field(name="`/addplayer`, `/updateplayer`, `/deleteplayer`", value="Manage the player database.", inline=False)
+    embed3.add_field(name="`/cleanduplicates`", value="Clean up duplicate players in the DB.", inline=False)
+    embed3.add_field(name="`/authadmin`", value="Toggle Admin permissions for player management.", inline=False)
+    embed3.add_field(name="`/set_user_tier`, `/set_server_tier`", value="Manage Subscriptions & Daily limits.", inline=False)
+
+    pages = [embed1, embed2, embed3]
+    view = HelpView(pages)
+    await interaction.response.send_message(embed=pages[0], view=view, ephemeral=True)
+
 # ==========================================
 # 🔍 8. PUBLIC DATABASE SEARCH
 # ==========================================
@@ -1778,6 +1887,51 @@ async def searchplayer(interaction: discord.Interaction, name: str):
         msg += f"\n\n📂 **Alternatives:**\n" + "\n".join([f"• {o}" for o in other[:5]])
         
     await interaction.followup.send(msg)
+
+@bot.tree.command(name="my_tier", description="Check your current subscription tier and daily match limits.")
+async def my_tier_cmd(interaction: discord.Interaction):
+    server_id = str(interaction.guild.id) if interaction.guild else None
+    u_tier, u_used, u_server_used, s_tier, s_used = get_tier_status(str(interaction.user.id), server_id)
+    
+    embed = discord.Embed(title="📊 Subscription Status", color=discord.Color.blue())
+    
+    # Format User Tier
+    if u_tier == "Basic":
+        u_limit, u_feat = "1/Day", "T20 & ODI Formats"
+    elif u_tier == "Standard":
+        u_limit, u_feat = "1/Day", "All Formats"
+    elif u_tier == "Single":
+        u_limit, u_feat = "1 (Consumable)", "All Formats"
+    elif u_tier == "Server Pro":
+        u_limit, u_feat = "0/Day", "Unlimited on Premium Servers"
+    else:
+        u_limit, u_feat = "0/Day", "Basic Access"
+        
+    u_val = f"**Tier:** {u_tier}\n**Personal Sims:** {u_used} / {u_limit}\n**Access:** {u_feat}"
+    
+    if u_tier not in ["Server Pro", "Standard"]:
+        u_val += f"\n**Premium Server Limits:** {u_server_used} / 7 per day"
+        
+    embed.add_field(name="👤 Personal Profile", value=u_val, inline=False)
+    
+    # Format Server Tier
+    if server_id:
+        if s_tier == "Bronze":
+            s_limit, s_feat = "10", "All Formats"
+        elif s_tier in ["Silver", "Diamond"]:
+            s_limit, s_feat = "Unlimited", "All Formats"
+        elif s_tier == "Gold":
+            s_limit, s_feat = "0", "Tournament Only"
+        else:
+            s_limit, s_feat = "0", "No active server tier."
+            
+        embed.add_field(
+            name="🏟️ Server Tier (This Server)", 
+            value=f"**Name:** {s_tier}\n**Daily Sims Used:** {s_used} / {s_limit}\n**Access:** {s_feat}", 
+            inline=False
+        )
+        
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ==========================================
 # 🛡️ 9. ADMIN DATABASE CONTROLS 
@@ -1865,6 +2019,8 @@ async def add_p_cmd(interaction: discord.Interaction):
 @app_commands.choices(tier=[
     app_commands.Choice(name="Basic (1 Sim/Day | T20/ODI)", value="Basic"),
     app_commands.Choice(name="Standard (1 Sim/Day | All)", value="Standard"),
+    app_commands.Choice(name="Single (1 Match Consumable)", value="Single"),
+    app_commands.Choice(name="Server Pro (Unlimited on Silver/Diamond)", value="Server Pro"),
     app_commands.Choice(name="None (Remove)", value="None")
 ])
 async def set_user_tier_cmd(interaction: discord.Interaction, user: discord.Member, tier: app_commands.Choice[str]):
