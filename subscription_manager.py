@@ -15,7 +15,8 @@ DB_CACHE = {
     "players": [],
     "user_subs": [],
     "server_subs": [],
-    "auth_admins": []
+    "auth_admins": [],
+    "restricted_channels": []
 }
 
 def load_data_from_bin():
@@ -30,6 +31,7 @@ def load_data_from_bin():
             DB_CACHE["user_subs"] = data.get("user_subs", [])
             DB_CACHE["server_subs"] = data.get("server_subs", [])
             DB_CACHE["auth_admins"] = data.get("auth_admins", [])
+            DB_CACHE["restricted_channels"] = data.get("restricted_channels", [])
             print(f"✅ Loaded {len(DB_CACHE['players'])} players & subscriptions from JSONBin!")
         else:
             print(f"❌ Failed to load from JSONBin: {res.text}")
@@ -248,3 +250,19 @@ def get_tier_status(user_id: str, server_id: str):
             s_used = s_row["sims_used"]
             
     return u_tier, u_used, u_server_used, s_tier, s_used
+
+def is_channel_restricted(channel_id: str):
+    return channel_id in DB_CACHE.get("restricted_channels", [])
+
+def toggle_restricted_channel(channel_id: str):
+    global DB_CACHE
+    if "restricted_channels" not in DB_CACHE:
+        DB_CACHE["restricted_channels"] = []
+    if channel_id in DB_CACHE["restricted_channels"]:
+        DB_CACHE["restricted_channels"].remove(channel_id)
+        added = False
+    else:
+        DB_CACHE["restricted_channels"].append(channel_id)
+        added = True
+    async_save_to_bin()
+    return added
