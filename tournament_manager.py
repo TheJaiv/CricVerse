@@ -3,6 +3,8 @@ from discord import app_commands
 from discord.ext import commands
 import itertools
 import difflib
+import io
+from PIL import Image, ImageDraw, ImageFont
 import asyncio
 from subscription_manager import DB_CACHE, async_save_to_bin, get_all_players, get_tier_status
 
@@ -380,10 +382,56 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             
         standings = sorted(teams.items(), key=lambda x: (x[1]["Pts"], x[1]["NRR"]), reverse=True)
         
-        table = "```text\nPos Team                   P  W  L  T  Pts  NRR\n"
-        table += "------------------------------------------------\n"
-        for i, (t_name, data) in enumerate(standings, 1):
-            table += f"{i:<3} {t_name[:18]:<22} {data['P']:<2} {data['W']:<2} {data['L']:<2} {data['T']:<2} {data['Pts']:<4} {data['NRR']:+.3f}\n"
-        table += "```"
+        # Generate PIL Image
+        row_height = 60
+        header_height = 150
+        img_height = header_height + (len(standings) * row_height) + 40
         
-        await interaction.response.send_message(embed=discord.Embed(title=f"🏆 Points Table: {tourney['name']}", description=table, color=discord.Color.gold()))
+        img = Image.new("RGB", (1100, img_height), color="#1A1A24")
+        d = ImageDraw.Draw(img)
+        
+        try:
+            font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 46)
+            font_hdr = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 26)
+            font_row = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 28)
+        except:
+            font_title = font_hdr = font_row = ImageFont.load_default()
+            
+        # Header
+        d.rectangle([(0, 0), (1100, 100)], fill="#0A6496")
+        d.text((40, 25), f"🏆 {tourney['name'].upper()} - POINTS TABLE", fill="#FFFFFF", font=font_title)
+        
+        # Column Headers
+        cols = [("POS", 40), ("TEAM", 150), ("P", 550), ("W", 650), ("L", 750), ("T", 850), ("PTS", 950), ("NRR", 1050)]
+        for name, x in cols:
+            w = d.textlength(name, font=font_hdr) if hasattr(d, 'textlength') else len(name)*15
+            d.text((x - w/2 if name != "TEAM" else x, 110), name, fill="#FFD700", font=font_hdr)
+            
+        # Rows
+        y = header_height
+        for i, (t_name, data) in enumerate(standings, 1):
+            bg_color = "#242631" if i % 2 == 0 else "#1A1A24"
+            d.rectangle([(0, y), (1100, y + row_height)], fill=bg_color)
+            
+            # Rank Accent Line
+            if i <= 4: d.rectangle([(0, y), (8, y + row_height)], fill="#39B54A") # Top 4 Qualification
+            
+            d.text((40 - (d.textlength(str(i), font=font_row)/2 if hasattr(d, 'textlength') else 10), y + 15), str(i), fill="#FFFFFF", font=font_row)
+            d.text((150, y + 15), t_name[:20].upper(), fill="#FFFFFF", font=font_row)
+            
+            d.text((550 - (d.textlength(str(data['P']), font=font_row)/2 if hasattr(d, 'textlength') else 10), y + 15), str(data['P']), fill="#FFFFFF", font=font_row)
+            d.text((650 - (d.textlength(str(data['W']), font=font_row)/2 if hasattr(d, 'textlength') else 10), y + 15), str(data['W']), fill="#39B54A", font=font_row)
+            d.text((750 - (d.textlength(str(data['L']), font=font_row)/2 if hasattr(d, 'textlength') else 10), y + 15), str(data['L']), fill="#E84135", font=font_row)
+            d.text((850 - (d.textlength(str(data['T']), font=font_row)/2 if hasattr(d, 'textlength') else 10), y + 15), str(data['T']), fill="#777777", font=font_row)
+            
+            d.text((950 - (d.textlength(str(data['Pts']), font=font_row)/2 if hasattr(d, 'textlength') else 10), y + 15), str(data['Pts']), fill="#FFD700", font=font_row)
+            nrr_str = f"{data['NRR']:+.3f}"
+            d.text((1050 - (d.textlength(nrr_str, font=font_row)/2 if hasattr(d, 'textlength') else 30), y + 15), nrr_str, fill="#FFFFFF", font=font_row)
+            
+            y += row_height
+            
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        buf.seek(0)
+        
+        await interaction.response.send_message(file=discord.File(fp=buf, filename="standings.png"))
