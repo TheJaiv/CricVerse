@@ -264,9 +264,14 @@ def execute_ball_math_t20(match):
     else:
         if "Spin" in bowler["role"]:
             if "Off" in bowler["role"]:
-                deliv = random.choice(["Off spin", "Carrom", "Arm ball", "Doosra", "Top spin", "Mystery"])
+                opts = ["Off spin", "Carrom", "Arm ball", "Doosra", "Top spin", "Mystery"]
             else:
-                deliv = random.choice(["Leg spin", "Googly", "Flipper", "Drifter", "Slider", "Mystery"])
+                opts = ["Leg spin", "Googly", "Flipper", "Drifter", "Slider", "Mystery"]
+            if getattr(innings, "mystery_bowled_this_over", False):
+                opts.remove("Mystery")
+            deliv = random.choice(opts)
+            if deliv == "Mystery":
+                innings.mystery_bowled_this_over = True
         else:
             deliv = f"{random.choice(['Inswing', 'Outswing', 'Fast', 'Slow'])} {random.choice(['Bouncer', 'Full', 'Good', 'Yorker'])}"
             
@@ -278,24 +283,43 @@ def execute_ball_math_t20(match):
 
     diff = bat_rating - bowl_rating
     
-    # EXTRAS SYSTEM: Wide Check (Skips ball)
-    if random.random() < 0.04 and "Yorker" not in deliv and "Slow" not in deliv:
+    free_hit_active = getattr(match, "free_hit", False)
+    is_wide = False
+    is_no_ball = False
+    prefix = getattr(match, "last_commentary_prefix", "")
+    match.last_commentary_prefix = ""
+    
+    if not hasattr(innings, "bouncers_in_over"): innings.bouncers_in_over = 0
+    if "Bouncer" in deliv:
+        innings.bouncers_in_over += 1
+        if innings.bouncers_in_over == 3:
+            is_no_ball = True
+            prefix += "🚨 **NO BALL!** (Third bouncer of the over)\n➡️ **NEXT BALL IS A FREE HIT!**\n"
+            
+    if not is_no_ball and random.random() < 0.04 and "Yorker" not in deliv and "Slow" not in deliv:
+        is_wide = True
         innings.total_runs += 1
         if not hasattr(innings, 'extras'): innings.extras = 0
         innings.extras += 1
         bow_stats.runs_conceded += 1
         innings.over_log.append("WD")
-        match.last_commentary = f"**{bowler['name']}** bowled a **Wide!**\n💥 **Result:** 1 Extra Run"
+        match.last_commentary = prefix + f"**{bowler['name']}** bowled a **Wide!**\n💥 **Result:** 1 Extra Run"
+        if free_hit_active: match.last_commentary_prefix = "🛡️ *(Free Hit continues)*\n"
         return
         
-    # EXTRAS SYSTEM: No Ball Check
-    is_no_ball = False
-    if random.random() < 0.02:
+    if not is_no_ball and random.random() < 0.02:
         is_no_ball = True
+        if not free_hit_active:
+            prefix += "🚨 **NO BALL!** Overstepping!\n➡️ **NEXT BALL IS A FREE HIT!**\n"
+        else:
+            prefix += "🚨 **NO BALL!** (Still a Free Hit)\n"
+            
+    if is_no_ball:
         if not hasattr(innings, 'extras'): innings.extras = 0
         innings.extras += 1
         innings.total_runs += 1
         bow_stats.runs_conceded += 1
+        match.free_hit = True
 
     dot_weight = max(15.0, 35.0 - diff * 0.4)
     single_weight = 40.0
@@ -425,6 +449,12 @@ def execute_ball_math_t20(match):
         if innings.last_ball_boundary: boundary_weight *= 1.15; wicket_weight *= 1.15
         if is_powerplay: boundary_weight *= 1.25; single_weight *= 0.85
             
+    if "Mystery" in deliv:
+        wicket_weight *= 1.6
+        dot_weight *= 1.5
+        boundary_weight *= 0.6
+        single_weight *= 0.8
+
     four_weight = boundary_weight
     six_weight = boundary_weight * 0.35
     
@@ -441,12 +471,17 @@ def execute_ball_math_t20(match):
     four_weight = max(0.5, min(four_weight, 35.0)) # Hard cap to prevent 300+ scores
     six_weight = max(0.1, min(six_weight, 25.0))
     wicket_weight = max(1.0, min(wicket_weight, 30.0)) # Hard cap to prevent 10/10 scenarios
-    dot_weight = max(5.0, dot_weight)
+    dot_weight = max(5.0, min(dot_weight, 120.0))
 
     weights = [dot_weight, single_weight, single_weight * 0.3, single_weight * 0.05, four_weight, six_weight, wicket_weight]
     outcome = random.choices(["dot", "single", "two", "three", "four", "six", "wicket"], weights=weights)[0]
     
-    if is_no_ball and outcome == "wicket": outcome = "dot"
+    if is_no_ball and outcome == "wicket":
+        outcome = "dot"
+        prefix += "*(Wicket denied due to No Ball)*\n"
+    if free_hit_active and not is_no_ball and outcome == "wicket":
+        outcome = random.choice(["dot", "single", "two"])
+        prefix += "🛡️ **FREE HIT!** Batter escapes dismissal!\n"
     
     b_stats.balls_faced += 1
     innings.last_ball_boundary = False
@@ -531,5 +566,8 @@ def execute_ball_math_t20(match):
     if not is_no_ball:
         bow_stats.balls_bowled += 1
         innings.total_balls += 1
+        match.free_hit = False
+        if innings.total_balls % 6 == 0:
+            match.over_completed = True
         
-    match.last_commentary = f"**{bowler['name']}** bowled a **{deliv}**\n**{striker['name']}** played: **{shot}**\n💥 **Result:** {outcome_text}"
+    match.last_commentary = prefix + f"**{bowler['name']}** bowled a **{deliv}**\n**{striker['name']}** played: **{shot}**\n💥 **Result:** {outcome_text}"
