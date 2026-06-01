@@ -31,6 +31,7 @@ class CricketBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
     
     async def setup_hook(self):
+        self.remove_command("help")
         await self.tree.sync()
         print("✅ Slash commands synchronized globally.")
 
@@ -546,11 +547,11 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
         d.text((offset_x + 465 - get_tw("R", font_small)//2, 235), "R", fill=c_text_grey, font=font_small)
         d.text((offset_x + 555 - get_tw("B", font_small)//2, 235), "B", fill=c_text_grey, font=font_small)
         
-        top_b = sorted(inn.batting_stats.values(), key=lambda x: x.runs_scored, reverse=True)[:4]
+        active_batters = [b for b in inn.batting_stats.values() if b.balls_faced > 0 or b.dismissal != "not out"]
+        top_b = sorted(active_batters, key=lambda x: x.runs_scored, reverse=True)[:4]
         for idx, b in enumerate(top_b):
             y = 285 + (idx * 50)
             name = b.profile['name'][:16].upper()
-            if b.dismissal == "not out": name += "*"
           
             d.text((offset_x + 75, y), name, fill=c_navy, font=font_bold)
             
@@ -560,6 +561,7 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
                 d.text((offset_x + 75 + nw + 8, y - 4), "★", fill="#FFD700", font=font_title)
             
             runs = str(b.runs_scored)
+            if b.dismissal == "not out": runs += "*"
             d.text((offset_x + 465 - get_tw(runs, font_bold)//2, y), runs, fill=c_navy, font=font_bold)
             
             balls = str(b.balls_faced)
@@ -596,7 +598,6 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
             
             if potm_name == bowl.profile['name']:
                 nw = get_tw(name, font_bold)
-                d.text((offset_x + 60 + nw + 8, y - 4), "★", fill="#FFD700", font=font_title)
                 d.text((offset_x + 75 + nw + 8, y - 4), "★", fill="#FFD700", font=font_title)
             
             wr = f"{bowl.wickets_taken}-{bowl.runs_conceded}"
