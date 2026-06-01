@@ -14,7 +14,7 @@ from subscription_manager import (
     load_data_from_bin, save_data_to_bin, check_potential_quota, consume_quota, 
     update_user_tier, update_server_tier, get_auth_admins, toggle_auth_admin, 
     get_all_players, add_player, update_player, delete_players, clean_duplicate_players,
-    get_tier_status
+    get_tier_status, is_channel_restricted, toggle_restricted_channel
 )
 
 # ==========================================
@@ -1730,6 +1730,9 @@ async def match_cmd(interaction: discord.Interaction, opponent: discord.Member =
     # Instantly defer to prevent 10062 timeouts while Cloud DB wakes up
     await interaction.response.defer()
     
+    if is_channel_restricted(str(interaction.channel.id)):
+        return await interaction.edit_original_response(content="❌ Matches are **disabled** in this channel. Please switch to a dedicated bot channel to play!")
+        
     # Run DB check in background thread so bot heartbeat doesn't block
     allowed, reason = await asyncio.to_thread(check_potential_quota, str(interaction.user.id), str(interaction.guild.id) if interaction.guild else None, str(ADMIN_DISCORD_ID))
     if not allowed: return await interaction.edit_original_response(content=reason)
@@ -1757,6 +1760,9 @@ async def match_cmd(interaction: discord.Interaction, opponent: discord.Member =
 async def simulatematch_cmd(interaction: discord.Interaction):
     
     await interaction.response.defer()
+    if is_channel_restricted(str(interaction.channel.id)):
+        return await interaction.edit_original_response(content="❌ Matches are **disabled** in this channel. Please switch to a dedicated bot channel to play!")
+
     allowed, reason = await asyncio.to_thread(check_potential_quota, str(interaction.user.id), str(interaction.guild.id) if interaction.guild else None, str(ADMIN_DISCORD_ID))
     if not allowed: return await interaction.edit_original_response(content=reason)
 
@@ -2059,6 +2065,20 @@ async def auth_admin_cmd(interaction: discord.Interaction, user: discord.Member)
         msg = f"🚫 Admin permissions **revoked** for {user.mention}."
         
     await interaction.response.send_message(msg, ephemeral=True)
+
+@bot.tree.command(name="toggle_channel_lock", description="[ADMIN] Lock or unlock matches in the current channel.")
+@app_commands.default_permissions(manage_channels=True)
+async def toggle_channel_lock_cmd(interaction: discord.Interaction):
+    is_owner = interaction.user.id == ADMIN_DISCORD_ID
+    has_perms = getattr(interaction.user, 'guild_permissions', None) and interaction.user.guild_permissions.manage_channels
+    if not (is_owner or has_perms):
+        return await interaction.response.send_message("❌ You need Manage Channels permission to do this.", ephemeral=True)
+        
+    locked = toggle_restricted_channel(str(interaction.channel.id))
+    if locked:
+        await interaction.response.send_message("🔒 **Channel Locked:** Matches can no longer be played in this channel.")
+    else:
+        await interaction.response.send_message("🔓 **Channel Unlocked:** Matches can now be played in this channel.")
 
 # ==================== UPDATE PLAYER ====================
 
