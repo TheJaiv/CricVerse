@@ -808,6 +808,9 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
         
         if channel.id in active_games:
             del active_games[channel.id]
+            
+        if getattr(match, "tournament_server_id", None):
+            bot.dispatch("tournament_match_complete", match)
 
 # ==========================================
 # 🏏 6. OVER HUB & INTERACTIVE MENUS
@@ -938,7 +941,7 @@ class OverControlHubView(discord.ui.View):
         if interaction.channel.id not in active_games or active_games[interaction.channel.id] != self.match:
             await interaction.response.send_message("❌ This match has been ended.", ephemeral=True)
             return False
-        if interaction.user.id != self.match.p1_id:
+        if interaction.user.id != self.match.p1_id and interaction.user.id != getattr(self.match, "manager_id", None):
             await interaction.response.send_message("❌ Host only.", ephemeral=True)
             return False
         return True
@@ -1304,8 +1307,10 @@ class MatchSetupState:
         self.impact_player = False
         self.t1_name = "Team 1"
         self.t1_roster = []
+        self.t1_squad = []
         self.t2_name = "Team 2"
         self.t2_roster = []
+        self.t2_squad = []
         self.pitch = "Flat"
         self.weather = "Clear"
         self.home_team_id = p1_id
@@ -1372,8 +1377,8 @@ class FormatSelectView(discord.ui.View):
         discord.SelectOption(label="Custom Format", value="custom", emoji="⚙️")
     ])
     async def select_format(self, interaction: discord.Interaction, select: discord.ui.Select):
-        if interaction.user.id != self.state.p1_id: 
-            return await interaction.response.send_message("Only Host.", ephemeral=True)
+        if interaction.user.id != self.state.p1_id and interaction.user.id != getattr(self.state, "manager_id", None): 
+            return await interaction.response.send_message("Only Host or Manager.", ephemeral=True)
             
         val = select.values[0]
         if val == "custom":
@@ -1395,7 +1400,10 @@ class FormatSelectView(discord.ui.View):
                 label = {"50": "ODI (50 overs)", "90": "Test (90 overs/innings)"}.get(val, f"{val} overs")
                 
                 await interaction.edit_original_response(content=f"✅ Format set: **{label}**", view=None)
-                await ask_team1_name(self.channel, self.state)
+                if getattr(self.state, "tournament_server_id", None):
+                    await prompt_tournament_xi(self.channel, self.state, 1)
+                else:
+                    await ask_team1_name(self.channel, self.state)
 
 class CustomOversModal(discord.ui.Modal, title="Custom Over Count"):
     overs_input = discord.ui.TextInput(label="Number of Overs (1-90)", max_length=2, required=True)
@@ -1419,7 +1427,10 @@ class CustomOversModal(discord.ui.Modal, title="Custom Over Count"):
         # 🚨 FIX: Atomic edit prevents the crash
        
         await interaction.edit_original_response(content=f"✅ Format set: **Custom ({val} overs)**", view=None)
-        await ask_team1_name(self.channel, self.state)
+        if getattr(self.state, "tournament_server_id", None):
+            await prompt_tournament_xi(self.channel, self.state, 1)
+        else:
+            await ask_team1_name(self.channel, self.state)
 
 class ImpactPlayerView(discord.ui.View):
     def __init__(self, state, channel):
@@ -1428,18 +1439,20 @@ class ImpactPlayerView(discord.ui.View):
         self.channel = channel
     @discord.ui.button(label="Yes (Impact Player)", style=discord.ButtonStyle.success)
     async def btn_yes(self, interaction, button):
-        if interaction.user.id != self.state.p1_id: return
+        if interaction.user.id != self.state.p1_id and interaction.user.id != getattr(self.state, "manager_id", None): return
         self.state.impact_player = True
-        # 🚨 FIX: Atomic edit
+        
         await interaction.response.edit_message(content="✅ **Impact Player rule enabled!**", view=None)
-        await ask_team1_name(self.channel, self.state)
+        if getattr(self.state, "tournament_server_id", None): await prompt_tournament_xi(self.channel, self.state, 1)
+        else: await ask_team1_name(self.channel, self.state)
     @discord.ui.button(label="No (Standard 11)", style=discord.ButtonStyle.secondary)
     async def btn_no(self, interaction, button):
-        if interaction.user.id != self.state.p1_id: return
+        if interaction.user.id != self.state.p1_id and interaction.user.id != getattr(self.state, "manager_id", None): return
         self.state.impact_player = False
         # 🚨 FIX: Atomic edit
         await interaction.response.edit_message(content="✅ Standard rules applied.", view=None)
-        await ask_team1_name(self.channel, self.state)
+        if getattr(self.state, "tournament_server_id", None): await prompt_tournament_xi(self.channel, self.state, 1)
+        else: await ask_team1_name(self.channel, self.state)
 
 # --- Step 2: Chat-Based Roster Collection Prompts ---
 
@@ -1507,7 +1520,81 @@ class Team2VerifyView(discord.ui.View):
         await interaction.response.defer()
         await interaction.message.edit(view=None)
         await ask_team2_xi(self.channel, self.state)
+        
+async def prompt_tournament_xi(channel, state, team_num):
+    owner_id = state.p1_id if team_num == 1 else state.p2_id
+    t_name = state.t1_name if team_num == 1 else state.t2_name
+    view = TournamentXIView(state, channel, team_num)
+    await channel.send(view.get_msg_content(), view=view)
 
+class TournamentXIView(discord.ui.View):
+    def __init__(self, state, channel, team_num):
+        super().__init__(timeout=300)
+        self.state = state
+        self.channel = channel
+        self.team_num = team_num
+        self.squad = state.t1_squad if team_num == 1 else state.t2_squad
+        self.owner_id = state.p1_id if team_num == 1 else state.p2_id
+        self.selected_players = []
+        self.req_count = 12 if state.impact_player else 11
+        self.update_ui()
+        
+    def update_ui(self):
+        self.clear_items()
+        if len(self.selected_players) < self.req_count:
+            options = []
+            for p in self.squad:
+                if p not in self.selected_players:
+                    role_short = p["role"].replace("All-Rounder", "AR").replace("Bowler", "BWL").replace("Batter", "BAT").replace("_", " ")
+                    options.append(discord.SelectOption(label=p["name"], description=f"Bat: {p['bat']} | {role_short}", value=p["name"]))
+            select = discord.ui.Select(placeholder=f"Pick Player {len(self.selected_players)+1} of {self.req_count}...", options=options)
+            select.callback = self.select_cb
+            self.add_item(select)
+            
+        btn_undo = discord.ui.Button(label="Undo Last", style=discord.ButtonStyle.danger, disabled=len(self.selected_players)==0)
+        btn_undo.callback = self.undo_cb
+        self.add_item(btn_undo)
+        
+        btn_confirm = discord.ui.Button(label="Confirm XI", style=discord.ButtonStyle.success, disabled=len(self.selected_players) < self.req_count)
+        btn_confirm.callback = self.confirm_cb
+        self.add_item(btn_confirm)
+        
+    async def interaction_check(self, interaction: discord.Interaction):
+        if interaction.user.id != self.owner_id and interaction.user.id != getattr(self.state, "manager_id", None):
+            await interaction.response.send_message("❌ Only the Team Owner or Manager can select this XI.", ephemeral=True)
+            return False
+        return True
+        
+    async def select_cb(self, interaction: discord.Interaction):
+        val = interaction.data["values"][0]
+        player = next(p for p in self.squad if p["name"] == val)
+        self.selected_players.append(player)
+        self.update_ui()
+        await interaction.response.edit_message(content=self.get_msg_content(), view=self)
+        
+    async def undo_cb(self, interaction: discord.Interaction):
+        self.selected_players.pop()
+        self.update_ui()
+        await interaction.response.edit_message(content=self.get_msg_content(), view=self)
+        
+    async def confirm_cb(self, interaction: discord.Interaction):
+        if self.team_num == 1:
+            self.state.t1_roster = self.selected_players
+            await interaction.response.edit_message(content="✅ **Team 1 XI Confirmed!**", view=None)
+            await prompt_tournament_xi(self.channel, self.state, 2)
+        else:
+            self.state.t2_roster = self.selected_players
+            await interaction.response.edit_message(content="✅ **Team 2 XI Confirmed!**", view=None)
+            await ask_pitch_and_weather(self.channel, self.state)
+            
+    def get_msg_content(self):
+        t_name = self.state.t1_name if self.team_num == 1 else self.state.t2_name
+        msg = f"📋 <@{self.owner_id}> (or Manager) — **{t_name} XI Selection**\n"
+        msg += f"Select {self.req_count} players from your squad using the dropdown below.\n"
+        msg += f"⚠️ **IMPORTANT:** The order you select them determines your exact batting order!\n\n"
+        for i, p in enumerate(self.selected_players, 1):
+            msg += f"`{i:>2}.` **{p['name']}**\n"
+        return msg
 
 # --- Step 4: Pitch & Weather Select ---
 
@@ -1540,7 +1627,7 @@ class PitchWeatherView(discord.ui.View):
         discord.SelectOption(label="Sticky — Unplayable", value="Sticky", emoji="🍯")
     ])
     async def pitch_cb(self, interaction, select):
-        if interaction.user.id != self.state.home_team_id: return
+        if interaction.user.id != self.state.home_team_id and interaction.user.id != getattr(self.state, "manager_id", None): return
         self.s_pitch = select.values[0]
         await interaction.response.defer()
         await self.check_proceed(interaction)
@@ -1558,7 +1645,7 @@ class PitchWeatherView(discord.ui.View):
         discord.SelectOption(label="Thunderstorm — Severe DLS", value="Thunderstorm", emoji="🌩️")
     ])
     async def weather_cb(self, interaction, select):
-        if interaction.user.id != self.state.home_team_id: return
+        if interaction.user.id != self.state.home_team_id and interaction.user.id != getattr(self.state, "manager_id", None): return
         self.s_weather = select.values[0]
         await interaction.response.defer()
         await self.check_proceed(interaction)
@@ -1581,6 +1668,9 @@ async def begin_toss(channel, state):
 
     match = CricketMatch(state.p1, state.p2, state.p1_id, state.p2_id, t1, t2, state.format_overs, state.pitch, state.weather)
     match.impact_player = state.impact_player
+    match.tournament_server_id = getattr(state, "tournament_server_id", None)
+    match.tournament_match_id = getattr(state, "tournament_match_id", None)
+    match.manager_id = getattr(state, "manager_id", None)
     active_games[channel.id] = match
 
     if getattr(state, 'sim_only', False):
@@ -1629,7 +1719,7 @@ class TossCallView(discord.ui.View):
         super().__init__(timeout=60)
         self.match = match
     async def handle_call(self, interaction, call):
-        if interaction.user.id != self.match.p2_id: return
+        if interaction.user.id != self.match.p2_id and interaction.user.id != getattr(self.match, "manager_id", None): return
         flip = random.choice(["Heads", "Tails"])
         self.match.toss_winner = interaction.user.id if call == flip else self.match.p1_id
         await interaction.response.defer()
@@ -1649,7 +1739,7 @@ class TossDecisionView(discord.ui.View):
         if interaction.channel.id not in active_games or active_games[interaction.channel.id] != self.match:
             await interaction.response.send_message("❌ This match has been ended.", ephemeral=True)
             return False
-        if interaction.user.id != self.match.toss_winner:
+        if interaction.user.id != self.match.toss_winner and interaction.user.id != getattr(self.match, "manager_id", None):
             await interaction.response.send_message("Not your turn.", ephemeral=True)
             return False
         return True
@@ -1818,6 +1908,29 @@ async def simulatematch_cmd(interaction: discord.Interaction):
     active_setups[interaction.channel.id] = ("format_selection", state)
     
     await interaction.edit_original_response(content=f"⚙️ **Custom Simulation Setup**\n**Host:** {interaction.user.mention}\n\nYou will be prompted to provide the Playing XI for *both* teams.\nStep 1: Select Format below:", view=FormatSelectView(state, interaction.channel))
+
+@bot.event
+async def on_start_tournament_match(channel, manager_id, tourney, match_data):
+    team1_name = match_data["team1"]
+    team2_name = match_data["team2"]
+    t1_data = next(t for t in tourney["teams"] if t["name"] == team1_name)
+    t2_data = next(t for t in tourney["teams"] if t["name"] == team2_name)
+    
+    p1_id = int(t1_data["owner_id"])
+    p2_id = int(t2_data["owner_id"])
+    
+    state = MatchSetupState(None, None, p1_id, p2_id)
+    state.t1_name = team1_name
+    state.t2_name = team2_name
+    state.t1_squad = t1_data["squad"]
+    state.t2_squad = t2_data["squad"]
+    state.tournament_server_id = tourney["server_id"]
+    state.tournament_match_id = match_data["match_id"]
+    state.manager_id = manager_id
+    
+    active_setups[channel.id] = ("format_selection", state)
+    
+    await channel.send(f"🏆 **Tournament Match {match_data['match_id']}**\n**{team1_name}** (<@{p1_id}>) vs **{team2_name}** (<@{p2_id}>)\n\nStep 1: Select Format below:", view=FormatSelectView(state, channel))
 
 @bot.tree.command(name="endmatch", description="Force cancel the current match or setup in this channel.")
 async def endmatch_cmd(interaction: discord.Interaction):
