@@ -383,52 +383,85 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         standings = sorted(teams.items(), key=lambda x: (x[1]["Pts"], x[1]["NRR"]), reverse=True)
         
         # Generate PIL Image
+        c_bg = "#101820"
+        c_panel = "#F8F9FA"
+        c_header = "#0B2B5C"
+        c_cyan = "#1DA1F2"
+        c_text_navy = "#0F172A"
+        c_text_grey = "#64748B"
+        c_white = "#FFFFFF"
+        c_line = "#E2E8F0"
+        c_green = "#39B54A"
+        c_red = "#E84135"
+
         row_height = 60
-        header_height = 150
-        img_height = header_height + (len(standings) * row_height) + 40
+        header_height = 120
+        footer_height = 80
         
-        img = Image.new("RGB", (1100, img_height), color="#1A1A24")
+        img_height = 80 + header_height + 50 + (len(standings) * row_height) + footer_height + 80
+        
+        img = Image.new("RGB", (1200, img_height), color=c_bg)
         d = ImageDraw.Draw(img)
         
         try:
             font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 46)
-            font_hdr = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 26)
-            font_row = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 28)
+            font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 18)
+            font_hdr = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 22)
+            font_row = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 26)
+            font_bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 22)
         except:
-            font_title = font_hdr = font_row = ImageFont.load_default()
+            font_title = font_small = font_hdr = font_row = font_bold = ImageFont.load_default()
+            
+        def get_tw(text, font):
+            if hasattr(font, 'getbbox'): return font.getbbox(text)[2]
+            return len(text) * 12
+            
+        # Panel Background
+        d.rounded_rectangle([(100, 80), (1100, img_height - 80)], radius=20, fill=c_panel)
             
         # Header
-        d.rectangle([(0, 0), (1100, 100)], fill="#0A6496")
-        d.text((40, 25), f"🏆 {tourney['name'].upper()} - POINTS TABLE", fill="#FFFFFF", font=font_title)
+        d.rounded_rectangle([(100, 80), (1100, 80 + header_height)], radius=20, fill=c_header)
+        d.rectangle([(100, 80 + header_height - 20), (1100, 80 + header_height)], fill=c_header)
+        
+        d.text((140, 105), tourney['name'][:30].upper(), fill=c_white, font=font_title)
+        d.text((140, 155), "POINTS TABLE - GROUP STAGE", fill="#A5F3FC", font=font_small)
+        d.text((1060 - get_tw("SERVER LOGO", font_bold), 120), "SERVER LOGO", fill=c_white, font=font_bold)
         
         # Column Headers
         cols = [("POS", 40), ("TEAM", 150), ("P", 550), ("W", 650), ("L", 750), ("T", 850), ("PTS", 950), ("NRR", 1050)]
         for name, x in cols:
-            w = d.textlength(name, font=font_hdr) if hasattr(d, 'textlength') else len(name)*15
-            d.text((x - w/2 if name != "TEAM" else x, 110), name, fill="#FFD700", font=font_hdr)
+            w = get_tw(name, font_hdr)
+            align_x = x - w/2 if name != "TEAM" else x
+            d.text((align_x, 80 + header_height + 15), name, fill=c_text_grey, font=font_hdr)
             
         # Rows
-        y = header_height
+        y = 80 + header_height + 50
         for i, (t_name, data) in enumerate(standings, 1):
-            bg_color = "#242631" if i % 2 == 0 else "#1A1A24"
-            d.rectangle([(0, y), (1100, y + row_height)], fill=bg_color)
+            d.line([(100, y), (1100, y)], fill=c_line, width=2)
             
             # Rank Accent Line
-            if i <= 4: d.rectangle([(0, y), (8, y + row_height)], fill="#39B54A") # Top 4 Qualification
+            if i <= 4: d.rectangle([(100, y), (108, y + row_height)], fill=c_cyan) 
             
-            d.text((40 - (d.textlength(str(i), font=font_row)/2 if hasattr(d, 'textlength') else 10), y + 15), str(i), fill="#FFFFFF", font=font_row)
-            d.text((150, y + 15), t_name[:20].upper(), fill="#FFFFFF", font=font_row)
+            d.text((140 - (get_tw(str(i), font_row)/2), y + 15), str(i), fill=c_text_navy, font=font_row)
+            d.text((220, y + 15), t_name[:20].upper(), fill=c_text_navy, font=font_row)
             
-            d.text((550 - (d.textlength(str(data['P']), font=font_row)/2 if hasattr(d, 'textlength') else 10), y + 15), str(data['P']), fill="#FFFFFF", font=font_row)
-            d.text((650 - (d.textlength(str(data['W']), font=font_row)/2 if hasattr(d, 'textlength') else 10), y + 15), str(data['W']), fill="#39B54A", font=font_row)
-            d.text((750 - (d.textlength(str(data['L']), font=font_row)/2 if hasattr(d, 'textlength') else 10), y + 15), str(data['L']), fill="#E84135", font=font_row)
-            d.text((850 - (d.textlength(str(data['T']), font=font_row)/2 if hasattr(d, 'textlength') else 10), y + 15), str(data['T']), fill="#777777", font=font_row)
+            d.text((550 - (get_tw(str(data['P']), font_row)/2), y + 15), str(data['P']), fill=c_text_grey, font=font_row)
+            d.text((650 - (get_tw(str(data['W']), font_row)/2), y + 15), str(data['W']), fill=c_green, font=font_row)
+            d.text((750 - (get_tw(str(data['L']), font_row)/2), y + 15), str(data['L']), fill=c_red, font=font_row)
+            d.text((850 - (get_tw(str(data['T']), font_row)/2), y + 15), str(data['T']), fill=c_text_grey, font=font_row)
             
-            d.text((950 - (d.textlength(str(data['Pts']), font=font_row)/2 if hasattr(d, 'textlength') else 10), y + 15), str(data['Pts']), fill="#FFD700", font=font_row)
+            d.text((950 - (get_tw(str(data['Pts']), font_row)/2), y + 15), str(data['Pts']), fill=c_text_navy, font=font_row)
             nrr_str = f"{data['NRR']:+.3f}"
-            d.text((1050 - (d.textlength(nrr_str, font=font_row)/2 if hasattr(d, 'textlength') else 30), y + 15), nrr_str, fill="#FFFFFF", font=font_row)
+            d.text((1050 - (get_tw(nrr_str, font_row)/2), y + 15), nrr_str, fill=c_text_navy, font=font_row)
             
             y += row_height
+            
+        # Footer Block
+        footer_y = img_height - 80 - footer_height
+        d.rounded_rectangle([(100, footer_y), (1100, img_height - 80)], radius=20, fill=c_header)
+        d.rectangle([(100, footer_y), (1100, footer_y + 20)], fill=c_header) # square top
+        
+        d.text((600 - get_tw("SIMULATION ENGINE PRO", font_bold)//2, footer_y + 25), "SIMULATION ENGINE PRO", fill=c_white, font=font_bold)
             
         buf = io.BytesIO()
         img.save(buf, format="PNG")
