@@ -588,6 +588,10 @@ def execute_ball_math_t20(match):
             
         if runs in [4, 6] and not is_bye:
             innings.last_ball_boundary = True
+            if runs == 4:
+                b_stats.fours = getattr(b_stats, 'fours', 0) + 1
+            elif runs == 6:
+                b_stats.sixes = getattr(b_stats, 'sixes', 0) + 1
             
         innings.over_log.append(log_entry)
         
