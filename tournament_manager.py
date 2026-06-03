@@ -345,6 +345,37 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             "t2_runs": t2_inn.total_runs, "t2_wickets": t2_inn.wickets, "t2_balls": t2_inn.total_balls,
         }
         tourney["current_match_idx"] += 1
+        
+        # --- PHASE 3: STATS AGGREGATION ---
+        if "stats" not in tourney: tourney["stats"] = {}
+        if t1_name not in tourney["stats"]: tourney["stats"][t1_name] = {}
+        if t2_name not in tourney["stats"]: tourney["stats"][t2_name] = {}
+        
+        def process_team_stats(team_name, batting_inn, bowling_inn):
+            for p in batting_inn.batting_team["players"]:
+                p_name = p["name"]
+                p_stats = tourney["stats"][team_name].setdefault(p_name, {"matches": 0, "runs": 0, "balls_faced": 0, "outs": 0, "fours": 0, "sixes": 0, "fifties": 0, "hundreds": 0, "wickets": 0, "runs_conceded": 0, "balls_bowled": 0})
+                p_stats["matches"] += 1
+                
+                if p_name in batting_inn.batting_stats:
+                    b_stat = batting_inn.batting_stats[p_name]
+                    p_stats["runs"] += b_stat.runs_scored
+                    p_stats["balls_faced"] += b_stat.balls_faced
+                    if b_stat.dismissal != "not out": p_stats["outs"] += 1
+                    p_stats["fours"] += getattr(b_stat, "fours", 0)
+                    p_stats["sixes"] += getattr(b_stat, "sixes", 0)
+                    if b_stat.runs_scored >= 100: p_stats["hundreds"] += 1
+                    elif b_stat.runs_scored >= 50: p_stats["fifties"] += 1
+                    
+            for p_name, bw_stat in bowling_inn.bowling_stats.items():
+                if bw_stat.balls_bowled > 0:
+                    p_stats = tourney["stats"][team_name].setdefault(p_name, {"matches": 0, "runs": 0, "balls_faced": 0, "outs": 0, "fours": 0, "sixes": 0, "fifties": 0, "hundreds": 0, "wickets": 0, "runs_conceded": 0, "balls_bowled": 0})
+                    p_stats["wickets"] += bw_stat.wickets_taken
+                    p_stats["runs_conceded"] += bw_stat.runs_conceded
+                    p_stats["balls_bowled"] += bw_stat.balls_bowled
+
+        process_team_stats(t1_name, t1_inn, t2_inn)
+        process_team_stats(t2_name, t2_inn, t1_inn)
         save_tournament(tourney)
 
     @app_commands.command(name="standings", description="View the Tournament Points Table & NRR.")
@@ -468,3 +499,111 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         buf.seek(0)
         
         await interaction.response.send_message(file=discord.File(fp=buf, filename="standings.png"))
+
+    @app_commands.command(name="leaderboard", description="View the top performing players in the tournament.")
+    @app_commands.choices(category=[
+        app_commands.Choice(name="Most Runs", value="runs"),
+        app_commands.Choice(name="Most Wickets", value="wickets"),
+        app_commands.Choice(name="Highest Strike Rate (Min 50 Runs)", value="sr"),
+        app_commands.Choice(name="Highest Batting Avg (Min 50 Runs)", value="bat_avg"),
+        app_commands.Choice(name="Most 4s", value="fours"),
+        app_commands.Choice(name="Most 6s", value="sixes"),
+        app_commands.Choice(name="Most 50s", value="fifties"),
+        app_commands.Choice(name="Most 100s", value="hundreds"),
+        app_commands.Choice(name="Best Economy (Min 5 Overs)", value="econ"),
+        app_commands.Choice(name="Best Bowling Avg (Min 3 Wickets)", value="bowl_avg")
+    ])
+    async def leaderboard(self, interaction: discord.Interaction, category: app_commands.Choice[str]):
+        server_id = str(interaction.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
+        
+        all_players = []
+        for t_name, players in tourney.get("stats", {}).items():
+            for p_name, stats in players.items():
+                all_players.append({"name": p_name, "team": t_name, "stats": stats})
+                
+        if not all_players:
+            return await interaction.response.send_message("❌ No stats available yet. Complete a match first!", ephemeral=True)
+            
+        c_val = category.value
+        if c_val == "runs": sorted_players = sorted(all_players, key=lambda x: x["stats"]["runs"], reverse=True)
+        elif c_val == "wickets": sorted_players = sorted(all_players, key=lambda x: x["stats"]["wickets"], reverse=True)
+        elif c_val == "sr":
+            qualifiers = [p for p in all_players if p["stats"]["runs"] >= 50]
+            sorted_players = sorted(qualifiers, key=lambda x: (x["stats"]["runs"] / x["stats"]["balls_faced"]) if x["stats"]["balls_faced"] > 0 else 0, reverse=True)
+        elif c_val == "bat_avg":
+            qualifiers = [p for p in all_players if p["stats"]["runs"] >= 50]
+            sorted_players = sorted(qualifiers, key=lambda x: x["stats"]["runs"] / max(1, x["stats"]["outs"]), reverse=True)
+        elif c_val in ["fours", "sixes", "fifties", "hundreds"]:
+            sorted_players = sorted(all_players, key=lambda x: x["stats"][c_val], reverse=True)
+        elif c_val == "econ":
+            qualifiers = [p for p in all_players if p["stats"]["balls_bowled"] >= 30] 
+            sorted_players = sorted(qualifiers, key=lambda x: (x["stats"]["runs_conceded"] / x["stats"]["balls_bowled"])*6 if x["stats"]["balls_bowled"]>0 else 999)
+        elif c_val == "bowl_avg":
+            qualifiers = [p for p in all_players if p["stats"]["wickets"] >= 3]
+            sorted_players = sorted(qualifiers, key=lambda x: x["stats"]["runs_conceded"] / x["stats"]["wickets"] if x["stats"]["wickets"]>0 else 999)
+
+        embed = discord.Embed(title=f"🏆 Tournament Leaderboard: {category.name}", color=discord.Color.gold())
+        
+        lines = []
+        for i, p in enumerate(sorted_players[:10], 1):
+            s = p["stats"]
+            if c_val == "runs": val = f"**{s['runs']}** runs"
+            elif c_val == "wickets": val = f"**{s['wickets']}** wickets"
+            elif c_val == "sr": 
+                sr = (s['runs']/s['balls_faced']*100) if s['balls_faced']>0 else 0
+                val = f"**{sr:.1f}** SR"
+            elif c_val == "bat_avg":
+                avg = s['runs']/max(1, s['outs'])
+                val = f"**{avg:.1f}** Avg"
+            elif c_val in ["fours", "sixes", "fifties", "hundreds"]:
+                val = f"**{s[c_val]}**"
+            elif c_val == "econ":
+                econ = (s['runs_conceded']/s['balls_bowled']*6) if s['balls_bowled']>0 else 0
+                val = f"**{econ:.1f}** Econ"
+            elif c_val == "bowl_avg":
+                avg = s['runs_conceded']/s['wickets'] if s['wickets']>0 else 0
+                val = f"**{avg:.1f}** Avg"
+                
+            lines.append(f"`{i:>2}.` **{p['name']}** ({p['team']}) — {val}")
+            
+        embed.description = "\n".join(lines) if lines else "No players qualify for this leaderboard yet."
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="player_stats", description="View a specific player's tournament stats.")
+    async def player_stats(self, interaction: discord.Interaction, team_name: str, player_name: str):
+        server_id = str(interaction.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
+        
+        t_match = next((t for t in tourney.get("stats", {}).keys() if t.lower() == team_name.lower()), None)
+        if not t_match:
+            return await interaction.response.send_message(f"❌ Team '{team_name}' not found or hasn't played a match yet.", ephemeral=True)
+            
+        p_match = next((p for p in tourney["stats"][t_match].keys() if p.lower() == player_name.lower()), None)
+        if not p_match:
+            close = difflib.get_close_matches(player_name, list(tourney["stats"][t_match].keys()), n=1, cutoff=0.5)
+            if close: p_match = close[0]
+            else: return await interaction.response.send_message(f"❌ Player '{player_name}' not found in team '{t_match}'.", ephemeral=True)
+            
+        stats = tourney["stats"][t_match][p_match]
+        
+        sr = (stats["runs"] / stats["balls_faced"] * 100) if stats["balls_faced"] > 0 else 0.0
+        bat_avg = (stats["runs"] / stats["outs"]) if stats["outs"] > 0 else float(stats["runs"])
+        bowl_avg = (stats["runs_conceded"] / stats["wickets"]) if stats["wickets"] > 0 else 0.0
+        econ = (stats["runs_conceded"] / stats["balls_bowled"] * 6) if stats["balls_bowled"] > 0 else 0.0
+        
+        embed = discord.Embed(title=f"📊 Tournament Stats: {p_match}", description=f"**Team:** {t_match} | **Matches:** {stats['matches']}", color=discord.Color.blue())
+        
+        bat_str = f"**Runs:** {stats['runs']}\n**Strike Rate:** {sr:.1f}\n**Average:** {bat_avg:.1f}\n"
+        bat_str += f"**4s:** {stats['fours']} | **6s:** {stats['sixes']}\n**50s:** {stats['fifties']} | **100s:** {stats['hundreds']}"
+        embed.add_field(name="🏏 Batting", value=bat_str, inline=True)
+        
+        bowl_str = f"**Wickets:** {stats['wickets']}\n**Economy:** {econ:.1f}\n**Bowling Avg:** {bowl_avg:.1f}\n"
+        o = stats['balls_bowled'] // 6
+        b = stats['balls_bowled'] % 6
+        bowl_str += f"**Overs:** {o}.{b}"
+        embed.add_field(name="🎯 Bowling", value=bowl_str, inline=True)
+        
+        await interaction.response.send_message(embed=embed)
