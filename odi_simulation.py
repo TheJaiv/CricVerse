@@ -628,6 +628,10 @@ def execute_ball_math_odi(match):
             
         if runs in [4, 6] and not is_bye:
             innings.last_ball_boundary = True
+            if runs == 4:
+                b_stats.fours = getattr(b_stats, 'fours', 0) + 1
+            elif runs == 6:
+                b_stats.sixes = getattr(b_stats, 'sixes', 0) + 1
             
         innings.over_log.append(log_entry)
         if runs in [1, 3]: innings.current_striker_idx, innings.current_non_striker_idx = innings.current_non_striker_idx, innings.current_striker_idx
