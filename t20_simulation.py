@@ -24,9 +24,9 @@ def get_smart_ai_shot_t20(deliv, is_collapse, is_death_overs, archetype, pressur
         
     if force_aggression:
         if "Yorker" in deliv:
-            return random.choices(["Drive", "Block", "Flick", "Scoop"], weights=[50, 20, 20, 10], k=1)[0]
+            return random.choices(["Drive", "Block", "Flick", "Scoop", "Pull"], weights=[40, 10, 20, 20, 10], k=1)[0]
         elif "Bouncer" in deliv:
-            return random.choices(["Pull", "Cut", "Loft"], weights=[50, 30, 20], k=1)[0]
+            return random.choices(["Pull", "Cut", "Loft", "Sweep"], weights=[40, 30, 20, 10], k=1)[0]
         elif "Full" in deliv:
             return random.choices(["Loft", "Drive", "Sweep", "Scoop"], weights=[40, 30, 15, 15], k=1)[0]
         elif deliv in SPIN_SHOT_MATRIX:
@@ -36,18 +36,18 @@ def get_smart_ai_shot_t20(deliv, is_collapse, is_death_overs, archetype, pressur
             return random.choices(["Loft", "Pull", "Drive", "Scoop"], weights=[30, 30, 25, 15], k=1)[0]
             
     if "Yorker" in deliv:
-        return random.choices(["Block", "Drive", "Flick"], weights=[40, 40, 20], k=1)[0]
+        return random.choices(["Block", "Drive", "Flick", "Cut"], weights=[30, 40, 20, 10], k=1)[0]
     elif "Bouncer" in deliv:
-        return random.choices(["Pull", "Cut", "Block"], weights=[50, 40, 10], k=1)[0]
+        return random.choices(["Pull", "Cut", "Block", "Drive"], weights=[45, 35, 10, 10], k=1)[0]
     elif "Full" in deliv:
-        return random.choices(["Drive", "Loft", "Flick"], weights=[40, 40, 20], k=1)[0]
+        return random.choices(["Drive", "Loft", "Flick", "Defensive"], weights=[40, 35, 15, 10], k=1)[0]
     elif deliv in SPIN_SHOT_MATRIX:
-        if random.random() < 0.75:
+        if random.random() < 0.65:
             return random.choice(SPIN_SHOT_MATRIX[deliv])
         else:
-            return random.choices(["Drive", "Sweep", "Cut", "Block"], weights=[30, 30, 25, 15], k=1)[0]
+            return random.choices(["Drive", "Sweep", "Cut", "Block", "Leave"], weights=[25, 25, 25, 15, 10], k=1)[0]
     else:
-        return random.choices(["Drive", "Cut", "Flick", "Block"], weights=[35, 25, 25, 15], k=1)[0]
+        return random.choices(["Drive", "Cut", "Flick", "Block", "Loft"], weights=[30, 20, 20, 15, 15], k=1)[0]
 
 def get_smart_ai_bowler_t20(innings, pitch, weather="Clear", format_overs=20):
     valid_bowlers = []
@@ -262,8 +262,21 @@ def execute_ball_math_t20(match):
         runs_needed = target - innings.total_runs
         if balls_left > 0:
             rrr = (runs_needed / balls_left) * 6
-            if rrr > 10.0:
-                pressure_multiplier = min(1.4, 1.0 + ((rrr - 10.0) * 0.05))
+            if total_balls < 36: # Powerplay
+                threshold = 10.0
+                max_p = 1.25
+                scale = 0.05
+            elif total_balls < 90: # Middle
+                threshold = 11.0
+                max_p = 1.35
+                scale = 0.06
+            else: # Death
+                threshold = 10.5
+                max_p = 1.50
+                scale = 0.08
+                
+            if rrr > threshold:
+                pressure_multiplier = min(max_p, 1.0 + ((rrr - threshold) * scale))
 
     is_collapse = innings.over_log[-18:].count("<a:wickett:1510369641959264429>") >= 2 and innings.partnership_runs < 25
     is_set_partnership = innings.partnership_runs >= 30
@@ -334,7 +347,7 @@ def execute_ball_math_t20(match):
 
     dot_weight = max(12.0, 35.0 - diff * 0.45)
     single_weight = 40.0
-    boundary_weight = max(2.0, 11.0 + diff * 0.45) # Balanced to allow occasional underdog boundaries
+    boundary_weight = max(2.0, 10.0 + diff * 0.45) # Toned down to prevent AI from inflating scores
     wicket_weight = max(1.2, 5.0 - diff * 0.18) # Balanced to prevent 100% guaranteed routs
     
     if b_stats.balls_faced > 45:
@@ -461,18 +474,18 @@ def execute_ball_math_t20(match):
         active_multiplier = pressure_multiplier
         if is_death_overs:
             if match.current_innings_num == 1:
-                active_multiplier = max(1.35, pressure_multiplier)
+                active_multiplier = max(1.30, pressure_multiplier)
             else:
                 # Chasing teams shouldn't commit suicide if they are already cruising to victory
                 if balls_left > 0 and (runs_needed / balls_left * 6) > 7.5:
-                    active_multiplier = max(1.35, pressure_multiplier)
+                    active_multiplier = max(1.30, pressure_multiplier)
 
         if active_multiplier > 1.0:
             boundary_weight *= active_multiplier
             if total_balls < 90:
-                wicket_weight *= (active_multiplier * 1.10)
+                wicket_weight *= (1.0 + (active_multiplier - 1.0) * 0.6) # Dampened suicide curve
             else:
-                wicket_weight *= (active_multiplier * 1.25)
+                wicket_weight *= (1.0 + (active_multiplier - 1.0) * 0.8) # Dampened suicide curve
                 
         if innings.last_ball_boundary: boundary_weight *= 1.15; wicket_weight *= 1.15
         if is_powerplay: boundary_weight *= 1.25; single_weight *= 0.85
