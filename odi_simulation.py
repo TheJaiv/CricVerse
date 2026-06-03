@@ -61,31 +61,34 @@ def get_smart_ai_bowler_odi(innings, pitch, weather="Clear", format_overs=50):
     bowler_quota = max(1, (format_overs + 4) // 5) # Scales perfectly for Custom match formats!
     
     for p in innings.bowling_team["players"]:
-        if ("Bowler" in p["role"] or "All-Rounder" in p["role"]):
-            stats = innings.bowling_stats[p["name"]]
-            if (stats.balls_bowled // 6) < bowler_quota:
-                if not innings.current_bowler or innings.current_bowler["name"] != p["name"]:
-                    valid_bowlers.append(p)
+        if not getattr(innings.bowling_stats.get(p["name"]), "is_subbed_out", False):
+            if ("Bowler" in p["role"] or "All-Rounder" in p["role"]):
+                stats = innings.bowling_stats[p["name"]]
+                if (stats.balls_bowled // 6) < bowler_quota:
+                    if not innings.current_bowler or innings.current_bowler["name"] != p["name"]:
+                        valid_bowlers.append(p)
                     
     if not valid_bowlers: return None
     # FALLBACK 1: If no standard bowlers have overs left, allow Batters to bowl
     if not valid_bowlers:
         for p in innings.bowling_team["players"]:
-            stats = innings.bowling_stats[p["name"]]
-            if (stats.balls_bowled // 6) < bowler_quota:
-                if not innings.current_bowler or innings.current_bowler["name"] != p["name"]:
-                    valid_bowlers.append(p)
+            if not getattr(innings.bowling_stats.get(p["name"]), "is_subbed_out", False):
+                stats = innings.bowling_stats[p["name"]]
+                if (stats.balls_bowled // 6) < bowler_quota:
+                    if not innings.current_bowler or innings.current_bowler["name"] != p["name"]:
+                        valid_bowlers.append(p)
                     
     # FALLBACK 2: If everyone has bowled two in a row
     if not valid_bowlers:
         for p in innings.bowling_team["players"]:
-            stats = innings.bowling_stats[p["name"]]
-            if (stats.balls_bowled // 6) < bowler_quota:
-                valid_bowlers.append(p)
+            if not getattr(innings.bowling_stats.get(p["name"]), "is_subbed_out", False):
+                stats = innings.bowling_stats[p["name"]]
+                if (stats.balls_bowled // 6) < bowler_quota:
+                    valid_bowlers.append(p)
                 
     # FALLBACK 3: Absolute worst case, ignore quotas completely
     if not valid_bowlers:
-        valid_bowlers = innings.bowling_team["players"]
+        valid_bowlers = [p for p in innings.bowling_team["players"] if not getattr(innings.bowling_stats.get(p["name"]), "is_subbed_out", False)]
 
     current_over = innings.total_balls // 6
     weights = []
@@ -180,43 +183,43 @@ def execute_ball_math_odi(match):
     if match.pitch == "Flat":
         bat_rating += 5
     elif match.pitch == "Green" and "Pace" in bowler["role"]:
-        bowl_rating += 10
+        bowl_rating += 5
     elif match.pitch == "Dry" and "Spin" in bowler["role"] and innings.total_balls > 150:
-        bowl_rating += 8
+        bowl_rating += 5
     elif match.pitch == "Dusty":
-        if "Spin" in bowler["role"]: bowl_rating += 12
-        bat_rating -= 3
+        if "Spin" in bowler["role"]: bowl_rating += 3
+        bat_rating -= 2
     elif match.pitch == "Hard":
-        if "Pace" in bowler["role"] and innings.total_balls < 60: bowl_rating += 8
-        bat_rating += 4
+        if "Pace" in bowler["role"] and innings.total_balls < 60: bowl_rating += 4
+        bat_rating += 3
     elif match.pitch == "Soft":
-        bat_rating -= 5
+        bat_rating -= 3
     elif match.pitch == "Cracked":
-        bowl_rating += 8
-        bat_rating -= 6
+        bowl_rating += 3
+        bat_rating -= 2
     elif match.pitch == "Damp":
-        if "Pace" in bowler["role"] and innings.total_balls < 90: bowl_rating += 12
-        if innings.total_balls < 90: bat_rating -= 5
+        if "Pace" in bowler["role"] and innings.total_balls < 90: bowl_rating += 5
+        if innings.total_balls < 90: bat_rating -= 3
     elif match.pitch == "Dead":
-        bat_rating += 10
+        bat_rating += 5
         bowl_rating -= 5
     elif match.pitch == "Worn":
-        if "Spin" in bowler["role"] and innings.total_balls > 150: bowl_rating += 10
-        if innings.total_balls > 150: bat_rating -= 3
+        if "Spin" in bowler["role"] and innings.total_balls > 150: bowl_rating += 6
+        if innings.total_balls > 150: bat_rating -= 2
     elif match.pitch == "Turning":
-        if "Spin" in bowler["role"]: bowl_rating += 15
-        bat_rating -= 8
+        if "Spin" in bowler["role"]: bowl_rating += 6
+        bat_rating -= 4
     elif match.pitch == "Two-Paced":
-        bat_rating -= 8
+        bat_rating -= 4
     elif match.pitch == "Slow":
-        if "Spin" in bowler["role"]: bowl_rating += 8
-        bat_rating -= 6
+        if "Spin" in bowler["role"]: bowl_rating += 5
+        bat_rating -= 3
     elif match.pitch == "Bouncy":
-        if "Pace" in bowler["role"]: bowl_rating += 10
-        bat_rating -= 2
+        if "Pace" in bowler["role"]: bowl_rating += 6
+        bat_rating -= 1
     elif match.pitch == "Sticky":
-        bowl_rating += 15
-        bat_rating -= 12
+        bowl_rating += 7
+        bat_rating -= 2
         
     # Weather Mechanics
     if match.weather == "Clear":
@@ -224,39 +227,39 @@ def execute_ball_math_odi(match):
     elif match.weather == "Cloudy" and "Pace" in bowler["role"]:
         bowl_rating += 4
     elif match.weather == "Overcast":
-        if "Pace" in bowler["role"]: bowl_rating += 12
-        bat_rating -= 5
+        if "Pace" in bowler["role"]: bowl_rating += 8
+        bat_rating -= 3
     elif match.weather == "Humid" and "Pace" in bowler["role"]:
-        bowl_rating += 8
+        bowl_rating += 5
     elif match.weather == "Dry Heat":
         if "Pace" in bowler["role"]: bowl_rating -= 5
-        elif "Spin" in bowler["role"] and innings.total_balls > 150: bowl_rating += 8
+        elif "Spin" in bowler["role"] and innings.total_balls > 150: bowl_rating += 6
     elif match.weather == "Windy":
         if "Pace" in bowler["role"]: bowl_rating += 6
     elif match.weather in ["Light Rain", "Drizzle"]:
-        bowl_rating -= 8
+        bowl_rating -= 4
         bat_rating += 4
     elif match.weather in ["Heavy Rain", "Thunderstorm"]:
-        bowl_rating -= 12
-        bat_rating += 8
+        bowl_rating -= 8
+        bat_rating += 5
 
     # ODI Batter form progression (Realistic pacing & late fatigue prevents 180+ spam)
     if b_stats.balls_faced < 10:
-        bat_rating -= 8
-    elif 10 <= b_stats.balls_faced < 30:
         bat_rating -= 3
+    elif 10 <= b_stats.balls_faced < 30:
+        bat_rating -= 1
     elif 30 <= b_stats.balls_faced <= 80:
-        bat_rating += 6
+        bat_rating += 4
     elif 80 < b_stats.balls_faced <= 120:
-        bat_rating += 12
+        bat_rating += 7
     elif b_stats.balls_faced > 120:
-        bat_rating -= 5
+        bat_rating -= 2
         
     # ODI Bowler fatigue
     if bow_stats.balls_bowled >= 42 and "Pace" in bowler["role"]:
-        bowl_rating -= 5
+        bowl_rating -= 3
     elif bow_stats.balls_bowled >= 54:
-        bowl_rating -= 10
+        bowl_rating -= 5
         
     total_balls = innings.total_balls
     is_powerplay = total_balls < 60
@@ -363,59 +366,59 @@ def execute_ball_math_odi(match):
     
     # Pitch Extreme Modifiers (Balanced)
     if match.pitch == "Green" and "Pace" in bowler["role"]:
-        wicket_weight *= 1.25
-        boundary_weight *= 0.85
+        wicket_weight *= 1.15
+        boundary_weight *= 0.90
     elif match.pitch == "Dusty" and "Spin" in bowler["role"]:
-        wicket_weight *= 1.25
-        boundary_weight *= 0.80
-        dot_weight *= 1.15
-    elif match.pitch == "Dry" and "Spin" in bowler["role"] and total_balls > 150:
-        wicket_weight *= 1.20
+        wicket_weight *= 1.15
+        boundary_weight *= 0.85
         dot_weight *= 1.10
+    elif match.pitch == "Dry" and "Spin" in bowler["role"] and total_balls > 150:
+        wicket_weight *= 1.10
+        dot_weight *= 1.05
     elif match.pitch == "Hard":
         if total_balls < 60 and "Pace" in bowler["role"]:
-            wicket_weight *= 1.15
+            wicket_weight *= 1.10
         else:
             boundary_weight *= 1.05
     elif match.pitch == "Soft":
-        dot_weight *= 1.30
-        boundary_weight *= 0.75
-    elif match.pitch == "Cracked":
-        wicket_weight *= 1.30
+        dot_weight *= 1.20
         boundary_weight *= 0.80
+    elif match.pitch == "Cracked":
+        wicket_weight *= 1.20
+        boundary_weight *= 0.85
     elif match.pitch == "Damp":
         if "Pace" in bowler["role"] and total_balls < 90:
-            wicket_weight *= 1.35
+            wicket_weight *= 1.25
             boundary_weight *= 0.80
     elif match.pitch == "Dead":
         boundary_weight *= 1.20
-        wicket_weight *= 0.80
+        wicket_weight *= 0.85
     elif match.pitch == "Worn":
         if "Spin" in bowler["role"] and total_balls > 150:
-            wicket_weight *= 1.30
-            dot_weight *= 1.20
-            boundary_weight *= 0.80
+            wicket_weight *= 1.20
+            dot_weight *= 1.10
+            boundary_weight *= 0.85
     elif match.pitch == "Turning":
         if "Spin" in bowler["role"]:
-            wicket_weight *= 1.45
-            boundary_weight *= 0.65
-            dot_weight *= 1.25
+            wicket_weight *= 1.25
+            boundary_weight *= 0.75
+            dot_weight *= 1.15
     elif match.pitch == "Two-Paced":
-        dot_weight *= 1.40
-        boundary_weight *= 0.70
-        wicket_weight *= 1.15
+        dot_weight *= 1.25
+        boundary_weight *= 0.80
+        wicket_weight *= 1.10
     elif match.pitch == "Slow":
-        dot_weight *= 1.30
-        boundary_weight *= 0.70
+        dot_weight *= 1.20
+        boundary_weight *= 0.75
         if "Spin" in bowler["role"]:
-            wicket_weight *= 1.30
+            wicket_weight *= 1.15
     elif match.pitch == "Bouncy":
         if "Pace" in bowler["role"]:
-            wicket_weight *= 1.30
+            wicket_weight *= 1.15
     elif match.pitch == "Sticky":
-        wicket_weight *= 1.70
-        boundary_weight *= 0.50
-        dot_weight *= 1.50
+        wicket_weight *= 1.40
+        boundary_weight *= 0.65
+        dot_weight *= 1.35
     elif match.pitch == "Flat":
         boundary_weight *= 1.10
         wicket_weight *= 0.95
