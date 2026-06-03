@@ -30,9 +30,9 @@ def get_smart_ai_shot_odi(deliv, innings, is_death_overs, archetype, pressure_mu
 
     if force_aggression:
         if "Yorker" in deliv:
-            return random.choices(["Drive", "Block", "Flick", "Scoop"], weights=[50, 20, 20, 10], k=1)[0]
+            return random.choices(["Drive", "Block", "Flick", "Scoop", "Pull"], weights=[40, 10, 20, 20, 10], k=1)[0]
         elif "Bouncer" in deliv:
-            return random.choices(["Pull", "Cut", "Loft"], weights=[50, 30, 20], k=1)[0]
+            return random.choices(["Pull", "Cut", "Loft", "Drive"], weights=[40, 30, 20, 10], k=1)[0]
         elif "Full" in deliv:
             return random.choices(["Loft", "Drive", "Sweep", "Scoop"], weights=[40, 30, 15, 15], k=1)[0]
         elif deliv in SPIN_SHOT_MATRIX:
@@ -43,17 +43,17 @@ def get_smart_ai_shot_odi(deliv, innings, is_death_overs, archetype, pressure_mu
             
     # Standard Match Phase AI
     if "Yorker" in deliv:
-        return random.choices(["Block", "Defensive", "Drive", "Flick"], weights=[40, 30, 20, 10], k=1)[0]
+        return random.choices(["Block", "Defensive", "Drive", "Flick", "Cut"], weights=[35, 25, 20, 10, 10], k=1)[0]
     elif "Bouncer" in deliv:
-        return random.choices(["Leave", "Block", "Pull", "Cut"], weights=[30, 30, 25, 15], k=1)[0]
+        return random.choices(["Leave", "Block", "Pull", "Cut", "Drive"], weights=[25, 25, 25, 15, 10], k=1)[0]
     elif "Full Toss" in deliv or "Full" in deliv:
-        return random.choices(["Drive", "Flick", "Loft", "Block"], weights=[50, 30, 15, 5], k=1)[0]
+        return random.choices(["Drive", "Flick", "Loft", "Block", "Leave"], weights=[45, 25, 15, 10, 5], k=1)[0]
     elif deliv in SPIN_SHOT_MATRIX:
-        if random.random() < 0.75:
+        if random.random() < 0.65:
             return random.choice(SPIN_SHOT_MATRIX[deliv])
-        return random.choices(["Drive", "Sweep", "Cut", "Block"], weights=[35, 25, 25, 15], k=1)[0]
+        return random.choices(["Drive", "Sweep", "Cut", "Block", "Leave"], weights=[30, 20, 20, 20, 10], k=1)[0]
     else:
-        return random.choices(["Drive", "Cut", "Flick", "Block"], weights=[35, 25, 25, 15], k=1)[0]
+        return random.choices(["Drive", "Cut", "Flick", "Block", "Loft"], weights=[30, 25, 25, 15, 5], k=1)[0]
 
 def get_smart_ai_bowler_odi(innings, pitch, weather="Clear", format_overs=50):
     valid_bowlers = []
@@ -278,17 +278,17 @@ def execute_ball_math_odi(match):
             
             # Smart Chasing Phase: Teams delay heavy panic until the later overs
             if total_balls < 120:  # Overs 1-20
-                threshold = 8.5
+                threshold = 8.0
                 max_p = 1.20
-                scale = 0.08
+                scale = 0.05
             elif total_balls < 210:  # Overs 21-35
                 threshold = 7.5
-                max_p = 1.40
-                scale = 0.10
+                max_p = 1.35
+                scale = 0.08
             else:  # Overs 36-50
                 threshold = 6.5
-                max_p = 1.85
-                scale = 0.15
+                max_p = 1.60
+                scale = 0.12
                 
             if rrr > threshold:
                 pressure_multiplier = min(max_p, 1.0 + ((rrr - threshold) * scale))
@@ -502,9 +502,9 @@ def execute_ball_math_odi(match):
         if active_multiplier > 1.0:
             boundary_weight *= active_multiplier
             if total_balls < 240:
-                wicket_weight *= (active_multiplier * 1.05)
+                wicket_weight *= (1.0 + (active_multiplier - 1.0) * 0.5)
             else:
-                wicket_weight *= (active_multiplier * 1.15)
+                wicket_weight *= (1.0 + (active_multiplier - 1.0) * 0.8)
                 
         if innings.last_ball_boundary: boundary_weight *= 1.15; wicket_weight *= 1.15
             
