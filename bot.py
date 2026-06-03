@@ -142,6 +142,10 @@ class CricketMatch:
         self.p2_id = p2_id
         self.team1 = team1
         self.team2 = team2
+        self.t1_subs = team1.get("subs", [])
+        self.t2_subs = team2.get("subs", [])
+        self.t1_impact_used = False
+        self.t2_impact_used = False
         self.format_overs = format_overs
         self.max_balls = format_overs * 6
         self.pitch = pitch
@@ -177,6 +181,74 @@ class CricketMatch:
 # ==========================================
 # 🧠 3. SIMULATION ROUTING ENGINE
 # ==========================================
+
+def swap_impact_player(match: CricketMatch, team_id: int, out_name: str, in_player: dict):
+    if team_id == 1:
+        match.t1_impact_used = True
+        team = match.team1
+    else:
+        match.t2_impact_used = True
+        team = match.team2
+        
+    if in_player not in team["players"]:
+        team["players"].append(in_player)
+        
+    for inn in [match.innings1, match.innings2]:
+        if not inn: continue
+        
+        is_batting = (inn.batting_team["name"] == team["name"])
+        if is_batting:
+            if in_player["name"] not in inn.batting_stats:
+                inn.batting_team["players"].append(in_player)
+                inn.batting_stats[in_player["name"]] = BatterStats(in_player)
+            
+            b_stats = inn.batting_stats.get(out_name)
+            if b_stats:
+                if b_stats.dismissal == "not out" and b_stats.balls_faced == 0:
+                    b_stats.dismissal = "Subbed Out"
+                elif b_stats.dismissal == "not out":
+                    b_stats.dismissal = "Retired (Sub)"
+        else:
+            if in_player["name"] not in inn.bowling_stats:
+                inn.bowling_team["players"].append(in_player)
+                inn.bowling_stats[in_player["name"]] = BowlerStats(in_player)
+            
+            bw_stats = inn.bowling_stats.get(out_name)
+            if bw_stats:
+                bw_stats.is_subbed_out = True
+
+def try_ai_impact_player(match: CricketMatch, innings: InningsState):
+    if not getattr(match, "impact_player", False): return
+    if not match.is_ai_game: return
+    if getattr(match, "t2_impact_used", False): return
+    
+    subs = getattr(match, "t2_subs", [])
+    if not subs: return
+    
+    team = match.team2
+    is_batting = (innings.batting_team["name"] == team["name"])
+    
+    if is_batting:
+        if innings.wickets >= 3 and innings.total_balls < match.max_balls - 12:
+            batters = [s for s in subs if "Batter" in s["role"] or "All-Rounder" in s["role"]]
+            if batters:
+                best_bat = max(batters, key=lambda x: x["bat"])
+                curr = [innings.batting_team["players"][innings.current_striker_idx]["name"], innings.batting_team["players"][innings.current_non_striker_idx]["name"]]
+                cands = [p for p in innings.batting_team["players"] if p["name"] not in curr]
+                if cands:
+                    worst_bowl = min(cands, key=lambda x: x["bat"])
+                    swap_impact_player(match, 2, worst_bowl["name"], best_bat)
+                    match.last_commentary_prefix = f"🔄 **AI TACTIC:** {team['name']} uses IMPACT PLAYER! **{best_bat['name']}** IN for **{worst_bowl['name']}**!\n" + getattr(match, "last_commentary_prefix", "")
+    else:
+        if innings.total_balls >= match.max_balls - 30:
+            bowlers = [s for s in subs if "Bowler" in s["role"] or "All-Rounder" in s["role"]]
+            if bowlers:
+                best_bowl = max(bowlers, key=lambda x: x["bowl"])
+                cands = [p for p in innings.bowling_team["players"] if (not innings.current_bowler or p["name"] != innings.current_bowler["name"])]
+                if cands:
+                    worst_bat = min(cands, key=lambda x: x["bowl"])
+                    swap_impact_player(match, 2, worst_bat["name"], best_bowl)
+                    match.last_commentary_prefix = f"🔄 **AI TACTIC:** {team['name']} uses IMPACT PLAYER! **{best_bowl['name']}** IN for **{worst_bat['name']}**!\n" + getattr(match, "last_commentary_prefix", "")
 
 def get_smart_ai_bowler(innings, pitch, weather="Clear", format_overs=20):
     if format_overs == 50:
@@ -821,6 +893,7 @@ async def loop_entire_match_simulation(interaction, match: CricketMatch):
             break
             
         if innings.total_balls % 6 == 0:
+            try_ai_impact_player(match, innings)
             new_bowler = get_smart_ai_bowler(innings, match.pitch, match.weather, match.format_overs)
             if not new_bowler:
                 await channel.send("🚨 **CRITICAL ERROR:** Could not find a valid bowler to continue simulation. Match has been stopped.")
@@ -983,8 +1056,10 @@ async def prompt_next_batter(interaction, match: CricketMatch):
         
     options = []
     for p in available:
-        role_short = p["role"].split("_")[0]
-        options.append(discord.SelectOption(label=p["name"], description=f"Bat: {p['bat']} | {role_short}", value=p["name"]))
+        st = innings.batting_stats[p["name"]]
+        if st.dismissal == "not out":
+            role_short = p["role"].split("_")[0]
+            options.append(discord.SelectOption(label=p["name"], description=f"Bat: {p['bat']} | {role_short}", value=p["name"]))
         
     view = discord.ui.View(timeout=120)
     select = discord.ui.Select(placeholder="Select Next Batter...", options=options[:25])
@@ -1014,7 +1089,11 @@ async def prompt_next_batter(interaction, match: CricketMatch):
         
     select.callback = cb
     view.add_item(select)
-    await channel.send(f"🏏 <@{uid}>, select the next batter to walk in:", view=view)
+    
+    msg = f"🏏 <@{uid}>, select the next batter to walk in:"
+    if getattr(match, "impact_player", False):
+        msg += "\n💡 *(Need to sub someone in? Run `/impactplayer` first!)*"
+    await channel.send(msg, view=view)
 
 async def prompt_new_over_bowler(interaction, match: CricketMatch):
     innings = match.current_innings
@@ -1022,6 +1101,7 @@ async def prompt_new_over_bowler(interaction, match: CricketMatch):
     channel = interaction.channel if hasattr(interaction, 'channel') else interaction
     
     if match.is_ai_game and bowler_uid == match.p2_id:
+        try_ai_impact_player(match, innings)
         new_bowler = get_smart_ai_bowler(innings, match.pitch, match.weather, match.format_overs)
         if not new_bowler:
             await channel.send("🚨 **CRITICAL ERROR:** Could not find a valid bowler to proceed. The match cannot continue. Please use `/endmatch`.")
@@ -1039,8 +1119,9 @@ async def prompt_new_over_bowler(interaction, match: CricketMatch):
 
     actual_bowlers = []
     for p in innings.bowling_team["players"]:
-        if "Bowler" in p["role"] or "All-Rounder" in p["role"]:
-            actual_bowlers.append(p)
+        if not getattr(innings.bowling_stats.get(p["name"]), "is_subbed_out", False):
+            if "Bowler" in p["role"] or "All-Rounder" in p["role"]:
+                actual_bowlers.append(p)
             
     options = []
     bowler_quota = max(1, (match.format_overs + 4) // 5)
@@ -1089,23 +1170,42 @@ async def prompt_new_over_bowler(interaction, match: CricketMatch):
         return True
     view.interaction_check = interaction_check
     
-    await channel.send(f"🏏 <@{bowler_uid}>, select bowler for Over {innings.total_balls // 6 + 1}:", view=view)
+    msg = f"🏏 <@{bowler_uid}>, select bowler for Over {innings.total_balls // 6 + 1}:"
+    if getattr(match, "impact_player", False):
+        msg += "\n💡 *(Need to sub someone in? Run `/impactplayer` first!)*"
+    await channel.send(msg, view=view)
 
 async def prompt_over_pacing_hub(interaction, match: CricketMatch):
     view = OverControlHubView(match)
     embed = render_embed_scoreboard(match)
     channel = interaction.channel if hasattr(interaction, 'channel') else interaction
-    await channel.send(f"⚡ <@{match.p1_id}> **Over Hub** - How to progress the next 6 deliveries?", embed=embed, view=view)
+    
+    msg = f"⚡ <@{match.p1_id}> **Over Hub** - How to progress the next 6 deliveries?"
+    if getattr(match, "impact_player", False):
+        msg += "\n💡 **TIP:** Any player can use the `🔄 Impact Player` button below to make a sub!"
+        
+    await channel.send(msg, embed=embed, view=view)
 
 class OverControlHubView(discord.ui.View):
     def __init__(self, match: CricketMatch):
         super().__init__(timeout=60)
         self.match = match
         
+        if getattr(match, "impact_player", False):
+            btn = discord.ui.Button(label="🔄 Impact Player", style=discord.ButtonStyle.secondary, row=1, custom_id="impact_btn")
+            btn.callback = self.impact_btn
+            self.add_item(btn)
+        
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.channel.id not in active_games or active_games[interaction.channel.id] != self.match:
             await interaction.response.send_message("❌ This match has been ended.", ephemeral=True)
             return False
+            
+        if interaction.data.get("custom_id") == "impact_btn":
+            if interaction.user.id in [self.match.p1_id, self.match.p2_id]: return True
+            await interaction.response.send_message("❌ You are not playing in this match.", ephemeral=True)
+            return False
+            
         if interaction.user.id != self.match.p1_id and interaction.user.id != getattr(self.match, "manager_id", None):
             await interaction.response.send_message("❌ Host only.", ephemeral=True)
             return False
@@ -1170,6 +1270,18 @@ class OverControlHubView(discord.ui.View):
         self.match.simulation_mode = "whole_match"
         self.match.verbose = True # Verbose mode: Every over summary
         await loop_entire_match_simulation(interaction, self.match)
+        
+    async def impact_btn(self, interaction: discord.Interaction):
+        team_id = 1 if interaction.user.id == self.match.p1_id else (2 if interaction.user.id == self.match.p2_id else None)
+        if not team_id: return await interaction.response.send_message("❌ You are not playing in this match.", ephemeral=True)
+        
+        if (team_id == 1 and getattr(self.match, "t1_impact_used", False)) or (team_id == 2 and getattr(self.match, "t2_impact_used", False)):
+            return await interaction.response.send_message("❌ You have already used your Impact Player.", ephemeral=True)
+            
+        subs = self.match.t1_subs if team_id == 1 else self.match.t2_subs
+        if not subs: return await interaction.response.send_message("❌ You have no subs available.", ephemeral=True)
+            
+        await interaction.response.send_message("🔄 **Select your Impact Player Swap:**", view=ImpactPlayerSelectView(self.match, team_id), ephemeral=True)
         
 class ActionButton(discord.ui.Button):
     def __init__(self, label, style, row, action_type, disabled=False):
@@ -1402,6 +1514,8 @@ async def run_interactive_delivery_sequence(interaction, match: CricketMatch):
     channel = interaction.channel if hasattr(interaction, 'channel') else interaction
     
     if match.is_ai_game and match.get_bowler_user_id() == match.p2_id:
+        if getattr(innings, "total_balls", 0) % 6 == 0 or (innings.over_log and innings.over_log[-1] == "<a:wickett:1510369641959264429>"):
+            try_ai_impact_player(match, innings)
         role = innings.current_bowler["role"]
         
         if "Spin" in role:
@@ -1432,6 +1546,8 @@ async def run_interactive_delivery_sequence(interaction, match: CricketMatch):
 
 async def prompt_batter_shot(channel, match: CricketMatch, prev=None):
     if match.is_ai_game and match.get_striker_user_id() == match.p2_id:
+        if getattr(match.current_innings, "total_balls", 0) % 6 == 0 or (match.current_innings.over_log and match.current_innings.over_log[-1] == "<a:wickett:1510369641959264429>"):
+            try_ai_impact_player(match, match.current_innings)
         execute_ball_math(match)
             
         if getattr(match, "pending_drs", False):
@@ -1646,7 +1762,10 @@ async def ask_team1_name(channel, state):
     active_setups[channel.id] = ("awaiting_team1_name", state)
 
 async def ask_team1_xi(channel, state):
-    await channel.send(f"📋 <@{state.p1_id}> — Type your **Playing XI** (one per line) OR type `default` for a built-in team:\n```text\nVirat Kohli\nRohit Sharma\n...```")
+    if state.impact_player:
+        await channel.send(f"📋 <@{state.p1_id}> — Type your **Playing XI + up to 5 Subs** (one per line, 11-16 total) OR type `default`:\n```text\nPlayer 1\n...\nPlayer 11\nSub 1\n...```")
+    else:
+        await channel.send(f"📋 <@{state.p1_id}> — Type your **Playing XI** (one per line) OR type `default` for a built-in team:\n```text\nVirat Kohli\nRohit Sharma\n...```")
     active_setups[channel.id] = ("awaiting_team1_xi", state)
 
 async def ask_team2_name(channel, state):
@@ -1656,7 +1775,10 @@ async def ask_team2_name(channel, state):
 
 async def ask_team2_xi(channel, state):
     target_id = state.p2_id if state.p2_id else state.p1_id
-    await channel.send(f"📋 <@{target_id}> — Type **Team 2's Playing XI** (one per line) OR type `default` for a built-in team:\n```text\nPlayer Name\n...```")
+    if state.impact_player:
+        await channel.send(f"📋 <@{target_id}> — Type **Team 2's Playing XI + up to 5 Subs** (one per line, 11-16 total) OR type `default`:\n```text\nPlayer 1\n...\nPlayer 11\nSub 1\n...```")
+    else:
+        await channel.send(f"📋 <@{target_id}> — Type **Team 2's Playing XI** (one per line) OR type `default` for a built-in team:\n```text\nPlayer Name\n...```")
     active_setups[channel.id] = ("awaiting_team2_xi", state)
 
 
@@ -1721,7 +1843,7 @@ class TournamentXIView(discord.ui.View):
         self.squad = state.t1_squad if team_num == 1 else state.t2_squad
         self.owner_id = state.p1_id if team_num == 1 else state.p2_id
         self.selected_players = []
-        self.req_count = 12 if state.impact_player else 11
+        self.req_count = 11
         self.update_ui()
         
     def update_ui(self):
@@ -1732,7 +1854,7 @@ class TournamentXIView(discord.ui.View):
                 if p not in self.selected_players:
                     role_short = p["role"].replace("All-Rounder", "AR").replace("Bowler", "BWL").replace("Batter", "BAT").replace("_", " ")
                     options.append(discord.SelectOption(label=p["name"], description=f"Bat: {p['bat']} | {role_short}", value=p["name"]))
-            select = discord.ui.Select(placeholder=f"Pick Player {len(self.selected_players)+1} of {self.req_count}...", options=options)
+            select = discord.ui.Select(placeholder=f"Pick Player {len(self.selected_players)+1} of {self.req_count}...", options=options[:25])
             select.callback = self.select_cb
             self.add_item(select)
             
@@ -1763,12 +1885,15 @@ class TournamentXIView(discord.ui.View):
         await interaction.response.edit_message(content=self.get_msg_content(), view=self)
         
     async def confirm_cb(self, interaction: discord.Interaction):
+        subs = [p for p in self.squad if p not in self.selected_players][:5]
         if self.team_num == 1:
             self.state.t1_roster = self.selected_players
+            self.state.t1_subs = subs
             await interaction.response.edit_message(content="✅ **Team 1 XI Confirmed!**", view=None)
             await prompt_tournament_xi(self.channel, self.state, 2)
         else:
             self.state.t2_roster = self.selected_players
+            self.state.t2_subs = subs
             await interaction.response.edit_message(content="✅ **Team 2 XI Confirmed!**", view=None)
             await ask_pitch_and_weather(self.channel, self.state)
             
@@ -1848,8 +1973,8 @@ class PitchWeatherView(discord.ui.View):
 # --- Step 5: Toss Engine ---
 
 async def begin_toss(channel, state):
-    t1 = {"name": state.t1_name, "players": state.t1_roster}
-    t2 = {"name": state.t2_name, "players": state.t2_roster}
+    t1 = {"name": state.t1_name, "players": state.t1_roster, "subs": getattr(state, 't1_subs', [])}
+    t2 = {"name": state.t2_name, "players": state.t2_roster, "subs": getattr(state, 't2_subs', [])}
 
     match = CricketMatch(state.p1, state.p2, state.p1_id, state.p2_id, t1, t2, state.format_overs, state.pitch, state.weather)
     match.impact_player = state.impact_player
@@ -1975,15 +2100,19 @@ async def on_message(message: discord.Message):
     elif stage == "awaiting_team1_xi":
         if message.author.id != state.p1_id: return
         
-        req_length = 12 if state.impact_player else 11
+        req_length = 11
         if message.content.strip().lower() == "default":
             players = list(TEAMS_DATA["Team 1"]["players"])
-            if state.impact_player and len(players) < 12:
-                players.append({"name": "Extra Batter", "bat": 80, "bowl": 10, "archetype": "Standard", "role": "Batter"})
+            if state.impact_player:
+                state.t1_subs = [{"name": "Extra Batter", "bat": 85, "bowl": 10, "archetype": "Aggressor", "role": "Batter"}, {"name": "Extra Bowler", "bat": 10, "bowl": 85, "archetype": "Standard", "role": "Bowler_Pace"}]
+            else:
+                state.t1_subs = []
             missing = []
         else:
             db = get_all_players()
-            players, missing = parse_pasted_roster(message.content, db)
+            parsed_players, missing = parse_pasted_roster(message.content, db)
+            players = parsed_players[:11]
+            state.t1_subs = parsed_players[11:16] if state.impact_player else []
             
         if missing or len(players) < req_length:
             err = f"❌ **Roster Validation Failed ({len(players)}/{req_length} Found)**\n\n"
@@ -2005,6 +2134,10 @@ async def on_message(message: discord.Message):
         
         if state.p2_id is None and not getattr(state, 'sim_only', False):
             state.t2_roster = TEAMS_DATA["Team 2"]["players"]
+            if getattr(state, "impact_player", False):
+                state.t2_subs = [{"name": "Extra Batter 2", "bat": 86, "bowl": 10, "archetype": "Aggressor", "role": "Batter"}, {"name": "Extra Bowler 2", "bat": 10, "bowl": 86, "archetype": "Standard", "role": "Bowler_Pace"}]
+            else:
+                state.t2_subs = []
             await message.channel.send(f"🤖 AI team **{state.t2_name}** will use the built-in roster.")
             await ask_pitch_and_weather(message.channel, state)
         else:
@@ -2014,15 +2147,19 @@ async def on_message(message: discord.Message):
         target_id = state.p2_id if state.p2_id else state.p1_id
         if message.author.id != target_id: return
         
-        req_length = 12 if state.impact_player else 11
+        req_length = 11
         if message.content.strip().lower() == "default":
             players = list(TEAMS_DATA["Team 2"]["players"])
-            if state.impact_player and len(players) < 12:
-                players.append({"name": "Extra Bowler", "bat": 20, "bowl": 80, "archetype": "Standard", "role": "Bowler_Pace"})
+            if state.impact_player:
+                state.t2_subs = [{"name": "Extra Batter 2", "bat": 86, "bowl": 10, "archetype": "Aggressor", "role": "Batter"}, {"name": "Extra Bowler 2", "bat": 10, "bowl": 86, "archetype": "Standard", "role": "Bowler_Pace"}]
+            else:
+                state.t2_subs = []
             missing = []
         else:
             db = get_all_players()
-            players, missing = parse_pasted_roster(message.content, db)
+            parsed_players, missing = parse_pasted_roster(message.content, db)
+            players = parsed_players[:11]
+            state.t2_subs = parsed_players[11:16] if state.impact_player else []
             
         if missing or len(players) < req_length:
             err = f"❌ **Roster Validation Failed ({len(players)}/{req_length} Found)**\n\n"
@@ -2114,10 +2251,13 @@ async def on_start_tournament_match(channel, manager_id, tourney, match_data):
     state.tournament_match_id = match_data["match_id"]
     state.manager_id = manager_id
     state.tournament_name = tourney["name"]
+    state.format_overs = tourney.get("format_overs", 20)
+    state.impact_player = tourney.get("impact_player", False)
     
-    active_setups[channel.id] = ("format_selection", state)
+    active_setups[channel.id] = ("tournament_setup", state)
     
-    await channel.send(f"🏆 **Tournament Match {match_data['match_id']}**\n**{team1_name}** (<@{p1_id}>) vs **{team2_name}** (<@{p2_id}>)\n\nStep 1: Select Format below:", view=FormatSelectView(state, channel))
+    await channel.send(f"🏆 **Tournament Match {match_data['match_id']}**\n**{team1_name}** (<@{p1_id}>) vs **{team2_name}** (<@{p2_id}>)\n\nFormat: **{state.format_overs} Overs**")
+    await prompt_tournament_xi(channel, state, 1)
 
 @bot.tree.command(name="endmatch", description="Force cancel the current match or setup in this channel.")
 async def endmatch_cmd(interaction: discord.Interaction):
@@ -2182,6 +2322,72 @@ async def help_cmd(interaction: discord.Interaction):
     pages = [embed1, embed2, embed3]
     view = HelpView(pages)
     await interaction.response.send_message(embed=pages[0], view=view, ephemeral=True)
+
+class ImpactPlayerSelectView(discord.ui.View):
+    def __init__(self, match: CricketMatch, team_id: int):
+        super().__init__(timeout=120)
+        self.match = match
+        self.team_id = team_id
+        self.team = match.team1 if team_id == 1 else match.team2
+        self.subs = match.t1_subs if team_id == 1 else match.t2_subs
+        
+        out_opts = []
+        for p in self.team["players"]:
+            if len(out_opts) < 25:
+                inn = self.match.current_innings
+                if inn:
+                    if inn.batting_team["name"] == self.team["name"]:
+                        curr_strikers = [inn.batting_team["players"][inn.current_striker_idx]["name"], inn.batting_team["players"][inn.current_non_striker_idx]["name"]]
+                        if p["name"] in curr_strikers: continue
+                    if inn.bowling_team["name"] == self.team["name"]:
+                        if inn.current_bowler and p["name"] == inn.current_bowler["name"]: continue
+                out_opts.append(discord.SelectOption(label=f"OUT: {p['name']}", value=p["name"]))
+                
+        in_opts = []
+        for p in self.subs:
+            role_short = p["role"].split("_")[0]
+            in_opts.append(discord.SelectOption(label=f"IN: {p['name']} ({role_short})", value=p["name"]))
+            
+        self.select_out = discord.ui.Select(placeholder="Player to swap OUT...", options=out_opts, custom_id="out")
+        self.select_in = discord.ui.Select(placeholder="Player to bring IN...", options=in_opts, custom_id="in")
+        self.select_out.callback = self.cb
+        self.select_in.callback = self.cb
+        self.add_item(self.select_out)
+        self.add_item(self.select_in)
+        
+        self.btn = discord.ui.Button(label="Confirm Swap", style=discord.ButtonStyle.success, disabled=True)
+        self.btn.callback = self.confirm_cb
+        self.add_item(self.btn)
+        
+    async def cb(self, interaction: discord.Interaction):
+        if self.select_out.values and self.select_in.values:
+            self.btn.disabled = False
+        await interaction.response.edit_message(view=self)
+        
+    async def confirm_cb(self, interaction: discord.Interaction):
+        out_name = self.select_out.values[0]
+        in_name = self.select_in.values[0]
+        in_player = next(p for p in self.subs if p["name"] == in_name)
+        swap_impact_player(self.match, self.team_id, out_name, in_player)
+        await interaction.response.edit_message(content=f"🔄 **IMPACT PLAYER SWAP:** **{in_name}** comes IN for **{out_name}**!", view=None)
+
+@bot.tree.command(name="impactplayer", description="Swap in your Impact Player during an active match.")
+async def impact_player_cmd(interaction: discord.Interaction):
+    channel_id = interaction.channel.id
+    if channel_id not in active_games: return await interaction.response.send_message("❌ No active match in this channel.", ephemeral=True)
+    match = active_games[channel_id]
+    if not getattr(match, "impact_player", False): return await interaction.response.send_message("❌ Impact Player rule is not enabled for this match.", ephemeral=True)
+    
+    team_id = 1 if interaction.user.id == match.p1_id else (2 if interaction.user.id == match.p2_id else None)
+    if not team_id: return await interaction.response.send_message("❌ You are not playing in this match.", ephemeral=True)
+    
+    if (team_id == 1 and getattr(match, "t1_impact_used", False)) or (team_id == 2 and getattr(match, "t2_impact_used", False)):
+        return await interaction.response.send_message("❌ You have already used your Impact Player.", ephemeral=True)
+        
+    subs = match.t1_subs if team_id == 1 else match.t2_subs
+    if not subs: return await interaction.response.send_message("❌ You have no subs available.", ephemeral=True)
+        
+    await interaction.response.send_message("🔄 **Select your Impact Player Swap:**", view=ImpactPlayerSelectView(match, team_id), ephemeral=True)
 
 # ==========================================
 # 🔍 8. PUBLIC DATABASE SEARCH
@@ -2588,4 +2794,4 @@ TOKEN = os.environ.get("DISCORD_TOKEN")
 if not TOKEN:
     print("🚨 CRITICAL ERROR: DISCORD_TOKEN environment variable is missing from Render!")
 else:
-    bot.run(TOKEN)
+    bot.run(TOKEN)    
