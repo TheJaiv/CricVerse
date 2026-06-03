@@ -102,7 +102,7 @@ class BatterStats:
         self.runs_scored = 0
         self.balls_faced = 0
         self.dismissal = "not out"
-        self.form_factor = random.uniform(0.90, 1.10)
+        self.form_factor = random.uniform(0.96, 1.04) # Smoothed out to prevent massive RNG blowouts
 
 class BowlerStats:
     def __init__(self, profile):
@@ -110,7 +110,7 @@ class BowlerStats:
         self.runs_conceded = 0
         self.balls_bowled = 0
         self.wickets_taken = 0
-        self.form_factor = random.uniform(0.90, 1.10)
+        self.form_factor = random.uniform(0.96, 1.04)
 
 class InningsState:
     def __init__(self, batting_team, bowling_team):
@@ -1137,15 +1137,19 @@ class OverControlHubView(discord.ui.View):
             innings.bouncers_in_over = 0
             innings.mystery_bowled_this_over = False
             
-        for _ in range(6):
+        target_balls = (innings.total_balls // 6 + 1) * 6
+            
+        while True:
             max_w = 2 if getattr(self.match, 'is_super_over', False) else 10
-            if innings.wickets < max_w and innings.total_balls < self.match.max_balls:
-                if self.match.current_innings_num == 2 and innings.total_runs >= getattr(self.match, "target", self.match.innings1.total_runs + 1): break
-                execute_ball_math(self.match)
+            if innings.wickets >= max_w or innings.total_balls >= self.match.max_balls: break
+            if self.match.current_innings_num == 2 and innings.total_runs >= getattr(self.match, "target", self.match.innings1.total_runs + 1): break
+            if innings.total_balls >= target_balls: break
+            
+            execute_ball_math(self.match)
                 
         self.match.simulation_mode = prev_mode
         
-        events_str = ' '.join(innings.over_log[-6:])
+        events_str = ' '.join(innings.over_log) if innings.over_log else "Maiden"
         await interaction.channel.send(f"⏩ **Simulated Over Complete!**\n**Timeline:** {events_str}\n**Yield:** {innings.total_runs - start_runs} Runs, {innings.wickets - start_wkts} Wickets")
         await advance_match_loop(interaction, self.match)
         
