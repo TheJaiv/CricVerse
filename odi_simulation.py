@@ -14,42 +14,51 @@ SPIN_SHOT_MATRIX = {
     "Mystery": ["Block", "Sweep", "Drive"] 
 }
 
-def get_smart_ai_shot_odi(deliv, innings, is_death_overs, archetype):
+def get_smart_ai_shot_odi(deliv, innings, is_death_overs, archetype, pressure_multiplier=1.0):
     total_balls = innings.total_balls
     is_powerplay = total_balls < 60
     is_middle = 60 <= total_balls < 240
     is_collapse = ((innings.wickets >= 3 and total_balls < 120) or (innings.wickets >= 5 and total_balls < 240)) and innings.partnership_runs < 40
 
-    if is_collapse:
-        return random.choices(["Block", "Defensive", "Drive", "Leave"], weights=[40, 20, 30, 10], k=1)[0]
+    # High pressure forces aggressive mindset (RRR > ~7-8 depending on phase)
+    force_aggression = pressure_multiplier > 1.2 or is_death_overs
         
-    if is_death_overs:
-        if archetype == "Anchor":
-            return random.choices(["Drive", "Loft", "Pull", "Flick"], weights=[30, 30, 20, 20], k=1)[0]
-        else:
-            return random.choices(["Loft", "Pull", "Scoop", "Sweep"], weights=[40, 25, 15, 20], k=1)[0]
-            
-    # ODI Specific Match Phase AI
-    if is_powerplay:
-        if "Yorker" in deliv or "Good" in deliv:
-            return random.choices(["Block", "Drive", "Flick"], weights=[50, 35, 15], k=1)[0]
+    if is_collapse and not force_aggression:
+        if "Yorker" in deliv: return random.choices(["Block", "Defensive", "Drive"], weights=[40, 30, 30], k=1)[0]
+        elif "Bouncer" in deliv: return random.choices(["Leave", "Block", "Pull"], weights=[40, 40, 20], k=1)[0]
+        else: return random.choices(["Block", "Defensive", "Drive", "Flick"], weights=[30, 30, 25, 15], k=1)[0]
+
+    if force_aggression:
+        if "Yorker" in deliv:
+            return random.choices(["Drive", "Block", "Flick", "Scoop"], weights=[50, 20, 20, 10], k=1)[0]
         elif "Bouncer" in deliv:
-            return random.choices(["Leave", "Pull", "Block"], weights=[40, 20, 40], k=1)[0]
+            return random.choices(["Pull", "Cut", "Loft"], weights=[50, 30, 20], k=1)[0]
+        elif "Full" in deliv:
+            return random.choices(["Loft", "Drive", "Sweep", "Scoop"], weights=[40, 30, 15, 15], k=1)[0]
+        elif deliv in SPIN_SHOT_MATRIX:
+            if random.random() < 0.8: return random.choice(SPIN_SHOT_MATRIX[deliv])
+            return random.choices(["Loft", "Sweep", "Drive"], weights=[40, 40, 20], k=1)[0]
         else:
-            return random.choices(["Drive", "Cut", "Flick", "Block"], weights=[40, 20, 20, 20], k=1)[0]
-    elif is_middle:
-        if deliv in SPIN_SHOT_MATRIX:
-            if random.random() < 0.7:
-                return random.choice(SPIN_SHOT_MATRIX[deliv])
-            return random.choices(["Drive", "Sweep", "Cut", "Block"], weights=[35, 25, 25, 15], k=1)[0]
-        else:
-            return random.choices(["Drive", "Cut", "Flick", "Pull"], weights=[40, 20, 25, 15], k=1)[0]
+            return random.choices(["Loft", "Pull", "Drive", "Scoop"], weights=[30, 30, 25, 15], k=1)[0]
             
-    return random.choices(["Drive", "Cut", "Flick", "Block"], weights=[35, 25, 25, 15], k=1)[0]
+    # Standard Match Phase AI
+    if "Yorker" in deliv:
+        return random.choices(["Block", "Defensive", "Drive", "Flick"], weights=[40, 30, 20, 10], k=1)[0]
+    elif "Bouncer" in deliv:
+        return random.choices(["Leave", "Block", "Pull", "Cut"], weights=[30, 30, 25, 15], k=1)[0]
+    elif "Full Toss" in deliv or "Full" in deliv:
+        return random.choices(["Drive", "Flick", "Loft", "Block"], weights=[50, 30, 15, 5], k=1)[0]
+    elif deliv in SPIN_SHOT_MATRIX:
+        if random.random() < 0.75:
+            return random.choice(SPIN_SHOT_MATRIX[deliv])
+        return random.choices(["Drive", "Sweep", "Cut", "Block"], weights=[35, 25, 25, 15], k=1)[0]
+    else:
+        return random.choices(["Drive", "Cut", "Flick", "Block"], weights=[35, 25, 25, 15], k=1)[0]
 
 def get_smart_ai_bowler_odi(innings, pitch, weather="Clear", format_overs=50):
     valid_bowlers = []
     bowler_quota = 10
+    bowler_quota = max(1, (format_overs + 4) // 5) # Scales perfectly for Custom match formats!
     
     for p in innings.bowling_team["players"]:
         if ("Bowler" in p["role"] or "All-Rounder" in p["role"]):
@@ -59,6 +68,24 @@ def get_smart_ai_bowler_odi(innings, pitch, weather="Clear", format_overs=50):
                     valid_bowlers.append(p)
                     
     if not valid_bowlers: return None
+    # FALLBACK 1: If no standard bowlers have overs left, allow Batters to bowl
+    if not valid_bowlers:
+        for p in innings.bowling_team["players"]:
+            stats = innings.bowling_stats[p["name"]]
+            if (stats.balls_bowled // 6) < bowler_quota:
+                if not innings.current_bowler or innings.current_bowler["name"] != p["name"]:
+                    valid_bowlers.append(p)
+                    
+    # FALLBACK 2: If everyone has bowled two in a row
+    if not valid_bowlers:
+        for p in innings.bowling_team["players"]:
+            stats = innings.bowling_stats[p["name"]]
+            if (stats.balls_bowled // 6) < bowler_quota:
+                valid_bowlers.append(p)
+                
+    # FALLBACK 3: Absolute worst case, ignore quotas completely
+    if not valid_bowlers:
+        valid_bowlers = innings.bowling_team["players"]
 
     current_over = innings.total_balls // 6
     weights = []
@@ -66,9 +93,9 @@ def get_smart_ai_bowler_odi(innings, pitch, weather="Clear", format_overs=50):
     for p in valid_bowlers:
         stats = innings.bowling_stats[p["name"]]
         overs_bowled = stats.balls_bowled // 6
-        base_score = float(p["bowl"])
         
-        is_frontline = "Bowler" in p["role"] or base_score >= 80
+        is_frontline = "Bowler" in p["role"] or float(p["bowl"]) >= 80
+        base_score = (float(p["bowl"]) / 10.0) ** 2.0 # Toned down to allow slight bowler rotation
         base_score *= (3.0 if is_frontline else 0.1)
         
         # ODI Pitch Adjustments
@@ -214,14 +241,14 @@ def execute_ball_math_odi(match):
         bat_rating += 8
 
     # ODI Batter form progression (Realistic pacing & late fatigue prevents 180+ spam)
-    if b_stats.balls_faced < 15:
-        bat_rating -= 15
-    elif 15 <= b_stats.balls_faced < 40:
-        bat_rating -= 5
-    elif 40 <= b_stats.balls_faced <= 80:
-        bat_rating += 5
+    if b_stats.balls_faced < 10:
+        bat_rating -= 8
+    elif 10 <= b_stats.balls_faced < 30:
+        bat_rating -= 3
+    elif 30 <= b_stats.balls_faced <= 80:
+        bat_rating += 6
     elif 80 < b_stats.balls_faced <= 120:
-        bat_rating += 10
+        bat_rating += 12
     elif b_stats.balls_faced > 120:
         bat_rating -= 5
         
@@ -237,12 +264,15 @@ def execute_ball_math_odi(match):
     is_death_overs = total_balls >= 240
     
     is_collapse = ((innings.wickets >= 3 and total_balls < 120) or (innings.wickets >= 5 and total_balls < 240)) and innings.partnership_runs < 40
+    is_set_partnership = innings.partnership_runs >= 50
+    has_wickets_in_hand = innings.total_balls >= 240 and innings.wickets <= 4
 
     pressure_multiplier = 1.0
+    runs_needed = 0
+    balls_left = match.max_balls - total_balls
     if match.current_innings_num == 2 and not is_collapse:
         target = getattr(match, "target", match.innings1.total_runs + 1)
         runs_needed = target - innings.total_runs
-        balls_left = match.max_balls - total_balls
         if balls_left > 0:
             rrr = (runs_needed / balls_left) * 6
             
@@ -279,7 +309,7 @@ def execute_ball_math_odi(match):
         else:
             deliv = f"{random.choice(['Inswing', 'Outswing', 'Fast', 'Slow'])} {random.choice(['Bouncer', 'Full', 'Good', 'Yorker'])}"
             
-    shot = match.current_shot_selection or get_smart_ai_shot_odi(deliv, innings, is_death_overs, striker["archetype"])
+    shot = match.current_shot_selection or get_smart_ai_shot_odi(deliv, innings, is_death_overs, striker["archetype"], pressure_multiplier)
         
     match.current_delivery_selection = None
     match.current_shot_selection = None
@@ -326,10 +356,10 @@ def execute_ball_math_odi(match):
         match.free_hit = True
 
     # Baseline ODI Weights - High discipline, lower boundary frequency
-    dot_weight = max(25.0, 50.0 - diff * 0.4)
+    dot_weight = max(22.0, 50.0 - diff * 0.45)
     single_weight = 40.0
-    boundary_weight = max(1.5, 7.0 + diff * 0.3) 
-    wicket_weight = max(1.2, 3.0 - diff * 0.1) 
+    boundary_weight = max(1.5, 7.0 + diff * 0.35) # Balanced to allow underdog resistance
+    wicket_weight = max(1.0, 3.0 - diff * 0.15) # Balanced to allow upsets
     
     # Pitch Extreme Modifiers (Balanced)
     if match.pitch == "Green" and "Pace" in bowler["role"]:
@@ -420,49 +450,63 @@ def execute_ball_math_odi(match):
     perfect_shot_selection = False
     
     # Tactical Spin & Pace UI
-    if "Yorker" in deliv and shot in ["Pull", "Cut"]: bad_shot_selection = True
-    elif "Bouncer" in deliv and shot in ["Drive", "Sweep", "Scoop"]: bad_shot_selection = True
-    elif "Full Toss" in deliv and shot in ["Defensive", "Leave"]: bad_shot_selection = True
-    elif deliv in SPIN_SHOT_MATRIX and shot in SPIN_SHOT_MATRIX[deliv]: perfect_shot_selection = True
+    if "Yorker" in deliv:
+        if shot in ["Pull", "Cut", "Leave"]: bad_shot_selection = True
+        elif shot in ["Defensive", "Drive"]: perfect_shot_selection = True
+    elif "Bouncer" in deliv:
+        if shot in ["Drive", "Sweep", "Scoop"]: bad_shot_selection = True
+        elif shot in ["Pull", "Leave"]: perfect_shot_selection = True
+    elif "Full Toss" in deliv:
+        if shot in ["Defensive", "Leave"]: bad_shot_selection = True
+        elif shot in ["Loft", "Drive"]: perfect_shot_selection = True
+    elif deliv in SPIN_SHOT_MATRIX:
+        if shot in SPIN_SHOT_MATRIX[deliv]: perfect_shot_selection = True
+        elif shot == "Leave": bad_shot_selection = True 
+        else:
+            boundary_weight *= 0.25
+            dot_weight *= 1.3
+            single_weight *= 1.1
 
     if shot in ["Block", "Defensive"]:
-        dot_weight *= 2.0
-        single_weight *= 0.6
-        boundary_weight = 0.1
-        wicket_weight *= 0.4
+        dot_weight *= 1.6; single_weight *= 0.9; boundary_weight = 0.1; wicket_weight *= 0.5
     elif shot == "Leave":
-        dot_weight *= 3.0
-        single_weight = 0
-        boundary_weight = 0
-        wicket_weight *= 0.6
+        dot_weight *= 3.0; single_weight = 0.0; boundary_weight = 0.0; wicket_weight *= 1.2
     else:
         if bad_shot_selection:
-            wicket_weight *= 1.8
-            boundary_weight *= 0.3
-            dot_weight *= 1.5
+            wicket_weight *= 1.8; boundary_weight *= 0.3; dot_weight *= 1.5
         elif perfect_shot_selection:
-            boundary_weight *= 1.3
-            single_weight *= 1.2
-            wicket_weight *= 0.8
+            boundary_weight *= 1.3; single_weight *= 1.1; wicket_weight *= 0.8
             
-        if is_collapse:
-            boundary_weight *= 0.5
-            wicket_weight *= 0.6 
-            
-        # Massive late assault if they have protected their wickets properly
-        if total_balls >= 240 and innings.wickets <= 4:
-            boundary_weight *= 1.25
-            wicket_weight *= 1.15
-            dot_weight *= 0.7
-            
-        if is_death_overs or pressure_multiplier > 1.0:
-            active_multiplier = max(1.4, pressure_multiplier) if is_death_overs else pressure_multiplier
-            boundary_weight *= active_multiplier
-            
-            if total_balls < 180:
-                wicket_weight *= (active_multiplier * 1.05) # Calculated risks while building
+        if striker["archetype"] == "Aggressor": 
+            boundary_weight *= 1.15; wicket_weight *= 1.15
+        elif striker["archetype"] == "Anchor": 
+            if b_stats.balls_faced >= 40 and (is_death_overs or pressure_multiplier > 1.15):
+                boundary_weight *= 1.15; wicket_weight *= 1.05 # Set Anchors slog effectively!
             else:
-                wicket_weight *= (active_multiplier * 1.15) # High risks when running out of time
+                dot_weight *= 1.1; wicket_weight *= 0.8
+        elif striker["archetype"] == "Finisher" and is_death_overs: 
+            boundary_weight *= 1.25
+
+        if is_collapse: boundary_weight *= 0.7; wicket_weight *= 0.75; single_weight *= 1.2
+        if is_set_partnership: wicket_weight *= 0.85
+        if has_wickets_in_hand: boundary_weight *= 1.3; wicket_weight *= 1.2; dot_weight *= 0.7
+            
+        active_multiplier = pressure_multiplier
+        if is_death_overs:
+            if match.current_innings_num == 1:
+                active_multiplier = max(1.35, pressure_multiplier)
+            else:
+                if balls_left > 0 and (runs_needed / balls_left * 6) > 6.5:
+                    active_multiplier = max(1.35, pressure_multiplier)
+                    
+        if active_multiplier > 1.0:
+            boundary_weight *= active_multiplier
+            if total_balls < 240:
+                wicket_weight *= (active_multiplier * 1.05)
+            else:
+                wicket_weight *= (active_multiplier * 1.15)
+                
+        if innings.last_ball_boundary: boundary_weight *= 1.15; wicket_weight *= 1.15
             
     if "Mystery" in deliv:
         wicket_weight *= 1.6
@@ -475,8 +519,8 @@ def execute_ball_math_odi(match):
     
     # ODI Exploit fixes
     if shot in ["Loft", "Scoop"]:
-        four_weight *= 0.7
-        six_weight *= 2.5
+        four_weight *= 0.6
+        six_weight *= 3.0
         if not is_death_overs: 
             wicket_weight *= 3.0 # Highly suicidal in overs 1-40
         else:
@@ -487,7 +531,12 @@ def execute_ball_math_odi(match):
         six_weight = 0.0
     elif shot in ["Drive", "Cut", "Pull", "Flick", "Sweep"]:
         four_weight *= 1.2
-        six_weight *= 0.3
+        six_weight *= 0.4
+        
+    if "Slow" in deliv and shot in ["Loft", "Pull", "Sweep", "Scoop"]: wicket_weight *= 1.5; six_weight *= 0.5
+    elif "Fast" in deliv and shot in ["Scoop", "Sweep", "Pull", "Loft"]: wicket_weight *= 1.5
+    elif "Outswing" in deliv and shot in ["Drive", "Cut"]: wicket_weight *= 1.4; four_weight *= 1.2
+    elif "Inswing" in deliv and shot in ["Drive", "Flick", "Sweep"]: wicket_weight *= 1.4
         
     # 🚨 ANTI-OVERCOOK SAFETIES (Prevents stacked conditions from breaking the game)
     four_weight = max(0.5, min(four_weight, 25.0)) # Hard cap to prevent 450+ scores
@@ -511,9 +560,16 @@ def execute_ball_math_odi(match):
     if outcome == "wicket":
         innings.wickets += 1
         innings.partnership_runs = 0
-        dismissal_type = random.choice(["Bowled", "Caught", "LBW", "Caught Behind"])
-        b_stats.dismissal = f"b. {bowler['name']}" if dismissal_type == "Bowled" else f"lbw b. {bowler['name']}" if dismissal_type == "LBW" else f"c. {dismissal_type} b. {bowler['name']}"
+        d_types = ["Bowled", "Caught", "LBW"]
         
+        if "Outswing" in deliv and shot in ["Drive", "Cut"]: dismissal_type = "Caught Behind"
+        elif "Inswing" in deliv and shot in ["Drive", "Flick"]: dismissal_type = random.choice(["Bowled", "LBW"])
+        elif "Slow" in deliv and shot in ["Loft", "Pull", "Scoop"]: dismissal_type = "Caught"
+        elif bad_shot_selection and "Yorker" in deliv: dismissal_type = "Bowled"
+        elif bad_shot_selection and "Bouncer" in deliv: dismissal_type = "Caught"
+        elif shot in ["Loft", "Scoop"]: dismissal_type = "Caught"
+        else: dismissal_type = random.choice(d_types)
+            
         if dismissal_type == "Bowled":
             b_stats.dismissal = f"b. {bowler['name']}"
         elif dismissal_type == "LBW":
@@ -544,17 +600,37 @@ def execute_ball_math_odi(match):
                 match.out_batter_profile = striker
         outcome_text = f"WICKET! ({dismissal_type.upper()})"
     else:
-        runs = {"dot": 0, "single": 1, "two": 2, "three": 3, "four": 4, "six": 6}[outcome]
-        innings.total_runs += runs
-        innings.partnership_runs += runs
-        b_stats.runs_scored += runs
-        bow_stats.runs_conceded += runs
-        log_entry = {0: "<a:0run:1510601371483897896>", 1: "<a:1run:1510600760570679356>", 2: "<a:2runs:1510601044818788403>", 3: "<a:3runs:1510600945053073508>", 4: "<a:4runs:1510600613556125787>", 6: "<a:6runs:1510600650613063761>"}[runs]
-        if is_no_ball: log_entry = "NB" + (log_entry if runs > 0 else "")
+        runs_map = {"dot": 0, "single": 1, "two": 2, "three": 3, "four": 4, "six": 6}
+        runs = runs_map[outcome]
+        
+        is_bye = False
+        if runs == 0 and random.random() < 0.03:
+            is_bye = True
+            runs = random.choice([1, 2, 4])
+            innings.total_runs += runs
+            if not hasattr(innings, 'extras'): innings.extras = 0
+            innings.extras += runs
+            outcome_text = f"{runs} Leg Byes"
+            log_entry = f"{runs}LB"
+        else:
+            innings.total_runs += runs
+            innings.partnership_runs += runs
+            b_stats.runs_scored += runs
+            bow_stats.runs_conceded += runs
+            outcome_text = f"{runs} Runs" if runs > 0 else "Dot Ball"
+                
+            emoji_map = {0: "<a:0run:1510601371483897896>", 1: "<a:1run:1510600760570679356>", 2: "<a:2runs:1510601044818788403>", 3: "<a:3runs:1510600945053073508>", 4: "<a:4runs:1510600613556125787>", 6: "<a:6runs:1510600650613063761>"}
+            log_entry = emoji_map[runs]
+            
+        if is_no_ball:
+            log_entry = "NB" + (log_entry if runs > 0 and not is_bye else "")
+            outcome_text += " (NO BALL)"
+            
+        if runs in [4, 6] and not is_bye:
+            innings.last_ball_boundary = True
+            
         innings.over_log.append(log_entry)
         if runs in [1, 3]: innings.current_striker_idx, innings.current_non_striker_idx = innings.current_non_striker_idx, innings.current_striker_idx
-        outcome_text = f"{runs} Runs" if runs > 0 else "Dot Ball"
-        if is_no_ball: outcome_text += " (NO BALL)"
 
     if not is_no_ball:
         bow_stats.balls_bowled += 1
