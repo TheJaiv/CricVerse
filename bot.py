@@ -1628,7 +1628,7 @@ def parse_pasted_roster(raw_text, db_players):
     seen_names = set() # 🚨 NEW: Tracks who is already in the XI
     
     lines = [l.strip() for l in raw_text.split("\n") if l.strip()]
-    for line in lines[:15]:
+    for line in lines[:16]:
         query = line.lower()
         matched_player = None
         
@@ -2794,4 +2794,4 @@ TOKEN = os.environ.get("DISCORD_TOKEN")
 if not TOKEN:
     print("🚨 CRITICAL ERROR: DISCORD_TOKEN environment variable is missing from Render!")
 else:
-    bot.run(TOKEN)    
+    bot.run(TOKEN)
