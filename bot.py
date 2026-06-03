@@ -102,6 +102,8 @@ class BatterStats:
         self.runs_scored = 0
         self.balls_faced = 0
         self.dismissal = "not out"
+        self.fours = 0
+        self.sixes = 0
         self.form_factor = random.uniform(0.96, 1.04) # Smoothed out to prevent massive RNG blowouts
 
 class BowlerStats:
