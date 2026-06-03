@@ -239,6 +239,12 @@ def try_ai_impact_player(match: CricketMatch, innings: InningsState):
                     worst_bowl = min(cands, key=lambda x: x["bat"])
                     swap_impact_player(match, 2, worst_bowl["name"], best_bat)
                     match.last_commentary_prefix = f"🔄 **AI TACTIC:** {team['name']} uses IMPACT PLAYER! **{best_bat['name']}** IN for **{worst_bowl['name']}**!\n" + getattr(match, "last_commentary_prefix", "")
+                    cands = sorted(cands, key=lambda x: x["bat"])
+                    worst_bat = cands[0]
+                    
+                    if best_bat["bat"] > worst_bat["bat"] + 15 and best_bat["bat"] >= 75:
+                        swap_impact_player(match, 2, worst_bat["name"], best_bat)
+                        match.last_commentary_prefix = f"🔄 **AI TACTIC:** {team['name']} uses IMPACT PLAYER! **{best_bat['name']}** IN for **{worst_bat['name']}**!\n" + getattr(match, "last_commentary_prefix", "")
     else:
         if innings.total_balls >= match.max_balls - 30:
             bowlers = [s for s in subs if "Bowler" in s["role"] or "All-Rounder" in s["role"]]
@@ -249,6 +255,12 @@ def try_ai_impact_player(match: CricketMatch, innings: InningsState):
                     worst_bat = min(cands, key=lambda x: x["bowl"])
                     swap_impact_player(match, 2, worst_bat["name"], best_bowl)
                     match.last_commentary_prefix = f"🔄 **AI TACTIC:** {team['name']} uses IMPACT PLAYER! **{best_bowl['name']}** IN for **{worst_bat['name']}**!\n" + getattr(match, "last_commentary_prefix", "")
+                    cands = sorted(cands, key=lambda x: x["bowl"])
+                    worst_bowl = cands[0]
+                    
+                    if best_bowl["bowl"] > worst_bowl["bowl"] + 15 and best_bowl["bowl"] >= 75:
+                        swap_impact_player(match, 2, worst_bowl["name"], best_bowl)
+                        match.last_commentary_prefix = f"🔄 **AI TACTIC:** {team['name']} uses IMPACT PLAYER! **{best_bowl['name']}** IN for **{worst_bowl['name']}**!\n" + getattr(match, "last_commentary_prefix", "")
 
 def get_smart_ai_bowler(innings, pitch, weather="Clear", format_overs=20):
     if format_overs == 50:
@@ -1904,6 +1916,14 @@ class TournamentXIView(discord.ui.View):
         msg += f"⚠️ **IMPORTANT:** The order you select them determines your exact batting order!\n\n"
         for i, p in enumerate(self.selected_players, 1):
             msg += f"`{i:>2}.` **{p['name']}**\n"
+            
+        if getattr(self.state, "impact_player", False) and len(self.selected_players) == self.req_count:
+            subs = [p for p in self.squad if p not in self.selected_players][:5]
+            if subs:
+                msg += "\n**Impact Subs (Automatically assigned from remaining squad):**\n"
+                for i, p in enumerate(subs, 1):
+                    role_short = p["role"].replace("All-Rounder", "AR").replace("Bowler", "BWL").replace("Batter", "BAT").replace("_", " ")
+                    msg += f"`{i:>2}.` **{p['name']}** — {role_short} *(Bat: {p['bat']} | Bowl: {p['bowl']})*\n"
         return msg
 
 # --- Step 4: Pitch & Weather Select ---
@@ -2123,6 +2143,8 @@ async def on_message(message: discord.Message):
 
         del active_setups[channel_id]
         xi_text = format_xi_display(players)
+        if state.impact_player and state.t1_subs:
+            xi_text += "\n\n**Impact Subs:**\n" + format_xi_display(state.t1_subs)
         await message.channel.send(f"📋 **{state.t1_name} XI** Verified:\n{xi_text}\n\nIs this correct?", view=Team1VerifyView(state, message.channel, players))
 
     elif stage == "awaiting_team2_name":
@@ -2170,6 +2192,8 @@ async def on_message(message: discord.Message):
 
         del active_setups[channel_id]
         xi_text = format_xi_display(players)
+        if state.impact_player and state.t2_subs:
+            xi_text += "\n\n**Impact Subs:**\n" + format_xi_display(state.t2_subs)
         await message.channel.send(f"📋 **{state.t2_name} XI** Verified:\n{xi_text}\n\nIs this correct?", view=Team2VerifyView(state, message.channel, players))
 
     await bot.process_commands(message)
