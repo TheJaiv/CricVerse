@@ -191,7 +191,7 @@ def execute_ball_math_t20(match):
     elif match.pitch == "Soft":
         bat_rating -= 2
     elif match.pitch == "Cracked":
-        bowl_rating += 4
+        bowl_rating += 3
         bat_rating -= 2
     elif match.pitch == "Damp":
         if "Pace" in bowler["role"] and innings.total_balls < 36: bowl_rating += 5
@@ -204,7 +204,7 @@ def execute_ball_math_t20(match):
         if innings.total_balls > 60: bat_rating -= 1
     elif match.pitch == "Turning":
         if "Spin" in bowler["role"]: bowl_rating += 5
-        bat_rating -= 3
+       
     elif match.pitch == "Two-Paced":
         bat_rating -= 2
     elif match.pitch == "Slow":
@@ -214,7 +214,7 @@ def execute_ball_math_t20(match):
         if "Pace" in bowler["role"]: bowl_rating += 4
         bat_rating -= 1
     elif match.pitch == "Sticky":
-        bowl_rating += 6
+        bowl_rating += 5
         bat_rating -= 4
         
     # Weather Mechanics
@@ -223,10 +223,10 @@ def execute_ball_math_t20(match):
     elif match.weather == "Cloudy" and "Pace" in bowler["role"]:
         bowl_rating += 2
     elif match.weather == "Overcast":
-        if "Pace" in bowler["role"]: bowl_rating += 6
+        if "Pace" in bowler["role"]: bowl_rating += 3
         bat_rating -= 2
     elif match.weather == "Humid" and "Pace" in bowler["role"]:
-        bowl_rating += 4
+        bowl_rating += 2
     elif match.weather == "Dry Heat":
         if "Pace" in bowler["role"]: bowl_rating -= 3
         elif "Spin" in bowler["role"] and innings.total_balls > 60: bowl_rating += 4
@@ -236,8 +236,8 @@ def execute_ball_math_t20(match):
         bowl_rating -= 4
         bat_rating += 2
     elif match.weather in ["Heavy Rain", "Thunderstorm"]:
-        bowl_rating -= 6
-        bat_rating += 4
+        bowl_rating -= 3
+        bat_rating += 2
 
     # Batter form progression
     if b_stats.balls_faced < 4:
