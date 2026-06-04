@@ -375,6 +375,21 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         async_save_to_bin()
         await interaction.response.send_message("🗑️ **Tournament Successfully Deleted.** You can now create a new one.")
 
+    @app_commands.command(name="set_theme", description="[OWNER] Set a custom image theme for this server's tournament.")
+    async def set_theme(self, interaction: discord.Interaction, theme_name: str):
+        if interaction.user.id != 1087369198801526836:
+            return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
+            
+        server_id = str(interaction.guild.id)
+        tourney = get_server_tournament(server_id)
+        
+        if not tourney:
+            return await interaction.response.send_message("❌ No tournament exists in this server.", ephemeral=True)
+            
+        tourney["theme"] = theme_name
+        save_tournament(tourney)
+        await interaction.response.send_message(f"✅ Tournament theme set to `{theme_name}` for this server.", ephemeral=True)
+
     @app_commands.command(name="play_next", description="[MANAGER] Launch the next pending tournament match in this channel.")
     async def play_next(self, interaction: discord.Interaction):
         server_id = str(interaction.guild.id)
@@ -527,8 +542,66 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
         
         standings = get_tournament_standings(tourney)
+        theme = tourney.get("theme", "Default")
         
-        # Generate PIL Image
+        # --- 1. SHARED FONTS ---
+        try:
+            font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 46)
+            font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 18)
+            font_hdr = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 22)
+            font_row = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 26)
+            font_bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 22)
+        except:
+            font_title = font_small = font_hdr = font_row = font_bold = ImageFont.load_default()
+            
+        def get_tw(text, font):
+            if hasattr(font, 'getbbox'): return font.getbbox(text)[2]
+            return len(text) * 12
+            
+        # --- 2. CRIMSON CRICKET TEMPLATE ---
+        if theme == "Crimson Cricket":
+            try:
+                img = Image.open("points_table_crimson.png").convert("RGB")
+                d = ImageDraw.Draw(img)
+                
+                # 🛠️ CONFIGURATION: Adjust these pixels if it doesn't line up perfectly with your PNG!
+                start_y = 288       # Y-pixel where the first team row starts
+                row_height = 47     # Spacing between each team row
+                c_text = "#FFFFFF"  # Text color
+                
+                # X-pixel coordinates for the center of each column (Adjust left/right as needed)
+                # Note: The template already has 1-10 written for POS, so we skip drawing the rank!
+                cols = {"TEAM": 140, "P": 465, "W": 590, "L": 715, "NR": 840, "PTS": 965, "NRR": 1090}
+                
+                y = start_y
+                for i, (t_name, data) in enumerate(standings, 1):
+                    if i > 10: break # Template only supports up to 10 teams
+                    
+                    # Team Name (Left Aligned)
+                    d.text((cols["TEAM"], y + 8), t_name[:20].upper(), fill=c_text, font=font_row)
+                    # Stats
+                    d.text((cols["P"] - (get_tw(str(data['P']), font_row)/2), y + 8), str(data['P']), fill=c_text, font=font_row)
+                    d.text((cols["W"] - (get_tw(str(data['W']), font_row)/2), y + 8), str(data['W']), fill=c_text, font=font_row)
+                    d.text((cols["L"] - (get_tw(str(data['L']), font_row)/2), y + 8), str(data['L']), fill=c_text, font=font_row)
+                    d.text((cols["NR"] - (get_tw(str(data['T']), font_row)/2), y + 8), str(data['T']), fill=c_text, font=font_row)
+                    d.text((cols["PTS"] - (get_tw(str(data['Pts']), font_row)/2), y + 8), str(data['Pts']), fill=c_text, font=font_row)
+                    # NRR
+                    nrr_str = f"{data['NRR']:+.3f}"
+                    d.text((cols["NRR"] - (get_tw(nrr_str, font_row)/2), y + 8), nrr_str, fill=c_text, font=font_row)
+                    
+                    y += row_height
+                    
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                buf.seek(0)
+                return await interaction.response.send_message(file=discord.File(fp=buf, filename="crimson_standings.png"))
+                
+            except FileNotFoundError:
+                # If you misspelled the file or it's missing, gracefully fall back to the default!
+                print("⚠️ Warning: points_table_crimson.png not found. Falling back to default layout.")
+                pass
+                
+        # --- 3. DEFAULT THEME (Auto-Generated) ---
         c_bg = "#101820"
         c_panel = "#F8F9FA"
         c_header = "#0B2B5C"
@@ -548,19 +621,6 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         
         img = Image.new("RGB", (1200, img_height), color=c_bg)
         d = ImageDraw.Draw(img)
-        
-        try:
-            font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 46)
-            font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 18)
-            font_hdr = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 22)
-            font_row = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 26)
-            font_bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 22)
-        except:
-            font_title = font_small = font_hdr = font_row = font_bold = ImageFont.load_default()
-            
-        def get_tw(text, font):
-            if hasattr(font, 'getbbox'): return font.getbbox(text)[2]
-            return len(text) * 12
             
         # Panel Background
         d.rounded_rectangle([(100, 80), (1100, img_height - 80)], radius=20, fill=c_panel)
@@ -722,3 +782,71 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         embed.add_field(name="🎯 Bowling", value=bowl_str, inline=True)
         
         await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="squad", description="View a team's tournament squad and player ratings.")
+    async def squad(self, interaction: discord.Interaction, team_name: str = None):
+        server_id = str(interaction.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
+        
+        if team_name:
+            team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.lower()), None)
+            if not team: return await interaction.response.send_message(f"❌ Team '{team_name}' not found.", ephemeral=True)
+        else:
+            team = next((t for t in tourney["teams"] if t["owner_id"] == str(interaction.user.id)), None)
+            if not team: return await interaction.response.send_message("❌ You do not own a team. Please specify a `team_name`.", ephemeral=True)
+            
+        if not team.get("squad"):
+            return await interaction.response.send_message(f"❌ **{team['name']}** has not submitted their squad yet.", ephemeral=True)
+            
+        batters, wks, all_rounders, bowlers = [], [], [], []
+        
+        for p in team["squad"]:
+            role = p["role"]
+            if "WK" in role: wks.append(p)
+            elif "All-Rounder" in role: all_rounders.append(p)
+            elif "Bowler" in role: bowlers.append(p)
+            else: batters.append(p)
+            
+        batters.sort(key=lambda x: x["bat"], reverse=True)
+        wks.sort(key=lambda x: x["bat"], reverse=True)
+        all_rounders.sort(key=lambda x: (x["bat"] + x["bowl"]), reverse=True)
+        bowlers.sort(key=lambda x: x["bowl"], reverse=True)
+        
+        embed = discord.Embed(title=f"📋 Squad: {team['name']}", description=f"👤 **Owner:** <@{team['owner_id']}> | **Total Players:** {len(team['squad'])}", color=discord.Color.blue())
+        
+        def format_player(p, cat):
+            arch = p["archetype"]
+            style = p["role"].split("_", 1)[1].replace("_", " ") if "_" in p["role"] else ""
+            
+            if cat in ["bat", "wk"]:
+                return f"`{p['bat']:>2} BAT` • **{p['name']}** *(Type: {arch})*"
+            elif cat == "ar":
+                return f"`{p['bat']:>2} BAT | {p['bowl']:>2} BWL` • **{p['name']}** *({style} | {arch})*"
+            else:
+                return f"`{p['bowl']:>2} BWL` • **{p['name']}** *({style})*"
+
+        if batters: embed.add_field(name="🏏 Batters", value="\n".join([format_player(p, "bat") for p in batters]), inline=False)
+        if wks: embed.add_field(name="🧤 Wicket-Keepers", value="\n".join([format_player(p, "wk") for p in wks]), inline=False)
+        if all_rounders: embed.add_field(name="⚔️ All-Rounders", value="\n".join([format_player(p, "ar") for p in all_rounders]), inline=False)
+        if bowlers: embed.add_field(name="🎯 Bowlers", value="\n".join([format_player(p, "bowl") for p in bowlers]), inline=False)
+        
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="help", description="Show the Tournament module help guide.")
+    async def tournament_help(self, interaction: discord.Interaction):
+        embed = discord.Embed(title="🏆 Tournament Commands & Guide", color=discord.Color.gold())
+        
+        setup = "`/tournament create` - [ADMIN] Start a new tournament & set rules.\n`/tournament add_manager` - [MANAGER] Assign a co-manager.\n`/tournament add_team` - [MANAGER] Add a team and assign an Owner.\n`/tournament submit_squad` - [OWNER] Submit your squad.\n`/tournament start` - [MANAGER] Locks registration & generates schedule."
+        embed.add_field(name="🛠️ 1. Setup & Registration", value=setup, inline=False)
+        
+        play = "`/tournament next_match` - [OWNER] Instantly launch your team's next match.\n`/tournament play` - [MANAGER] Force start a specific Match ID.\n`/tournament play_next` - [MANAGER] Force start the next sequential match."
+        embed.add_field(name="🏏 2. Playing Matches", value=play, inline=False)
+        
+        stats = "`/tournament status` - View the live schedule and upcoming matches.\n`/tournament standings` - View the Points Table and NRR.\n`/tournament leaderboard` - View top Runs, Wickets, Strike Rates, etc.\n`/tournament player_stats` - Check a specific player's exact stats.\n`/tournament squad` - View the full roster & ratings of any team."
+        embed.add_field(name="📊 3. Stats & Standings", value=stats, inline=False)
+        
+        knockouts = "`/tournament generate_knockouts` - [MANAGER] Starts the Semi-Finals for the Top 4 teams!\n`/tournament force_delete` - [OWNER] Completely deletes the tournament."
+        embed.add_field(name="🔥 4. Knockouts & Admin", value=knockouts, inline=False)
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
