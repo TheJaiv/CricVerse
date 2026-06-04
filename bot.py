@@ -15,7 +15,7 @@ from subscription_manager import (
     load_data_from_bin, save_data_to_bin, check_potential_quota, consume_quota, 
     update_user_tier, update_server_tier, get_auth_admins, toggle_auth_admin, 
     get_all_players, add_player, add_players_bulk, update_player, delete_players, clean_duplicate_players,
-    get_tier_status, is_channel_restricted, toggle_restricted_channel
+    get_tier_status, is_channel_restricted, toggle_restricted_channel, DB_CACHE
 )
 
 # ==========================================
@@ -735,6 +735,117 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
     return buf
 
 def generate_tournament_score_image(match: CricketMatch) -> io.BytesIO:
+    theme = "Default"
+    if getattr(match, "tournament_server_id", None):
+        tourney = next((t for t in DB_CACHE.get("tournaments", []) if t.get("server_id") == match.tournament_server_id), None)
+        if tourney: theme = tourney.get("theme", "Default")
+
+    if theme == "Crimson Cricket":
+        try:
+            img = Image.open("scoreboard_crimson.png").convert("RGB")
+            d = ImageDraw.Draw(img)
+            W, H = img.width, img.height
+            
+            try:
+                # Dynamically scales font size based on the image height!
+                font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", int(H*0.030))
+                font_score = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", int(H*0.040))
+                font_bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", int(H*0.022))
+            except:
+                font_title = font_score = font_bold = ImageFont.load_default()
+
+            def get_tw(text, font):
+                if hasattr(font, 'getbbox'): return font.getbbox(text)[2]
+                return len(text) * 12
+                
+            c_text = "#FFFFFF"
+            
+            t1_name = match.team1["name"].upper()
+            t2_name = match.team2["name"].upper()
+
+            # Top Boxes - Team Names
+            d.text((W*0.28 - get_tw(t1_name, font_title)/2, H*0.255), t1_name, fill=c_text, font=font_title)
+            d.text((W*0.715 - get_tw(t2_name, font_title)/2, H*0.255), t2_name, fill=c_text, font=font_title)
+
+            # Top Boxes - Scores
+            inn1 = match.innings1
+            if inn1:
+                score1 = f"{inn1.total_runs}-{inn1.wickets} ({inn1.total_balls//6}.{inn1.total_balls%6})"
+                d.text((W*0.28 - get_tw(score1, font_score)/2, H*0.285), score1, fill=c_text, font=font_score)
+
+            inn2 = match.innings2 if match.current_innings_num == 2 else None
+            if inn2:
+                score2 = f"{inn2.total_runs}-{inn2.wickets} ({inn2.total_balls//6}.{inn2.total_balls%6})"
+            else:
+                score2 = "YET TO BAT"
+            d.text((W*0.715 - get_tw(score2, font_score)/2, H*0.285), score2, fill=c_text, font=font_score)
+
+            def draw_grid(inn, start_x, start_y, width, row_h, is_batting):
+                if not inn: return
+                y = start_y
+                if is_batting:
+                    active = [b for b in inn.batting_stats.values() if b.balls_faced > 0 or b.dismissal != "not out"]
+                    top = sorted(active, key=lambda x: x.runs_scored, reverse=True)[:5]
+                    for b in top:
+                        name = b.profile['name'][:18].upper()
+                        runs = f"{b.runs_scored}*" if b.dismissal == "not out" else str(b.runs_scored)
+                        balls = str(b.balls_faced)
+                        d.text((start_x, y), name, fill=c_text, font=font_bold)
+                        d.text((start_x + width*0.75 - get_tw(runs, font_bold)/2, y), runs, fill=c_text, font=font_bold)
+                        d.text((start_x + width*0.92 - get_tw(balls, font_bold)/2, y), balls, fill=c_text, font=font_bold)
+                        y += row_h
+                else:
+                    active = [b for b in inn.bowling_stats.values() if b.balls_bowled > 0]
+                    top = sorted(active, key=lambda x: (x.wickets_taken, -x.runs_conceded), reverse=True)[:5]
+                    for b in top:
+                        name = b.profile['name'][:18].upper()
+                        wr = f"{b.wickets_taken}-{b.runs_conceded}"
+                        ov = f"{b.balls_bowled // 6}.{b.balls_bowled % 6}"
+                        d.text((start_x, y), name, fill=c_text, font=font_bold)
+                        d.text((start_x + width*0.75 - get_tw(wr, font_bold)/2, y), wr, fill=c_text, font=font_bold)
+                        d.text((start_x + width*0.92 - get_tw(ov, font_bold)/2, y), ov, fill=c_text, font=font_bold)
+                        y += row_h
+
+            grid_w = W * 0.40
+            row_h = H * 0.043
+
+            # Left column is Team 1, Right column is Team 2
+            if match.team1["name"] == match.innings1.batting_team["name"]:
+                t1_bat_inn, t1_bowl_inn = match.innings1, inn2
+                t2_bat_inn, t2_bowl_inn = inn2, match.innings1
+            else:
+                t2_bat_inn, t2_bowl_inn = match.innings1, inn2
+                t1_bat_inn, t1_bowl_inn = inn2, match.innings1
+
+            # 🛠️ CONFIGURATION: Tweaking these percentages moves the text!
+            draw_grid(t1_bat_inn, W*0.05, H*0.40, grid_w, row_h, True)
+            draw_grid(t1_bowl_inn, W*0.05, H*0.68, grid_w, row_h, False)
+            draw_grid(t2_bat_inn, W*0.54, H*0.40, grid_w, row_h, True)
+            draw_grid(t2_bowl_inn, W*0.54, H*0.68, grid_w, row_h, False)
+
+            # Bottom Banner
+            if match.current_innings_num == 1:
+                res = f"TARGET SET: {match.innings1.total_runs + 1} RUNS"
+            else:
+                target = getattr(match, "target", match.innings1.total_runs + 1)
+                max_w = 2 if getattr(match, 'is_super_over', False) else 10
+                if inn2.total_runs >= target: res = f"{inn2.batting_team['name'].upper()} WON BY {max_w - inn2.wickets} WICKETS"
+                elif inn2.total_runs == target - 1: res = "MATCH TIED"
+                else: res = f"{match.innings1.batting_team['name'].upper()} WON BY {(target - 1) - inn2.total_runs} RUNS"
+                if getattr(match, "dls_active", False): res += " (DLS)"
+                potm = get_player_of_the_match(match)
+                if potm: res += f"  •  POTM: {potm.upper()}"
+
+            d.text((W*0.50 - get_tw(res, font_title)/2, H*0.925), res, fill=c_text, font=font_title)
+
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            buf.seek(0)
+            return buf
+        except Exception as e:
+            print(f"⚠️ Warning: scoreboard_crimson.png not found or error: {e}. Falling back to default layout.")
+            pass
+
     # Dark blurred stadium/background proxy
     img = Image.new("RGB", (1200, 900), color="#101820") 
     d = ImageDraw.Draw(img)
