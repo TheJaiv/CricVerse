@@ -565,13 +565,15 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                 d = ImageDraw.Draw(img)
                 
                 # 🛠️ CONFIGURATION: Adjust these pixels if it doesn't line up perfectly with your PNG!
-                start_y = 288       # Y-pixel where the first team row starts
-                row_height = 47     # Spacing between each team row
+                  # Spacing between each team row
+                start_y = 285       # Y-pixel where the first team row starts
+                row_height = 42     # Spacing between each team row
                 c_text = "#FFFFFF"  # Text color
                 
                 # X-pixel coordinates for the center of each column (Adjust left/right as needed)
                 # Note: The template already has 1-10 written for POS, so we skip drawing the rank!
-                cols = {"TEAM": 140, "P": 465, "W": 590, "L": 715, "NR": 840, "PTS": 965, "NRR": 1090}
+               
+                cols = {"TEAM": 140, "P": 465, "W": 590, "L": 715, "NR": 840, "PTS": 965, "NRR": 1060}
                 
                 y = start_y
                 for i, (t_name, data) in enumerate(standings, 1):
@@ -586,7 +588,8 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                     d.text((cols["NR"] - (get_tw(str(data['T']), font_row)/2), y + 8), str(data['T']), fill=c_text, font=font_row)
                     d.text((cols["PTS"] - (get_tw(str(data['Pts']), font_row)/2), y + 8), str(data['Pts']), fill=c_text, font=font_row)
                     # NRR
-                    nrr_str = f"{data['NRR']:+.3f}"
+                  
+                    nrr_str = f"{data['NRR']:+.2f}"
                     d.text((cols["NRR"] - (get_tw(nrr_str, font_row)/2), y + 8), nrr_str, fill=c_text, font=font_row)
                     
                     y += row_height
