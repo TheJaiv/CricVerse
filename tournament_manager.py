@@ -6,7 +6,7 @@ import difflib
 import io
 from PIL import Image, ImageDraw, ImageFont
 import asyncio
-from subscription_manager import DB_CACHE, async_save_to_bin, get_all_players, get_tier_status
+from subscription_manager import DB_CACHE, async_save_tournament_to_bin, get_all_players, get_tier_status
 
 def get_server_tournament(server_id: str):
     if "tournaments" not in DB_CACHE:
@@ -20,10 +20,10 @@ def save_tournament(t_data):
     for i, t in enumerate(tourneys):
         if t.get("server_id") == t_data["server_id"]:
             tourneys[i] = t_data
-            async_save_to_bin()
+            async_save_tournament_to_bin()
             return
     tourneys.append(t_data)
-    async_save_to_bin()
+    async_save_tournament_to_bin()
 
 def get_tournament_standings(tourney):
     teams = {t["name"]: {"P":0, "W":0, "L":0, "T":0, "Pts":0, "RF":0, "OF":0.0, "RA":0, "OA":0.0} for t in tourney["teams"]}
@@ -408,7 +408,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             return await interaction.response.send_message("❌ No tournament exists in this server.", ephemeral=True)
             
         DB_CACHE["tournaments"] = [t for t in DB_CACHE["tournaments"] if t.get("server_id") != server_id]
-        async_save_to_bin()
+        async_save_tournament_to_bin()
         await interaction.response.send_message("🗑️ **Tournament Successfully Deleted.** You can now create a new one.")
 
     @app_commands.command(name="set_theme", description="[OWNER] Set a custom image theme for this server's tournament.")
