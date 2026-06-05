@@ -568,6 +568,14 @@ def execute_ball_math_t20(match):
         if innings.wickets < max_wickets:
             is_ai_batting = match.is_ai_game and match.get_striker_user_id() == match.p2_id
             if match.simulation_mode == "whole_match" or is_ai_batting:
+                # Skip any players who are already dismissed or subbed out (e.g. impact
+                # player subs insert the original player at a later slot with "Subbed Out")
+                while innings.next_batter_idx < len(innings.batting_team["players"]):
+                    candidate_name = innings.batting_team["players"][innings.next_batter_idx]["name"]
+                    candidate_stats = innings.batting_stats.get(candidate_name)
+                    if candidate_stats is None or candidate_stats.dismissal == "not out":
+                        break
+                    innings.next_batter_idx += 1
                 innings.current_striker_idx = innings.next_batter_idx
                 innings.next_batter_idx += 1
             else:
