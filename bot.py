@@ -3071,7 +3071,7 @@ class PrefixCog(commands.Cog):
 
     @commands.group(name="tournament", invoke_without_command=True, help="Main command for tournaments. Use 'cv help tournament' for subcommands.")
     async def tournament(self, ctx):
-        await self.bot.help_command.send_group_help(ctx.command)
+         await ctx.send_help(ctx.command)
 
     @tournament.command(name="create", help="[ADMIN] Create a new tournament.\nUsage: cv tournament create \"<name>\" <format> [impact_player=true/false]")
     async def t_create(self, ctx, name: str, format_str: str, *options: str):
