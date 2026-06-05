@@ -489,6 +489,156 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         await interaction.response.send_message(f"🚀 **Launching Next Match for {my_team_name}: Match {match['match_id']} ({r_label})...**")
         self.bot.dispatch("start_tournament_match", interaction.channel, interaction.user.id, tourney, match)
 
+    @app_commands.command(name="admin_record_result", description="[MANAGER] Manually record a completed match result (for stuck/bugged matches).")
+    async def admin_record_result(
+        self, interaction: discord.Interaction,
+        match_id: int,
+        winner: str,
+        t1_runs: int, t1_wickets: int, t1_balls: int,
+        t2_runs: int, t2_wickets: int, t2_balls: int,
+    ):
+        server_id = str(interaction.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney:
+            return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
+        if not self.is_manager(interaction, tourney):
+            return await interaction.response.send_message("❌ Managers only.", ephemeral=True)
+        if tourney["status"] != "active":
+            return await interaction.response.send_message("❌ Tournament is not active.", ephemeral=True)
+
+        m_data = next((m for m in tourney.get("schedule", []) if m["match_id"] == match_id), None)
+        if not m_data:
+            return await interaction.response.send_message(f"❌ Match ID {match_id} not found.", ephemeral=True)
+        if m_data["status"] == "completed":
+            return await interaction.response.send_message(f"❌ Match {match_id} is already marked completed.", ephemeral=True)
+
+        t1_name, t2_name = m_data["team1"], m_data["team2"]
+        winner_clean = winner.strip()
+        if winner_clean not in (t1_name, t2_name, "TIE"):
+            return await interaction.response.send_message(
+                f"❌ Winner must be **{t1_name}**, **{t2_name}**, or **TIE**.", ephemeral=True
+            )
+
+        m_data["status"] = "completed"
+        m_data["result"] = {
+            "winner": winner_clean,
+            "format_overs": tourney.get("format_overs", 20),
+            "t1_runs": t1_runs, "t1_wickets": t1_wickets, "t1_balls": t1_balls,
+            "t2_runs": t2_runs, "t2_wickets": t2_wickets, "t2_balls": t2_balls,
+        }
+        tourney["current_match_idx"] = tourney.get("current_match_idx", 0) + 1
+
+        # Auto-generate Final if both semis are now complete
+        sf1 = next((m for m in tourney["schedule"] if m["round"] == "Semi-Final 1"), None)
+        sf2 = next((m for m in tourney["schedule"] if m["round"] == "Semi-Final 2"), None)
+        if sf1 and sf2 and sf1["status"] == "completed" and sf2["status"] == "completed":
+            if not any(m["round"] == "Final" for m in tourney["schedule"]):
+                tourney["schedule"].append({
+                    "match_id": len(tourney["schedule"]) + 1, "round": "Final",
+                    "team1": sf1["result"]["winner"], "team2": sf2["result"]["winner"],
+                    "status": "pending", "result": None
+                })
+
+        final_match = next((m for m in tourney["schedule"] if m["round"] == "Final"), None)
+        if final_match and final_match["status"] == "completed" and tourney["status"] != "completed":
+            tourney["status"] = "completed"
+
+        save_tournament(tourney)
+
+        r_label = f"Round {m_data['round']}" if isinstance(m_data['round'], int) else m_data['round']
+        overs1 = f"{t1_balls // 6}.{t1_balls % 6}"
+        overs2 = f"{t2_balls // 6}.{t2_balls % 6}"
+        embed = discord.Embed(
+            title=f"✅ Match {match_id} Result Recorded",
+            description=(
+                f"**{r_label}** — {t1_name} vs {t2_name}\n\n"
+                f"🏏 **{t1_name}:** {t1_runs}/{t1_wickets} ({overs1} ov)\n"
+                f"🏏 **{t2_name}:** {t2_runs}/{t2_wickets} ({overs2} ov)\n\n"
+                f"🏆 **Winner: {winner_clean}**\n\n"
+                f"⚠️ *Player stats for this match were not recorded (match object unavailable). "
+                f"Patch them manually in JSONBin if needed.*"
+            ),
+            color=discord.Color.green()
+        )
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="admin_restore_schedule", description="[MANAGER] Regenerate round-robin schedule from current teams without random shuffle (same pairings every time).")
+    async def admin_restore_schedule(self, interaction: discord.Interaction):
+        server_id = str(interaction.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney:
+            return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
+        if not self.is_manager(interaction, tourney):
+            return await interaction.response.send_message("❌ Managers only.", ephemeral=True)
+
+        completed = [m for m in tourney.get("schedule", []) if m["status"] == "completed"]
+        if completed:
+            return await interaction.response.send_message(
+                f"⚠️ This tournament already has **{len(completed)} completed match(es)**. "
+                f"Running this will wipe the schedule and reset all matches to pending.\n"
+                f"If you still want to proceed, use `/tournament admin_force_restore_schedule`.",
+                ephemeral=True
+            )
+        await self._do_restore_schedule(interaction, tourney)
+
+    @app_commands.command(name="admin_force_restore_schedule", description="[MANAGER] Force-regenerate schedule even if matches are already completed. Use with caution.")
+    async def admin_force_restore_schedule(self, interaction: discord.Interaction):
+        server_id = str(interaction.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney:
+            return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
+        if not self.is_manager(interaction, tourney):
+            return await interaction.response.send_message("❌ Managers only.", ephemeral=True)
+        await self._do_restore_schedule(interaction, tourney)
+
+    async def _do_restore_schedule(self, interaction: discord.Interaction, tourney: dict):
+        teams = [t["name"] for t in tourney["teams"]]
+        if len(teams) < 2:
+            return await interaction.response.send_message("❌ Need at least 2 teams registered.", ephemeral=True)
+
+        if len(teams) % 2 != 0:
+            teams.append("BYE")
+
+        n = len(teams)
+        matchups = []
+        for r in range(n - 1):
+            for i in range(n // 2):
+                t1, t2 = teams[i], teams[n - 1 - i]
+                if t1 != "BYE" and t2 != "BYE":
+                    matchups.append({
+                        "round": r + 1,
+                        "team1": t1 if r % 2 == 0 else t2,
+                        "team2": t2 if r % 2 == 0 else t1,
+                    })
+            teams.insert(1, teams.pop())
+
+        schedule = [
+            {"match_id": i + 1, "round": m["round"], "team1": m["team1"], "team2": m["team2"], "status": "pending", "result": None}
+            for i, m in enumerate(matchups)
+        ]
+
+        tourney["schedule"] = schedule
+        tourney["status"] = "active"
+        tourney["current_match_idx"] = 0
+        save_tournament(tourney)
+
+        # Build a preview of the first two rounds
+        r1 = [m for m in schedule if m["round"] == 1]
+        r2 = [m for m in schedule if m["round"] == 2]
+        preview = "**Round 1:**\n" + "\n".join(f"  Match {m['match_id']}: {m['team1']} vs {m['team2']}" for m in r1)
+        preview += "\n\n**Round 2:**\n" + "\n".join(f"  Match {m['match_id']}: {m['team1']} vs {m['team2']}" for m in r2)
+
+        embed = discord.Embed(
+            title=f"✅ Schedule Restored — {tourney['name']}",
+            description=(
+                f"Generated **{len(schedule)} matches** across **{n - 1} rounds**.\n"
+                f"All matches set to pending. Use `/tournament admin_record_result` to re-enter already-played results.\n\n"
+                f"{preview}"
+            ),
+            color=discord.Color.blue()
+        )
+        await interaction.response.send_message(embed=embed)
+
     @commands.Cog.listener()
     async def on_tournament_match_complete(self, match):
         server_id = match.tournament_server_id
@@ -506,7 +656,10 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             
         target = getattr(match, "target", match.innings1.total_runs + 1)
         is_tied = (match.innings2.total_runs == target - 1)
-        if is_tied: winner = "TIE"
+        
+        if getattr(match, 'tiebreak_winner_name', None):
+            winner = match.tiebreak_winner_name
+        elif is_tied: winner = "TIE"
         elif match.innings2.total_runs >= target: winner = match.innings2.batting_team["name"]
         else: winner = match.innings1.batting_team["name"]
             
