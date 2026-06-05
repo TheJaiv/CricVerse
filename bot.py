@@ -14,8 +14,10 @@ from odi_simulation import execute_ball_math_odi, get_smart_ai_bowler_odi
 from t20_simulation import execute_ball_math_t20, get_smart_ai_bowler_t20
 from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings
 from subscription_manager import (
-    load_data_from_bin, save_data_to_bin, check_potential_quota, consume_quota, 
-    update_user_tier, update_server_tier, get_auth_admins, toggle_auth_admin, 
+    load_data_from_bin, load_tournament_data_from_bin,
+    save_data_to_bin, save_tournament_data_to_bin,
+    check_potential_quota, consume_quota,
+    update_user_tier, update_server_tier, get_auth_admins, toggle_auth_admin,
     get_all_players, add_player, add_players_bulk, update_player, delete_players, clean_duplicate_players,
     get_tier_status, is_channel_restricted, toggle_restricted_channel, DB_CACHE
 )
@@ -53,11 +55,13 @@ active_setups = {}
 async def auto_sync_jsonbin():
     """Automatically backs up memory to JSONBin every hour"""
     save_data_to_bin()
+    save_tournament_data_to_bin()
 
 @bot.event
 async def on_ready():
     print(f"🏏 Logged in successfully as {bot.user.name}")
     load_data_from_bin()
+    load_tournament_data_from_bin()
     auto_sync_jsonbin.start()
     print("✅ Memory Cache Loaded and Ready.")
 # ==========================================
@@ -2741,13 +2745,22 @@ async def force_sync_cmd(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     try:
         res = save_data_to_bin()
+        res_t = save_tournament_data_to_bin()
+        lines = []
         if res is None:
-            await interaction.followup.send("❌ Sync skipped — JSONBin credentials missing.")
+            lines.append("❌ Main bin skipped — credentials missing.")
         elif res.status_code in (200, 201, 204):
-            await interaction.followup.send(f"✅ Memory cache successfully force-synced to the Cloud DB! (HTTP {res.status_code})")
+            lines.append(f"✅ Main bin synced (HTTP {res.status_code})")
             await log_db_update("Manual Cloud Sync", "Database Backup", interaction.user, "Force synced local memory cache to JSONBin.")
         else:
-            await interaction.followup.send(f"❌ JSONBin rejected the save — HTTP {res.status_code}: {res.text[:300]}")
+            lines.append(f"❌ Main bin failed — HTTP {res.status_code}: {res.text[:200]}")
+        if res_t is None:
+            lines.append("❌ Tournament bin skipped — JSONBIN_TOURNAMENT_BIN_ID missing.")
+        elif res_t.status_code in (200, 201, 204):
+            lines.append(f"✅ Tournament bin synced (HTTP {res_t.status_code})")
+        else:
+            lines.append(f"❌ Tournament bin failed — HTTP {res_t.status_code}: {res_t.text[:200]}")
+        await interaction.followup.send("\n".join(lines))
     except Exception as e:
         await interaction.followup.send(f"❌ Error during sync: {e}")
 
@@ -3127,12 +3140,21 @@ class PrefixCog(commands.Cog):
             return await ctx.send("❌ Owner only.")
         try:
             res = save_data_to_bin()
+            res_t = save_tournament_data_to_bin()
+            lines = []
             if res is None:
-                await ctx.send("❌ Sync skipped — JSONBin credentials missing.")
+                lines.append("❌ Main bin skipped — credentials missing.")
             elif res.status_code in (200, 201, 204):
-                await ctx.send(f"✅ Memory cache successfully force-synced to the Cloud DB! (HTTP {res.status_code})")
+                lines.append(f"✅ Main bin synced (HTTP {res.status_code})")
             else:
-                await ctx.send(f"❌ JSONBin rejected the save — HTTP {res.status_code}: {res.text[:300]}")
+                lines.append(f"❌ Main bin failed — HTTP {res.status_code}: {res.text[:200]}")
+            if res_t is None:
+                lines.append("❌ Tournament bin skipped — JSONBIN_TOURNAMENT_BIN_ID missing.")
+            elif res_t.status_code in (200, 201, 204):
+                lines.append(f"✅ Tournament bin synced (HTTP {res_t.status_code})")
+            else:
+                lines.append(f"❌ Tournament bin failed — HTTP {res_t.status_code}: {res_t.text[:200]}")
+            await ctx.send("\n".join(lines))
         except Exception as e:
             await ctx.send(f"❌ Error during sync: {e}")
 
