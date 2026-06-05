@@ -29,14 +29,16 @@ class CricketBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
-        super().__init__(command_prefix="!", intents=intents)
+        super().__init__(command_prefix=commands.when_mentioned_or("cv ", "Cv ", "CV ", "cv", "Cv", "CV"), case_insensitive=True, intents=intents, help_command=None)
     
     async def setup_hook(self):
-        self.remove_command("help")
         from tournament_manager import TournamentCog
         await self.add_cog(TournamentCog(self))
+        from prefix_handler import PrefixCog
+        await self.add_cog(PrefixCog(self))
         await self.tree.sync()
         print("✅ Slash commands synchronized globally.")
+        print("✅ Prefix commands loaded.")
 
 bot = CricketBot()
 active_games = {}
@@ -782,10 +784,21 @@ def generate_tournament_score_image(match: CricketMatch) -> io.BytesIO:
 
             def draw_grid(inn, start_x, start_y, width, row_h, is_batting):
                 if not inn: return
-                y = start_y
+                
+                c_hdr = "#CCCCCC"
+                if is_batting:
+                    d.text((start_x, start_y), "BATTER", fill=c_hdr, font=font_bold)
+                    d.text((start_x + width*0.75 - get_tw("R", font_bold)/2, start_y), "R", fill=c_hdr, font=font_bold)
+                    d.text((start_x + width*0.92 - get_tw("B", font_bold)/2, start_y), "B", fill=c_hdr, font=font_bold)
+                else:
+                    d.text((start_x, start_y), "BOWLER", fill=c_hdr, font=font_bold)
+                    d.text((start_x + width*0.75 - get_tw("W-R", font_bold)/2, start_y), "W-R", fill=c_hdr, font=font_bold)
+                    d.text((start_x + width*0.92 - get_tw("O", font_bold)/2, start_y), "O", fill=c_hdr, font=font_bold)
+                    
+                y = start_y + row_h
                 if is_batting:
                     active = [b for b in inn.batting_stats.values() if b.balls_faced > 0 or b.dismissal != "not out"]
-                    top = sorted(active, key=lambda x: x.runs_scored, reverse=True)[:5]
+                    top = sorted(active, key=lambda x: x.runs_scored, reverse=True)[:6]
                     for b in top:
                         name = b.profile['name'][:18].upper()
                         runs = f"{b.runs_scored}*" if b.dismissal == "not out" else str(b.runs_scored)
@@ -796,7 +809,7 @@ def generate_tournament_score_image(match: CricketMatch) -> io.BytesIO:
                         y += row_h
                 else:
                     active = [b for b in inn.bowling_stats.values() if b.balls_bowled > 0]
-                    top = sorted(active, key=lambda x: (x.wickets_taken, -x.runs_conceded), reverse=True)[:5]
+                    top = sorted(active, key=lambda x: (x.wickets_taken, -x.runs_conceded), reverse=True)[:6]
                     for b in top:
                         name = b.profile['name'][:18].upper()
                         wr = f"{b.wickets_taken}-{b.runs_conceded}"
@@ -818,10 +831,10 @@ def generate_tournament_score_image(match: CricketMatch) -> io.BytesIO:
                 t1_bat_inn, t1_bowl_inn = inn2, match.innings1
 
             # 🛠️ CONFIGURATION: Tweaking these percentages moves the text!
-            draw_grid(t1_bat_inn, W*0.05, H*0.40, grid_w, row_h, True)
-            draw_grid(t1_bowl_inn, W*0.05, H*0.68, grid_w, row_h, False)
-            draw_grid(t2_bat_inn, W*0.54, H*0.40, grid_w, row_h, True)
-            draw_grid(t2_bowl_inn, W*0.54, H*0.68, grid_w, row_h, False)
+            draw_grid(t1_bat_inn, W*0.09, H*0.33, grid_w, row_h, True)
+            draw_grid(t1_bowl_inn, W*0.09, H*0.61, grid_w, row_h, False)
+            draw_grid(t2_bat_inn, W*0.58, H*0.33, grid_w, row_h, True)
+            draw_grid(t2_bowl_inn, W*0.58, H*0.61, grid_w, row_h, False)
 
             # Bottom Banner
             if match.current_innings_num == 1:
