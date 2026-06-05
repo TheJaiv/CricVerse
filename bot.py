@@ -3004,7 +3004,7 @@ class PrefixCog(commands.Cog):
             print(f"An error occurred in a prefix command '{ctx.command}': {error}")
             await ctx.send(f"An unexpected error occurred while running that command.")
 
-    @commands.command(name="match", help="Start a new Cricket Match simulation.\nUsage: cv match [@opponent]")
+    @commands.command(name="match", help="Start a new Cricket Match simulation.\nUsage: match [@opponent]")
     async def match(self, ctx, opponent: discord.Member = None):
         if is_channel_restricted(str(ctx.channel.id)):
             return await ctx.send("❌ Matches are **disabled** in this channel.")
@@ -3022,7 +3022,7 @@ class PrefixCog(commands.Cog):
         opp_str = opponent.mention if opponent else "🤖 AI"
         await ctx.send(f"🏏 **Match Setup**\n**Host:** {ctx.author.mention}\n**Opponent:** {opp_str}\n\nStep 1: Select Format below:", view=FormatSelectView(state, ctx.channel))
 
-    @commands.command(name="endmatch", help="Force cancel the current match or setup in this channel.\nUsage: cv endmatch")
+    @commands.command(name="endmatch", help="Force cancel the current match or setup in this channel.\nUsage: endmatch")
     async def endmatch(self, ctx):
         channel_id = ctx.channel.id
         cleared = False
@@ -3037,7 +3037,7 @@ class PrefixCog(commands.Cog):
         else:
             await ctx.send("⚠️ There is no active match or setup running in this channel.")
 
-    @commands.command(name="searchplayer", help="Search for a player in the Cloud DB.\nUsage: cv searchplayer <name>")
+    @commands.command(name="searchplayer", help="Search for a player in the Cloud DB.\nUsage: searchplayer <name>")
     async def searchplayer(self, ctx, *, name: str):
         search_query = name.strip()
         all_players = get_all_players()
@@ -3069,11 +3069,11 @@ class PrefixCog(commands.Cog):
         msg = f"🔍 **Not found exactly.**\n💡 **Best Match:** `{best_name}`\n👉 Rerun: `cv searchplayer \"{best_name}\"`"
         await ctx.send(msg)
 
-    @commands.group(name="tournament", invoke_without_command=True, help="Main command for tournaments. Use 'cv help tournament' for subcommands.")
+    @commands.group(name="tournament", invoke_without_command=True, help="Main command for tournaments.\nUsage: tournament")
     async def tournament(self, ctx):
          await ctx.send_help(ctx.command)
 
-    @tournament.command(name="create", help="[ADMIN] Create a new tournament.\nUsage: cv tournament create \"<name>\" <format> [impact_player=true/false]")
+    @tournament.command(name="create", help="[ADMIN] Create a new tournament.\nUsage: tournament create \"<name>\" <format> [impact_player=true/false]")
     async def t_create(self, ctx, name: str, format_str: str, *options: str):
         kwargs = { 'impact_player': False }
         for opt in options:
@@ -3107,7 +3107,7 @@ class PrefixCog(commands.Cog):
         save_tournament(t_data)
         await ctx.send(f"🏆 **Tournament Created:** `{name}`\nUse `cv tournament add_team` to get started!")
 
-    @tournament.command(name="add_team", help="[MANAGER] Add a team and assign an Owner.\nUsage: cv tournament add_team \"<team_name>\" <@owner>")
+    @tournament.command(name="add_team", help="[MANAGER] Add a team and assign an Owner.\nUsage: tournament add_team \"<team_name>\" <@owner>")
     async def t_add_team(self, ctx, team_name: str, owner: discord.Member):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
@@ -3127,7 +3127,7 @@ class PrefixCog(commands.Cog):
         save_tournament(tourney)
         await ctx.send(f"✅ Team **{team_name}** added! Owner: {owner.mention}")
 
-    @tournament.command(name="replace_player", help="[MANAGER] Replace a player in a team's squad.\nUsage: cv tournament replace_player \"<team>\" \"<out_player>\" \"<in_player>\"")
+    @tournament.command(name="replace_player", help="[MANAGER] Replace a player in a team's squad.\nUsage: tournament replace_player \"<team>\" \"<out_player>\" \"<in_player>\"")
     async def t_replace_player(self, ctx, team_name: str, out_player: str, in_player: str):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
@@ -3162,7 +3162,287 @@ class PrefixCog(commands.Cog):
         save_tournament(tourney)
         await ctx.send(f"✅ **Squad Updated for {team['name']}:**\n🔴 OUT: {old_p['name']}\n🟢 IN: {new_p['name']}")
 
-    @tournament.command(name="standings", help="View the Tournament Points Table & NRR.\nUsage: cv tournament standings")
+    @tournament.command(name="submit_squad", help="[OWNER/MANAGER] Submit a tournament squad (15 players).\nUsage: tournament submit_squad [team_name]")
+    async def t_submit_squad(self, ctx, *, team_name: str = None):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        if tourney["status"] != "registration": return await ctx.send("❌ Registration is closed.")
+        
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (str(ctx.author.id) in tourney.get("managers", []))
+        
+        if team_name:
+            if not is_mgr:
+                return await ctx.send("❌ Only Managers can use the team_name parameter to submit for others.")
+            team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.lower()), None)
+            if not team: return await ctx.send(f"❌ Team '{team_name}' not found.")
+        else:
+            team = next((t for t in tourney["teams"] if t["owner_id"] == str(ctx.author.id)), None)
+            if not team: return await ctx.send("❌ You do not own a team. Managers must provide the `team_name` parameter.")
+        
+        min_s = tourney.get("min_squad", 11)
+        max_s = tourney.get("max_squad", 15)
+        await ctx.send(f"📋 Please reply to this message with the **{min_s} to {max_s} Player Squad** for **{team['name']}** (One player name per line). You have 3 minutes.")
+        
+        def check(m):
+            return m.author.id == ctx.author.id and m.channel.id == ctx.channel.id
+            
+        try:
+            msg = await self.bot.wait_for('message', timeout=180.0, check=check)
+        except asyncio.TimeoutError:
+            return await ctx.send("⏳ Time expired. Please run `cv tournament submit_squad` again.")
+            
+        db_players = get_all_players()
+        db_map = {p["name"].lower(): p for p in db_players}
+        db_names_list = list(db_map.keys())
+        
+        found_players = []
+        missing = []
+        seen = set()
+        
+        lines = [l.strip() for l in msg.content.split("\n") if l.strip()]
+        for line in lines[:(max_s + 3)]:
+            q = line.lower()
+            match = db_map.get(q)
+            if not match:
+                fuzz = difflib.get_close_matches(q, db_names_list, n=1, cutoff=0.6)
+                if fuzz: match = db_map[fuzz[0]]
+            
+            if match:
+                if match["name"] not in seen and len(found_players) < max_s:
+                    found_players.append(match)
+                    seen.add(match["name"])
+            else:
+                missing.append(line)
+                
+        if missing or len(found_players) < min_s:
+            err = f"❌ **Roster Invalid ({len(found_players)}/{min_s} Minimum Found)**\n"
+            if missing: err += f"Missing: {', '.join(missing)}\n"
+            err += "Please fix the names and try again."
+            return await ctx.send(err)
+            
+        team["squad"] = found_players
+        save_tournament(tourney)
+        await ctx.send(f"✅ **Squad Verified and Saved for {team['name']}!**\nRegistered {len(found_players)} players.")
+
+    @tournament.command(name="squad", help="View a team's tournament squad and player ratings.\nUsage: tournament squad [team_name]")
+    async def t_squad(self, ctx, *, team_name: str = None):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        
+        if team_name:
+            team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.lower()), None)
+            if not team: return await ctx.send(f"❌ Team '{team_name}' not found.")
+        else:
+            team = next((t for t in tourney["teams"] if t["owner_id"] == str(ctx.author.id)), None)
+            if not team: return await ctx.send("❌ You do not own a team. Please specify a `team_name`.")
+            
+        if not team.get("squad"):
+            return await ctx.send(f"❌ **{team['name']}** has not submitted their squad yet.")
+            
+        batters, wks, all_rounders, bowlers = [], [], [], []
+        for p in team["squad"]:
+            role = p["role"]
+            if "WK" in role: wks.append(p)
+            elif "All-Rounder" in role: all_rounders.append(p)
+            elif "Bowler" in role: bowlers.append(p)
+            else: batters.append(p)
+            
+        batters.sort(key=lambda x: x["bat"], reverse=True)
+        wks.sort(key=lambda x: x["bat"], reverse=True)
+        all_rounders.sort(key=lambda x: (x["bat"] + x["bowl"]), reverse=True)
+        bowlers.sort(key=lambda x: x["bowl"], reverse=True)
+        
+        embed = discord.Embed(title=f"📋 Squad: {team['name']}", description=f"👤 **Owner:** <@{team['owner_id']}> | **Total Players:** {len(team['squad'])}", color=discord.Color.blue())
+        
+        def format_player(p, cat):
+            arch = p["archetype"]
+            style = p["role"].split("_", 1)[1].replace("_", " ") if "_" in p["role"] else ""
+            if cat in ["bat", "wk"]: return f"`{p['bat']:>2} BAT` • **{p['name']}** *(Type: {arch})*"
+            elif cat == "ar": return f"`{p['bat']:>2} BAT | {p['bowl']:>2} BWL` • **{p['name']}** *({style} | {arch})*"
+            else: return f"`{p['bowl']:>2} BWL` • **{p['name']}** *({style})*"
+
+        if batters: embed.add_field(name="🏏 Batters", value="\n".join([format_player(p, "bat") for p in batters]), inline=False)
+        if wks: embed.add_field(name="🧤 Wicket-Keepers", value="\n".join([format_player(p, "wk") for p in wks]), inline=False)
+        if all_rounders: embed.add_field(name="⚔️ All-Rounders", value="\n".join([format_player(p, "ar") for p in all_rounders]), inline=False)
+        if bowlers: embed.add_field(name="🎯 Bowlers", value="\n".join([format_player(p, "bowl") for p in bowlers]), inline=False)
+        
+        await ctx.send(embed=embed)
+
+    @tournament.command(name="start", help="[MANAGER] Lock registration and generate Round Robin schedule.\nUsage: tournament start")
+    async def t_start(self, ctx):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (tourney and str(ctx.author.id) in tourney.get("managers", []))
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        if tourney["status"] != "registration": return await ctx.send("❌ Tournament already started.")
+        
+        if len(tourney["teams"]) < 2:
+            return await ctx.send("❌ Need at least 2 teams.")
+            
+        min_s = tourney.get("min_squad", 11)
+        for t in tourney["teams"]:
+            if len(t.get("squad", [])) < min_s:
+                return await ctx.send(f"❌ Team **{t['name']}** does not have a valid squad yet.")
+                
+        teams = [t["name"] for t in tourney["teams"]]
+        if len(teams) % 2 != 0:
+            teams.append("BYE")
+            
+        import random
+        n = len(teams)
+        matchups = []
+        
+        for r in range(n - 1):
+            round_matches = []
+            for i in range(n // 2):
+                t1, t2 = teams[i], teams[n - 1 - i]
+                if t1 != "BYE" and t2 != "BYE":
+                    round_matches.append((t1, t2) if r % 2 == 0 else (t2, t1))
+            random.shuffle(round_matches)
+            for m in round_matches:
+                matchups.append({
+                    "round": r + 1,
+                    "team1": m[0],
+                    "team2": m[1]
+                })
+            teams.insert(1, teams.pop())
+            
+        schedule = [{"match_id": i + 1, "round": m["round"], "team1": m["team1"], "team2": m["team2"], "status": "pending", "result": None} for i, m in enumerate(matchups)]
+            
+        tourney["schedule"] = schedule
+        tourney["status"] = "active"
+        tourney["current_match_idx"] = 0
+        save_tournament(tourney)
+        
+        await ctx.send(f"🏆 **TOURNAMENT STARTED: {tourney['name']}!**\nGenerated **{len(schedule)} matches** in the Round Robin stage.\nUse `cv tournament status` to view it!")
+
+    @tournament.command(name="status", help="View the current tournament schedule and standings.\nUsage: tournament status")
+    async def t_status(self, ctx):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney:
+            return await ctx.send("❌ No tournament exists in this server.")
+            
+        embed = discord.Embed(title=f"🏆 Tournament: {tourney['name']}", color=discord.Color.gold())
+        fmt = tourney.get('format_overs', 20)
+        embed.set_footer(text=f"Format: {fmt} Overs | Squad Rules: {tourney.get('min_squad', 11)}-{tourney.get('max_squad', 15)} Players")
+        
+        if tourney["status"] == "registration":
+            embed.description = "📝 **Registration Phase**"
+            teams_str = ""
+            for t in tourney["teams"]:
+                squad_len = len(t.get("squad", []))
+                teams_str += f"• **{t['name']}** (<@{t['owner_id']}>) - {squad_len}/{tourney.get('max_squad', 15)} Players\n"
+            if not teams_str: teams_str = "No teams added yet."
+            embed.add_field(name="Registered Teams", value=teams_str, inline=False)
+            
+        elif tourney["status"] == "active":
+            schedule = tourney.get("schedule", [])
+            pending_matches = [m for m in schedule if m["status"] == "pending"]
+            
+            if not pending_matches:
+                gs_matches = [m for m in schedule if isinstance(m.get("round"), int)]
+                if all(m["status"] == "completed" for m in gs_matches) and not any(not isinstance(m.get("round"), int) for m in schedule):
+                    return await ctx.send(embed=discord.Embed(title=f"🏆 Tournament: {tourney['name']}", description="🏁 **Group Stage Completed!**\nUse `cv tournament generate_knockouts` to begin the Semi-Finals.", color=discord.Color.gold()))
+                else:
+                    return await ctx.send(embed=discord.Embed(title=f"🏆 Tournament: {tourney['name']}", description="🏁 **All matches are completed!**", color=discord.Color.gold()))
+                
+            embed.description = f"🔥 **Active Phase**\nUse `cv tournament play <match_id>` to launch your matches!"
+            sched_str = ""
+            for m in pending_matches[:10]:
+                r_label = f"Round {m['round']}" if isinstance(m['round'], int) else m['round']
+                sched_str += f"**Match {m['match_id']}** ({r_label}): **{m['team1']}** vs **{m['team2']}**\n"
+            
+            if len(pending_matches) > 10:
+                sched_str += f"\n*...and {len(pending_matches) - 10} more matches.*"
+            embed.add_field(name="Upcoming Matches", value=sched_str, inline=False)
+            
+        elif tourney["status"] == "completed":
+            final = next((m for m in tourney.get("schedule", []) if m["round"] == "Final"), None)
+            winner = final["result"]["winner"] if final else "TBD"
+            embed.description = f"🏆 **TOURNAMENT COMPLETED!**\n👑 **Champions: {winner}**\n\nCheck `cv tournament leaderboard` for top performers!"
+            
+        await ctx.send(embed=embed)
+
+    @tournament.command(name="play_next", help="[MANAGER] Launch the next pending tournament match.\nUsage: tournament play_next")
+    async def t_play_next(self, ctx):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (tourney and str(ctx.author.id) in tourney.get("managers", []))
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        if tourney["status"] != "active": return await ctx.send("❌ Tournament is not active.")
+        
+        schedule = tourney.get("schedule", [])
+        current_round = next((m["round"] for m in schedule if m["status"] == "pending"), None)
+        
+        pending = next((m for m in schedule if m["status"] == "pending" and m["round"] == current_round), None)
+        if not pending:
+            return await ctx.send("🏆 All matches have been completed!")
+            
+        r_label = f"Round {current_round}" if isinstance(current_round, int) else current_round
+        await ctx.send(f"🚀 **Launching {r_label} — Match {pending['match_id']}...**")
+        self.bot.dispatch("start_tournament_match", ctx.channel, ctx.author.id, tourney, pending)
+
+    @tournament.command(name="play", help="[MANAGER] Launch a specific tournament match by its ID.\nUsage: tournament play <match_id>")
+    async def t_play_match(self, ctx, match_id: int):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (tourney and str(ctx.author.id) in tourney.get("managers", []))
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        if tourney["status"] != "active": return await ctx.send("❌ Tournament is not active.")
+        
+        match = next((m for m in tourney.get("schedule", []) if m["match_id"] == match_id), None)
+        if not match:
+            return await ctx.send(f"❌ Match ID {match_id} does not exist.")
+        if match["status"] != "pending":
+            return await ctx.send(f"❌ Match {match_id} is already completed.")
+            
+        r_label = f"Round {match['round']}" if isinstance(match['round'], int) else match['round']
+        await ctx.send(f"🚀 **Manually Launching Match {match['match_id']} ({r_label})...**")
+        self.bot.dispatch("start_tournament_match", ctx.channel, ctx.author.id, tourney, match)
+
+    @tournament.command(name="generate_knockouts", help="[MANAGER] Generate Knockouts (Semi-Finals) for Top 4 teams.\nUsage: tournament generate_knockouts")
+    async def t_generate_knockouts(self, ctx):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (tourney and str(ctx.author.id) in tourney.get("managers", []))
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        if tourney["status"] != "active": return await ctx.send("❌ Tournament is not active.")
+        
+        gs_matches = [m for m in tourney["schedule"] if isinstance(m.get("round"), int)]
+        if any(m["status"] == "pending" for m in gs_matches):
+            return await ctx.send("❌ Cannot generate knockouts until all Group Stage matches are completed.")
+            
+        if any(not isinstance(m.get("round"), int) for m in tourney["schedule"]):
+            return await ctx.send("❌ Knockouts have already been generated.")
+            
+        standings = get_tournament_standings(tourney)
+        real_teams = [t[0] for t in standings if t[0] != "BYE"]
+        
+        if len(real_teams) < 4:
+            return await ctx.send("❌ Need at least 4 teams to play Semi-Finals.")
+            
+        top4 = real_teams[:4]
+        
+        sf1 = {"match_id": len(tourney["schedule"]) + 1, "round": "Semi-Final 1", "team1": top4[0], "team2": top4[3], "status": "pending", "result": None}
+        sf2 = {"match_id": len(tourney["schedule"]) + 2, "round": "Semi-Final 2", "team1": top4[1], "team2": top4[2], "status": "pending", "result": None}
+        
+        tourney["schedule"].extend([sf1, sf2])
+        save_tournament(tourney)
+        
+        await ctx.send(f"🔥 **Knockout Stage Set!**\n**Semi-Final 1:** {top4[0]} vs {top4[3]}\n**Semi-Final 2:** {top4[1]} vs {top4[2]}\n\nUse `cv tournament play_next` to begin!")
+
+    @tournament.command(name="standings", help="View the Tournament Points Table & NRR.\nUsage: tournament standings")
     async def t_standings(self, ctx):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
