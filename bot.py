@@ -207,7 +207,10 @@ def swap_impact_player(match: CricketMatch, team_id: int, out_name: str, in_play
         is_batting = (inn.batting_team["name"] == team["name"])
         if is_batting:
             if in_player["name"] not in inn.batting_stats:
-                inn.batting_team["players"].append(in_player)
+                # Insert at next_batter_idx so the sub comes in at the very next wicket
+                # (appending to end would put them at position 11, unreachable before 10 wickets)
+                insert_pos = getattr(inn, "next_batter_idx", len(inn.batting_team["players"]))
+                inn.batting_team["players"].insert(insert_pos, in_player)
                 inn.batting_stats[in_player["name"]] = BatterStats(in_player)
             
             b_stats = inn.batting_stats.get(out_name)
@@ -1034,7 +1037,10 @@ async def loop_entire_match_simulation(interaction, match: CricketMatch):
             await handle_innings_end(interaction, match)
             break
             
-        if innings.total_balls % 6 == 0:
+        # Only select a new bowler at the TRUE start of a new over (over_log empty = no
+        # deliveries yet this over, including wides). This prevents wides from triggering
+        # a mid-over bowler swap when total_balls % 6 == 0.
+        if innings.total_balls % 6 == 0 and not innings.over_log:
             try_ai_impact_player(match, innings)
             new_bowler = get_smart_ai_bowler(innings, match.pitch, match.weather, match.format_overs)
             if not new_bowler:
@@ -1043,14 +1049,18 @@ async def loop_entire_match_simulation(interaction, match: CricketMatch):
                     del active_games[channel.id]
                 return
             innings.current_bowler = new_bowler
+
+        execute_ball_math(match)
+
+        # After each completed over (6 legal balls), reset over-specific state so the
+        # next iteration's bowler-selection guard (not over_log) triggers correctly.
+        if innings.total_balls % 6 == 0 and innings.total_balls > 0:
             innings.over_log.clear()
             innings.bouncers_in_over = 0
             innings.mystery_bowled_this_over = False
-            
-        execute_ball_math(match)
-        
+
         # Only print scoreboard if user chose Verbose mode
-        if getattr(match, 'verbose', False) and innings.total_balls % 6 == 0:
+        if getattr(match, 'verbose', False) and innings.total_balls % 6 == 0 and innings.total_balls > 0:
             await channel.send(embed=render_embed_scoreboard(match))
             await asyncio.sleep(0.5)
             
@@ -2043,18 +2053,27 @@ class TournamentXIView(discord.ui.View):
         await interaction.response.edit_message(content=self.get_msg_content(), view=self)
         
     async def confirm_cb(self, interaction: discord.Interaction):
-        subs = [p for p in self.squad if p not in self.selected_players][:5]
         if self.team_num == 1:
             self.state.t1_roster = self.selected_players
-            self.state.t1_subs = subs
+            self.state.t1_subs = []
             await interaction.response.edit_message(content="✅ **Team 1 XI Confirmed!**", view=None)
-            await prompt_tournament_xi(self.channel, self.state, 2)
+            remaining = [p for p in self.squad if p not in self.selected_players]
+            if getattr(self.state, "impact_player", False) and remaining:
+                view = TournamentSubSelectView(self.state, self.channel, 1, remaining)
+                await self.channel.send(view.get_msg_content(), view=view)
+            else:
+                await prompt_tournament_xi(self.channel, self.state, 2)
         else:
             self.state.t2_roster = self.selected_players
-            self.state.t2_subs = subs
+            self.state.t2_subs = []
             await interaction.response.edit_message(content="✅ **Team 2 XI Confirmed!**", view=None)
-            await ask_pitch_and_weather(self.channel, self.state)
-            
+            remaining = [p for p in self.squad if p not in self.selected_players]
+            if getattr(self.state, "impact_player", False) and remaining:
+                view = TournamentSubSelectView(self.state, self.channel, 2, remaining)
+                await self.channel.send(view.get_msg_content(), view=view)
+            else:
+                await ask_pitch_and_weather(self.channel, self.state)
+
     def get_msg_content(self):
         t_name = self.state.t1_name if self.team_num == 1 else self.state.t2_name
         msg = f"📋 <@{self.owner_id}> (or Manager) — **{t_name} XI Selection**\n"
@@ -2062,15 +2081,84 @@ class TournamentXIView(discord.ui.View):
         msg += f"⚠️ **IMPORTANT:** The order you select them determines your exact batting order!\n\n"
         for i, p in enumerate(self.selected_players, 1):
             msg += f"`{i:>2}.` **{p['name']}**\n"
-            
         if getattr(self.state, "impact_player", False) and len(self.selected_players) == self.req_count:
-            subs = [p for p in self.squad if p not in self.selected_players][:5]
-            if subs:
-                msg += "\n**Impact Subs (Automatically assigned from remaining squad):**\n"
-                for i, p in enumerate(subs, 1):
-                    role_short = p["role"].replace("All-Rounder", "AR").replace("Bowler", "BWL").replace("Batter", "BAT").replace("_", " ")
-                    msg += f"`{i:>2}.` **{p['name']}** — {role_short} *(Bat: {p['bat']} | Bowl: {p['bowl']})*\n"
+            msg += "\n*After confirming, you'll choose your Impact Subs from the remaining squad.*"
         return msg
+
+class TournamentSubSelectView(discord.ui.View):
+    def __init__(self, state, channel, team_num, remaining):
+        super().__init__(timeout=300)
+        self.state = state
+        self.channel = channel
+        self.team_num = team_num
+        self.remaining = remaining
+        self.owner_id = state.p1_id if team_num == 1 else state.p2_id
+        self.selected_subs = []
+        self.max_subs = min(5, len(remaining))
+        self.update_ui()
+
+    def update_ui(self):
+        self.clear_items()
+        if len(self.selected_subs) < self.max_subs:
+            options = []
+            for p in self.remaining:
+                if p not in self.selected_subs:
+                    role_short = p["role"].replace("All-Rounder", "AR").replace("Bowler", "BWL").replace("Batter", "BAT").replace("_", " ")
+                    options.append(discord.SelectOption(label=p["name"], description=f"Bat: {p['bat']} | {role_short}", value=p["name"]))
+            if options:
+                select = discord.ui.Select(placeholder=f"Add Impact Sub {len(self.selected_subs)+1}...", options=options[:25])
+                select.callback = self.select_cb
+                self.add_item(select)
+
+        btn_undo = discord.ui.Button(label="Remove Last", style=discord.ButtonStyle.danger, disabled=len(self.selected_subs) == 0)
+        btn_undo.callback = self.undo_cb
+        self.add_item(btn_undo)
+
+        btn_confirm = discord.ui.Button(label="Confirm Subs", style=discord.ButtonStyle.success)
+        btn_confirm.callback = self.confirm_cb
+        self.add_item(btn_confirm)
+
+    async def interaction_check(self, interaction: discord.Interaction):
+        if interaction.user.id != self.owner_id and interaction.user.id != getattr(self.state, "manager_id", None):
+            await interaction.response.send_message("❌ Only the Team Owner or Manager can select subs.", ephemeral=True)
+            return False
+        return True
+
+    def get_msg_content(self):
+        t_name = self.state.t1_name if self.team_num == 1 else self.state.t2_name
+        msg = f"🔄 <@{self.owner_id}> (or Manager) — **{t_name} Impact Subs**\n"
+        msg += f"Select up to **{self.max_subs} sub(s)** from your remaining squad, or click **Confirm Subs** with 0 to play without subs.\n\n"
+        if self.selected_subs:
+            for i, p in enumerate(self.selected_subs, 1):
+                role_short = p["role"].replace("All-Rounder", "AR").replace("Bowler", "BWL").replace("Batter", "BAT").replace("_", " ")
+                msg += f"`{i:>2}.` **{p['name']}** — {role_short} *(Bat: {p['bat']} | Bowl: {p['bowl']})*\n"
+        else:
+            msg += "*No subs selected yet.*\n"
+        return msg
+
+    async def select_cb(self, interaction: discord.Interaction):
+        val = interaction.data["values"][0]
+        player = next(p for p in self.remaining if p["name"] == val)
+        self.selected_subs.append(player)
+        self.update_ui()
+        await interaction.response.edit_message(content=self.get_msg_content(), view=self)
+
+    async def undo_cb(self, interaction: discord.Interaction):
+        self.selected_subs.pop()
+        self.update_ui()
+        await interaction.response.edit_message(content=self.get_msg_content(), view=self)
+
+    async def confirm_cb(self, interaction: discord.Interaction):
+        t_name = self.state.t1_name if self.team_num == 1 else self.state.t2_name
+        if self.team_num == 1:
+            self.state.t1_subs = self.selected_subs
+            await interaction.response.edit_message(content=f"✅ **{t_name} Impact Subs Confirmed!** ({len(self.selected_subs)} selected)", view=None)
+            await prompt_tournament_xi(self.channel, self.state, 2)
+        else:
+            self.state.t2_subs = self.selected_subs
+            await interaction.response.edit_message(content=f"✅ **{t_name} Impact Subs Confirmed!** ({len(self.selected_subs)} selected)", view=None)
+            await ask_pitch_and_weather(self.channel, self.state)
+
 
 # --- Step 4: Pitch & Weather Select ---
 
