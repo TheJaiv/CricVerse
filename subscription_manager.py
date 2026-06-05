@@ -41,11 +41,17 @@ def load_data_from_bin():
         print(f"❌ JSONBin Load Error: {e}")
 
 def save_data_to_bin():
-    if not JSONBIN_KEY or not JSONBIN_BIN_ID: return
+    if not JSONBIN_KEY or not JSONBIN_BIN_ID: return None
     try:
-        requests.put(BIN_URL, json=DB_CACHE, headers=HEADERS)
+        res = requests.put(BIN_URL, json=DB_CACHE, headers=HEADERS)
+        if res.status_code not in (200, 201, 204):
+            print(f"❌ JSONBin Save Failed (HTTP {res.status_code}): {res.text[:300]}")
+        else:
+            print(f"✅ JSONBin Save OK (HTTP {res.status_code})")
+        return res
     except Exception as e:
         print(f"❌ JSONBin Save Error: {e}")
+        return None
 
 def async_save_to_bin():
     Thread(target=save_data_to_bin).start()
