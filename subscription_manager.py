@@ -5,7 +5,10 @@ from threading import Thread
 
 JSONBIN_KEY = os.environ.get("JSONBIN_KEY")
 JSONBIN_BIN_ID = os.environ.get("JSONBIN_BIN_ID")
+JSONBIN_TOURNAMENT_BIN_ID = os.environ.get("JSONBIN_TOURNAMENT_BIN_ID")
+
 BIN_URL = f"https://api.jsonbin.io/v3/b/{JSONBIN_BIN_ID}" if JSONBIN_BIN_ID else ""
+TOURNAMENT_BIN_URL = f"https://api.jsonbin.io/v3/b/{JSONBIN_TOURNAMENT_BIN_ID}" if JSONBIN_TOURNAMENT_BIN_ID else ""
 HEADERS = {
     "X-Master-Key": JSONBIN_KEY,
     "Content-Type": "application/json"
@@ -33,17 +36,33 @@ def load_data_from_bin():
             DB_CACHE["server_subs"] = data.get("server_subs", [])
             DB_CACHE["auth_admins"] = data.get("auth_admins", [])
             DB_CACHE["restricted_channels"] = data.get("restricted_channels", [])
-            DB_CACHE["tournaments"] = data.get("tournaments", [])
             print(f"✅ Loaded {len(DB_CACHE['players'])} players & subscriptions from JSONBin!")
         else:
             print(f"❌ Failed to load from JSONBin: {res.text}")
     except Exception as e:
         print(f"❌ JSONBin Load Error: {e}")
 
+def load_tournament_data_from_bin():
+    if not JSONBIN_KEY or not JSONBIN_TOURNAMENT_BIN_ID:
+        print("⚠️ JSONBIN_TOURNAMENT_BIN_ID missing! Tournament data will be empty.")
+        return
+    try:
+        res = requests.get(TOURNAMENT_BIN_URL, headers={"X-Master-Key": JSONBIN_KEY})
+        if res.status_code == 200:
+            data = res.json().get("record", {})
+            DB_CACHE["tournaments"] = data.get("tournaments", [])
+            print(f"✅ Loaded {len(DB_CACHE['tournaments'])} tournament(s) from Tournament JSONBin!")
+        else:
+            print(f"❌ Failed to load tournament data from JSONBin: {res.text}")
+    except Exception as e:
+        print(f"❌ Tournament JSONBin Load Error: {e}")
+
 def save_data_to_bin():
     if not JSONBIN_KEY or not JSONBIN_BIN_ID: return None
     try:
-        res = requests.put(BIN_URL, json=DB_CACHE, headers=HEADERS)
+        # Save only players/subscriptions — tournaments go to their own bin
+        payload = {k: v for k, v in DB_CACHE.items() if k != "tournaments"}
+        res = requests.put(BIN_URL, json=payload, headers=HEADERS)
         if res.status_code not in (200, 201, 204):
             print(f"❌ JSONBin Save Failed (HTTP {res.status_code}): {res.text[:300]}")
         else:
@@ -53,8 +72,24 @@ def save_data_to_bin():
         print(f"❌ JSONBin Save Error: {e}")
         return None
 
+def save_tournament_data_to_bin():
+    if not JSONBIN_KEY or not JSONBIN_TOURNAMENT_BIN_ID: return None
+    try:
+        res = requests.put(TOURNAMENT_BIN_URL, json={"tournaments": DB_CACHE["tournaments"]}, headers=HEADERS)
+        if res.status_code not in (200, 201, 204):
+            print(f"❌ Tournament JSONBin Save Failed (HTTP {res.status_code}): {res.text[:300]}")
+        else:
+            print(f"✅ Tournament JSONBin Save OK (HTTP {res.status_code})")
+        return res
+    except Exception as e:
+        print(f"❌ Tournament JSONBin Save Error: {e}")
+        return None
+
 def async_save_to_bin():
     Thread(target=save_data_to_bin).start()
+
+def async_save_tournament_to_bin():
+    Thread(target=save_tournament_data_to_bin).start()
 
 def get_today_str():
     return datetime.date.today().isoformat()
