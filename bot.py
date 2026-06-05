@@ -640,7 +640,7 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
 
     def draw_batters(inn, offset_x):
         if not inn: return
-       
+    
         d.text((offset_x + 75, 235), "BATTER", fill=c_text_grey, font=font_small)
         d.text((offset_x + 465 - get_tw("R", font_small)//2, 235), "R", fill=c_text_grey, font=font_small)
         d.text((offset_x + 555 - get_tw("B", font_small)//2, 235), "B", fill=c_text_grey, font=font_small)
@@ -650,12 +650,12 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
         for idx, b in enumerate(top_b):
             y = 285 + (idx * 50)
             name = b.profile['name'][:16].upper()
-          
+        
             d.text((offset_x + 75, y), name, fill=c_navy, font=font_bold)
             
             if potm_name == b.profile['name']:
                 nw = get_tw(name, font_bold)
-               
+            
                 d.text((offset_x + 75 + nw + 8, y - 4), "★", fill="#FFD700", font=font_title)
             
             runs = str(b.runs_scored)
@@ -691,7 +691,7 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
         for idx, bowl in enumerate(top_bowl):
             y = 615 + (idx * 50)
             name = bowl.profile['name'][:16].upper()
-           
+        
             d.text((offset_x + 75, y), name, fill=c_navy, font=font_bold)
             
             if potm_name == bowl.profile['name']:
@@ -1822,17 +1822,17 @@ class FormatSelectView(discord.ui.View):
         if val == "custom":
             await interaction.response.send_modal(CustomOversModal(self.state, self.channel))
         else:
-           
+        
             await interaction.response.defer()
             allowed, reason = await asyncio.to_thread(consume_quota, str(interaction.user.id), str(interaction.guild.id) if interaction.guild else None, val, str(ADMIN_DISCORD_ID))
             if not allowed:
-               
+            
                 return await interaction.followup.send(reason, ephemeral=True)
 
             self.state.format_overs = int(val)
             # 🚨 FIX: Atomic edit prevents the "Already Acknowledged" Crash
             if val == "20":
-               
+            
                 await interaction.edit_original_response(content=f"✅ Format set: **T20 (20 overs)**\n\n🌟 <@{self.state.p1_id}> — Enable **Impact Player** rule?", view=ImpactPlayerView(self.state, self.channel))
             else:
                 label = {"50": "ODI (50 overs)", "90": "Test (90 overs/innings)"}.get(val, f"{val} overs")
@@ -1855,7 +1855,7 @@ class CustomOversModal(discord.ui.Modal, title="Custom Over Count"):
             if not (1 <= val <= 90): raise ValueError
         except: return await interaction.response.send_message("❌ Enter a number between 1 and 90.", ephemeral=True)
         
-       
+    
         await interaction.response.defer()
         allowed, reason = await asyncio.to_thread(consume_quota, str(interaction.user.id), str(interaction.guild.id) if interaction.guild else None, "custom", str(ADMIN_DISCORD_ID))
         if not allowed:
@@ -1863,7 +1863,7 @@ class CustomOversModal(discord.ui.Modal, title="Custom Over Count"):
 
         self.state.format_overs = val
         # 🚨 FIX: Atomic edit prevents the crash
-       
+    
         await interaction.edit_original_response(content=f"✅ Format set: **Custom ({val} overs)**", view=None)
         if getattr(self.state, "tournament_server_id", None):
             await prompt_tournament_xi(self.channel, self.state, 1)
@@ -2345,7 +2345,7 @@ async def match_cmd(interaction: discord.Interaction, opponent: discord.Member =
         
         return await interaction.edit_original_response(content="❌ A setup is already happening here. Use `/endmatch` to cancel it.")
     if opponent and opponent.bot: 
-       
+    
         return await interaction.edit_original_response(content="❌ Cannot challenge a bot user.")
 
     state = MatchSetupState(interaction.user, opponent, interaction.user.id, opponent.id if opponent else None)
@@ -2716,6 +2716,20 @@ async def add_p_cmd(interaction: discord.Interaction):
         
     await interaction.response.send_modal(AddPlayerModal())
 
+@bot.tree.command(name="force_sync", description="[OWNER] Manually force backup memory cache to Cloud DB.")
+async def force_sync_cmd(interaction: discord.Interaction):
+    if interaction.user.id != ADMIN_DISCORD_ID:
+        return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
+        
+    await interaction.response.defer(ephemeral=True)
+    try:
+        # Forces the synchronous JSONBin save instead of waiting for the 1-hour loop
+        save_data_to_bin()
+        await interaction.followup.send("✅ Memory cache successfully force-synced to the Cloud DB!")
+        await log_db_update("Manual Cloud Sync", "Database Backup", interaction.user, "Force synced local memory cache to JSONBin.")
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error during sync: {e}")
+
 @bot.tree.command(name="sync_csv", description="[OWNER] Sync missing players from players_master.csv to Cloud DB.")
 async def sync_csv_cmd(interaction: discord.Interaction):
     if interaction.user.id != ADMIN_DISCORD_ID:
@@ -3069,9 +3083,19 @@ class PrefixCog(commands.Cog):
         msg = f"🔍 **Not found exactly.**\n💡 **Best Match:** `{best_name}`\n👉 Rerun: `cv searchplayer \"{best_name}\"`"
         await ctx.send(msg)
 
+    @commands.command(name="force_sync", help="[OWNER] Manually force backup memory cache to Cloud DB.\nUsage: force_sync")
+    async def force_sync(self, ctx):
+        if ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("❌ Owner only.")
+        try:
+            save_data_to_bin()
+            await ctx.send("✅ Memory cache successfully force-synced to the Cloud DB!")
+        except Exception as e:
+            await ctx.send(f"❌ Error during sync: {e}")
+
     @commands.group(name="tournament", invoke_without_command=True, help="Main command for tournaments.\nUsage: tournament")
     async def tournament(self, ctx):
-         await ctx.send_help(ctx.command)
+        await ctx.send_help(ctx.command)
 
     @tournament.command(name="create", help="[ADMIN] Create a new tournament.\nUsage: tournament create \"<name>\" <format> [impact_player=true/false]")
     async def t_create(self, ctx, name: str, format_str: str, *options: str):
