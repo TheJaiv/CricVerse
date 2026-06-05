@@ -562,7 +562,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         )
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="admin_restore_schedule", description="[MANAGER] Regenerate round-robin schedule from current teams without random shuffle (same pairings every time).")
+    @app_commands.command(name="admin_restore_schedule", description="[MANAGER] Regenerate round-robin schedule (deterministic, no shuffle). Safe to use before any matches.")
     async def admin_restore_schedule(self, interaction: discord.Interaction):
         server_id = str(interaction.guild.id)
         tourney = get_server_tournament(server_id)
