@@ -7,6 +7,7 @@ import difflib
 import asyncio
 import io
 import os
+import json
 from PIL import Image, ImageDraw, ImageFont
 from keep_alive import keep_alive
 from odi_simulation import execute_ball_math_odi, get_smart_ai_bowler_odi
@@ -1076,12 +1077,17 @@ class ODISuperOverPrompt(discord.ui.View):
 async def trigger_super_over(channel, match: CricketMatch):
     so_match = CricketMatch(match.p1, match.p2, match.p1_id, match.p2_id, match.team1, match.team2, format_overs=1, pitch=match.pitch, weather=match.weather)
     so_match.is_super_over = True
+    so_match.original_match_object = match
     so_match.sim_only = getattr(match, 'sim_only', False)
     so_match.verbose = getattr(match, 'verbose', True)
     so_match.batting_first_id = match.bowling_first_id
     so_match.bowling_first_id = match.batting_first_id
     so_match.innings1 = InningsState(match.innings2.batting_team, match.innings1.batting_team)
     so_match.current_innings = so_match.innings1
+    so_match.tournament_server_id = getattr(match, "tournament_server_id", None)
+    so_match.tournament_match_id = getattr(match, "tournament_match_id", None)
+    so_match.manager_id = getattr(match, "manager_id", None)
+    so_match.tournament_name = getattr(match, "tournament_name", "TOURNAMENT")
     active_games[channel.id] = so_match
     
     await channel.send("🚨 **SCORES ARE TIED!** 🚨\nGet ready for the **SUPER OVER!**\n*The team that batted second will bat first. Max 2 wickets.*")
@@ -1148,22 +1154,33 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
         target = getattr(match, "target", inn1.total_runs + 1)
         is_tied = (inn2.total_runs == target - 1)
         
-        if is_tied and not getattr(match, "tie_accepted", False):
-            if getattr(match, "is_super_over", False):
-                await channel.send("🤯 **THE SUPER OVER IS TIED!** We are going to ANOTHER Super Over!")
-                return await trigger_super_over(channel, match)
+        if is_tied and not getattr(match, "tie_accepted", False) and not getattr(match, 'is_super_over', False):
             if match.format_overs != 50:
-                return await trigger_super_over(channel, match)
-            else:
-                return await channel.send("🏆 **The Match has TIED!** Do you want to play a Super Over?", view=ODISuperOverPrompt(match))
+                await trigger_super_over(channel, match)
+                return
 
-        if getattr(match, "tournament_server_id", None):
-            img_buf = generate_tournament_score_image(match)
+            else:
+                await channel.send("🏆 **The Match has TIED!** Do you want to play a Super Over?", view=ODISuperOverPrompt(match))
+                return
+        if is_tied and getattr(match, 'is_super_over', False):
+            await channel.send("🤯 **THE SUPER OVER IS TIED!** We are going to ANOTHER Super Over!")
+            await trigger_super_over(channel, match)
+            return
+
+        match_to_finalize = match
+        if getattr(match, 'is_super_over', False) and hasattr(match, 'original_match_object'):
+            original_match = match.original_match_object
+            so_winner_name = match.innings2.batting_team['name'] if match.innings2.total_runs > match.innings1.total_runs else match.innings1.batting_team['name']
+            original_match.tiebreak_winner_name = so_winner_name
+            match_to_finalize = original_match
+
+        if getattr(match_to_finalize, "tournament_server_id", None):
+            img_buf = generate_tournament_score_image(match_to_finalize)
         else:
-            img_buf = generate_final_score_image(match)
+            img_buf = generate_final_score_image(match_to_finalize)
             
         file = discord.File(fp=img_buf, filename="final_scoreboard.png")
-        embed_full = render_full_scorecard_embed(match, 2)
+        embed_full = render_full_scorecard_embed(match_to_finalize, 2)
         
         await channel.send(
             "🏆 **Match over! Here is the final detailed scorecard and broadcast graphic:**", 
@@ -1174,8 +1191,8 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
         if channel.id in active_games:
             del active_games[channel.id]
             
-        if getattr(match, "tournament_server_id", None):
-            bot.dispatch("tournament_match_complete", match)
+        if getattr(match_to_finalize, "tournament_server_id", None):
+            bot.dispatch("tournament_match_complete", match_to_finalize)
 
 # ==========================================
 # 🏏 6. OVER HUB & INTERACTIVE MENUS
@@ -2723,12 +2740,33 @@ async def force_sync_cmd(interaction: discord.Interaction):
         
     await interaction.response.defer(ephemeral=True)
     try:
-        # Forces the synchronous JSONBin save instead of waiting for the 1-hour loop
-        save_data_to_bin()
-        await interaction.followup.send("✅ Memory cache successfully force-synced to the Cloud DB!")
-        await log_db_update("Manual Cloud Sync", "Database Backup", interaction.user, "Force synced local memory cache to JSONBin.")
+        res = save_data_to_bin()
+        if res is None:
+            await interaction.followup.send("❌ Sync skipped — JSONBin credentials missing.")
+        elif res.status_code in (200, 201, 204):
+            await interaction.followup.send(f"✅ Memory cache successfully force-synced to the Cloud DB! (HTTP {res.status_code})")
+            await log_db_update("Manual Cloud Sync", "Database Backup", interaction.user, "Force synced local memory cache to JSONBin.")
+        else:
+            await interaction.followup.send(f"❌ JSONBin rejected the save — HTTP {res.status_code}: {res.text[:300]}")
     except Exception as e:
         await interaction.followup.send(f"❌ Error during sync: {e}")
+
+@bot.tree.command(name="dump_cache", description="[OWNER] Export current in-memory tournament data as a JSON file (emergency backup).")
+async def dump_cache_cmd(interaction: discord.Interaction):
+    if interaction.user.id != ADMIN_DISCORD_ID:
+        return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    try:
+        data = {"tournaments": DB_CACHE.get("tournaments", [])}
+        raw = json.dumps(data, indent=2, ensure_ascii=False)
+        file = discord.File(fp=io.BytesIO(raw.encode("utf-8")), filename="tournament_cache_dump.json")
+        await interaction.followup.send(
+            "📦 Current in-memory tournament data. Paste the contents of `tournaments` into your JSONBin manually if saves are failing.",
+            file=file,
+            ephemeral=True
+        )
+    except Exception as e:
+        await interaction.followup.send(f"❌ Dump failed: {e}", ephemeral=True)
 
 @bot.tree.command(name="sync_csv", description="[OWNER] Sync missing players from players_master.csv to Cloud DB.")
 async def sync_csv_cmd(interaction: discord.Interaction):
@@ -3088,8 +3126,13 @@ class PrefixCog(commands.Cog):
         if ctx.author.id != ADMIN_DISCORD_ID:
             return await ctx.send("❌ Owner only.")
         try:
-            save_data_to_bin()
-            await ctx.send("✅ Memory cache successfully force-synced to the Cloud DB!")
+            res = save_data_to_bin()
+            if res is None:
+                await ctx.send("❌ Sync skipped — JSONBin credentials missing.")
+            elif res.status_code in (200, 201, 204):
+                await ctx.send(f"✅ Memory cache successfully force-synced to the Cloud DB! (HTTP {res.status_code})")
+            else:
+                await ctx.send(f"❌ JSONBin rejected the save — HTTP {res.status_code}: {res.text[:300]}")
         except Exception as e:
             await ctx.send(f"❌ Error during sync: {e}")
 
@@ -3433,6 +3476,30 @@ class PrefixCog(commands.Cog):
         r_label = f"Round {match['round']}" if isinstance(match['round'], int) else match['round']
         await ctx.send(f"🚀 **Manually Launching Match {match['match_id']} ({r_label})...**")
         self.bot.dispatch("start_tournament_match", ctx.channel, ctx.author.id, tourney, match)
+
+    @tournament.command(name="force_result", help="[MANAGER] Manually set match result.\nUsage: tournament force_result <id> <winner> <t1_r> <t1_w> <t1_b> <t2_r> <t2_w> <t2_b>")
+    async def t_force_result(self, ctx, match_id: int, winner_team: str, t1_runs: int, t1_wkts: int, t1_balls: int, t2_runs: int, t2_wkts: int, t2_balls: int):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (tourney and str(ctx.author.id) in tourney.get("managers", []))
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        
+        match_data = next((m for m in tourney.get("schedule", []) if m["match_id"] == match_id), None)
+        if not match_data: return await ctx.send(f"❌ Match ID {match_id} does not exist.")
+        if match_data["status"] == "completed": return await ctx.send(f"❌ Match {match_id} is already completed.")
+            
+        match_data["status"] = "completed"
+        match_data["result"] = {
+            "winner": winner_team,
+            "format_overs": tourney.get("format_overs", 20),
+            "t1_runs": t1_runs, "t1_wickets": t1_wkts, "t1_balls": t1_balls,
+            "t2_runs": t2_runs, "t2_wickets": t2_wkts, "t2_balls": t2_balls
+        }
+        tourney["current_match_idx"] += 1
+        save_tournament(tourney)
+        await ctx.send(f"✅ **Match {match_id} forcefully completed!**\nWinner: **{winner_team}**\nPoints Table and NRR updated.")
 
     @tournament.command(name="generate_knockouts", help="[MANAGER] Generate Knockouts (Semi-Finals) for Top 4 teams.\nUsage: tournament generate_knockouts")
     async def t_generate_knockouts(self, ctx):
