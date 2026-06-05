@@ -53,9 +53,9 @@ active_setups = {}
 # ==========================================
 @tasks.loop(hours=1)
 async def auto_sync_jsonbin():
-    """Automatically backs up memory to JSONBin every hour"""
-    save_data_to_bin()
-    save_tournament_data_to_bin()
+    """Refresh in-memory cache from JSONBin every hour (picks up manual edits)"""
+    load_data_from_bin()
+    load_tournament_data_from_bin()
 
 @bot.event
 async def on_ready():
