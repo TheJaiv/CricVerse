@@ -168,6 +168,42 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         save_tournament(tourney)
         await interaction.response.send_message(f"✅ Team **{team_name}** has been successfully removed from the tournament.")
 
+    @app_commands.command(name="replace_player", description="[MANAGER] Replace a player in a team's squad.")
+    async def replace_player(self, interaction: discord.Interaction, team_name: str, out_player: str, in_player: str):
+        server_id = str(interaction.guild.id)
+        tourney = get_server_tournament(server_id)
+        
+        if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
+        if not self.is_manager(interaction, tourney): return await interaction.response.send_message("❌ Managers only.", ephemeral=True)
+        
+        team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.lower()), None)
+        if not team: return await interaction.response.send_message(f"❌ Team '{team_name}' not found.", ephemeral=True)
+        
+        if not team.get("squad"):
+            return await interaction.response.send_message(f"❌ Team '{team_name}' has no squad submitted yet.", ephemeral=True)
+            
+        old_p = next((p for p in team["squad"] if p["name"].lower() == out_player.lower()), None)
+        if not old_p:
+            close = difflib.get_close_matches(out_player, [p["name"] for p in team["squad"]], n=1, cutoff=0.5)
+            if close: old_p = next(p for p in team["squad"] if p["name"] == close[0])
+            else: return await interaction.response.send_message(f"❌ Player '{out_player}' not found in team '{team_name}'.", ephemeral=True)
+            
+        db_players = get_all_players()
+        new_p = next((p for p in db_players if p["name"].lower() == in_player.lower()), None)
+        if not new_p:
+            close = difflib.get_close_matches(in_player, [p["name"] for p in db_players], n=1, cutoff=0.6)
+            if close: new_p = next(p for p in db_players if p["name"] == close[0])
+            else: return await interaction.response.send_message(f"❌ Player '{in_player}' not found in the global database.", ephemeral=True)
+            
+        if any(p["name"] == new_p["name"] for p in team["squad"]):
+            return await interaction.response.send_message(f"❌ '{new_p['name']}' is already in the squad.", ephemeral=True)
+            
+        idx = team["squad"].index(old_p)
+        team["squad"][idx] = new_p
+        
+        save_tournament(tourney)
+        await interaction.response.send_message(f"✅ **Squad Updated for {team['name']}:**\n🔴 OUT: {old_p['name']}\n🟢 IN: {new_p['name']}")
+
     @app_commands.command(name="submit_squad", description="[OWNER/MANAGER] Submit a tournament squad (15 players).")
     async def submit_squad(self, interaction: discord.Interaction, team_name: str = None):
         server_id = str(interaction.guild.id)
@@ -567,11 +603,13 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                 # 🛠️ CONFIGURATION: Adjust these pixels if it doesn't line up perfectly with your PNG!
                 start_y = 275       # Y-pixel where the first team row starts
                 row_height = 40     # Spacing between each team row
+              
                 c_text = "#FFFFFF"  # Text color
                 
                 # X-pixel coordinates for the center of each column (Adjust left/right as needed)
                 # Note: The template already has 1-10 written for POS, so we skip drawing the rank!
-                cols = {"TEAM": 140, "P": 455, "W": 565, "L": 675, "NR": 785, "PTS": 895, "NRR": 1005}
+                
+                cols = {"TEAM": 140, "P": 445, "W": 555, "L": 665, "NR": 775, "PTS": 885, "NRR": 995}
                 
                 y = start_y
                 for i, (t_name, data) in enumerate(standings, 1):
