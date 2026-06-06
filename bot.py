@@ -820,11 +820,198 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
     
     return buf
 
-def generate_tournament_score_image(match: CricketMatch) -> io.BytesIO:
+def extract_scoreboard_data(match: CricketMatch) -> dict:
+    """Serialize all match display data needed to regenerate the scorecard image later."""
     theme = "Default"
     if getattr(match, "tournament_server_id", None):
         tourney = next((t for t in DB_CACHE.get("tournaments", []) if t.get("server_id") == match.tournament_server_id), None)
         if tourney: theme = tourney.get("theme", "Default")
+
+    potm = get_player_of_the_match(match)
+    inn1 = match.innings1
+    inn2 = match.innings2 if match.current_innings_num == 2 else None
+
+    def _top_bat(inn):
+        if not inn: return []
+        active = [b for b in inn.batting_stats.values() if b.balls_faced > 0 or b.dismissal != "not out"]
+        top = sorted(active, key=lambda x: x.runs_scored, reverse=True)[:4]
+        return [{"name": b.profile["name"], "runs": b.runs_scored, "balls": b.balls_faced, "not_out": b.dismissal == "not out"} for b in top]
+
+    def _top_bowl(inn):
+        if not inn: return []
+        active = [b for b in inn.bowling_stats.values() if b.balls_bowled > 0]
+        top = sorted(active, key=lambda x: (x.wickets_taken, -x.runs_conceded), reverse=True)[:4]
+        return [{"name": b.profile["name"], "wickets": b.wickets_taken, "runs": b.runs_conceded, "overs": f"{b.balls_bowled//6}.{b.balls_bowled%6}"} for b in top]
+
+    if match.team1["name"] == inn1.batting_team["name"]:
+        t1_bat_inn, t1_bowl_inn = inn1, inn2
+        t2_bat_inn, t2_bowl_inn = inn2, inn1
+    else:
+        t2_bat_inn, t2_bowl_inn = inn1, inn2
+        t1_bat_inn, t1_bowl_inn = inn2, inn1
+
+    target = getattr(match, "target", inn1.total_runs + 1)
+    if inn2:
+        max_w = 2 if getattr(match, 'is_super_over', False) else 10
+        if inn2.total_runs >= target:
+            result_str = f"{inn2.batting_team['name'].upper()} WON BY {max_w - inn2.wickets} WICKETS"
+        elif inn2.total_runs == target - 1:
+            result_str = "MATCH TIED"
+        else:
+            result_str = f"{inn1.batting_team['name'].upper()} WON BY {(target - 1) - inn2.total_runs} RUNS"
+        if getattr(match, "dls_active", False):
+            result_str += " (DLS)"
+    else:
+        result_str = f"TARGET SET: {inn1.total_runs + 1} RUNS"
+
+    return {
+        "theme": theme,
+        "match_id": str(getattr(match, "tournament_match_id", "?")),
+        "tourn_name": getattr(match, "tournament_name", "TOURNAMENT").upper(),
+        "format_overs": getattr(match, "format_overs", 20),
+        "result_str": result_str,
+        "potm": potm if potm else None,
+        "t1": {
+            "name": match.team1["name"].upper(),
+            "color": match.team1.get("color", "#6B7280"),
+            "runs": t1_bat_inn.total_runs if t1_bat_inn else 0,
+            "wickets": t1_bat_inn.wickets if t1_bat_inn else 0,
+            "balls": t1_bat_inn.total_balls if t1_bat_inn else 0,
+            "yet_to_bat": t1_bat_inn is None,
+            "batters": _top_bat(t1_bat_inn),
+            "bowlers": _top_bowl(t1_bowl_inn),
+            "impact_sub": getattr(match, "t1_impact_sub_name", None),
+        },
+        "t2": {
+            "name": match.team2["name"].upper(),
+            "color": match.team2.get("color", "#6B7280"),
+            "runs": t2_bat_inn.total_runs if t2_bat_inn else 0,
+            "wickets": t2_bat_inn.wickets if t2_bat_inn else 0,
+            "balls": t2_bat_inn.total_balls if t2_bat_inn else 0,
+            "yet_to_bat": t2_bat_inn is None,
+            "batters": _top_bat(t2_bat_inn),
+            "bowlers": _top_bowl(t2_bowl_inn),
+            "impact_sub": getattr(match, "t2_impact_sub_name", None),
+        },
+    }
+
+
+def extract_scorecard_players(match: CricketMatch) -> dict:
+    """Minimal per-match data for scorecard regeneration.
+    Only stores what can't be derived from the existing tournament/result JSON.
+    Uses short keys + arrays to keep the stored JSON as small as possible.
+    Per-match size: ~580 bytes → 45 matches ≈ 26 KB added to the bin.
+    """
+    potm = get_player_of_the_match(match)
+    inn1 = match.innings1
+    inn2 = match.innings2 if match.current_innings_num == 2 else None
+
+    def _bat(inn):
+        if not inn: return []
+        active = [b for b in inn.batting_stats.values() if b.balls_faced > 0 or b.dismissal != "not out"]
+        top = sorted(active, key=lambda x: x.runs_scored, reverse=True)[:4]
+        return [[b.profile["name"], b.runs_scored, b.balls_faced, b.dismissal == "not out"] for b in top]
+
+    def _bowl(inn):
+        if not inn: return []
+        active = [b for b in inn.bowling_stats.values() if b.balls_bowled > 0]
+        top = sorted(active, key=lambda x: (x.wickets_taken, -x.runs_conceded), reverse=True)[:4]
+        return [[b.profile["name"], b.wickets_taken, b.runs_conceded, f"{b.balls_bowled//6}.{b.balls_bowled%6}"] for b in top]
+
+    if match.team1["name"] == inn1.batting_team["name"]:
+        t1_bat, t1_bowl = inn1, inn2
+        t2_bat, t2_bowl = inn2, inn1
+    else:
+        t2_bat, t2_bowl = inn1, inn2
+        t1_bat, t1_bowl = inn2, inn1
+
+    target = getattr(match, "target", inn1.total_runs + 1)
+    if inn2:
+        max_w = 2 if getattr(match, 'is_super_over', False) else 10
+        if getattr(match, "tiebreak_winner_name", None):
+            rs = f"{match.tiebreak_winner_name.upper()} WON (SUPER OVER)"
+        elif inn2.total_runs >= target:
+            rs = f"{inn2.batting_team['name'].upper()} WON BY {max_w - inn2.wickets} WICKETS"
+        elif inn2.total_runs == target - 1:
+            rs = "MATCH TIED"
+        else:
+            rs = f"{inn1.batting_team['name'].upper()} WON BY {(target - 1) - inn2.total_runs} RUNS"
+        if getattr(match, "dls_active", False): rs += " (DLS)"
+    else:
+        rs = f"TARGET SET: {inn1.total_runs + 1} RUNS"
+
+    return {
+        "rs": rs,
+        "p":  potm,
+        "i1": getattr(match, "t1_impact_sub_name", None),
+        "i2": getattr(match, "t2_impact_sub_name", None),
+        "b1": _bat(t1_bat),
+        "w1": _bowl(t1_bowl),
+        "b2": _bat(t2_bat),
+        "w2": _bowl(t2_bowl),
+    }
+
+
+def reconstruct_scorecard_data(tourney: dict, m: dict) -> dict:
+    """Rebuild the full display dict from minimal stored data + existing tournament JSON.
+    Returns None if no scorecard_players entry exists (old match or data missing).
+    """
+    r = m.get("result") or {}
+    p = r.get("scorecard_players")
+    if not p:
+        return None
+    t1_name = m["team1"]
+    t2_name = m["team2"]
+    t1_team = next((t for t in tourney.get("teams", []) if t["name"] == t1_name), {})
+    t2_team = next((t for t in tourney.get("teams", []) if t["name"] == t2_name), {})
+
+    def _bat(arrays):
+        return [{"name": a[0], "runs": a[1], "balls": a[2], "not_out": a[3]} for a in (arrays or [])]
+    def _bowl(arrays):
+        return [{"name": a[0], "wickets": a[1], "runs": a[2], "overs": a[3]} for a in (arrays or [])]
+
+    return {
+        "theme":       tourney.get("theme", "Default"),
+        "match_id":    str(m["match_id"]),
+        "tourn_name":  tourney["name"].upper(),
+        "format_overs": r.get("format_overs", 20),
+        "result_str":  p.get("rs", ""),
+        "potm":        p.get("p"),
+        "t1": {
+            "name":       t1_name.upper(),
+            "color":      t1_team.get("color", "#6B7280"),
+            "runs":       r.get("t1_runs", 0),
+            "wickets":    r.get("t1_wickets", 0),
+            "balls":      r.get("t1_balls", 0),
+            "yet_to_bat": False,
+            "batters":    _bat(p.get("b1")),
+            "bowlers":    _bowl(p.get("w1")),
+            "impact_sub": p.get("i1"),
+        },
+        "t2": {
+            "name":       t2_name.upper(),
+            "color":      t2_team.get("color", "#6B7280"),
+            "runs":       r.get("t2_runs", 0),
+            "wickets":    r.get("t2_wickets", 0),
+            "balls":      r.get("t2_balls", 0),
+            "yet_to_bat": False,
+            "batters":    _bat(p.get("b2")),
+            "bowlers":    _bowl(p.get("w2")),
+            "impact_sub": p.get("i2"),
+        },
+    }
+
+
+def generate_scorecard_from_data(data: dict) -> io.BytesIO:
+    """Generate a scorecard image from pre-serialized match display data."""
+    theme      = data.get("theme", "Default")
+    t1_data    = data["t1"]
+    t2_data    = data["t2"]
+    potm       = data.get("potm")
+    match_id   = str(data.get("match_id", "?"))
+    tourn_name = data.get("tourn_name", "TOURNAMENT")
+    result_str = data.get("result_str", "")
+    format_overs = data.get("format_overs", 20)
 
     if theme == "Crimson Cricket":
         try:
@@ -902,70 +1089,6 @@ def generate_tournament_score_image(match: CricketMatch) -> io.BytesIO:
                     pts.append((cx + r * math.cos(angle), cy + r * math.sin(angle)))
                 d.polygon(pts, fill=_C_GOLD)
 
-            # ── Extract match data ───────────────────────────────
-            potm       = get_player_of_the_match(match)
-            match_id   = str(getattr(match, "tournament_match_id", "?"))
-            tourn_name = getattr(match, "tournament_name", "TOURNAMENT").upper()
-
-            inn1 = match.innings1
-            inn2 = match.innings2 if match.current_innings_num == 2 else None
-
-            def _top_bat(inn):
-                if not inn: return []
-                active = [b for b in inn.batting_stats.values() if b.balls_faced > 0 or b.dismissal != "not out"]
-                top = sorted(active, key=lambda x: x.runs_scored, reverse=True)[:4]
-                return [{"name": b.profile["name"], "runs": b.runs_scored, "balls": b.balls_faced,
-                         "not_out": b.dismissal == "not out"} for b in top]
-
-            def _top_bowl(inn):
-                if not inn: return []
-                active = [b for b in inn.bowling_stats.values() if b.balls_bowled > 0]
-                top = sorted(active, key=lambda x: (x.wickets_taken, -x.runs_conceded), reverse=True)[:4]
-                return [{"name": b.profile["name"], "wickets": b.wickets_taken, "runs": b.runs_conceded,
-                         "overs": f"{b.balls_bowled // 6}.{b.balls_bowled % 6}"} for b in top]
-
-            if match.team1["name"] == inn1.batting_team["name"]:
-                t1_bat_inn, t1_bowl_inn = inn1, inn2
-                t2_bat_inn, t2_bowl_inn = inn2, inn1
-            else:
-                t2_bat_inn, t2_bowl_inn = inn1, inn2
-                t1_bat_inn, t1_bowl_inn = inn2, inn1
-
-            t1_data = {
-                "name": match.team1["name"].upper(),
-                "color": match.team1.get("color", "#6B7280"),
-                "runs": t1_bat_inn.total_runs if t1_bat_inn else 0,
-                "wickets": t1_bat_inn.wickets if t1_bat_inn else 0,
-                "yet_to_bat": t1_bat_inn is None,
-                "batters": _top_bat(t1_bat_inn),
-                "bowlers": _top_bowl(t1_bowl_inn),
-                "impact_sub": getattr(match, "t1_impact_sub_name", None),
-            }
-            t2_data = {
-                "name": match.team2["name"].upper(),
-                "color": match.team2.get("color", "#6B7280"),
-                "runs": t2_bat_inn.total_runs if t2_bat_inn else 0,
-                "wickets": t2_bat_inn.wickets if t2_bat_inn else 0,
-                "yet_to_bat": t2_bat_inn is None,
-                "batters": _top_bat(t2_bat_inn),
-                "bowlers": _top_bowl(t2_bowl_inn),
-                "impact_sub": getattr(match, "t2_impact_sub_name", None),
-            }
-
-            if inn2:
-                target = getattr(match, "target", inn1.total_runs + 1)
-                max_w  = 2 if getattr(match, 'is_super_over', False) else 10
-                if inn2.total_runs >= target:
-                    result_str = f"{inn2.batting_team['name'].upper()} WON BY {max_w - inn2.wickets} WICKETS"
-                elif inn2.total_runs == target - 1:
-                    result_str = "MATCH TIED"
-                else:
-                    result_str = f"{inn1.batting_team['name'].upper()} WON BY {(target - 1) - inn2.total_runs} RUNS"
-                if getattr(match, "dls_active", False):
-                    result_str += " (DLS)"
-            else:
-                result_str = f"TARGET SET: {inn1.total_runs + 1} RUNS"
-
             # ── 1. Gradient header ───────────────────────────────
             for x in range(_W):
                 t = x / (_W - 1)
@@ -1002,7 +1125,7 @@ def generate_tournament_score_image(match: CricketMatch) -> io.BytesIO:
 
                 d.text((30, y_top + (_H_BAR - _th(_fTEAM)) // 2), td["name"], fill=_C_WHITE, font=_fTEAM)
 
-                ovr = f"OVERS  {match.format_overs}"
+                ovr = f"OVERS  {format_overs}"
                 d.text((_W - _SCORE_PANEL + (_SCORE_PANEL - _tw(ovr, _fOVR)) // 2, y_top + 6),
                        ovr, fill="#AAAAAA", font=_fOVR)
 
@@ -1148,116 +1271,64 @@ def generate_tournament_score_image(match: CricketMatch) -> io.BytesIO:
     d.rounded_rectangle([(100, 80), (1100, 200)], radius=20, fill=c_header)
     d.rectangle([(100, 120), (1100, 180)], fill=c_header) # square bottom for seamless connection
     
-    t_name = getattr(match, "tournament_name", "TOURNAMENT").upper()
-    d.text((140, 100), t_name[:30], fill=c_white, font=font_huge)
-    
-    match_id = getattr(match, "tournament_match_id", "1")
-    d.text((140, 145), f"MATCH {match_id} - {match.format_overs} OVERS", fill="#A5F3FC", font=font_small)
-
-    # Server Logo right
+    d.text((140, 100), tourn_name[:30], fill=c_white, font=font_huge)
+    d.text((140, 145), f"MATCH {match_id} - {format_overs} OVERS", fill="#A5F3FC", font=font_small)
     d.text((1060 - get_tw("SERVER LOGO", font_bold), 115), "SERVER LOGO", fill=c_white, font=font_bold)
 
-    # Helper for drawing Team Section (Header Bar + Grid)
-    def draw_team_section(inn, team_dict, y_start):
-        # Team Bar
+    def draw_team_section(td, y_start):
         d.rectangle([(100, y_start), (1100, y_start + 60)], fill=c_team_bar)
-        
-        # Flag placeholder
         d.rectangle([(140, y_start + 18), (170, y_start + 42)], fill=c_header)
-        
-        d.text((185, y_start + 12), team_dict['name'].upper(), fill=c_white, font=font_large)
-        
-        if inn:
-            overs_txt = f"OVERS {inn.total_balls // 6}.{inn.total_balls % 6}"
-            score_txt = f"{inn.total_runs}-{inn.wickets}"
+        d.text((185, y_start + 12), td["name"], fill=c_white, font=font_large)
+        if td["yet_to_bat"]:
+            score_txt, overs_txt = "YET TO BAT", ""
         else:
-            overs_txt = ""
-            score_txt = "YET TO BAT"
-            
+            score_txt = f"{td['runs']}-{td['wickets']}"
+            b = td.get("balls", 0)
+            overs_txt = f"OVERS {b // 6}.{b % 6}"
         sw = get_tw(score_txt, font_huge)
         d.text((1060 - sw, y_start + 5), score_txt, fill=c_white, font=font_huge)
         if overs_txt:
             d.text((1060 - sw - get_tw(overs_txt, font_bold) - 20, y_start + 18), overs_txt, fill=c_white, font=font_bold)
-
-        # Grid Headers
         g_y = y_start + 60
-        if not inn: return 
-
-        # Middle Divider
+        if td["yet_to_bat"]: return
         d.line([(600, g_y), (600, g_y + 210)], fill=c_grid_line, width=2)
-
-        # Left Col (Batting)
         d.text((140, g_y + 10), "BATTER", fill=c_text_grey, font=font_small)
         d.text((490 - get_tw("R", font_small)//2, g_y + 10), "R", fill=c_text_grey, font=font_small)
         d.text((550 - get_tw("B", font_small)//2, g_y + 10), "B", fill=c_text_grey, font=font_small)
-
-        active_batters = [b for b in inn.batting_stats.values() if b.balls_faced > 0 or b.dismissal != "not out"]
-        top_b = sorted(active_batters, key=lambda x: x.runs_scored, reverse=True)[:4]
-        
-        for idx, b in enumerate(top_b):
-            r_y = g_y + 40 + (idx * 40)
+        for idx, b in enumerate(td["batters"][:4]):
+            r_y = g_y + 40 + idx * 40
             d.line([(100, r_y), (600, r_y)], fill=c_grid_line, width=1)
-            runs = f"{b.runs_scored}*" if b.dismissal == "not out" else str(b.runs_scored)
-            
-            name = b.profile['name'][:16].upper()
-            d.text((140, r_y + 8), name, fill=c_text_navy, font=font_bold)
+            runs = f"{b['runs']}{'*' if b.get('not_out') else ''}"
+            d.text((140, r_y + 8), b["name"][:16].upper(), fill=c_text_navy, font=font_bold)
             d.text((490 - get_tw(runs, font_bold)//2, r_y + 8), runs, fill=c_text_navy, font=font_bold)
-            d.text((550 - get_tw(str(b.balls_faced), font_small)//2, r_y + 8), str(b.balls_faced), fill=c_text_grey, font=font_bold)
-
-        # Right Col (Bowling)
+            d.text((550 - get_tw(str(b["balls"]), font_small)//2, r_y + 8), str(b["balls"]), fill=c_text_grey, font=font_bold)
         d.text((640, g_y + 10), "BOWLER", fill=c_text_grey, font=font_small)
         d.text((950 - get_tw("W-R", font_small)//2, g_y + 10), "W-R", fill=c_text_grey, font=font_small)
         d.text((1050 - get_tw("O", font_small)//2, g_y + 10), "O", fill=c_text_grey, font=font_small)
-
-        active_bowlers = [b for b in inn.bowling_stats.values() if b.balls_bowled > 0]
-        top_bowl = sorted(active_bowlers, key=lambda x: (x.wickets_taken, -x.runs_conceded), reverse=True)[:4]
-        
-        for idx, b in enumerate(top_bowl):
-            r_y = g_y + 40 + (idx * 40)
+        for idx, bw in enumerate(td["bowlers"][:4]):
+            r_y = g_y + 40 + idx * 40
             d.line([(600, r_y), (1100, r_y)], fill=c_grid_line, width=1)
-            
-            wr = f"{b.wickets_taken}-{b.runs_conceded}"
-            ov = f"{b.balls_bowled // 6}.{b.balls_bowled % 6}"
-            
-            name = b.profile['name'][:16].upper()
-            d.text((640, r_y + 8), name, fill=c_text_navy, font=font_bold)
+            wr = f"{bw['wickets']}-{bw['runs']}"
+            d.text((640, r_y + 8), bw["name"][:16].upper(), fill=c_text_navy, font=font_bold)
             d.text((950 - get_tw(wr, font_bold)//2, r_y + 8), wr, fill=c_text_navy, font=font_bold)
-            d.text((1050 - get_tw(ov, font_small)//2, r_y + 8), ov, fill=c_text_grey, font=font_bold)
+            d.text((1050 - get_tw(bw["overs"], font_small)//2, r_y + 8), bw["overs"], fill=c_text_grey, font=font_bold)
 
-    # 2 & 3. Team 1 Section (Starts at 180px)
-    draw_team_section(match.innings1, match.team1, 180)
-    
-    # 4 & 5. Team 2 Section (Starts at 450px)
-    draw_team_section(match.innings2 if match.current_innings_num == 2 else None, match.team2, 450)
+    draw_team_section(t1_data, 180)
+    draw_team_section(t2_data, 450)
 
-    # 6. Footer Block (720 to 820px)
     d.rounded_rectangle([(100, 720), (1100, 820)], radius=20, fill=c_header)
-    d.rectangle([(100, 720), (1100, 780)], fill=c_header) # square top
-    
-    if match.current_innings_num == 1:
-        result_str = f"TARGET SET: {match.innings1.total_runs + 1} RUNS"
-    else:
-        inn1, inn2 = match.innings1, match.innings2
-        target = getattr(match, "target", inn1.total_runs + 1)
-        max_w = 2 if getattr(match, 'is_super_over', False) else 10
-        if inn2.total_runs >= target:
-            result_str = f"{inn2.batting_team['name'].upper()} WON BY {max_w - inn2.wickets} WICKETS"
-        elif inn2.total_runs == target - 1:
-            result_str = "MATCH TIED"
-        else:
-            result_str = f"{inn1.batting_team['name'].upper()} WON BY {(target - 1) - inn2.total_runs} RUNS"
-            
-        if getattr(match, "dls_active", False): result_str += " (DLS)"
-        
-        potm_name = get_player_of_the_match(match)
-        if potm_name: result_str += f"  •  POTM: {potm_name.upper()}"
-
-    d.text((600 - get_tw(result_str, font_title)//2, 755), result_str, fill=c_white, font=font_title)
+    d.rectangle([(100, 720), (1100, 780)], fill=c_header)
+    footer = result_str
+    if potm: footer += f"  •  POTM: {potm.upper()}"
+    d.text((600 - get_tw(footer, font_title)//2, 755), footer, fill=c_white, font=font_title)
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     buf.seek(0)
     return buf
+
+def generate_tournament_score_image(match: CricketMatch) -> io.BytesIO:
+    return generate_scorecard_from_data(extract_scoreboard_data(match))
 
 # ==========================================
 # 🔄 5. MATCH PROGRESSION & LOOPS
@@ -1444,15 +1515,18 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
         file = discord.File(fp=img_buf, filename="final_scoreboard.png")
         embed_full = render_full_scorecard_embed(match_to_finalize, 2)
 
-        sent_msg = await channel.send(
+        await channel.send(
             "🏆 **Match over! Here is the final detailed scorecard and broadcast graphic:**",
             embed=embed_full,
             file=file
         )
 
-        # Capture the Discord CDN URL so we can show the scorecard image later
-        if getattr(match_to_finalize, "tournament_server_id", None) and sent_msg.attachments:
-            match_to_finalize.scoreboard_image_url = sent_msg.attachments[0].url
+        if getattr(match_to_finalize, "tournament_server_id", None):
+            try:
+                match_to_finalize._scorecard_players = extract_scorecard_players(match_to_finalize)
+            except Exception as _e:
+                print(f"⚠️ Could not extract scorecard players: {_e}")
+                match_to_finalize._scorecard_players = None
 
         if channel.id in active_games:
             del active_games[channel.id]
@@ -1874,16 +1948,20 @@ class DRSView(discord.ui.View):
         self.processed = True
         await interaction.response.defer()
         await self.message.edit(view=None)
+        is_caught_behind = getattr(self.match, "drs_dismissal", "") == "Caught Behind"
         if random.random() < 0.35:
-            await interaction.channel.send("📺 **DRS REVIEW:** Pitching... Impact... Wickets Missing! **DECISION OVERTURNED!** 🟢")
+            if is_caught_behind:
+                await interaction.channel.send("📺 **DRS REVIEW:** Hot Spot check... Snickometer flat! **NO EDGE — DECISION OVERTURNED!** 🟢")
+            else:
+                await interaction.channel.send("📺 **DRS REVIEW:** Pitching... Impact... Wickets Missing! **DECISION OVERTURNED!** 🟢")
             innings = self.match.current_innings
             innings.wickets -= 1
-            
+
             if getattr(self.match, "pending_next_batter", False):
                 self.match.pending_next_batter = False
             else:
                 innings.next_batter_idx -= 1
-                
+
             innings.current_striker_idx = self.match.prev_striker_idx
             innings.batting_stats[innings.batting_team["players"][innings.current_striker_idx]["name"]].dismissal = "not out"
             innings.bowling_stats[innings.current_bowler["name"]].wickets_taken -= 1
@@ -1891,7 +1969,10 @@ class DRSView(discord.ui.View):
                 innings.over_log[-1] = "<a:0run:1510601371483897896>"
             self.match.last_commentary += "\n📺 **DRS:** Decision Overturned (Not Out)."
         else:
-            await interaction.channel.send("📺 **DRS REVIEW:** Three Reds! **UMPIRING DECISION UPHELD!** 🔴")
+            if is_caught_behind:
+                await interaction.channel.send("📺 **DRS REVIEW:** Hot Spot: Clear Edge! Snickometer spike confirmed! **UMPIRING DECISION UPHELD!** 🔴")
+            else:
+                await interaction.channel.send("📺 **DRS REVIEW:** Three Reds! **UMPIRING DECISION UPHELD!** 🔴")
             self.match.last_commentary += "\n📺 **DRS:** Decision Upheld (Out)."
             if getattr(self.match, "pending_next_batter", False):
                 self.match.pending_next_batter = False
@@ -1975,8 +2056,12 @@ async def prompt_batter_shot(channel, match: CricketMatch, prev=None):
             if random.random() < 0.4:
                 await channel.send("📺 **AI has opted for a DRS Review!**")
                 await asyncio.sleep(2)
+                is_caught_behind = getattr(match, "drs_dismissal", "") == "Caught Behind"
                 if random.random() < 0.35:
-                    await channel.send("📺 **DRS REVIEW:** Pitching... Impact... Wickets Missing! **DECISION OVERTURNED!** 🟢")
+                    if is_caught_behind:
+                        await channel.send("📺 **DRS REVIEW:** Hot Spot check... Snickometer flat! **NO EDGE — DECISION OVERTURNED!** 🟢")
+                    else:
+                        await channel.send("📺 **DRS REVIEW:** Pitching... Impact... Wickets Missing! **DECISION OVERTURNED!** 🟢")
                     innings = match.current_innings
                     innings.wickets -= 1
                     if getattr(match, "pending_next_batter", False):
@@ -1990,7 +2075,10 @@ async def prompt_batter_shot(channel, match: CricketMatch, prev=None):
                         innings.over_log[-1] = "<a:0run:1510601371483897896>"
                     match.last_commentary += "\n📺 **DRS:** Decision Overturned (Not Out)."
                 else:
-                    await channel.send("📺 **DRS REVIEW:** Three Reds! **UMPIRING DECISION UPHELD!** 🔴")
+                    if is_caught_behind:
+                        await channel.send("📺 **DRS REVIEW:** Hot Spot: Clear Edge! Snickometer spike confirmed! **UMPIRING DECISION UPHELD!** 🔴")
+                    else:
+                        await channel.send("📺 **DRS REVIEW:** Three Reds! **UMPIRING DECISION UPHELD!** 🔴")
                     match.last_commentary += "\n📺 **DRS:** Decision Upheld (Out)."
             else:
                 await channel.send("🚶 AI Batter accepts the decision and walks off.")
@@ -3758,11 +3846,11 @@ class PrefixCog(commands.Cog):
         tourney = get_server_tournament(server_id)
         if not tourney:
             return await ctx.send("❌ No tournament exists in this server.")
-            
+
         embed = discord.Embed(title=f"🏆 Tournament: {tourney['name']}", color=discord.Color.gold())
         fmt = tourney.get('format_overs', 20)
         embed.set_footer(text=f"Format: {fmt} Overs | Squad Rules: {tourney.get('min_squad', 11)}-{tourney.get('max_squad', 15)} Players")
-        
+
         if tourney["status"] == "registration":
             embed.description = "📝 **Registration Phase**"
             teams_str = ""
@@ -3771,33 +3859,59 @@ class PrefixCog(commands.Cog):
                 teams_str += f"• **{t['name']}** (<@{t['owner_id']}>) - {squad_len}/{tourney.get('max_squad', 15)} Players\n"
             if not teams_str: teams_str = "No teams added yet."
             embed.add_field(name="Registered Teams", value=teams_str, inline=False)
-            
+
         elif tourney["status"] == "active":
             schedule = tourney.get("schedule", [])
-            pending_matches = [m for m in schedule if m["status"] == "pending"]
-            
+            pending_matches   = [m for m in schedule if m["status"] == "pending"]
+            completed_matches = [m for m in schedule if m["status"] == "completed"]
+
             if not pending_matches:
                 gs_matches = [m for m in schedule if isinstance(m.get("round"), int)]
                 if all(m["status"] == "completed" for m in gs_matches) and not any(not isinstance(m.get("round"), int) for m in schedule):
                     return await ctx.send(embed=discord.Embed(title=f"🏆 Tournament: {tourney['name']}", description="🏁 **Group Stage Completed!**\nUse `cv tournament generate_knockouts` to begin the Semi-Finals.", color=discord.Color.gold()))
                 else:
                     return await ctx.send(embed=discord.Embed(title=f"🏆 Tournament: {tourney['name']}", description="🏁 **All matches are completed!**", color=discord.Color.gold()))
-                
+
             embed.description = f"🔥 **Active Phase**\nUse `cv tournament play <match_id>` to launch your matches!"
             sched_str = ""
             for m in pending_matches[:10]:
                 r_label = f"Round {m['round']}" if isinstance(m['round'], int) else m['round']
                 sched_str += f"**Match {m['match_id']}** ({r_label}): **{m['team1']}** vs **{m['team2']}**\n"
-            
             if len(pending_matches) > 10:
                 sched_str += f"\n*...and {len(pending_matches) - 10} more matches.*"
             embed.add_field(name="Upcoming Matches", value=sched_str, inline=False)
-            
+
+            if completed_matches:
+                res_lines = []
+                for m in completed_matches[-5:]:
+                    r = m["result"]
+                    t1_s = f"{r['t1_runs']}/{r['t1_wickets']}"
+                    t2_s = f"{r['t2_runs']}/{r['t2_wickets']}"
+                    w = r["winner"]
+                    t1_fmt = f"**{m['team1']}**" if w == m["team1"] else m["team1"]
+                    t2_fmt = f"**{m['team2']}**" if w == m["team2"] else m["team2"]
+                    res_lines.append(f"`#{m['match_id']}` {t1_fmt} {t1_s} vs {t2_fmt} {t2_s}")
+                embed.add_field(name="Recent Results  ·  cv tournament match_scorecard <id>", value="\n".join(res_lines), inline=False)
+
         elif tourney["status"] == "completed":
             final = next((m for m in tourney.get("schedule", []) if m["round"] == "Final"), None)
             winner = final["result"]["winner"] if final else "TBD"
             embed.description = f"🏆 **TOURNAMENT COMPLETED!**\n👑 **Champions: {winner}**\n\nCheck `cv tournament leaderboard` for top performers!"
-            
+
+            all_completed = [m for m in tourney.get("schedule", []) if m["status"] == "completed"]
+            if all_completed:
+                res_lines = []
+                for m in all_completed:
+                    r = m["result"]
+                    t1_s = f"{r['t1_runs']}/{r['t1_wickets']}"
+                    t2_s = f"{r['t2_runs']}/{r['t2_wickets']}"
+                    w = r["winner"]
+                    r_label = m.get("round", f"Match {m['match_id']}")
+                    t1_fmt = f"**{m['team1']}**" if w == m["team1"] else m["team1"]
+                    t2_fmt = f"**{m['team2']}**" if w == m["team2"] else m["team2"]
+                    res_lines.append(f"`#{m['match_id']}` {r_label} — {t1_fmt} {t1_s} vs {t2_fmt} {t2_s}")
+                embed.add_field(name="All Results", value="\n".join(res_lines[:15]), inline=False)
+
         await ctx.send(embed=embed)
 
     @tournament.command(name="play_next", help="[MANAGER] Launch the next pending tournament match.\nUsage: tournament play_next")
@@ -3896,6 +4010,262 @@ class PrefixCog(commands.Cog):
         save_tournament(tourney)
         
         await ctx.send(f"🔥 **Knockout Stage Set!**\n**Semi-Final 1:** {top4[0]} vs {top4[3]}\n**Semi-Final 2:** {top4[1]} vs {top4[2]}\n\nUse `cv tournament play_next` to begin!")
+
+    @tournament.command(name="add_manager", help="[MANAGER] Assign a tournament manager.\nUsage: tournament add_manager <@user>")
+    async def t_add_manager(self, ctx, user: discord.Member):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (tourney and str(ctx.author.id) in tourney.get("managers", []))
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        uid = str(user.id)
+        if uid not in tourney["managers"]:
+            tourney["managers"].append(uid)
+            save_tournament(tourney)
+        await ctx.send(f"✅ {user.mention} is now a Tournament Manager!")
+
+    @tournament.command(name="remove_team", help="[MANAGER] Remove a team from the tournament.\nUsage: tournament remove_team \"<team_name>\"")
+    async def t_remove_team(self, ctx, *, team_name: str):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (tourney and str(ctx.author.id) in tourney.get("managers", []))
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        if tourney["status"] != "registration": return await ctx.send("❌ Cannot remove teams after tournament has started.")
+        idx = next((i for i, t in enumerate(tourney["teams"]) if t["name"].lower() == team_name.lower()), None)
+        if idx is None: return await ctx.send(f"❌ Team **{team_name}** not found.")
+        del tourney["teams"][idx]
+        save_tournament(tourney)
+        await ctx.send(f"✅ Team **{team_name}** removed.")
+
+    @tournament.command(name="force_delete", help="[ADMIN] Forcefully delete this server's tournament.\nUsage: tournament force_delete")
+    async def t_force_delete(self, ctx):
+        if not ctx.author.guild_permissions.administrator and ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("❌ Server Admins only.")
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        from subscription_manager import DB_CACHE
+        DB_CACHE["tournaments"].pop(server_id, None)
+        save_tournament_data_to_bin()
+        await ctx.send("🗑️ Tournament deleted.")
+
+    @tournament.command(name="set_theme", help="[ADMIN] Set the scorecard theme.\nUsage: tournament set_theme <Default|Crimson Cricket>")
+    async def t_set_theme(self, ctx, *, theme_name: str):
+        if not ctx.author.guild_permissions.administrator and ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("❌ Server Admins only.")
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        valid = ["Default", "Crimson Cricket"]
+        match_theme = next((v for v in valid if v.lower() == theme_name.lower()), None)
+        if not match_theme: return await ctx.send(f"❌ Invalid theme. Options: {', '.join(valid)}")
+        tourney["theme"] = match_theme
+        save_tournament(tourney)
+        await ctx.send(f"✅ Theme set to `{match_theme}`.")
+
+    @tournament.command(name="set_team_color", help="[MANAGER] Set a team's scorecard color.\nUsage: tournament set_team_color \"<team_name>\" #RRGGBB")
+    async def t_set_team_color(self, ctx, team_name: str, color: str):
+        import re as _re
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (tourney and str(ctx.author.id) in tourney.get("managers", []))
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        if not _re.match(r'^#[0-9A-Fa-f]{6}$', color):
+            return await ctx.send("❌ Invalid color format. Use a 6-digit hex code like `#FF0000`.")
+        team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.lower()), None)
+        if not team: return await ctx.send(f"❌ Team **{team_name}** not found.")
+        team["color"] = color.upper()
+        save_tournament(tourney)
+        await ctx.send(embed=discord.Embed(description=f"✅ **{team['name']}** color set to `{color.upper()}`.", color=int(color.lstrip('#'), 16)))
+
+    @tournament.command(name="match_scorecard", help="View the scorecard image for a completed match.\nUsage: tournament match_scorecard <match_id>")
+    async def t_match_scorecard(self, ctx, match_id: int):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        m = next((x for x in tourney.get("schedule", []) if x["match_id"] == match_id), None)
+        if not m: return await ctx.send(f"❌ Match #{match_id} not found.")
+        if m["status"] != "completed": return await ctx.send(f"❌ Match #{match_id} hasn't been completed yet.")
+        r = m["result"]
+        t1_s    = f"{r['t1_runs']}/{r['t1_wickets']}"
+        t2_s    = f"{r['t2_runs']}/{r['t2_wickets']}"
+        r_label = m.get("round", f"Match {m['match_id']}")
+        embed = discord.Embed(
+            title=f"Match #{match_id} — {r_label}",
+            description=f"**{m['team1']}** {t1_s}  vs  **{m['team2']}** {t2_s}\n🏆 Winner: **{r['winner']}**",
+            color=discord.Color.orange()
+        )
+        embed.set_footer(text=tourney["name"])
+        full_data = reconstruct_scorecard_data(tourney, m)
+        if full_data:
+            try:
+                img_buf = generate_scorecard_from_data(full_data)
+                file = discord.File(fp=img_buf, filename=f"scorecard_m{match_id}.png")
+                await ctx.send(embed=embed, file=file)
+                return
+            except Exception as _e:
+                print(f"⚠️ Scorecard regeneration failed for match {match_id}: {_e}")
+        embed.add_field(name="No image", value="No scorecard data for this match.", inline=False)
+        await ctx.send(embed=embed)
+
+    @tournament.command(name="next_match", help="[OWNER] Launch your team's next pending match.\nUsage: tournament next_match")
+    async def t_next_match(self, ctx):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        if tourney["status"] != "active": return await ctx.send("❌ Tournament is not active.")
+        my_team = next((t for t in tourney["teams"] if t["owner_id"] == str(ctx.author.id)), None)
+        if not my_team: return await ctx.send("❌ You are not a Team Owner in this tournament.")
+        my_matches = [m for m in tourney.get("schedule", []) if m["status"] == "pending" and (m["team1"] == my_team["name"] or m["team2"] == my_team["name"])]
+        if not my_matches: return await ctx.send(f"✅ **{my_team['name']}** has no pending matches right now!")
+        match = my_matches[0]
+        r_label = f"Round {match['round']}" if isinstance(match['round'], int) else match['round']
+        await ctx.send(f"🚀 **Launching Match {match['match_id']} ({r_label})...**")
+        self.bot.dispatch("start_tournament_match", ctx.channel, ctx.author.id, tourney, match)
+
+    @tournament.command(name="admin_record_result", help="[MANAGER] Manually record a match result.\nUsage: tournament admin_record_result <id> <winner> <t1_r> <t1_w> <t1_b> <t2_r> <t2_w> <t2_b>")
+    async def t_admin_record_result(self, ctx, match_id: int, winner: str, t1_runs: int, t1_wickets: int, t1_balls: int, t2_runs: int, t2_wickets: int, t2_balls: int):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (tourney and str(ctx.author.id) in tourney.get("managers", []))
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        if tourney["status"] != "active": return await ctx.send("❌ Tournament is not active.")
+        m_data = next((m for m in tourney.get("schedule", []) if m["match_id"] == match_id), None)
+        if not m_data: return await ctx.send(f"❌ Match ID {match_id} not found.")
+        if m_data["status"] == "completed": return await ctx.send(f"❌ Match {match_id} already completed.")
+        t1_name, t2_name = m_data["team1"], m_data["team2"]
+        winner_clean = winner.strip()
+        if winner_clean not in (t1_name, t2_name, "TIE"):
+            return await ctx.send(f"❌ Winner must be **{t1_name}**, **{t2_name}**, or **TIE**.")
+        m_data["status"] = "completed"
+        m_data["result"] = {
+            "winner": winner_clean, "format_overs": tourney.get("format_overs", 20),
+            "t1_runs": t1_runs, "t1_wickets": t1_wickets, "t1_balls": t1_balls,
+            "t2_runs": t2_runs, "t2_wickets": t2_wickets, "t2_balls": t2_balls,
+        }
+        tourney["current_match_idx"] = tourney.get("current_match_idx", 0) + 1
+        sf1 = next((m for m in tourney["schedule"] if m["round"] == "Semi-Final 1"), None)
+        sf2 = next((m for m in tourney["schedule"] if m["round"] == "Semi-Final 2"), None)
+        if sf1 and sf2 and sf1["status"] == "completed" and sf2["status"] == "completed":
+            if not any(m["round"] == "Final" for m in tourney["schedule"]):
+                tourney["schedule"].append({"match_id": len(tourney["schedule"]) + 1, "round": "Final", "team1": sf1["result"]["winner"], "team2": sf2["result"]["winner"], "status": "pending", "result": None})
+        final_m = next((m for m in tourney["schedule"] if m["round"] == "Final"), None)
+        if final_m and final_m["status"] == "completed":
+            tourney["status"] = "completed"
+        save_tournament(tourney)
+        overs1 = f"{t1_balls//6}.{t1_balls%6}"; overs2 = f"{t2_balls//6}.{t2_balls%6}"
+        r_label = f"Round {m_data['round']}" if isinstance(m_data['round'], int) else m_data['round']
+        await ctx.send(embed=discord.Embed(title=f"✅ Match {match_id} Result Recorded", description=f"**{r_label}** — {t1_name} vs {t2_name}\n🏏 {t1_name}: {t1_runs}/{t1_wickets} ({overs1})\n🏏 {t2_name}: {t2_runs}/{t2_wickets} ({overs2})\n🏆 **Winner: {winner_clean}**", color=discord.Color.green()))
+
+    @tournament.command(name="admin_restore_schedule", help="[MANAGER] Regenerate schedule (no shuffle, for post-restart).\nUsage: tournament admin_restore_schedule")
+    async def t_admin_restore_schedule(self, ctx):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (tourney and str(ctx.author.id) in tourney.get("managers", []))
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        completed = [m for m in tourney.get("schedule", []) if m["status"] == "completed"]
+        if completed:
+            return await ctx.send(f"⚠️ **{len(completed)} completed match(es)** found. This will wipe the schedule.\nUse `cv tournament admin_force_restore_schedule` to proceed anyway.")
+        await self._do_restore_schedule_prefix(ctx, tourney)
+
+    @tournament.command(name="admin_force_restore_schedule", help="[MANAGER] Force-regenerate schedule (wipes completed matches).\nUsage: tournament admin_force_restore_schedule")
+    async def t_admin_force_restore_schedule(self, ctx):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (tourney and str(ctx.author.id) in tourney.get("managers", []))
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        await self._do_restore_schedule_prefix(ctx, tourney)
+
+    async def _do_restore_schedule_prefix(self, ctx, tourney):
+        teams = [t["name"] for t in tourney["teams"]]
+        if len(teams) < 2: return await ctx.send("❌ Need at least 2 teams.")
+        if len(teams) % 2 != 0: teams.append("BYE")
+        n = len(teams); matchups = []
+        for r in range(n - 1):
+            for i in range(n // 2):
+                t1, t2 = teams[i], teams[n - 1 - i]
+                if t1 != "BYE" and t2 != "BYE":
+                    matchups.append({"round": r + 1, "team1": t1 if r % 2 == 0 else t2, "team2": t2 if r % 2 == 0 else t1})
+            teams.insert(1, teams.pop())
+        schedule = [{"match_id": i + 1, "round": m["round"], "team1": m["team1"], "team2": m["team2"], "status": "pending", "result": None} for i, m in enumerate(matchups)]
+        tourney["schedule"] = schedule; tourney["status"] = "active"; tourney["current_match_idx"] = 0
+        save_tournament(tourney)
+        r1 = [m for m in schedule if m["round"] == 1]
+        preview = "**Round 1:**\n" + "\n".join(f"  Match {m['match_id']}: {m['team1']} vs {m['team2']}" for m in r1)
+        await ctx.send(embed=discord.Embed(title=f"✅ Schedule Restored — {tourney['name']}", description=preview, color=discord.Color.green()))
+
+    @tournament.command(name="leaderboard", help="View the tournament leaderboard.\nUsage: tournament leaderboard <runs|wickets|sr|bat_avg|fours|sixes|fifties|hundreds|econ|bowl_avg>")
+    async def t_leaderboard(self, ctx, category: str = "runs"):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        valid_cats = {"runs", "wickets", "sr", "bat_avg", "fours", "sixes", "fifties", "hundreds", "econ", "bowl_avg"}
+        c_val = category.lower()
+        if c_val not in valid_cats:
+            return await ctx.send(f"❌ Invalid category. Choose from: {', '.join(sorted(valid_cats))}")
+        all_players = [{"name": p_name, "team": t_name, "stats": stats} for t_name, players in tourney.get("stats", {}).items() for p_name, stats in players.items()]
+        if not all_players: return await ctx.send("❌ No stats yet. Complete a match first!")
+        if c_val == "runs": sp = sorted(all_players, key=lambda x: x["stats"]["runs"], reverse=True)
+        elif c_val == "wickets": sp = sorted(all_players, key=lambda x: x["stats"]["wickets"], reverse=True)
+        elif c_val == "sr": sp = sorted([p for p in all_players if p["stats"]["runs"] >= 50], key=lambda x: (x["stats"]["runs"]/x["stats"]["balls_faced"]*100) if x["stats"]["balls_faced"] > 0 else 0, reverse=True)
+        elif c_val == "bat_avg": sp = sorted([p for p in all_players if p["stats"]["runs"] >= 50], key=lambda x: x["stats"]["runs"]/max(1, x["stats"]["outs"]), reverse=True)
+        elif c_val in {"fours", "sixes", "fifties", "hundreds"}: sp = sorted(all_players, key=lambda x: x["stats"][c_val], reverse=True)
+        elif c_val == "econ": sp = sorted([p for p in all_players if p["stats"]["balls_bowled"] >= 30], key=lambda x: (x["stats"]["runs_conceded"]/x["stats"]["balls_bowled"]*6) if x["stats"]["balls_bowled"] > 0 else 999)
+        elif c_val == "bowl_avg": sp = sorted([p for p in all_players if p["stats"]["wickets"] >= 3], key=lambda x: x["stats"]["runs_conceded"]/x["stats"]["wickets"] if x["stats"]["wickets"] > 0 else 999)
+        else: sp = []
+        cat_labels = {"runs":"Most Runs","wickets":"Most Wickets","sr":"Best Strike Rate","bat_avg":"Best Batting Avg","fours":"Most Fours","sixes":"Most Sixes","fifties":"Most 50s","hundreds":"Most 100s","econ":"Best Economy","bowl_avg":"Best Bowling Avg"}
+        embed = discord.Embed(title=f"🏆 Leaderboard: {cat_labels.get(c_val, c_val)}", color=discord.Color.gold())
+        lines = []
+        for i, p in enumerate(sp[:10], 1):
+            s = p["stats"]
+            if c_val == "runs": val = f"**{s['runs']}** runs"
+            elif c_val == "wickets": val = f"**{s['wickets']}** wkts"
+            elif c_val == "sr": val = f"**{(s['runs']/s['balls_faced']*100):.1f}** SR" if s['balls_faced'] > 0 else "N/A"
+            elif c_val == "bat_avg": val = f"**{s['runs']/max(1,s['outs']):.1f}** avg"
+            elif c_val in {"fours","sixes","fifties","hundreds"}: val = f"**{s[c_val]}**"
+            elif c_val == "econ": val = f"**{(s['runs_conceded']/s['balls_bowled']*6):.1f}** econ" if s['balls_bowled'] > 0 else "N/A"
+            elif c_val == "bowl_avg": val = f"**{s['runs_conceded']/s['wickets']:.1f}** avg" if s['wickets'] > 0 else "N/A"
+            else: val = ""
+            lines.append(f"`{i:>2}.` **{p['name']}** ({p['team']}) — {val}")
+        embed.description = "\n".join(lines) if lines else "No players qualify yet."
+        await ctx.send(embed=embed)
+
+    @tournament.command(name="player_stats", help="View a specific player's tournament stats.\nUsage: tournament player_stats \"<team>\" \"<player>\"")
+    async def t_player_stats(self, ctx, team_name: str, *, player_name: str):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        t_match = next((t for t in tourney.get("stats", {}).keys() if t.lower() == team_name.lower()), None)
+        if not t_match: return await ctx.send(f"❌ Team '{team_name}' not found or hasn't played yet.")
+        p_match = next((p for p in tourney["stats"][t_match].keys() if p.lower() == player_name.lower()), None)
+        if not p_match:
+            close = difflib.get_close_matches(player_name, list(tourney["stats"][t_match].keys()), n=1, cutoff=0.5)
+            if close: p_match = close[0]
+            else: return await ctx.send(f"❌ Player '{player_name}' not found in team '{t_match}'.")
+        stats = tourney["stats"][t_match][p_match]
+        sr = (stats["runs"]/stats["balls_faced"]*100) if stats["balls_faced"] > 0 else 0.0
+        bat_avg = stats["runs"]/stats["outs"] if stats["outs"] > 0 else float(stats["runs"])
+        bowl_avg = stats["runs_conceded"]/stats["wickets"] if stats["wickets"] > 0 else 0.0
+        econ = (stats["runs_conceded"]/stats["balls_bowled"]*6) if stats["balls_bowled"] > 0 else 0.0
+        embed = discord.Embed(title=f"📊 {p_match} — {t_match}", description=f"Matches: {stats['matches']}", color=discord.Color.blue())
+        embed.add_field(name="🏏 Batting", value=f"**Runs:** {stats['runs']}\n**SR:** {sr:.1f}\n**Avg:** {bat_avg:.1f}\n**4s:** {stats['fours']} | **6s:** {stats['sixes']}\n**50s:** {stats['fifties']} | **100s:** {stats['hundreds']}", inline=True)
+        embed.add_field(name="🎯 Bowling", value=f"**Wkts:** {stats['wickets']}\n**Econ:** {econ:.1f}\n**Avg:** {bowl_avg:.1f}\n**Overs:** {stats['balls_bowled']//6}.{stats['balls_bowled']%6}", inline=True)
+        await ctx.send(embed=embed)
+
+    @tournament.command(name="help_guide", help="Show the tournament commands guide.\nUsage: tournament help_guide")
+    async def t_help_guide(self, ctx):
+        embed = discord.Embed(title="🏆 Tournament Commands (cv prefix)", color=discord.Color.gold())
+        embed.add_field(name="🛠️ Setup", value="`create` `add_manager` `add_team` `remove_team` `submit_squad` `start` `force_delete`", inline=False)
+        embed.add_field(name="🏏 Playing", value="`play <id>` `play_next` `next_match`", inline=False)
+        embed.add_field(name="📊 Stats & Standings", value="`status` `standings` `leaderboard <cat>` `player_stats <team> <player>` `squad` `match_scorecard <id>`", inline=False)
+        embed.add_field(name="⚙️ Admin", value="`set_theme` `set_team_color` `replace_player` `admin_record_result` `admin_restore_schedule` `admin_force_restore_schedule` `force_result`", inline=False)
+        embed.set_footer(text="All commands start with: cv tournament ...")
+        await ctx.send(embed=embed)
 
     @tournament.command(name="standings", help="View the Tournament Points Table & NRR.\nUsage: tournament standings")
     async def t_standings(self, ctx):
