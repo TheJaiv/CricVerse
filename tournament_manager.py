@@ -1,7 +1,6 @@
 import discord
 from discord import app_commands
 from discord.ext import commands
-import itertools
 import difflib
 import io
 import re
@@ -55,7 +54,7 @@ def get_tournament_standings(tourney):
             teams[t2]["RF"] += res["t2_runs"]; teams[t2]["OF"] += t2_o
             teams[t2]["RA"] += res["t1_runs"]; teams[t2]["OA"] += t1_o
             
-    for t_name, data in teams.items():
+    for _, data in teams.items():
         data["NRR"] = ((data["RF"]/data["OF"]) if data["OF"] > 0 else 0) - ((data["RA"]/data["OA"]) if data["OA"] > 0 else 0)
         
     return sorted(teams.items(), key=lambda x: (x[1]["Pts"], x[1]["NRR"]), reverse=True)
@@ -499,12 +498,10 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             return await interaction.response.send_message(f"❌ Match #{match_id} hasn't been completed yet.", ephemeral=True)
 
         r = m["result"]
-        url = r.get("scoreboard_url")
-
-        t1, t2   = m["team1"], m["team2"]
-        t1_score = f"{r['t1_runs']}/{r['t1_wickets']}"
-        t2_score = f"{r['t2_runs']}/{r['t2_wickets']}"
-        winner   = r["winner"]
+        t1, t2      = m["team1"], m["team2"]
+        t1_score    = f"{r['t1_runs']}/{r['t1_wickets']}"
+        t2_score    = f"{r['t2_runs']}/{r['t2_wickets']}"
+        winner      = r["winner"]
         round_label = m.get("round", f"Match {m['match_id']}")
 
         embed = discord.Embed(
@@ -514,44 +511,23 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         )
         embed.set_footer(text=tourney["name"])
 
-        if url:
-            embed.set_image(url=url)
-            await interaction.response.send_message(embed=embed)
+        from bot import reconstruct_scorecard_data, generate_scorecard_from_data
+        full_data = reconstruct_scorecard_data(tourney, m)
+        if full_data:
+            try:
+                await interaction.response.defer()
+                img_buf = generate_scorecard_from_data(full_data)
+                file = discord.File(fp=img_buf, filename=f"scorecard_m{match_id}.png")
+                await interaction.followup.send(embed=embed, file=file)
+                return
+            except Exception as _e:
+                print(f"⚠️ Scorecard regeneration failed for match {match_id}: {_e}")
+        if interaction.response.is_done():
+            embed.add_field(name="No image", value="Scorecard image could not be generated.", inline=False)
+            await interaction.followup.send(embed=embed)
         else:
-            embed.add_field(
-                name="No image available",
-                value="This match was completed before scorecard saving was enabled, or the image was not captured.",
-                inline=False
-            )
+            embed.add_field(name="No image", value="No scorecard data saved for this match.", inline=False)
             await interaction.response.send_message(embed=embed)
-
-    @app_commands.command(name="set_match_image", description="[MANAGER] Manually link a scorecard image to a completed match (for matches before auto-saving).")
-    async def set_match_image(self, interaction: discord.Interaction, match_id: int, image_url: str):
-        server_id = str(interaction.guild.id)
-        tourney = get_server_tournament(server_id)
-        if not tourney:
-            return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
-        if not self.is_manager(interaction, tourney):
-            return await interaction.response.send_message("❌ Managers only.", ephemeral=True)
-
-        m = next((x for x in tourney.get("schedule", []) if x["match_id"] == match_id), None)
-        if not m:
-            return await interaction.response.send_message(f"❌ Match #{match_id} not found.", ephemeral=True)
-        if m["status"] != "completed":
-            return await interaction.response.send_message(f"❌ Match #{match_id} is not completed yet.", ephemeral=True)
-
-        if not m.get("result"):
-            return await interaction.response.send_message("❌ Match has no result data.", ephemeral=True)
-
-        m["result"]["scoreboard_url"] = image_url
-        save_tournament(tourney)
-
-        embed = discord.Embed(
-            description=f"✅ Scorecard image linked to **Match #{match_id}**.",
-            color=discord.Color.green()
-        )
-        embed.set_image(url=image_url)
-        await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="play_next", description="[MANAGER] Launch the next pending tournament match in this channel.")
     async def play_next(self, interaction: discord.Interaction):
@@ -799,7 +775,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             "winner": winner, "format_overs": match.format_overs,
             "t1_runs": t1_inn.total_runs, "t1_wickets": t1_inn.wickets, "t1_balls": t1_inn.total_balls,
             "t2_runs": t2_inn.total_runs, "t2_wickets": t2_inn.wickets, "t2_balls": t2_inn.total_balls,
-            "scoreboard_url": getattr(match, "scoreboard_image_url", None),
+            "scorecard_players": getattr(match, "_scorecard_players", None),
         }
         tourney["current_match_idx"] += 1
         
