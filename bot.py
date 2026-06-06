@@ -194,9 +194,11 @@ class CricketMatch:
 def swap_impact_player(match: CricketMatch, team_id: int, out_name: str, in_player: dict):
     if team_id == 1:
         match.t1_impact_used = True
+        match.t1_impact_sub_name = in_player["name"]
         team = match.team1
     else:
         match.t2_impact_used = True
+        match.t2_impact_sub_name = in_player["name"]
         team = match.team2
         
     if in_player not in team["players"]:
@@ -229,50 +231,124 @@ def swap_impact_player(match: CricketMatch, team_id: int, out_name: str, in_play
             if bw_stats:
                 bw_stats.is_subbed_out = True
 
+def _do_impact_swap(match: CricketMatch, team_num: int, out_name: str, in_player: dict):
+    swap_impact_player(match, team_num, out_name, in_player)
+    team   = match.team1 if team_num == 1 else match.team2
+    prefix = getattr(match, "last_commentary_prefix", "")
+    match.last_commentary_prefix = (
+        f"🔄 **AI TACTIC:** {team['name']} uses IMPACT PLAYER! "
+        f"**{in_player['name']}** IN for **{out_name}**!\n" + prefix
+    )
+
+def _ai_batting_impact(match: CricketMatch, innings: InningsState, team_num: int, subs):
+    overs   = innings.total_balls // 6
+    wkts    = innings.wickets
+    max_b   = match.max_balls
+    is_inn1 = (match.current_innings_num == 1)
+
+    bat_subs = [s for s in subs if "Batter" in s["role"] or "All-Rounder" in s["role"]] or subs
+    best_sub = max(bat_subs, key=lambda x: x["bat"])
+
+    players  = innings.batting_team["players"]
+    upcoming = [
+        p for p in players[innings.next_batter_idx:]
+        if innings.batting_stats[p["name"]].dismissal == "not out"
+    ]
+    if not upcoming:
+        return
+
+    # Batting first: never sacrifice a pure bowler — you'll need them in inn2
+    if is_inn1:
+        swappable = [p for p in upcoming if "Bowler" not in p["role"]]
+        if not swappable:
+            return
+    else:
+        swappable = upcoming
+
+    next_up  = swappable[0]
+    worst_up = min(swappable, key=lambda x: x["bat"])
+
+    # Guarantee (batting second only): next batter is tail — sub them out before they walk in
+    if not is_inn1 and next_up["bat"] < 60 and best_sub["bat"] > next_up["bat"] + 10:
+        _do_impact_swap(match, team_num, next_up["name"], best_sub)
+        return
+
+    # Powerplay crisis: 2+ wickets before over 6
+    if wkts >= 2 and overs < 6 and best_sub["bat"] >= 72:
+        if best_sub["bat"] > worst_up["bat"] + 12:
+            _do_impact_swap(match, team_num, worst_up["name"], best_sub)
+            return
+
+    # Mid-innings wicket cluster: 3+ wickets after over 5, not in last 3 overs
+    if wkts >= 3 and overs >= 5 and innings.total_balls < max_b - 18:
+        if best_sub["bat"] > worst_up["bat"] + 10:
+            _do_impact_swap(match, team_num, worst_up["name"], best_sub)
+            return
+
+    # Chase mode (batting second): RRR >= 9, bring in firepower
+    if not is_inn1:
+        balls_left = max_b - innings.total_balls
+        if balls_left > 0:
+            target = getattr(match, "target", match.innings1.total_runs + 1)
+            rrr = (target - innings.total_runs) / balls_left * 6
+            if rrr >= 9 and best_sub["bat"] >= 75 and best_sub["bat"] > worst_up["bat"] + 8:
+                _do_impact_swap(match, team_num, worst_up["name"], best_sub)
+                return
+
+    # Late guarantee: last 4 overs and sub still unused — don't waste the slot
+    if innings.total_balls >= max_b - 24 and best_sub["bat"] > worst_up["bat"] + 8:
+        _do_impact_swap(match, team_num, worst_up["name"], best_sub)
+
+def _ai_bowling_impact(match: CricketMatch, innings: InningsState, team_num: int, subs):
+    balls = innings.total_balls
+    max_b = match.max_balls
+
+    bowl_subs = [s for s in subs if "Bowler" in s["role"] or "All-Rounder" in s["role"]] or subs
+    best_sub  = max(bowl_subs, key=lambda x: x["bowl"])
+
+    curr  = innings.current_bowler
+    cands = [p for p in innings.bowling_team["players"]
+             if not curr or p["name"] != curr["name"]]
+    if not cands:
+        return
+
+    worst = min(cands, key=lambda x: x["bowl"])
+    if best_sub["bowl"] <= worst["bowl"] + 8:
+        return
+
+    # Death overs: last 5 overs
+    if balls >= max_b - 30:
+        _do_impact_swap(match, team_num, worst["name"], best_sub)
+        return
+
+    # 2nd innings, opponent cruising (low RRR) — use from last 6 overs
+    if match.current_innings_num == 2 and balls >= max_b - 36:
+        balls_left = max_b - balls
+        if balls_left > 0:
+            target = getattr(match, "target", match.innings1.total_runs + 1)
+            rrr = (target - innings.total_runs) / balls_left * 6
+            if rrr < 7:
+                _do_impact_swap(match, team_num, worst["name"], best_sub)
+                return
+
+    # Absolute guarantee: last 2 overs, don't leave sub unused
+    if balls >= max_b - 12:
+        _do_impact_swap(match, team_num, worst["name"], best_sub)
+
 def try_ai_impact_player(match: CricketMatch, innings: InningsState):
     if not getattr(match, "impact_player", False): return
     if not match.is_ai_game: return
-    if getattr(match, "t2_impact_used", False): return
-    
-    subs = getattr(match, "t2_subs", [])
-    if not subs: return
-    
-    team = match.team2
-    is_batting = (innings.batting_team["name"] == team["name"])
-    
-    if is_batting:
-        if innings.wickets >= 3 and innings.total_balls < match.max_balls - 12:
-            batters = [s for s in subs if "Batter" in s["role"] or "All-Rounder" in s["role"]]
-            if batters:
-                best_bat = max(batters, key=lambda x: x["bat"])
-                curr = [innings.batting_team["players"][innings.current_striker_idx]["name"], innings.batting_team["players"][innings.current_non_striker_idx]["name"]]
-                cands = [p for p in innings.batting_team["players"] if p["name"] not in curr]
-                if cands:
-                    worst_bowl = min(cands, key=lambda x: x["bat"])
-                    swap_impact_player(match, 2, worst_bowl["name"], best_bat)
-                    match.last_commentary_prefix = f"🔄 **AI TACTIC:** {team['name']} uses IMPACT PLAYER! **{best_bat['name']}** IN for **{worst_bowl['name']}**!\n" + getattr(match, "last_commentary_prefix", "")
-                    cands = sorted(cands, key=lambda x: x["bat"])
-                    worst_bat = cands[0]
-                    
-                    if best_bat["bat"] > worst_bat["bat"] + 15 and best_bat["bat"] >= 75:
-                        swap_impact_player(match, 2, worst_bat["name"], best_bat)
-                        match.last_commentary_prefix = f"🔄 **AI TACTIC:** {team['name']} uses IMPACT PLAYER! **{best_bat['name']}** IN for **{worst_bat['name']}**!\n" + getattr(match, "last_commentary_prefix", "")
-    else:
-        if innings.total_balls >= match.max_balls - 30:
-            bowlers = [s for s in subs if "Bowler" in s["role"] or "All-Rounder" in s["role"]]
-            if bowlers:
-                best_bowl = max(bowlers, key=lambda x: x["bowl"])
-                cands = [p for p in innings.bowling_team["players"] if (not innings.current_bowler or p["name"] != innings.current_bowler["name"])]
-                if cands:
-                    worst_bat = min(cands, key=lambda x: x["bowl"])
-                    swap_impact_player(match, 2, worst_bat["name"], best_bowl)
-                    match.last_commentary_prefix = f"🔄 **AI TACTIC:** {team['name']} uses IMPACT PLAYER! **{best_bowl['name']}** IN for **{worst_bat['name']}**!\n" + getattr(match, "last_commentary_prefix", "")
-                    cands = sorted(cands, key=lambda x: x["bowl"])
-                    worst_bowl = cands[0]
-                    
-                    if best_bowl["bowl"] > worst_bowl["bowl"] + 15 and best_bowl["bowl"] >= 75:
-                        swap_impact_player(match, 2, worst_bowl["name"], best_bowl)
-                        match.last_commentary_prefix = f"🔄 **AI TACTIC:** {team['name']} uses IMPACT PLAYER! **{best_bowl['name']}** IN for **{worst_bowl['name']}**!\n" + getattr(match, "last_commentary_prefix", "")
+
+    for team_num in (1, 2):
+        if getattr(match, f"t{team_num}_impact_used", False): continue
+        team = match.team1 if team_num == 1 else match.team2
+        subs = getattr(match, f"t{team_num}_subs", [])
+        if not subs: continue
+
+        if innings.batting_team["name"] == team["name"]:
+            _ai_batting_impact(match, innings, team_num, subs)
+        else:
+            _ai_bowling_impact(match, innings, team_num, subs)
 
 def get_smart_ai_bowler(innings, pitch, weather="Clear", format_overs=20):
     if format_overs == 50:
@@ -865,6 +941,7 @@ def generate_tournament_score_image(match: CricketMatch) -> io.BytesIO:
                 "yet_to_bat": t1_bat_inn is None,
                 "batters": _top_bat(t1_bat_inn),
                 "bowlers": _top_bowl(t1_bowl_inn),
+                "impact_sub": getattr(match, "t1_impact_sub_name", None),
             }
             t2_data = {
                 "name": match.team2["name"].upper(),
@@ -874,6 +951,7 @@ def generate_tournament_score_image(match: CricketMatch) -> io.BytesIO:
                 "yet_to_bat": t2_bat_inn is None,
                 "batters": _top_bat(t2_bat_inn),
                 "bowlers": _top_bowl(t2_bowl_inn),
+                "impact_sub": getattr(match, "t2_impact_sub_name", None),
             }
 
             if inn2:
@@ -968,12 +1046,26 @@ def generate_tournament_score_image(match: CricketMatch) -> io.BytesIO:
                     r_y = mid - _th(_fRUNS)  // 2
                     b_y = mid - _th(_fBALLS) // 2 + 2
 
+                    def _ip_badge(bx, bmid):
+                        bw_px = _tw("IP", _fCOL) + 8
+                        bh_px = _th(_fCOL) + 4
+                        by_px = bmid - bh_px // 2
+                        d.rounded_rectangle([(bx, by_px), (bx + bw_px, by_px + bh_px)],
+                                            radius=3, fill=(196, 75, 26))
+                        d.text((bx + 4, by_px + 2), "IP", fill=_C_WHITE, font=_fCOL)
+                        return bw_px + 6
+
+                    ip_name = (td.get("impact_sub") or "").upper()
+
                     if i < len(td["batters"]):
                         b  = td["batters"][i]
                         nm = b["name"][:16].upper()
                         d.text((_BN_X, n_y), nm, fill=_C_NAME, font=_fNAME)
+                        _off = _BN_X + _tw(nm, _fNAME) + 8
+                        if ip_name and b["name"].upper() == ip_name:
+                            _off += _ip_badge(_off, mid)
                         if potm and b["name"].upper() == potm.upper():
-                            _star(_BN_X + _tw(nm, _fNAME) + 16, mid, 9)
+                            _star(_off + 9, mid, 9)
                         rs = f"{b['runs']}{'*' if b.get('not_out') else ''}"
                         d.text((_BR_X - _tw(rs, _fRUNS) // 2, r_y), rs, fill=_C_MAIN, font=_fRUNS)
                         d.text((_BB_X - _tw(str(b["balls"]), _fBALLS) // 2, b_y),
@@ -983,8 +1075,11 @@ def generate_tournament_score_image(match: CricketMatch) -> io.BytesIO:
                         bw = td["bowlers"][i]
                         nm = bw["name"][:16].upper()
                         d.text((_WN_X, n_y), nm, fill=_C_NAME, font=_fNAME)
+                        _off = _WN_X + _tw(nm, _fNAME) + 8
+                        if ip_name and bw["name"].upper() == ip_name:
+                            _off += _ip_badge(_off, mid)
                         if potm and bw["name"].upper() == potm.upper():
-                            _star(_WN_X + _tw(nm, _fNAME) + 16, mid, 9)
+                            _star(_off + 9, mid, 9)
                         wr = f"{bw['wickets']}-{bw['runs']}"
                         d.text((_WR_X - _tw(wr, _fRUNS) // 2, r_y), wr, fill=_C_MAIN, font=_fRUNS)
                         d.text((_WO_X - _tw(bw["overs"], _fBALLS) // 2, b_y),
