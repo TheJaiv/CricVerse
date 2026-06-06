@@ -341,31 +341,60 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             
         elif tourney["status"] == "active":
             schedule = tourney.get("schedule", [])
-            pending_matches = [m for m in schedule if m["status"] == "pending"]
-            
+            pending_matches   = [m for m in schedule if m["status"] == "pending"]
+            completed_matches = [m for m in schedule if m["status"] == "completed"]
+
             if not pending_matches:
                 gs_matches = [m for m in schedule if isinstance(m.get("round"), int)]
                 if all(m["status"] == "completed" for m in gs_matches) and not any(not isinstance(m.get("round"), int) for m in schedule):
                     return await interaction.response.send_message(embed=discord.Embed(title=f"🏆 Tournament: {tourney['name']}", description="🏁 **Group Stage Completed!**\nUse `/tournament generate_knockouts` to begin the Semi-Finals.", color=discord.Color.gold()))
                 else:
                     return await interaction.response.send_message(embed=discord.Embed(title=f"🏆 Tournament: {tourney['name']}", description="🏁 **All matches are completed!**", color=discord.Color.gold()))
-                
+
             embed.description = f"🔥 **Active Phase**\nUse `/tournament play <match_id>` to launch your matches!"
             sched_str = ""
             for m in pending_matches[:10]:
                 r_label = f"Round {m['round']}" if isinstance(m['round'], int) else m['round']
                 sched_str += f"**Match {m['match_id']}** ({r_label}): **{m['team1']}** vs **{m['team2']}**\n"
-            
             if len(pending_matches) > 10:
                 sched_str += f"\n*...and {len(pending_matches) - 10} more matches.*"
-                
             embed.add_field(name="Upcoming Matches", value=sched_str, inline=False)
-            
+
+            if completed_matches:
+                res_lines = []
+                for m in completed_matches[-5:]:
+                    r = m["result"]
+                    winner = r["winner"]
+                    t1_s = f"{r['t1_runs']}/{r['t1_wickets']}"
+                    t2_s = f"{r['t2_runs']}/{r['t2_wickets']}"
+                    t1_bold = f"**{m['team1']}**" if winner == m["team1"] else m["team1"]
+                    t2_bold = f"**{m['team2']}**" if winner == m["team2"] else m["team2"]
+                    res_lines.append(f"`#{m['match_id']}` {t1_bold} {t1_s} vs {t2_bold} {t2_s}")
+                embed.add_field(
+                    name=f"Recent Results  ·  use `/tournament match_scorecard <id>` to view image",
+                    value="\n".join(res_lines),
+                    inline=False
+                )
+
         elif tourney["status"] == "completed":
             final = next((m for m in tourney.get("schedule", []) if m["round"] == "Final"), None)
             winner = final["result"]["winner"] if final else "TBD"
             embed.description = f"🏆 **TOURNAMENT COMPLETED!**\n👑 **Champions: {winner}**\n\nCheck `/tournament leaderboard` for top performers!"
-            
+
+            all_completed = [m for m in tourney.get("schedule", []) if m["status"] == "completed"]
+            if all_completed:
+                res_lines = []
+                for m in all_completed:
+                    r = m["result"]
+                    t1_s = f"{r['t1_runs']}/{r['t1_wickets']}"
+                    t2_s = f"{r['t2_runs']}/{r['t2_wickets']}"
+                    w = r["winner"]
+                    r_label = m.get("round", f"Match {m['match_id']}")
+                    t1_fmt = f"**{m['team1']}**" if w == m["team1"] else m["team1"]
+                    t2_fmt = f"**{m['team2']}**" if w == m["team2"] else m["team2"]
+                    res_lines.append(f"`#{m['match_id']}` {r_label} — {t1_fmt} {t1_s} vs {t2_fmt} {t2_s}")
+                embed.add_field(name="All Results", value="\n".join(res_lines[:15]), inline=False)
+
         await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="generate_knockouts", description="[MANAGER] Generate Knockouts (Semi-Finals) for Top 4 teams.")
@@ -455,43 +484,6 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             color=int(color.lstrip('#'), 16)
         )
         await interaction.response.send_message(embed=preview)
-
-    @app_commands.command(name="results", description="View completed match results in this tournament.")
-    async def results(self, interaction: discord.Interaction):
-        server_id = str(interaction.guild.id)
-        tourney = get_server_tournament(server_id)
-        if not tourney:
-            return await interaction.response.send_message("❌ No tournament exists in this server.", ephemeral=True)
-
-        schedule = tourney.get("schedule", [])
-        completed = [m for m in schedule if m["status"] == "completed"]
-        if not completed:
-            return await interaction.response.send_message("No matches have been completed yet.", ephemeral=True)
-
-        lines = []
-        for m in completed:
-            r = m["result"]
-            t1, t2 = m["team1"], m["team2"]
-            t1_score = f"{r['t1_runs']}/{r['t1_wickets']}"
-            t2_score = f"{r['t2_runs']}/{r['t2_wickets']}"
-            winner   = r["winner"]
-            round_label = m.get("round", f"Match {m['match_id']}")
-            won_marker = "🏆"
-            t1_display = f"**{t1}** {t1_score}"
-            t2_display = f"**{t2}** {t2_score}"
-            if winner == t1:
-                t1_display = f"{won_marker} {t1_display}"
-            elif winner == t2:
-                t2_display = f"{won_marker} {t2_display}"
-            lines.append(f"`#{m['match_id']}` **{round_label}** — {t1_display}  vs  {t2_display}")
-
-        embed = discord.Embed(
-            title=f"📋 {tourney['name']} — Match Results",
-            description="\n".join(lines),
-            color=discord.Color.orange()
-        )
-        embed.set_footer(text="Use /tournament match_scorecard <id> to view the scorecard image.")
-        await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="match_scorecard", description="View the scorecard image for a completed tournament match.")
     async def match_scorecard(self, interaction: discord.Interaction, match_id: int):
