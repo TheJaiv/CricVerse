@@ -176,6 +176,7 @@ class CricketMatch:
         self.temp_variation = None
         self.last_commentary = "Match is initializing..."
         self.impact_player = False   # T20 impact player rule flag
+        self._pending_bowler = None  # bowler selected before over hub, applied when over starts
 
     def get_striker_user_id(self):
         if self.current_innings_num == 1:
@@ -843,12 +844,12 @@ def extract_scoreboard_data(match: CricketMatch) -> dict:
         top = sorted(active, key=lambda x: (x.wickets_taken, -x.runs_conceded), reverse=True)[:4]
         return [{"name": b.profile["name"], "wickets": b.wickets_taken, "runs": b.runs_conceded, "overs": f"{b.balls_bowled//6}.{b.balls_bowled%6}"} for b in top]
 
-    if match.team1["name"] == inn1.batting_team["name"]:
-        t1_bat_inn, t1_bowl_inn = inn1, inn2
-        t2_bat_inn, t2_bowl_inn = inn2, inn1
-    else:
-        t2_bat_inn, t2_bowl_inn = inn1, inn2
-        t1_bat_inn, t1_bowl_inn = inn2, inn1
+    # batting-first team is always t1 (shown on top in the scorecard)
+    team1_bats_first = (match.team1["name"] == inn1.batting_team["name"])
+    bat_first_team  = match.team1 if team1_bats_first else match.team2
+    bat_second_team = match.team2 if team1_bats_first else match.team1
+    t1_impact_attr  = "t1_impact_sub_name" if team1_bats_first else "t2_impact_sub_name"
+    t2_impact_attr  = "t2_impact_sub_name" if team1_bats_first else "t1_impact_sub_name"
 
     target = getattr(match, "target", inn1.total_runs + 1)
     if inn2:
@@ -872,26 +873,26 @@ def extract_scoreboard_data(match: CricketMatch) -> dict:
         "result_str": result_str,
         "potm": potm if potm else None,
         "t1": {
-            "name": match.team1["name"].upper(),
-            "color": match.team1.get("color", "#6B7280"),
-            "runs": t1_bat_inn.total_runs if t1_bat_inn else 0,
-            "wickets": t1_bat_inn.wickets if t1_bat_inn else 0,
-            "balls": t1_bat_inn.total_balls if t1_bat_inn else 0,
-            "yet_to_bat": t1_bat_inn is None,
-            "batters": _top_bat(t1_bat_inn),
-            "bowlers": _top_bowl(t1_bowl_inn),
-            "impact_sub": getattr(match, "t1_impact_sub_name", None),
+            "name": inn1.batting_team["name"].upper(),
+            "color": bat_first_team.get("color", "#6B7280"),
+            "runs": inn1.total_runs,
+            "wickets": inn1.wickets,
+            "balls": inn1.total_balls,
+            "yet_to_bat": False,
+            "batters": _top_bat(inn1),
+            "bowlers": _top_bowl(inn2),
+            "impact_sub": getattr(match, t1_impact_attr, None),
         },
         "t2": {
-            "name": match.team2["name"].upper(),
-            "color": match.team2.get("color", "#6B7280"),
-            "runs": t2_bat_inn.total_runs if t2_bat_inn else 0,
-            "wickets": t2_bat_inn.wickets if t2_bat_inn else 0,
-            "balls": t2_bat_inn.total_balls if t2_bat_inn else 0,
-            "yet_to_bat": t2_bat_inn is None,
-            "batters": _top_bat(t2_bat_inn),
-            "bowlers": _top_bowl(t2_bowl_inn),
-            "impact_sub": getattr(match, "t2_impact_sub_name", None),
+            "name": bat_second_team["name"].upper(),
+            "color": bat_second_team.get("color", "#6B7280"),
+            "runs": inn2.total_runs if inn2 else 0,
+            "wickets": inn2.wickets if inn2 else 0,
+            "balls": inn2.total_balls if inn2 else 0,
+            "yet_to_bat": inn2 is None,
+            "batters": _top_bat(inn2),
+            "bowlers": _top_bowl(inn1),
+            "impact_sub": getattr(match, t2_impact_attr, None),
         },
     }
 
@@ -918,12 +919,11 @@ def extract_scorecard_players(match: CricketMatch) -> dict:
         top = sorted(active, key=lambda x: (x.wickets_taken, -x.runs_conceded), reverse=True)[:4]
         return [[b.profile["name"], b.wickets_taken, b.runs_conceded, f"{b.balls_bowled//6}.{b.balls_bowled%6}"] for b in top]
 
-    if match.team1["name"] == inn1.batting_team["name"]:
-        t1_bat, t1_bowl = inn1, inn2
-        t2_bat, t2_bowl = inn2, inn1
-    else:
-        t2_bat, t2_bowl = inn1, inn2
-        t1_bat, t1_bowl = inn2, inn1
+    # bf=1 means m["team1"] batted first, bf=2 means m["team2"] batted first
+    team1_bats_first = (match.team1["name"] == inn1.batting_team["name"])
+    bf = 1 if team1_bats_first else 2
+    t1_impact_attr = "t1_impact_sub_name" if team1_bats_first else "t2_impact_sub_name"
+    t2_impact_attr = "t2_impact_sub_name" if team1_bats_first else "t1_impact_sub_name"
 
     target = getattr(match, "target", inn1.total_runs + 1)
     if inn2:
@@ -943,12 +943,13 @@ def extract_scorecard_players(match: CricketMatch) -> dict:
     return {
         "rs": rs,
         "p":  potm,
-        "i1": getattr(match, "t1_impact_sub_name", None),
-        "i2": getattr(match, "t2_impact_sub_name", None),
-        "b1": _bat(t1_bat),
-        "w1": _bowl(t1_bowl),
-        "b2": _bat(t2_bat),
-        "w2": _bowl(t2_bowl),
+        "bf": bf,
+        "i1": getattr(match, t1_impact_attr, None),
+        "i2": getattr(match, t2_impact_attr, None),
+        "b1": _bat(inn1),   # batting-first team's batters
+        "w1": _bowl(inn2),  # batting-first team's bowlers (bowled in inn2)
+        "b2": _bat(inn2),   # batting-second team's batters
+        "w2": _bowl(inn1),  # batting-second team's bowlers (bowled in inn1)
     }
 
 
@@ -970,30 +971,41 @@ def reconstruct_scorecard_data(tourney: dict, m: dict) -> dict:
     def _bowl(arrays):
         return [{"name": a[0], "wickets": a[1], "runs": a[2], "overs": a[3]} for a in (arrays or [])]
 
+    # bf=1 → team1 batted first; bf=2 → team2 batted first
+    # result stores t1_*/t2_* keyed to m["team1"]/m["team2"], not batting order
+    bf = p.get("bf", 1)
+    if bf == 2:
+        # team2 batted first → swap for display
+        top_name, top_team, top_r, top_w, top_b = t2_name, t2_team, r.get("t2_runs", 0), r.get("t2_wickets", 0), r.get("t2_balls", 0)
+        bot_name, bot_team, bot_r, bot_w, bot_b = t1_name, t1_team, r.get("t1_runs", 0), r.get("t1_wickets", 0), r.get("t1_balls", 0)
+    else:
+        top_name, top_team, top_r, top_w, top_b = t1_name, t1_team, r.get("t1_runs", 0), r.get("t1_wickets", 0), r.get("t1_balls", 0)
+        bot_name, bot_team, bot_r, bot_w, bot_b = t2_name, t2_team, r.get("t2_runs", 0), r.get("t2_wickets", 0), r.get("t2_balls", 0)
+
     return {
-        "theme":       tourney.get("theme", "Default"),
-        "match_id":    str(m["match_id"]),
-        "tourn_name":  tourney["name"].upper(),
+        "theme":        tourney.get("theme", "Default"),
+        "match_id":     str(m["match_id"]),
+        "tourn_name":   tourney["name"].upper(),
         "format_overs": r.get("format_overs", 20),
-        "result_str":  p.get("rs", ""),
-        "potm":        p.get("p"),
+        "result_str":   p.get("rs", ""),
+        "potm":         p.get("p"),
         "t1": {
-            "name":       t1_name.upper(),
-            "color":      t1_team.get("color", "#6B7280"),
-            "runs":       r.get("t1_runs", 0),
-            "wickets":    r.get("t1_wickets", 0),
-            "balls":      r.get("t1_balls", 0),
+            "name":       top_name.upper(),
+            "color":      top_team.get("color", "#6B7280"),
+            "runs":       top_r,
+            "wickets":    top_w,
+            "balls":      top_b,
             "yet_to_bat": False,
             "batters":    _bat(p.get("b1")),
             "bowlers":    _bowl(p.get("w1")),
             "impact_sub": p.get("i1"),
         },
         "t2": {
-            "name":       t2_name.upper(),
-            "color":      t2_team.get("color", "#6B7280"),
-            "runs":       r.get("t2_runs", 0),
-            "wickets":    r.get("t2_wickets", 0),
-            "balls":      r.get("t2_balls", 0),
+            "name":       bot_name.upper(),
+            "color":      bot_team.get("color", "#6B7280"),
+            "runs":       bot_r,
+            "wickets":    bot_w,
+            "balls":      bot_b,
             "yet_to_bat": False,
             "batters":    _bat(p.get("b2")),
             "bowlers":    _bowl(p.get("w2")),
@@ -1125,7 +1137,14 @@ def generate_scorecard_from_data(data: dict) -> io.BytesIO:
 
                 d.text((30, y_top + (_H_BAR - _th(_fTEAM)) // 2), td["name"], fill=_C_WHITE, font=_fTEAM)
 
-                ovr = f"OVERS  {format_overs}"
+                _b = td.get("balls", 0)
+                if td.get("yet_to_bat") or _b == 0:
+                    _ov_str = str(format_overs)
+                elif _b % 6 == 0:
+                    _ov_str = str(_b // 6)
+                else:
+                    _ov_str = f"{_b // 6}.{_b % 6}"
+                ovr = f"OVERS  {_ov_str}"
                 d.text((_W - _SCORE_PANEL + (_SCORE_PANEL - _tw(ovr, _fOVR)) // 2, y_top + 6),
                        ovr, fill="#AAAAAA", font=_fOVR)
 
@@ -1284,7 +1303,8 @@ def generate_scorecard_from_data(data: dict) -> io.BytesIO:
         else:
             score_txt = f"{td['runs']}-{td['wickets']}"
             b = td.get("balls", 0)
-            overs_txt = f"OVERS {b // 6}.{b % 6}"
+            _ov = f"{b // 6}" if b % 6 == 0 else f"{b // 6}.{b % 6}"
+            overs_txt = f"OVERS {_ov}"
         sw = get_tw(score_txt, font_huge)
         d.text((1060 - sw, y_start + 5), score_txt, fill=c_white, font=font_huge)
         if overs_txt:
@@ -1425,7 +1445,7 @@ async def trigger_super_over(channel, match: CricketMatch):
     
     await channel.send("🚨 **SCORES ARE TIED!** 🚨\nGet ready for the **SUPER OVER!**\n*The team that batted second will bat first. Max 2 wickets.*")
     if so_match.sim_only: await loop_entire_match_simulation(channel, so_match)
-    else: await prompt_over_pacing_hub(channel, so_match)
+    else: await prompt_bowler_then_hub(channel, so_match)
 
 async def handle_innings_end(interaction_context, match: CricketMatch):
     channel = interaction_context if isinstance(interaction_context, discord.TextChannel) else interaction_context.channel
@@ -1479,7 +1499,7 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
             await channel.send("*Simulating 2nd Innings... ⚙️*")
             await loop_entire_match_simulation(channel, match)
         else:
-            await prompt_over_pacing_hub(channel, match)
+            await prompt_bowler_then_hub(channel, match)
         
     else:
         inn1 = match.innings1
@@ -1669,15 +1689,92 @@ async def prompt_new_over_bowler(interaction, match: CricketMatch):
         msg += "\n💡 *(Need to sub someone in? Run `/impactplayer` first!)*"
     await channel.send(msg, view=view)
 
+async def prompt_bowler_then_hub(interaction, match: CricketMatch):
+    """Show bowler select dropdown first, then over hub. For AI-bowling games, AI picks and hub shows directly."""
+    innings = match.current_innings
+    channel = interaction.channel if hasattr(interaction, 'channel') else interaction
+    bowler_uid = match.get_bowler_user_id()
+
+    # AI game where AI is bowling: AI picks, reset over state, show hub directly
+    if match.is_ai_game and bowler_uid == match.p2_id:
+        try_ai_impact_player(match, innings)
+        new_bowler = get_smart_ai_bowler(innings, match.pitch, match.weather, match.format_overs)
+        if not new_bowler:
+            await channel.send("🚨 **CRITICAL ERROR:** Could not find a valid bowler to proceed. The match cannot continue. Please use `/endmatch`.")
+            return
+        innings.current_bowler = new_bowler
+        innings.over_log.clear()
+        innings.bouncers_in_over = 0
+        innings.mystery_bowled_this_over = False
+        await prompt_over_pacing_hub(interaction, match)
+        return
+
+    # Human bowling: show bowler select, then show hub after selection
+    actual_bowlers = [p for p in innings.bowling_team["players"]
+                      if not getattr(innings.bowling_stats.get(p["name"]), "is_subbed_out", False)
+                      and ("Bowler" in p["role"] or "All-Rounder" in p["role"])]
+
+    bowler_quota = max(1, (match.format_overs + 4) // 5)
+    options = []
+    for p in actual_bowlers:
+        stats = innings.bowling_stats[p["name"]]
+        rem = bowler_quota - (stats.balls_bowled // 6)
+        if rem <= 0:
+            suffix = " (Quota Full)"
+        elif innings.current_bowler and innings.current_bowler["name"] == p["name"]:
+            suffix = f" ({rem} Over Rem) - Prev"
+        else:
+            suffix = f" ({rem} Over Rem)"
+        options.append(discord.SelectOption(label=f"{p['name']} [{p['bowl']} OVR]{suffix}", value=p["name"]))
+
+    if not options:
+        await channel.send("🚨 **ERROR:** No eligible bowlers available.")
+        return
+
+    view = discord.ui.View(timeout=120)
+    select = discord.ui.Select(
+        placeholder=f"🎳 Pick bowler for Over {innings.total_balls // 6 + 1}...",
+        options=options[:25]
+    )
+
+    async def b_callback(inter: discord.Interaction):
+        b_name = select.values[0]
+        b_stats = innings.bowling_stats[b_name]
+        if b_stats.balls_bowled // 6 >= bowler_quota or (innings.current_bowler and innings.current_bowler["name"] == b_name):
+            await inter.response.send_message("❌ Illegal selection (quota full or same bowler back-to-back).", ephemeral=True)
+            return
+        match._pending_bowler = next(p for p in innings.bowling_team["players"] if p["name"] == b_name)
+        await inter.response.defer()
+        await inter.message.edit(view=None)
+        await prompt_over_pacing_hub(inter, match)
+
+    select.callback = b_callback
+    view.add_item(select)
+
+    async def interaction_check(inter: discord.Interaction) -> bool:
+        if inter.channel.id not in active_games or active_games[inter.channel.id] != match:
+            await inter.response.send_message("❌ This match has been ended.", ephemeral=True)
+            return False
+        if inter.user.id != bowler_uid and inter.user.id != getattr(match, "manager_id", None):
+            await inter.response.send_message("❌ Not your turn.", ephemeral=True)
+            return False
+        return True
+    view.interaction_check = interaction_check
+
+    msg = f"🎳 <@{bowler_uid}>, pick your bowler for **Over {innings.total_balls // 6 + 1}**:"
+    if getattr(match, "impact_player", False):
+        msg += "\n💡 *(Need to sub someone in? Run `/impactplayer` first!)*"
+    await channel.send(msg, view=view)
+
 async def prompt_over_pacing_hub(interaction, match: CricketMatch):
     view = OverControlHubView(match)
     embed = render_embed_scoreboard(match)
     channel = interaction.channel if hasattr(interaction, 'channel') else interaction
-    
+
     msg = f"⚡ <@{match.p1_id}> **Over Hub** - How to progress the next 6 deliveries?"
     if getattr(match, "impact_player", False):
         msg += "\n💡 **TIP:** Any player can use the `🔄 Impact Player` button below to make a sub!"
-        
+
     await channel.send(msg, embed=embed, view=view)
 
 class OverControlHubView(discord.ui.View):
@@ -1710,7 +1807,15 @@ class OverControlHubView(discord.ui.View):
         await interaction.response.defer()
         await interaction.message.edit(view=None)
         self.match.simulation_mode = "interactive"
-        await prompt_new_over_bowler(interaction, self.match)
+        innings = self.match.current_innings
+        pending = getattr(self.match, '_pending_bowler', None)
+        if pending:
+            innings.current_bowler = pending
+            self.match._pending_bowler = None
+            innings.over_log.clear()
+            innings.bouncers_in_over = 0
+            innings.mystery_bowled_this_over = False
+        await run_interactive_delivery_sequence(interaction, self.match)
         
     @discord.ui.button(label="Simulate 1 Over", style=discord.ButtonStyle.primary)
     async def sim_over(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1718,11 +1823,19 @@ class OverControlHubView(discord.ui.View):
         await interaction.message.edit(view=None)
         innings = self.match.current_innings
         start_runs = innings.total_runs; start_wkts = innings.wickets
-        
+
         prev_mode = self.match.simulation_mode
         self.match.simulation_mode = "whole_match"
-        
-        if innings.total_balls % 6 == 0:
+
+        # Apply the pre-selected bowler (set in prompt_bowler_then_hub); fall back to AI if missing
+        pending = getattr(self.match, '_pending_bowler', None)
+        if pending:
+            innings.current_bowler = pending
+            self.match._pending_bowler = None
+            innings.over_log.clear()
+            innings.bouncers_in_over = 0
+            innings.mystery_bowled_this_over = False
+        elif not innings.current_bowler:
             new_bowler = get_smart_ai_bowler(innings, self.match.pitch, self.match.weather, self.match.format_overs)
             if not new_bowler:
                 channel = interaction.channel if hasattr(interaction, 'channel') else interaction
@@ -1754,7 +1867,12 @@ class OverControlHubView(discord.ui.View):
         await interaction.response.defer()
         await interaction.message.edit(view=None)
         self.match.simulation_mode = "whole_match"
-        self.match.verbose = False # Fast mode: No mid-match spam
+        self.match.verbose = False
+        self.match._pending_bowler = None  # AI handles all bowlers from here
+        innings = self.match.current_innings
+        innings.over_log.clear()
+        innings.bouncers_in_over = 0
+        innings.mystery_bowled_this_over = False
         await loop_entire_match_simulation(interaction, self.match)
 
     @discord.ui.button(label="Simulate Match (Verbose)", style=discord.ButtonStyle.secondary)
@@ -1762,7 +1880,12 @@ class OverControlHubView(discord.ui.View):
         await interaction.response.defer()
         await interaction.message.edit(view=None)
         self.match.simulation_mode = "whole_match"
-        self.match.verbose = True # Verbose mode: Every over summary
+        self.match.verbose = True
+        self.match._pending_bowler = None  # AI handles all bowlers from here
+        innings = self.match.current_innings
+        innings.over_log.clear()
+        innings.bouncers_in_over = 0
+        innings.mystery_bowled_this_over = False
         await loop_entire_match_simulation(interaction, self.match)
         
     async def impact_btn(self, interaction: discord.Interaction):
@@ -2009,7 +2132,7 @@ async def run_interactive_delivery_sequence(interaction, match: CricketMatch):
         
     if getattr(match, "over_completed", False):
         match.over_completed = False
-        await prompt_over_pacing_hub(interaction, match)
+        await prompt_bowler_then_hub(interaction, match)
         return
         
     channel = interaction.channel if hasattr(interaction, 'channel') else interaction
@@ -2615,7 +2738,7 @@ async def begin_toss(channel, state):
             match.bowling_first_id = match.p1_id if ai_choice == "Bat" else match.p2_id
             match.innings1 = InningsState(match.team2 if ai_choice == "Bat" else match.team1, match.team1 if ai_choice == "Bat" else match.team2)
             match.current_innings = match.innings1
-            await prompt_over_pacing_hub(channel, match)
+            await prompt_bowler_then_hub(channel, match)
     else:
         await channel.send(f"🪙 **Toss Time!** <@{match.p2_id}> — call the coin!", view=TossCallView(match))
 
@@ -2665,7 +2788,7 @@ class TossDecisionView(discord.ui.View):
         self.match.current_innings = self.match.innings1
         await interaction.response.defer()
         await interaction.message.edit(view=None)
-        await prompt_over_pacing_hub(interaction, self.match)
+        await prompt_bowler_then_hub(interaction, self.match)
     @discord.ui.button(label="🏏 Bat First", style=discord.ButtonStyle.success)
     async def bat(self, interaction, button): await self.finalize_toss(interaction, "Bat")
     @discord.ui.button(label="🎯 Bowl First", style=discord.ButtonStyle.danger)
