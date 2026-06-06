@@ -200,36 +200,34 @@ def swap_impact_player(match: CricketMatch, team_id: int, out_name: str, in_play
         match.t2_impact_used = True
         match.t2_impact_sub_name = in_player["name"]
         team = match.team2
-        
-    if in_player not in team["players"]:
-        team["players"].append(in_player)
-        
-    for inn in [match.innings1, match.innings2]:
-        if not inn: continue
-        
-        is_batting = (inn.batting_team["name"] == team["name"])
-        if is_batting:
-            if in_player["name"] not in inn.batting_stats:
-                # Insert at next_batter_idx so the sub comes in at the very next wicket
-                # (appending to end would put them at position 11, unreachable before 10 wickets)
-                insert_pos = getattr(inn, "next_batter_idx", len(inn.batting_team["players"]))
-                inn.batting_team["players"].insert(insert_pos, in_player)
-                inn.batting_stats[in_player["name"]] = BatterStats(in_player)
-            
-            b_stats = inn.batting_stats.get(out_name)
-            if b_stats:
-                if b_stats.dismissal == "not out" and b_stats.balls_faced == 0:
-                    b_stats.dismissal = "Subbed Out"
-                elif b_stats.dismissal == "not out":
-                    b_stats.dismissal = "Retired (Sub)"
-        else:
-            if in_player["name"] not in inn.bowling_stats:
+
+    inn = match.current_innings
+    if not inn:
+        return
+
+    is_batting = (inn.batting_team["name"] == team["name"])
+
+    if is_batting:
+        if in_player["name"] not in inn.batting_stats:
+            insert_pos = getattr(inn, "next_batter_idx", len(inn.batting_team["players"]))
+            inn.batting_team["players"].insert(insert_pos, in_player)
+            inn.batting_stats[in_player["name"]] = BatterStats(in_player)
+
+        b_stats = inn.batting_stats.get(out_name)
+        if b_stats:
+            if b_stats.dismissal == "not out" and b_stats.balls_faced == 0:
+                b_stats.dismissal = "Subbed Out"
+            elif b_stats.dismissal == "not out":
+                b_stats.dismissal = "Retired (Sub)"
+    else:
+        if in_player["name"] not in inn.bowling_stats:
+            if in_player not in inn.bowling_team["players"]:
                 inn.bowling_team["players"].append(in_player)
-                inn.bowling_stats[in_player["name"]] = BowlerStats(in_player)
-            
-            bw_stats = inn.bowling_stats.get(out_name)
-            if bw_stats:
-                bw_stats.is_subbed_out = True
+            inn.bowling_stats[in_player["name"]] = BowlerStats(in_player)
+
+        bw_stats = inn.bowling_stats.get(out_name)
+        if bw_stats:
+            bw_stats.is_subbed_out = True
 
 def _do_impact_swap(match: CricketMatch, team_num: int, out_name: str, in_player: dict):
     swap_impact_player(match, team_num, out_name, in_player)
@@ -1445,16 +1443,20 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
             
         file = discord.File(fp=img_buf, filename="final_scoreboard.png")
         embed_full = render_full_scorecard_embed(match_to_finalize, 2)
-        
-        await channel.send(
-            "🏆 **Match over! Here is the final detailed scorecard and broadcast graphic:**", 
-            embed=embed_full, 
+
+        sent_msg = await channel.send(
+            "🏆 **Match over! Here is the final detailed scorecard and broadcast graphic:**",
+            embed=embed_full,
             file=file
         )
-        
+
+        # Capture the Discord CDN URL so we can show the scorecard image later
+        if getattr(match_to_finalize, "tournament_server_id", None) and sent_msg.attachments:
+            match_to_finalize.scoreboard_image_url = sent_msg.attachments[0].url
+
         if channel.id in active_games:
             del active_games[channel.id]
-            
+
         if getattr(match_to_finalize, "tournament_server_id", None):
             bot.dispatch("tournament_match_complete", match_to_finalize)
 
