@@ -3,7 +3,7 @@ import re
 import datetime
 import certifi
 from threading import Thread
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, unquote_plus
 from pymongo import MongoClient
 
 MONGO_URI = os.environ.get("MONGO_URI")
@@ -13,12 +13,25 @@ _client = None
 _db     = None
 
 def _encode_mongo_uri(uri: str) -> str:
-    """Re-encode username and password in a MongoDB URI to handle special characters (RFC 3986)."""
-    m = re.match(r'^(mongodb(?:\+srv)?://)([^:@]+):([^@]+)@(.+)$', uri)
-    if m:
-        scheme, user, password, rest = m.groups()
-        return f"{scheme}{quote_plus(user)}:{quote_plus(password)}@{rest}"
-    return uri
+    """Re-encode username and password in a MongoDB URI to handle special characters (RFC 3986).
+    Uses rfind('@') so passwords containing '@' are handled correctly.
+    Decodes first to avoid double-encoding if the URI was already partially escaped.
+    """
+    m = re.match(r'^(mongodb(?:\+srv)?://)(.+)$', uri)
+    if not m:
+        return uri
+    scheme, rest = m.groups()
+    at_idx = rest.rfind('@')
+    if at_idx == -1:
+        return uri
+    credentials = rest[:at_idx]       # everything before last @
+    host_part   = rest[at_idx + 1:]   # cluster + options
+    colon_idx   = credentials.find(':')
+    if colon_idx == -1:
+        return uri
+    user     = unquote_plus(credentials[:colon_idx])
+    password = unquote_plus(credentials[colon_idx + 1:])
+    return f"{scheme}{quote_plus(user)}:{quote_plus(password)}@{host_part}"
 
 def _get_db():
     global _client, _db
