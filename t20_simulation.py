@@ -217,21 +217,23 @@ def execute_ball_math_t20(match):
         bowl_rating += 5
         bat_rating -= 4
         
-    # Weather Mechanics
+    # Weather Mechanics — new-ball conditions (Overcast, Cloudy, Humid, Windy) scale with
+    # innings.total_balls so the advantage applies to the START of BOTH innings equally.
+    _new_ball = innings.total_balls < 36  # powerplay of whichever innings is being played
     if match.weather == "Clear":
         bat_rating += 2
     elif match.weather == "Cloudy" and "Pace" in bowler["role"]:
-        bowl_rating += 2
+        bowl_rating += (3 if _new_ball else 1)
     elif match.weather == "Overcast":
-        if "Pace" in bowler["role"]: bowl_rating += 3
-        bat_rating -= 2
+        if "Pace" in bowler["role"]: bowl_rating += (5 if _new_ball else 2)
+        bat_rating -= (3 if _new_ball else 1)
     elif match.weather == "Humid" and "Pace" in bowler["role"]:
-        bowl_rating += 2
+        bowl_rating += (3 if _new_ball else 1)
     elif match.weather == "Dry Heat":
         if "Pace" in bowler["role"]: bowl_rating -= 3
         elif "Spin" in bowler["role"] and innings.total_balls > 60: bowl_rating += 4
     elif match.weather == "Windy":
-        if "Pace" in bowler["role"]: bowl_rating += 3
+        if "Pace" in bowler["role"]: bowl_rating += (4 if _new_ball else 2)
     elif match.weather in ["Light Rain", "Drizzle"]:
         bowl_rating -= 4
         bat_rating += 2
@@ -416,14 +418,23 @@ def execute_ball_math_t20(match):
         boundary_weight *= 0.75
         dot_weight *= 1.20
         
-    # Weather Advanced Modifiers
+    # Weather Advanced Modifiers — new-ball conditions scale with innings.total_balls
+    # so both innings get the powerplay swing advantage (not just innings 1).
+    _new_ball = total_balls < 36
     if match.weather == "Overcast":
-        wicket_weight *= 1.15
-        boundary_weight *= 0.90
+        wicket_weight *= (1.22 if _new_ball else 1.08)
+        boundary_weight *= (0.85 if _new_ball else 0.93)
+    elif match.weather == "Cloudy":
+        if _new_ball and "Pace" in bowler["role"]:
+            wicket_weight *= 1.10
+            boundary_weight *= 0.95
+    elif match.weather == "Humid":
+        if _new_ball and "Pace" in bowler["role"]:
+            wicket_weight *= 1.08
     elif match.weather == "Dry Heat":
         dot_weight *= 1.10
     elif match.weather == "Windy":
-        wicket_weight *= 1.10
+        wicket_weight *= (1.15 if _new_ball else 1.07)
         boundary_weight *= 0.95
     elif match.weather in ["Light Rain", "Drizzle"]:
         wicket_weight *= 0.90
@@ -488,9 +499,6 @@ def execute_ball_math_t20(match):
             else:
                 wicket_weight *= (1.0 + (active_multiplier - 1.0) * 0.8) # Dampened suicide curve
                 
-        if innings.last_ball_boundary: boundary_weight *= 1.15; wicket_weight *= 1.15
-        if is_powerplay: boundary_weight *= 1.25; single_weight *= 0.85
-            
         if innings.last_ball_boundary: boundary_weight *= 1.15; wicket_weight *= 1.15
         if is_powerplay: boundary_weight *= 1.25; single_weight *= 0.85
             

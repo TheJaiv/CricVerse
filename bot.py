@@ -20,7 +20,9 @@ from subscription_manager import (
     check_potential_quota, consume_quota,
     update_user_tier, update_server_tier, get_auth_admins, toggle_auth_admin,
     get_all_players, add_player, add_players_bulk, update_player, delete_players, clean_duplicate_players,
-    get_tier_status, is_channel_restricted, toggle_restricted_channel, DB_CACHE
+    get_tier_status, is_channel_restricted, toggle_restricted_channel,
+    is_ratings_channel, toggle_ratings_channel,
+    get_match_log_channel, set_match_log_channel, clear_match_log_channel, DB_CACHE
 )
 
 # ==========================================
@@ -485,7 +487,7 @@ def render_embed_scoreboard(match: CricketMatch) -> discord.Embed:
         bovers = f"{cbs.balls_bowled // 6}.{cbs.balls_bowled % 6}"
         desc += f"`{cb['name'][:16]:<17}{bovers:<5}{cbs.runs_conceded:<5}{cbs.wickets_taken:<5}`\n"
         
-    timeline_raw = innings.over_log[-6:] if innings.over_log else []
+    timeline_raw = innings.over_log if innings.over_log else []
     timeline_str = " ".join(timeline_raw) if timeline_raw else "Starting over..."
     
     desc += f"**Timeline**\n{timeline_str}\n"
@@ -574,11 +576,12 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
     
     c_white = "#FFFFFF"
     c_score_bg = "#FFFFFF"
+    _base_overs = getattr(match, 'original_format_overs', match.format_overs)
     if getattr(match, 'is_super_over', False):
         c_accent = "#FFD700" # Gold for Super Over
-    elif match.format_overs == 50:
+    elif _base_overs == 50:
         c_accent = "#39B54A" # Green for ODI
-    elif match.format_overs == 20:
+    elif _base_overs == 20:
         c_accent = "#F97316" # Orange for T20
     else:
         c_accent = "#00B4D8" # Cyan for Custom
@@ -703,7 +706,8 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
     if getattr(match, 'is_super_over', False):
         fmt_text = "SUPER OVER"
     else:
-        fmt = "ODI" if match.format_overs == 50 else "T20" if match.format_overs == 20 else "CUSTOM"
+        _base = getattr(match, 'original_format_overs', match.format_overs)
+        fmt = "ODI" if _base == 50 else "T20" if _base == 20 else "CUSTOM"
         fmt_text = f"{fmt} ({match.format_overs} OVERS)"
         
     left_text = "SIMULATION MATCH"
@@ -1395,14 +1399,13 @@ async def loop_entire_match_simulation(interaction, match: CricketMatch):
         # After each completed over (6 legal balls), reset over-specific state so the
         # next iteration's bowler-selection guard (not over_log) triggers correctly.
         if innings.total_balls % 6 == 0 and innings.total_balls > 0:
+            # Send verbose scoreboard BEFORE clearing over_log so the timeline is visible
+            if getattr(match, 'verbose', False):
+                await channel.send(embed=render_embed_scoreboard(match))
+                await asyncio.sleep(0.5)
             innings.over_log.clear()
             innings.bouncers_in_over = 0
             innings.mystery_bowled_this_over = False
-
-        # Only print scoreboard if user chose Verbose mode
-        if getattr(match, 'verbose', False) and innings.total_balls % 6 == 0 and innings.total_balls > 0:
-            await channel.send(embed=render_embed_scoreboard(match))
-            await asyncio.sleep(0.5)
             
 class ODISuperOverPrompt(discord.ui.View):
     def __init__(self, match):
@@ -1477,6 +1480,7 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
                 lost_overs = random.randint(max(2, int(match.format_overs * 0.15)), max(2, int(match.format_overs * 0.45)))
                 
             revised_overs = match.format_overs - lost_overs
+            match.original_format_overs = match.format_overs
             match.format_overs = revised_overs
             match.max_balls = revised_overs * 6
             
@@ -1542,6 +1546,24 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
             file=file
         )
 
+        # Send scorecard to match log channel if configured for this server
+        if channel.guild:
+            log_channel_id = get_match_log_channel(str(channel.guild.id))
+            if log_channel_id:
+                try:
+                    log_channel = bot.get_channel(int(log_channel_id))
+                    if log_channel:
+                        img_buf.seek(0)
+                        log_file = discord.File(fp=img_buf, filename="final_scoreboard.png")
+                        t1 = match_to_finalize.innings1.batting_team["name"]
+                        t2 = match_to_finalize.innings2.batting_team["name"]
+                        await log_channel.send(
+                            f"📋 **Match Log** · {t1} vs {t2} · <#{channel.id}>",
+                            file=log_file
+                        )
+                except Exception as _log_err:
+                    print(f"⚠️ Match log send failed: {_log_err}")
+
         if getattr(match_to_finalize, "tournament_server_id", None):
             try:
                 match_to_finalize._scorecard_players = extract_scorecard_players(match_to_finalize)
@@ -1574,9 +1596,9 @@ async def prompt_next_batter(interaction, match: CricketMatch):
         st = innings.batting_stats[p["name"]]
         if st.dismissal == "not out":
             role_short = p["role"].split("_")[0]
-            options.append(discord.SelectOption(label=p["name"], description=f"Bat: {p['bat']} | {role_short}", value=p["name"]))
-        
-    view = discord.ui.View(timeout=120)
+            options.append(discord.SelectOption(label=p["name"], description=role_short, value=p["name"]))
+
+    view = discord.ui.View(timeout=300)
     select = discord.ui.Select(placeholder="Select Next Batter...", options=options[:25])
     
     async def interaction_check(inter: discord.Interaction) -> bool:
@@ -1651,7 +1673,7 @@ async def prompt_new_over_bowler(interaction, match: CricketMatch):
         else:
             suffix = f" ({rem} Over Rem)"
             
-        options.append(discord.SelectOption(label=f"{p['name']} [{p['bowl']} OVR]{suffix}", value=p["name"]))
+        options.append(discord.SelectOption(label=f"{p['name']}{suffix}", value=p["name"]))
         
     view = discord.ui.View()
     select = discord.ui.Select(placeholder="Select Bowler for Next Over...", options=options[:25])
@@ -1726,13 +1748,13 @@ async def prompt_bowler_then_hub(interaction, match: CricketMatch):
             suffix = f" ({rem} Over Rem) - Prev"
         else:
             suffix = f" ({rem} Over Rem)"
-        options.append(discord.SelectOption(label=f"{p['name']} [{p['bowl']} OVR]{suffix}", value=p["name"]))
+        options.append(discord.SelectOption(label=f"{p['name']}{suffix}", value=p["name"]))
 
     if not options:
         await channel.send("🚨 **ERROR:** No eligible bowlers available.")
         return
 
-    view = discord.ui.View(timeout=120)
+    view = discord.ui.View(timeout=300)
     select = discord.ui.Select(
         placeholder=f"🎳 Pick bowler for Over {innings.total_balls // 6 + 1}...",
         options=options[:25]
@@ -1780,7 +1802,7 @@ async def prompt_over_pacing_hub(interaction, match: CricketMatch):
 
 class OverControlHubView(discord.ui.View):
     def __init__(self, match: CricketMatch):
-        super().__init__(timeout=60)
+        super().__init__(timeout=300)
         self.match = match
         
         if getattr(match, "impact_player", False):
@@ -2161,13 +2183,14 @@ async def run_interactive_delivery_sequence(interaction, match: CricketMatch):
         await prompt_batter_shot(channel, match)
     else:
         role = innings.current_bowler["role"]
-        
+        free_hit_notice = "\n🛡️ **FREE HIT BALL!** Batter cannot be dismissed (except run out)!" if getattr(match, "free_hit", False) else ""
+
         if "Spin" in role:
             spin_type = "off" if "Off" in role else "leg"
             title = "Off-Spin" if spin_type == "off" else "Leg-Spin"
-            await channel.send(f"🔮 <@{match.get_bowler_user_id()}> (**{innings.current_bowler['name']}**), select your {title} Variation:", view=SpinBowlingView(match, spin_type))
+            await channel.send(f"🔮 <@{match.get_bowler_user_id()}> (**{innings.current_bowler['name']}**), select your {title} Variation:{free_hit_notice}", view=SpinBowlingView(match, spin_type))
         else:
-            await channel.send(f"🔮 <@{match.get_bowler_user_id()}> (**{innings.current_bowler['name']}**), select your Pace Variation:", view=PaceBowlingView(match))
+            await channel.send(f"🔮 <@{match.get_bowler_user_id()}> (**{innings.current_bowler['name']}**), select your Pace Variation:{free_hit_notice}", view=PaceBowlingView(match))
 
 async def prompt_batter_shot(channel, match: CricketMatch, prev=None):
     if match.is_ai_game and match.get_striker_user_id() == match.p2_id:
@@ -2220,7 +2243,8 @@ async def prompt_batter_shot(channel, match: CricketMatch, prev=None):
             match.current_innings.current_striker_idx = len(match.current_innings.batting_team["players"]) - 1
             
         sn = match.current_innings.batting_team["players"][match.current_innings.current_striker_idx]["name"]
-        await channel.send(f"⚔️ <@{match.get_striker_user_id()}> (**{sn}**)\n🚨 The bowler bowled a **{match.current_delivery_selection}**!\nSelect your shot:", view=BattingView(match))
+        free_hit_notice = "\n🛡️ **FREE HIT!** You cannot be dismissed (except run out)!" if getattr(match, "free_hit", False) else ""
+        await channel.send(f"⚔️ <@{match.get_striker_user_id()}> (**{sn}**)\n🚨 The bowler bowled a **{match.current_delivery_selection}**!{free_hit_notice}\nSelect your shot:", view=BattingView(match))
 
 
 # ==========================================
@@ -2290,7 +2314,7 @@ def format_xi_display(players):
     lines = []
     for i, p in enumerate(players, 1):
         role_short = p["role"].replace("All-Rounder", "AR").replace("Bowler", "BWL").replace("Batter", "BAT").replace("_", " ")
-        lines.append(f"`{i:>2}.` **{p['name']}** — {role_short} *(Bat: {p['bat']} | Bowl: {p['bowl']})*")
+        lines.append(f"`{i:>2}.` **{p['name']}** — {role_short}")
     return "\n".join(lines)
 
 
@@ -2485,7 +2509,7 @@ class TournamentXIView(discord.ui.View):
             for p in self.squad:
                 if p not in self.selected_players:
                     role_short = p["role"].replace("All-Rounder", "AR").replace("Bowler", "BWL").replace("Batter", "BAT").replace("_", " ")
-                    options.append(discord.SelectOption(label=p["name"], description=f"Bat: {p['bat']} | {role_short}", value=p["name"]))
+                    options.append(discord.SelectOption(label=p["name"], description=role_short, value=p["name"]))
             select = discord.ui.Select(placeholder=f"Pick Player {len(self.selected_players)+1} of {self.req_count}...", options=options[:25])
             select.callback = self.select_cb
             self.add_item(select)
@@ -2568,7 +2592,7 @@ class TournamentSubSelectView(discord.ui.View):
             for p in self.remaining:
                 if p not in self.selected_subs:
                     role_short = p["role"].replace("All-Rounder", "AR").replace("Bowler", "BWL").replace("Batter", "BAT").replace("_", " ")
-                    options.append(discord.SelectOption(label=p["name"], description=f"Bat: {p['bat']} | {role_short}", value=p["name"]))
+                    options.append(discord.SelectOption(label=p["name"], description=role_short, value=p["name"]))
             if options:
                 select = discord.ui.Select(placeholder=f"Add Impact Sub {len(self.selected_subs)+1}...", options=options[:25])
                 select.callback = self.select_cb
@@ -2595,7 +2619,7 @@ class TournamentSubSelectView(discord.ui.View):
         if self.selected_subs:
             for i, p in enumerate(self.selected_subs, 1):
                 role_short = p["role"].replace("All-Rounder", "AR").replace("Bowler", "BWL").replace("Batter", "BAT").replace("_", " ")
-                msg += f"`{i:>2}.` **{p['name']}** — {role_short} *(Bat: {p['bat']} | Bowl: {p['bowl']})*\n"
+                msg += f"`{i:>2}.` **{p['name']}** — {role_short}\n"
         else:
             msg += "*No subs selected yet.*\n"
         return msg
@@ -2745,7 +2769,7 @@ async def begin_toss(channel, state):
 
 class TossCallView(discord.ui.View):
     def __init__(self, match):
-        super().__init__(timeout=60)
+        super().__init__(timeout=300)
         self.match = match
     async def handle_call(self, interaction, call):
         if interaction.user.id != self.match.p2_id and interaction.user.id != getattr(self.match, "manager_id", None): return
@@ -2761,7 +2785,7 @@ class TossCallView(discord.ui.View):
 
 class TossDecisionView(discord.ui.View):
     def __init__(self, match):
-        super().__init__(timeout=60)
+        super().__init__(timeout=300)
         self.match = match
         
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -2801,6 +2825,12 @@ class TossDecisionView(discord.ui.View):
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot: return
+
+    content = message.content
+    if content.startswith("cvt "):
+        message.content = "cv tournament " + content[4:]
+    elif content.startswith("cv t "):
+        message.content = "cv tournament " + content[5:]
 
     channel_id = message.channel.id
     if channel_id not in active_setups:
@@ -3092,8 +3122,14 @@ class ImpactPlayerSelectView(discord.ui.View):
         out_name = self.select_out.values[0]
         in_name = self.select_in.values[0]
         in_player = next(p for p in self.subs if p["name"] == in_name)
+        team = self.match.team1 if self.team_id == 1 else self.match.team2
         swap_impact_player(self.match, self.team_id, out_name, in_player)
-        await interaction.response.edit_message(content=f"🔄 **IMPACT PLAYER SWAP:** **{in_name}** comes IN for **{out_name}**!", view=None)
+        await interaction.response.edit_message(content=f"✅ Swap confirmed!", view=None)
+        await interaction.channel.send(
+            f"🔄 **IMPACT PLAYER!** | **{team['name']}**\n"
+            f"🚪 **OUT:** {out_name}\n"
+            f"✅ **IN:** {in_name}"
+        )
 
 @bot.tree.command(name="impactplayer", description="Swap in your Impact Player during an active match.")
 async def impact_player_cmd(interaction: discord.Interaction):
@@ -3117,51 +3153,62 @@ async def impact_player_cmd(interaction: discord.Interaction):
 # 🔍 8. PUBLIC DATABASE SEARCH
 # ==========================================
 
-async def send_player_profile(interaction: discord.Interaction, player: dict):
-    embed = discord.Embed(title=f"🏏 Player Profile: {player['name']}", color=0x1D4ED8)
-    embed.add_field(name="🔥 Batting", value=f"`{player['bat']}`", inline=True)
-    embed.add_field(name="🎯 Bowling", value=f"`{player['bowl']}`", inline=True)
-    embed.add_field(name="📋 Role", value=player["role"].replace("_", " "), inline=True)
-    embed.add_field(name="🧠 Archetype", value=player["archetype"], inline=True)
-    
+def _can_see_ratings(user_id: int, channel_id: int) -> bool:
+    if user_id == ADMIN_DISCORD_ID:
+        return True
+    if str(user_id) in get_auth_admins():
+        return is_ratings_channel(str(channel_id))
+    return False
+
+async def send_player_profile(interaction, player: dict, show_ratings: bool = True):
+    if show_ratings:
+        embed = discord.Embed(title=f"🏏 Player Profile: {player['name']}", color=0x1D4ED8)
+        embed.add_field(name="🔥 Batting", value=f"`{player['bat']}`", inline=True)
+        embed.add_field(name="🎯 Bowling", value=f"`{player['bowl']}`", inline=True)
+        embed.add_field(name="📋 Role", value=player["role"].replace("_", " "), inline=True)
+        embed.add_field(name="🧠 Archetype", value=player["archetype"], inline=True)
+    else:
+        embed = discord.Embed(title=f"🏏 {player['name']}", color=0x1D4ED8)
+        embed.description = (
+            "✅ This player is in the database.\n\n"
+            "*Ratings are hidden here — use `/match` to pick this player and put them to the test!*"
+        )
     await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="searchplayer", description="Search for a player in the Cloud DB.")
 async def searchplayer(interaction: discord.Interaction, name: str):
     await interaction.response.defer()
     search_query = name.strip()
-    
-    # 🚨 PULL FROM MEMORY CACHE
     all_players = get_all_players()
     player_names = [p["name"] for p in all_players]
-    
+
     if not all_players:
         return await interaction.followup.send("❌ Error: Cache is empty.")
-        
+
+    show_ratings = _can_see_ratings(interaction.user.id, interaction.channel_id)
+
     exact = next((p for p in all_players if p["name"].lower() == search_query.lower()), None)
     if exact:
-        return await send_player_profile(interaction, exact)
+        return await send_player_profile(interaction, exact, show_ratings)
 
     subs = [p for p in all_players if search_query.lower() in p["name"].lower()]
     fuzz = difflib.get_close_matches(search_query, player_names, n=1, cutoff=0.2)
 
     if not subs and not fuzz:
-        return await interaction.followup.send(f"❌ Player `{search_query}` not found.")
-    
+        return await interaction.followup.send(f"❌ Player `{search_query}` not found in the database.")
+
     if fuzz:
-        best_name = fuzz[0] 
+        best_name = fuzz[0]
     else:
         best_name = subs[0]["name"]
-        
+
     if len(subs) == 1 and not fuzz:
-        return await send_player_profile(interaction, subs[0])
+        return await send_player_profile(interaction, subs[0], show_ratings)
 
     other = [p["name"] for p in subs if p["name"] != best_name]
     msg = f"🔍 **Not found exactly.**\n💡 **Best Match:** `{best_name}`\n👉 Rerun: `/searchplayer name: {best_name}`"
-    
     if other:
-        msg += f"\n\n📂 **Alternatives:**\n" + "\n".join([f"• {o}" for o in other[:5]])
-        
+        msg += "\n\n📂 **Alternatives:**\n" + "\n".join(f"• {o}" for o in other[:5])
     await interaction.followup.send(msg)
 
 @bot.tree.command(name="my_tier", description="Check your current subscription tier and daily match limits.")
@@ -3227,147 +3274,11 @@ async def log_db_update(action: str, player_name: str, user: discord.User, detai
         except:
             pass
 
-class AddPlayerModal(discord.ui.Modal, title="Add New Player"):
-    p_name = discord.ui.TextInput(label="Player Name", required=True)
-    bat_r = discord.ui.TextInput(label="Batting Rating (1-99)", max_length=2, required=True)
-    bowl_r = discord.ui.TextInput(label="Bowling Rating (1-99)", max_length=2, required=True)
 
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            bat = int(self.bat_r.value)
-            bowl = int(self.bowl_r.value)
-            if not (0 <= bat <= 100 and 0 <= bowl <= 100):
-                raise ValueError
-        except:
-            return await interaction.response.send_message("❌ Need numbers 0-100.", ephemeral=True)
-            
-        await interaction.response.send_message("Select Role/Archetype below:", view=PlayerRoleSelectView(self.p_name.value.strip(), bat, bowl), ephemeral=True)
 
-class PlayerRoleSelectView(discord.ui.View):
-    def __init__(self, name, bat, bowl):
-        super().__init__(timeout=180)
-        self.n = name
-        self.bat = bat
-        self.bowl = bowl
-        self.s_role = None
-        self.s_arch = None
-
-    @discord.ui.select(placeholder="Select Role...", options=[discord.SelectOption(label=r, value=r) for r in ["Batter", "Batter_WK", "Bowler_Pace", "Bowler_Spin_Off", "Bowler_Spin_Leg", "All-Rounder_Pace", "All-Rounder_Spin_Off", "All-Rounder_Spin_Leg"]])
-    async def s_role_cb(self, inter, sel):
-        self.s_role = sel.values[0]
-        await inter.response.defer()
-        await self.save(inter)
-        
-    @discord.ui.select(placeholder="Select Archetype...", options=[discord.SelectOption(label=a, value=a) for a in ["Aggressor", "Anchor", "Finisher", "Standard"]])
-    async def s_arch_cb(self, inter, sel):
-        self.s_arch = sel.values[0]
-        await inter.response.defer()
-        await self.save(inter)
-        
-    async def save(self, inter):
-        if self.s_role and self.s_arch:
-            for c in self.children:
-                c.disabled = True
-                
-            success = add_player({
-                "name": self.n,
-                "bat": self.bat,
-                "bowl": self.bowl,
-                "role": self.s_role,
-                "archetype": self.s_arch
-            })
-            
-            if not success:
-                return await inter.followup.send(f"❌ Cancelled: `{self.n}` already exists in DB!", ephemeral=True)
-                
-            await inter.followup.send(f"✅ Saved `{self.n}` to database!", ephemeral=True)
-            await log_db_update("Player Added", self.n, inter.user, f"Bat: {self.bat} | Bowl: {self.bowl}\nRole: {self.s_role}\nArchetype: {self.s_arch}")
-
-@bot.tree.command(name="addplayer", description="[ADMIN] Add player to Cloud DB.")
-async def add_p_cmd(interaction: discord.Interaction):
-    admins = get_auth_admins()
-    if interaction.user.id != ADMIN_DISCORD_ID and str(interaction.user.id) not in admins: 
-        return await interaction.response.send_message("❌ Access Denied: Admin only.", ephemeral=True)
-        
-    await interaction.response.send_modal(AddPlayerModal())
-
-@bot.tree.command(name="force_sync", description="[OWNER] Manually force backup memory cache to Cloud DB.")
-async def force_sync_cmd(interaction: discord.Interaction):
-    if interaction.user.id != ADMIN_DISCORD_ID:
-        return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
-        
-    await interaction.response.defer(ephemeral=True)
-    try:
-        res = save_data_to_bin()
-        res_t = save_tournament_data_to_bin()
-        lines = []
-        if res is None:
-            lines.append("❌ Main DB skipped — MONGO_URI missing.")
-        elif res:
-            lines.append("✅ Main DB synced to MongoDB.")
-            await log_db_update("Manual Cloud Sync", "Database Backup", interaction.user, "Force synced local memory cache to MongoDB.")
-        else:
-            lines.append("❌ Main DB save failed — check bot logs.")
-        if res_t is None:
-            lines.append("❌ Tournament DB skipped — MONGO_URI missing.")
-        elif res_t:
-            lines.append("✅ Tournament DB synced to MongoDB.")
-        else:
-            lines.append("❌ Tournament DB save failed — check bot logs.")
-        await interaction.followup.send("\n".join(lines))
-    except Exception as e:
-        await interaction.followup.send(f"❌ Error during sync: {e}")
-
-@bot.tree.command(name="dump_cache", description="[OWNER] Export current in-memory tournament data as a JSON file (emergency backup).")
-async def dump_cache_cmd(interaction: discord.Interaction):
-    if interaction.user.id != ADMIN_DISCORD_ID:
-        return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
-    await interaction.response.defer(ephemeral=True)
-    try:
-        data = {"tournaments": DB_CACHE.get("tournaments", [])}
-        raw = json.dumps(data, indent=2, ensure_ascii=False)
-        file = discord.File(fp=io.BytesIO(raw.encode("utf-8")), filename="tournament_cache_dump.json")
-        await interaction.followup.send(
-            "📦 Current in-memory tournament data. You can import this into MongoDB manually if saves are failing.",
-            file=file,
-            ephemeral=True
-        )
-    except Exception as e:
-        await interaction.followup.send(f"❌ Dump failed: {e}", ephemeral=True)
-
-@bot.tree.command(name="sync_csv", description="[OWNER] Sync missing players from players_master.csv to Cloud DB.")
-async def sync_csv_cmd(interaction: discord.Interaction):
-    if interaction.user.id != ADMIN_DISCORD_ID:
-        return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
-    
-    await interaction.response.defer(ephemeral=True)
-    
-    if not os.path.exists("players_master.csv"):
-        return await interaction.followup.send("❌ Error: `players_master.csv` not found.")
-        
-    try:
-        new_players = []
-        with open("players_master.csv", "r", encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                new_players.append({
-                    "name": row["Name"].strip(),
-                    "bat": int(row["Bat"]),
-                    "bowl": int(row["Bowl"]),
-                    "role": row["Role"].strip(),
-                    "archetype": row["Archetype"].strip()
-                })
-                
-        added_count = add_players_bulk(new_players)
-        
-        if added_count > 0:
-            await interaction.followup.send(f"✅ Sync complete! Added **{added_count}** new players to the database.")
-            await log_db_update("CSV Sync", "Batch Import", interaction.user, f"Added {added_count} new players from CSV.")
-        else:
-            await interaction.followup.send("✅ Sync complete! No new players found in CSV (database is already up to date).")
-            
-    except Exception as e:
-        await interaction.followup.send(f"❌ Error during sync: {e}")
+# ==========================================
+# 🛡️ OWNER SLASH COMMANDS (dropdown-based)
+# ==========================================
 
 @bot.tree.command(name="set_user_tier", description="[OWNER] Assign a subscription tier to a user.")
 @app_commands.choices(tier=[
@@ -3380,7 +3291,6 @@ async def sync_csv_cmd(interaction: discord.Interaction):
 async def set_user_tier_cmd(interaction: discord.Interaction, user: discord.Member, tier: app_commands.Choice[str]):
     if interaction.user.id != ADMIN_DISCORD_ID:
         return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
-    
     msg = update_user_tier(str(user.id), tier.value, tier.name, user.mention)
     await interaction.response.send_message(msg, ephemeral=True)
 
@@ -3395,163 +3305,8 @@ async def set_user_tier_cmd(interaction: discord.Interaction, user: discord.Memb
 async def set_server_tier_cmd(interaction: discord.Interaction, server_id: str, tier: app_commands.Choice[str]):
     if interaction.user.id != ADMIN_DISCORD_ID:
         return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
-        
     msg = update_server_tier(server_id, tier.value, tier.name)
     await interaction.response.send_message(msg, ephemeral=True)
-
-@bot.tree.command(name="authadmin", description="[OWNER] Toggle a user's permission to add/update players.")
-async def auth_admin_cmd(interaction: discord.Interaction, user: discord.Member):
-    if interaction.user.id != ADMIN_DISCORD_ID:
-        return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
-    
-    uid = str(user.id)
-    added = toggle_auth_admin(uid)
-    if added:
-        msg = f"✅ {user.mention} is now an **Admin** and can add/update players."
-    else:
-        msg = f"🚫 Admin permissions **revoked** for {user.mention}."
-        
-    await interaction.response.send_message(msg, ephemeral=True)
-
-@bot.tree.command(name="toggle_channel_lock", description="[ADMIN] Lock or unlock matches in the current channel.")
-@app_commands.default_permissions(manage_channels=True)
-async def toggle_channel_lock_cmd(interaction: discord.Interaction):
-    is_owner = interaction.user.id == ADMIN_DISCORD_ID
-    has_perms = getattr(interaction.user, 'guild_permissions', None) and interaction.user.guild_permissions.manage_channels
-    if not (is_owner or has_perms):
-        return await interaction.response.send_message("❌ You need Manage Channels permission to do this.", ephemeral=True)
-        
-    locked = toggle_restricted_channel(str(interaction.channel.id))
-    if locked:
-        await interaction.response.send_message("🔒 **Channel Locked:** Matches can no longer be played in this channel.")
-    else:
-        await interaction.response.send_message("🔓 **Channel Unlocked:** Matches can now be played in this channel.")
-
-# ==================== UPDATE PLAYER ====================
-
-class UpdatePlayerModal(discord.ui.Modal, title="Update Player"):
-    def __init__(self, cur_player, all_p):
-        super().__init__()
-        self.cur = cur_player
-        self.all_p = all_p
-        
-        self.new_name = discord.ui.TextInput(label="Player Name (Edit to change)", default=self.cur["name"], required=True)
-        self.bat_r = discord.ui.TextInput(label="Batting Rating", default=str(self.cur["bat"]), required=True)
-        self.bowl_r = discord.ui.TextInput(label="Bowling Rating", default=str(self.cur["bowl"]), required=True)
-        
-        self.add_item(self.new_name)
-        self.add_item(self.bat_r)
-        self.add_item(self.bowl_r)
-        
-    async def on_submit(self, inter: discord.Interaction):
-        try:
-            bat = int(self.bat_r.value)
-            bowl = int(self.bowl_r.value)
-        except:
-            return await inter.response.send_message("❌ Must be numbers.", ephemeral=True)
-            
-        new_n = self.new_name.value.strip()
-        
-        # Prevent renaming to a player that already exists
-        if new_n.lower() != self.cur["name"].lower():
-            if any(p["name"].lower() == new_n.lower() for p in self.all_p):
-                return await inter.response.send_message(f"❌ A player named `{new_n}` already exists in the DB!", ephemeral=True)
-                
-        await inter.response.send_message("Select New Role/Archetype below:", view=UpdateRoleSelectView(self.cur["name"], new_n, bat, bowl, self.all_p), ephemeral=True)
-
-class UpdateRoleSelectView(discord.ui.View):
-    def __init__(self, old_name, new_name, bat, bowl, all_p):
-        super().__init__(timeout=180)
-        self.old_name = old_name
-        self.new_name = new_name
-        self.bat = bat
-        self.bowl = bowl
-        self.all_p = all_p
-        self.s_role = None
-        self.s_arch = None
-
-    @discord.ui.select(placeholder="Select Role...", options=[discord.SelectOption(label=r, value=r) for r in ["Batter", "Batter_WK", "Bowler_Pace", "Bowler_Spin_Off", "Bowler_Spin_Leg", "All-Rounder_Pace", "All-Rounder_Spin_Off", "All-Rounder_Spin_Leg"]])
-    async def s_role_cb(self, inter, sel):
-        self.s_role = sel.values[0]
-        await inter.response.defer()
-        await self.save(inter)
-        
-    @discord.ui.select(placeholder="Select Archetype...", options=[discord.SelectOption(label=a, value=a) for a in ["Aggressor", "Anchor", "Finisher", "Standard"]])
-    async def s_arch_cb(self, inter, sel):
-        self.s_arch = sel.values[0]
-        await inter.response.defer()
-        await self.save(inter)
-        
-    async def save(self, inter):
-        if self.s_role and self.s_arch:
-            for c in self.children:
-                c.disabled = True
-                
-            update_player(self.old_name, {
-                "name": self.new_name,
-                "bat": self.bat,
-                "bowl": self.bowl,
-                "role": self.s_role,
-                "archetype": self.s_arch
-            })
-            
-            await inter.followup.send(f"✅ Successfully updated `{self.new_name}` in the database!", ephemeral=True)
-            change_str = f"Old Name: {self.old_name}\n" if self.old_name != self.new_name else ""
-            change_str += f"Bat: {self.bat} | Bowl: {self.bowl}\nRole: {self.s_role}\nArchetype: {self.s_arch}"
-            await log_db_update("Player Updated", self.new_name, inter.user, change_str)
-
-@bot.tree.command(name="updateplayer", description="[ADMIN] Update player stats in DB.")
-async def up_p_cmd(interaction: discord.Interaction, name: str):
-    admins = get_auth_admins()
-    if interaction.user.id != ADMIN_DISCORD_ID and str(interaction.user.id) not in admins:
-        return await interaction.response.send_message("❌ Access Denied: Admin only.", ephemeral=True)
-        
-    all_p = get_all_players()
-    cur_player = next((p for p in all_p if p["name"].lower() == name.strip().lower()), None)
-        
-    if not cur_player:
-        return await interaction.response.send_message(f"❌ `{name}` not found in the database.", ephemeral=True)
-        
-    await interaction.response.send_modal(UpdatePlayerModal(cur_player, all_p))
-
-@bot.tree.command(name="cleanduplicates", description="[ADMIN] Find and remove duplicate players (case-insensitive) from DB.")
-async def clean_dup_cmd(interaction: discord.Interaction):
-    admins = get_auth_admins()
-    if interaction.user.id != ADMIN_DISCORD_ID and str(interaction.user.id) not in admins:
-        return await interaction.response.send_message("❌ Access Denied: Admin only.", ephemeral=True)
-        
-    await interaction.response.defer(ephemeral=True)
-    try:
-        removed_names = clean_duplicate_players()
-            
-        if removed_names:
-            await interaction.followup.send(f"✅ Removed {len(removed_names)} duplicate player(s):\n" + ", ".join(removed_names[:50]))
-            await log_db_update("Database Cleaned", "Duplicates Removed", interaction.user, f"Removed {len(removed_names)} duplicates:\n{', '.join(removed_names[:50])}")
-        else:
-            await interaction.followup.send("✅ Database is already clean. No duplicate players found.")
-    except Exception as e:
-        await interaction.followup.send(f"❌ Error: {e}")
-
-@bot.tree.command(name="deleteplayer", description="[ADMIN] Delete a specific player from the Cloud DB.")
-async def del_p_cmd(interaction: discord.Interaction, name: str):
-    admins = get_auth_admins()
-    if interaction.user.id != ADMIN_DISCORD_ID and str(interaction.user.id) not in admins:
-        return await interaction.response.send_message("❌ Access Denied: Admin only.", ephemeral=True)
-        
-    await interaction.response.defer(ephemeral=True)
-    try:
-        all_p = get_all_players()
-        found = [p["name"] for p in all_p if p["name"].lower().strip() == name.lower().strip()]
-        if not found:
-            return await interaction.followup.send(f"❌ Could not find `{name}` in the database.")
-        
-        delete_players(found)
-            
-        await interaction.followup.send(f"✅ Successfully deleted `{', '.join(found)}` from the database.")
-        await log_db_update("Player Deleted", name, interaction.user, f"Removed player(s): {', '.join(found)}")
-    except Exception as e:
-        await interaction.followup.send(f"❌ Error: {e}")
-
 
 # ==========================================
 # 💬 10. PREFIX COMMANDS & COG
@@ -3566,22 +3321,79 @@ class CustomHelpCommand(commands.HelpCommand):
         return f'`{self.context.prefix}{usage}`'
 
     async def send_bot_help(self, mapping):
-        embed = discord.Embed(title="🏏 Cricket Bot Commands", color=discord.Color.blue())
-        embed.description = f"Use `{self.context.prefix}help <command>` for more info on a specific command."
-        
-        for cog, cmds in mapping.items():
-            if cog and hasattr(cog, 'qualified_name') and cog.qualified_name == "PrefixCog":
-                main_cmds = [c for c in cmds if not isinstance(c, commands.Group)]
-                tourney_group = next((c for c in cmds if c.name == 'tournament'), None)
+        is_owner = self.context.author.id == ADMIN_DISCORD_ID
+        is_admin = is_owner or str(self.context.author.id) in get_auth_admins()
 
-                if main_cmds:
-                    main_list = " ".join(f"`{c.name}`" for c in sorted(main_cmds, key=lambda x: x.name))
-                    embed.add_field(name="Core Commands", value=main_list, inline=False)
-                
-                if tourney_group:
-                    tourney_list = " ".join(f"`{c.name}`" for c in sorted(tourney_group.commands, key=lambda x: x.name))
-                    embed.add_field(name="Tournament Commands (`cv tournament ...`)", value=tourney_list, inline=False)
+        embed = discord.Embed(
+            title="🏏 CricVerse",
+            description=(
+                "Cricket simulation bot — play matches, run tournaments, track players.\n"
+                "-# `cv help <command>` for details  ·  `cvt` = shortcut for `cv tournament`"
+            ),
+            color=0x1D4ED8
+        )
 
+        # Row 1: Match | Info  (2-column)
+        embed.add_field(
+            name="🎮 Match",
+            value=(
+                "`cv match [@opp]`\n"
+                "`/simulatematch`\n"
+                "`/impactplayer`\n"
+                "`cv endmatch`"
+            ),
+            inline=True
+        )
+        embed.add_field(
+            name="🔍 Lookup",
+            value=(
+                "`cv searchplayer <name>`\n"
+                "`/my_tier`\n"
+                "`cv help`"
+            ),
+            inline=True
+        )
+
+        # Spacer to force tournament onto its own row
+        embed.add_field(name="​", value="​", inline=True)
+
+        # Row 2: Tournament (full width)
+        embed.add_field(
+            name="🏆 Tournament  —  `cvt <cmd>`  or  `cv t <cmd>`",
+            value=(
+                "**View —** `status` · `standings` · `leaderboard` · `squad` · `player_stats` · `match_scorecard`\n"
+                "**Play —** `submit_squad` · `next_match` · `play` · `play_next`\n"
+                "**Manage —** `create` · `add_team` · `start` · `set_theme` · `generate_knockouts` · `force_delete`\n"
+                "-# Run `cvt help` for full usage and argument details"
+            ),
+            inline=False
+        )
+
+        # Admin section (if applicable)
+        if is_admin:
+            embed.add_field(
+                name="🛡️ Admin",
+                value=(
+                    "`addplayer` · `updateplayer` · `deleteplayer` · `cleanduplicates`\n"
+                    "`toggle_channel_lock` · `set_log_channel` · `toggle_ratings_channel`\n"
+                    "-# Prefix all with `cv ` · Run `cv help <cmd>` for arguments"
+                ),
+                inline=True if is_owner else False
+            )
+
+        if is_owner:
+            embed.add_field(
+                name="👑 Owner",
+                value=(
+                    "`force_sync` · `force_load` · `dump_cache` · `sync_csv`\n"
+                    "`authadmin @user` · `/set_user_tier` · `/set_server_tier`\n"
+                    "-# User tiers: Basic · Standard · Single · Server Pro\n"
+                    "-# Server tiers: Bronze · Silver · Gold · Diamond"
+                ),
+                inline=True
+            )
+
+        embed.set_footer(text="Powered by CricVerse  ·  /match  /simulatematch  /searchplayer  /my_tier")
         await self.get_destination().send(embed=embed)
 
     async def send_command_help(self, command):
@@ -3661,31 +3473,36 @@ class PrefixCog(commands.Cog):
         search_query = name.strip()
         all_players = get_all_players()
         player_names = [p["name"] for p in all_players]
-        
+
         if not all_players:
             return await ctx.send("❌ Error: Cache is empty.")
-            
-        exact = next((p for p in all_players if p["name"].lower() == search_query.lower()), None)
-        
+
+        show_ratings = _can_see_ratings(ctx.author.id, ctx.channel.id)
+
         class FakeFollowup:
             async def send(self, *args, **kwargs):
                 await ctx.send(*args, **kwargs)
-                
         class FakeInteraction:
-            def __init__(self):
-                self.followup = FakeFollowup()
-        
+            def __init__(self): self.followup = FakeFollowup()
+
+        exact = next((p for p in all_players if p["name"].lower() == search_query.lower()), None)
         if exact:
-            return await send_player_profile(FakeInteraction(), exact)
+            return await send_player_profile(FakeInteraction(), exact, show_ratings)
 
         subs = [p for p in all_players if search_query.lower() in p["name"].lower()]
         fuzz = difflib.get_close_matches(search_query, player_names, n=1, cutoff=0.2)
 
         if not subs and not fuzz:
-            return await ctx.send(f"❌ Player `{search_query}` not found.")
-        
+            return await ctx.send(f"❌ Player `{search_query}` not found in the database.")
+
+        if len(subs) == 1 and not fuzz:
+            return await send_player_profile(FakeInteraction(), subs[0], show_ratings)
+
         best_name = fuzz[0] if fuzz else subs[0]["name"]
+        other = [p["name"] for p in subs if p["name"] != best_name]
         msg = f"🔍 **Not found exactly.**\n💡 **Best Match:** `{best_name}`\n👉 Rerun: `cv searchplayer \"{best_name}\"`"
+        if other:
+            msg += "\n\n📂 **Alternatives:**\n" + "\n".join(f"• {o}" for o in other[:5])
         await ctx.send(msg)
 
     @commands.command(name="force_sync", help="[OWNER] Manually force backup memory cache to Cloud DB.\nUsage: force_sync")
@@ -3712,7 +3529,209 @@ class PrefixCog(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ Error during sync: {e}")
 
-    @commands.group(name="tournament", invoke_without_command=True, help="Main command for tournaments.\nUsage: tournament")
+    @commands.command(name="force_load", help="[OWNER] Reload in-memory cache from MongoDB.\nUsage: force_load")
+    async def force_load(self, ctx):
+        if ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("❌ Owner only.")
+        try:
+            load_data_from_bin()
+            load_tournament_data_from_bin()
+            await ctx.send(
+                f"✅ Cache reloaded from MongoDB — {len(DB_CACHE['players'])} players, "
+                f"{len(DB_CACHE['tournaments'])} tournament(s)."
+            )
+        except Exception as e:
+            await ctx.send(f"❌ Error during reload: {e}")
+
+    @commands.command(name="addplayer", help="[ADMIN] Add player to DB.\nUsage: addplayer \"<name>\" <bat> <bowl> <role> <archetype>")
+    async def addplayer(self, ctx, name: str, bat: int, bowl: int, role: str, archetype: str):
+        admins = get_auth_admins()
+        if ctx.author.id != ADMIN_DISCORD_ID and str(ctx.author.id) not in admins:
+            return await ctx.send("❌ Access Denied: Admin only.")
+        valid_roles = ["Batter", "Batter_WK", "Bowler_Pace", "Bowler_Spin_Off", "Bowler_Spin_Leg", "All-Rounder_Pace", "All-Rounder_Spin_Off", "All-Rounder_Spin_Leg"]
+        valid_archs = ["Aggressor", "Anchor", "Finisher", "Standard"]
+        if not (0 <= bat <= 100 and 0 <= bowl <= 100):
+            return await ctx.send("❌ Bat/Bowl ratings must be 0-100.")
+        if role not in valid_roles:
+            return await ctx.send(f"❌ Invalid role. Choose from: {', '.join(valid_roles)}")
+        if archetype not in valid_archs:
+            return await ctx.send(f"❌ Invalid archetype. Choose from: {', '.join(valid_archs)}")
+        success = add_player({"name": name.strip(), "bat": bat, "bowl": bowl, "role": role, "archetype": archetype})
+        if not success:
+            return await ctx.send(f"❌ `{name}` already exists in the database!")
+        await ctx.send(f"✅ Added `{name}` to the database!")
+        await log_db_update("Player Added", name, ctx.author, f"Bat: {bat} | Bowl: {bowl}\nRole: {role}\nArchetype: {archetype}")
+
+    @commands.command(name="updateplayer", help="[ADMIN] Update player in DB.\nUsage: updateplayer \"<name>\" <bat> <bowl> <role> <archetype> [\"<newname>\"]")
+    async def updateplayer(self, ctx, name: str, bat: int, bowl: int, role: str, archetype: str, *, new_name: str = None):
+        admins = get_auth_admins()
+        if ctx.author.id != ADMIN_DISCORD_ID and str(ctx.author.id) not in admins:
+            return await ctx.send("❌ Access Denied: Admin only.")
+        valid_roles = ["Batter", "Batter_WK", "Bowler_Pace", "Bowler_Spin_Off", "Bowler_Spin_Leg", "All-Rounder_Pace", "All-Rounder_Spin_Off", "All-Rounder_Spin_Leg"]
+        valid_archs = ["Aggressor", "Anchor", "Finisher", "Standard"]
+        all_p = get_all_players()
+        cur = next((p for p in all_p if p["name"].lower() == name.strip().lower()), None)
+        if not cur:
+            return await ctx.send(f"❌ `{name}` not found in the database.")
+        if not (0 <= bat <= 100 and 0 <= bowl <= 100):
+            return await ctx.send("❌ Bat/Bowl ratings must be 0-100.")
+        if role not in valid_roles:
+            return await ctx.send(f"❌ Invalid role. Choose from: {', '.join(valid_roles)}")
+        if archetype not in valid_archs:
+            return await ctx.send(f"❌ Invalid archetype. Choose from: {', '.join(valid_archs)}")
+        final_name = new_name.strip() if new_name else cur["name"]
+        if final_name.lower() != cur["name"].lower() and any(p["name"].lower() == final_name.lower() for p in all_p):
+            return await ctx.send(f"❌ A player named `{final_name}` already exists!")
+        update_player(cur["name"], {"name": final_name, "bat": bat, "bowl": bowl, "role": role, "archetype": archetype})
+        await ctx.send(f"✅ Updated `{final_name}` in the database!")
+        await log_db_update("Player Updated", final_name, ctx.author, f"Bat: {bat} | Bowl: {bowl}\nRole: {role}\nArchetype: {archetype}")
+
+    @commands.command(name="deleteplayer", help="[ADMIN] Delete a player from DB.\nUsage: deleteplayer \"<name>\"")
+    async def deleteplayer(self, ctx, *, name: str):
+        admins = get_auth_admins()
+        if ctx.author.id != ADMIN_DISCORD_ID and str(ctx.author.id) not in admins:
+            return await ctx.send("❌ Access Denied: Admin only.")
+        all_p = get_all_players()
+        found = [p["name"] for p in all_p if p["name"].lower().strip() == name.lower().strip()]
+        if not found:
+            return await ctx.send(f"❌ Could not find `{name}` in the database.")
+        delete_players(found)
+        await ctx.send(f"✅ Deleted `{', '.join(found)}` from the database.")
+        await log_db_update("Player Deleted", name, ctx.author, f"Removed: {', '.join(found)}")
+
+    @commands.command(name="cleanduplicates", help="[ADMIN] Remove duplicate players from DB.\nUsage: cleanduplicates")
+    async def cleanduplicates(self, ctx):
+        admins = get_auth_admins()
+        if ctx.author.id != ADMIN_DISCORD_ID and str(ctx.author.id) not in admins:
+            return await ctx.send("❌ Access Denied: Admin only.")
+        removed_names = clean_duplicate_players()
+        if removed_names:
+            await ctx.send(f"✅ Removed {len(removed_names)} duplicate(s): " + ", ".join(removed_names[:50]))
+            await log_db_update("Database Cleaned", "Duplicates Removed", ctx.author, f"Removed {len(removed_names)} duplicates:\n{', '.join(removed_names[:50])}")
+        else:
+            await ctx.send("✅ No duplicates found. Database is clean.")
+
+    @commands.command(name="dump_cache", help="[OWNER] Export tournament cache as JSON file.\nUsage: dump_cache")
+    async def dump_cache(self, ctx):
+        if ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("❌ Owner only.")
+        try:
+            data = {"tournaments": DB_CACHE.get("tournaments", [])}
+            raw = json.dumps(data, indent=2, ensure_ascii=False)
+            file = discord.File(fp=io.BytesIO(raw.encode("utf-8")), filename="tournament_cache_dump.json")
+            await ctx.send("📦 Current in-memory tournament data:", file=file)
+        except Exception as e:
+            await ctx.send(f"❌ Dump failed: {e}")
+
+    @commands.command(name="sync_csv", help="[OWNER] Sync players from players_master.csv to DB.\nUsage: sync_csv")
+    async def sync_csv(self, ctx):
+        if ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("❌ Owner only.")
+        if not os.path.exists("players_master.csv"):
+            return await ctx.send("❌ `players_master.csv` not found.")
+        try:
+            new_players = []
+            with open("players_master.csv", "r", encoding="utf-8-sig") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    new_players.append({
+                        "name": row["Name"].strip(),
+                        "bat": int(row["Bat"]),
+                        "bowl": int(row["Bowl"]),
+                        "role": row["Role"].strip(),
+                        "archetype": row["Archetype"].strip()
+                    })
+            added_count = add_players_bulk(new_players)
+            if added_count > 0:
+                await ctx.send(f"✅ Sync complete! Added **{added_count}** new players.")
+                await log_db_update("CSV Sync", "Batch Import", ctx.author, f"Added {added_count} new players from CSV.")
+            else:
+                await ctx.send("✅ Sync complete! No new players found (database already up to date).")
+        except Exception as e:
+            await ctx.send(f"❌ Error during sync: {e}")
+
+    @commands.command(name="set_user_tier", help="[OWNER] Assign subscription tier to a user.\nUsage: set_user_tier @user <tier>\nTiers: Basic, Standard, Single, Server Pro, None")
+    async def set_user_tier(self, ctx, user: discord.Member, *, tier: str):
+        if ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("❌ Owner only.")
+        valid = {
+            "Basic": "Basic (1 Sim/Day | T20/ODI)",
+            "Standard": "Standard (1 Sim/Day | All)",
+            "Single": "Single (1 Match Consumable)",
+            "Server Pro": "Server Pro (Unlimited on Silver/Diamond)",
+            "None": "None (Remove)"
+        }
+        tier = tier.strip()
+        if tier not in valid:
+            return await ctx.send(f"❌ Invalid tier. Choose from: {', '.join(valid.keys())}")
+        msg = update_user_tier(str(user.id), tier, valid[tier], user.mention)
+        await ctx.send(msg)
+
+    @commands.command(name="set_server_tier", help="[OWNER] Assign subscription tier to a server.\nUsage: set_server_tier <server_id> <tier>\nTiers: Bronze, Silver, Gold, Diamond, None")
+    async def set_server_tier(self, ctx, server_id: str, *, tier: str):
+        if ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("❌ Owner only.")
+        valid = {
+            "Bronze": "Bronze (10 Sims/Day | All)",
+            "Silver": "Silver (Unlimited | All)",
+            "Gold": "Gold (Tournament Only)",
+            "Diamond": "Diamond (Unlimited + Tournament)",
+            "None": "None (Remove)"
+        }
+        tier = tier.strip()
+        if tier not in valid:
+            return await ctx.send(f"❌ Invalid tier. Choose from: {', '.join(valid.keys())}")
+        msg = update_server_tier(server_id, tier, valid[tier])
+        await ctx.send(msg)
+
+    @commands.command(name="authadmin", help="[OWNER] Toggle admin permissions for a user.\nUsage: authadmin @user")
+    async def authadmin(self, ctx, user: discord.Member):
+        if ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("❌ Owner only.")
+        added = toggle_auth_admin(str(user.id))
+        if added:
+            await ctx.send(f"✅ {user.mention} is now an **Admin** and can add/update players.")
+        else:
+            await ctx.send(f"🚫 Admin permissions **revoked** for {user.mention}.")
+
+    @commands.command(name="toggle_channel_lock", help="[ADMIN] Lock or unlock matches in this channel.\nUsage: toggle_channel_lock")
+    async def toggle_channel_lock(self, ctx):
+        is_owner = ctx.author.id == ADMIN_DISCORD_ID
+        has_perms = ctx.author.guild_permissions.manage_channels
+        if not (is_owner or has_perms):
+            return await ctx.send("❌ You need Manage Channels permission.")
+        locked = toggle_restricted_channel(str(ctx.channel.id))
+        if locked:
+            await ctx.send("🔒 **Channel Locked:** Matches can no longer be played in this channel.")
+        else:
+            await ctx.send("🔓 **Channel Unlocked:** Matches can now be played in this channel.")
+
+    @commands.command(name="toggle_ratings_channel", help="[OWNER] Toggle player ratings visibility in this channel.\nUsage: toggle_ratings_channel")
+    async def toggle_ratings_channel_cmd(self, ctx):
+        if ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("❌ Owner only.")
+        added = toggle_ratings_channel(str(ctx.channel.id))
+        if added:
+            await ctx.send("📊 **Ratings Channel Enabled:** Player ratings are now visible to everyone in this channel.")
+        else:
+            await ctx.send("🔒 **Ratings Channel Disabled:** Player ratings are now hidden in this channel.")
+
+    @commands.command(name="set_log_channel", help="[ADMIN] Set this channel as the match log channel for this server. Run again to disable.\nUsage: set_log_channel")
+    async def set_log_channel_cmd(self, ctx):
+        if not ctx.author.guild_permissions.administrator and ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("❌ Server Admins only.")
+        if not ctx.guild:
+            return await ctx.send("❌ This command must be used in a server.")
+        server_id = str(ctx.guild.id)
+        existing = get_match_log_channel(server_id)
+        if existing and existing == str(ctx.channel.id):
+            clear_match_log_channel(server_id)
+            await ctx.send("🔕 **Match Log Disabled:** Final scorecards will no longer be logged in this server.")
+        else:
+            set_match_log_channel(server_id, str(ctx.channel.id))
+            await ctx.send(f"📋 **Match Log Enabled:** Final scorecards for all matches on this server will be sent here.")
+
+    @commands.group(name="tournament", aliases=["t"], invoke_without_command=True, help="Main command for tournaments.\nUsage: tournament")
     async def tournament(self, ctx):
         await ctx.send_help(ctx.command)
 

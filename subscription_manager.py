@@ -53,6 +53,8 @@ DB_CACHE = {
     "server_subs": [],
     "auth_admins": [],
     "restricted_channels": [],
+    "ratings_channels": [],
+    "match_log_channels": {},
     "tournaments": []
 }
 
@@ -68,6 +70,8 @@ def load_data_from_bin():
             DB_CACHE["server_subs"]         = doc.get("server_subs", [])
             DB_CACHE["auth_admins"]         = doc.get("auth_admins", [])
             DB_CACHE["restricted_channels"] = doc.get("restricted_channels", [])
+            DB_CACHE["ratings_channels"]    = doc.get("ratings_channels", [])
+            DB_CACHE["match_log_channels"]  = doc.get("match_log_channels", {})
             print(f"✅ Loaded {len(DB_CACHE['players'])} players & subscriptions from MongoDB!")
         else:
             print("⚠️ No main data document found in MongoDB. Starting with empty cache.")
@@ -353,6 +357,39 @@ def toggle_restricted_channel(channel_id: str):
         added = False
     else:
         DB_CACHE["restricted_channels"].append(channel_id)
+        added = True
+    async_save_to_bin()
+    return added
+
+def get_match_log_channel(server_id: str):
+    return DB_CACHE.get("match_log_channels", {}).get(server_id)
+
+def set_match_log_channel(server_id: str, channel_id: str):
+    global DB_CACHE
+    if "match_log_channels" not in DB_CACHE:
+        DB_CACHE["match_log_channels"] = {}
+    DB_CACHE["match_log_channels"][server_id] = channel_id
+    async_save_to_bin()
+
+def clear_match_log_channel(server_id: str):
+    global DB_CACHE
+    if "match_log_channels" not in DB_CACHE:
+        DB_CACHE["match_log_channels"] = {}
+    DB_CACHE["match_log_channels"].pop(server_id, None)
+    async_save_to_bin()
+
+def is_ratings_channel(channel_id: str) -> bool:
+    return channel_id in DB_CACHE.get("ratings_channels", [])
+
+def toggle_ratings_channel(channel_id: str) -> bool:
+    global DB_CACHE
+    if "ratings_channels" not in DB_CACHE:
+        DB_CACHE["ratings_channels"] = []
+    if channel_id in DB_CACHE["ratings_channels"]:
+        DB_CACHE["ratings_channels"].remove(channel_id)
+        added = False
+    else:
+        DB_CACHE["ratings_channels"].append(channel_id)
         added = True
     async_save_to_bin()
     return added

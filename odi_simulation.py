@@ -221,21 +221,24 @@ def execute_ball_math_odi(match):
         bowl_rating += 7
         bat_rating -= 2
         
-    # Weather Mechanics
+    # Weather Mechanics — new-ball conditions scale with innings.total_balls so the
+    # advantage applies to the START of BOTH innings equally (not just innings 1).
+    _new_ball = innings.total_balls < 90   # first 15 overs of whichever innings
+    _mid_ball = innings.total_balls < 180  # overs 15-30
     if match.weather == "Clear":
         bat_rating += 3
     elif match.weather == "Cloudy" and "Pace" in bowler["role"]:
-        bowl_rating += 4
+        bowl_rating += (5 if _new_ball else 2 if _mid_ball else 0)
     elif match.weather == "Overcast":
-        if "Pace" in bowler["role"]: bowl_rating += 8
-        bat_rating -= 3
+        if "Pace" in bowler["role"]: bowl_rating += (12 if _new_ball else 5 if _mid_ball else 2)
+        bat_rating -= (5 if _new_ball else 2 if _mid_ball else 1)
     elif match.weather == "Humid" and "Pace" in bowler["role"]:
-        bowl_rating += 5
+        bowl_rating += (7 if _new_ball else 3 if _mid_ball else 1)
     elif match.weather == "Dry Heat":
         if "Pace" in bowler["role"]: bowl_rating -= 5
         elif "Spin" in bowler["role"] and innings.total_balls > 150: bowl_rating += 6
     elif match.weather == "Windy":
-        if "Pace" in bowler["role"]: bowl_rating += 6
+        if "Pace" in bowler["role"]: bowl_rating += (8 if _new_ball else 4 if _mid_ball else 2)
     elif match.weather in ["Light Rain", "Drizzle"]:
         bowl_rating -= 4
         bat_rating += 4
@@ -327,12 +330,15 @@ def execute_ball_math_odi(match):
     match.last_commentary_prefix = ""
     
     if not hasattr(innings, "bouncers_in_over"): innings.bouncers_in_over = 0
+    is_bouncer_no_ball = False
     if "Bouncer" in deliv:
         innings.bouncers_in_over += 1
-        if innings.bouncers_in_over == 3:
+        if innings.bouncers_in_over == 2:  # ODI: 1 bouncer per over, 2nd = no ball
             is_no_ball = True
-            prefix += "🚨 **NO BALL!** (Third bouncer of the over)\n➡️ **NEXT BALL IS A FREE HIT!**\n"
-            
+            is_bouncer_no_ball = True
+            prefix += "🚨 **NO BALL!** (Second bouncer of the over — ODI limit is 1)\n"
+            # Bouncer no balls do NOT give free hits in ODI (ICC rules)
+
     if not is_no_ball and random.random() < 0.04 and "Yorker" not in deliv and "Slow" not in deliv:
         is_wide = True
         innings.total_runs += 1
@@ -343,20 +349,21 @@ def execute_ball_math_odi(match):
         match.last_commentary = prefix + f"**{bowler['name']}** bowled a **Wide!**\n💥 **Result:** 1 Extra Run"
         if free_hit_active: match.last_commentary_prefix = "🛡️ *(Free Hit continues)*\n"
         return
-        
+
     if not is_no_ball and random.random() < 0.01:
         is_no_ball = True
         if not free_hit_active:
             prefix += "🚨 **NO BALL!** Overstepping!\n➡️ **NEXT BALL IS A FREE HIT!**\n"
         else:
             prefix += "🚨 **NO BALL!** (Still a Free Hit)\n"
-            
+
     if is_no_ball:
         if not hasattr(innings, 'extras'): innings.extras = 0
         innings.extras += 1
         innings.total_runs += 1
         bow_stats.runs_conceded += 1
-        match.free_hit = True
+        if not is_bouncer_no_ball:  # Only front-foot no balls give free hits in ODI
+            match.free_hit = True
 
     # Baseline ODI Weights - High discipline, lower boundary frequency
     dot_weight = max(22.0, 50.0 - diff * 0.45)
@@ -423,15 +430,29 @@ def execute_ball_math_odi(match):
         boundary_weight *= 1.10
         wicket_weight *= 0.95
         
-    # Weather Advanced Modifiers
+    # Weather Advanced Modifiers — innings.total_balls used so both innings
+    # get the new-ball swing boost, not just innings 1.
+    _new_ball = total_balls < 90   # first 15 overs
+    _mid_ball = total_balls < 180  # overs 15-30
     if match.weather == "Overcast":
-        wicket_weight *= 1.20
-        boundary_weight *= 0.85
+        wicket_weight *= (1.30 if _new_ball else 1.15 if _mid_ball else 1.05)
+        boundary_weight *= (0.80 if _new_ball else 0.88 if _mid_ball else 0.95)
+    elif match.weather == "Cloudy":
+        if _new_ball and "Pace" in bowler["role"]:
+            wicket_weight *= 1.12
+            boundary_weight *= 0.93
+        elif _mid_ball and "Pace" in bowler["role"]:
+            wicket_weight *= 1.05
+    elif match.weather == "Humid":
+        if _new_ball and "Pace" in bowler["role"]:
+            wicket_weight *= 1.10
+        elif _mid_ball and "Pace" in bowler["role"]:
+            wicket_weight *= 1.04
     elif match.weather == "Dry Heat":
         dot_weight *= 1.10
     elif match.weather == "Windy":
-        wicket_weight *= 1.15
-        boundary_weight *= 0.90
+        wicket_weight *= (1.20 if _new_ball else 1.10 if _mid_ball else 1.05)
+        boundary_weight *= (0.87 if _new_ball else 0.92 if _mid_ball else 0.97)
     elif match.weather in ["Light Rain", "Drizzle"]:
         wicket_weight *= 0.85
         boundary_weight *= 1.10

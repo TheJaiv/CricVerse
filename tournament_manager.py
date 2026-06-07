@@ -1114,13 +1114,13 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         def format_player(p, cat):
             arch = p["archetype"]
             style = p["role"].split("_", 1)[1].replace("_", " ") if "_" in p["role"] else ""
-            
+
             if cat in ["bat", "wk"]:
-                return f"`{p['bat']:>2} BAT` • **{p['name']}** *(Type: {arch})*"
+                return f"**{p['name']}** *(Type: {arch})*"
             elif cat == "ar":
-                return f"`{p['bat']:>2} BAT | {p['bowl']:>2} BWL` • **{p['name']}** *({style} | {arch})*"
+                return f"**{p['name']}** *({style} | {arch})*"
             else:
-                return f"`{p['bowl']:>2} BWL` • **{p['name']}** *({style})*"
+                return f"**{p['name']}** *({style})*"
 
         if batters: embed.add_field(name="🏏 Batters", value="\n".join([format_player(p, "bat") for p in batters]), inline=False)
         if wks: embed.add_field(name="🧤 Wicket-Keepers", value="\n".join([format_player(p, "wk") for p in wks]), inline=False)
