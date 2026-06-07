@@ -1,7 +1,9 @@
 import os
+import re
 import datetime
 import certifi
 from threading import Thread
+from urllib.parse import quote_plus
 from pymongo import MongoClient
 
 MONGO_URI = os.environ.get("MONGO_URI")
@@ -10,12 +12,20 @@ MONGO_DB  = os.environ.get("MONGO_DB", "cricket_bot")
 _client = None
 _db     = None
 
+def _encode_mongo_uri(uri: str) -> str:
+    """Re-encode username and password in a MongoDB URI to handle special characters (RFC 3986)."""
+    m = re.match(r'^(mongodb(?:\+srv)?://)([^:@]+):([^@]+)@(.+)$', uri)
+    if m:
+        scheme, user, password, rest = m.groups()
+        return f"{scheme}{quote_plus(user)}:{quote_plus(password)}@{rest}"
+    return uri
+
 def _get_db():
     global _client, _db
     if _db is None:
         if not MONGO_URI:
             raise RuntimeError("MONGO_URI environment variable is not set.")
-        _client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
+        _client = MongoClient(_encode_mongo_uri(MONGO_URI), tlsCAFile=certifi.where())
         _db = _client[MONGO_DB]
     return _db
 
