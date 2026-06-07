@@ -194,7 +194,7 @@ def execute_ball_math_t20(match):
         bowl_rating += 3
         bat_rating -= 2
     elif match.pitch == "Damp":
-        if "Pace" in bowler["role"] and innings.total_balls < 36: bowl_rating += 5
+        if "Pace" in bowler["role"] and innings.total_balls < 36: bowl_rating += 4
         if innings.total_balls < 36: bat_rating -= 2
     elif match.pitch == "Dead":
         bat_rating += 4
@@ -214,8 +214,8 @@ def execute_ball_math_t20(match):
         if "Pace" in bowler["role"]: bowl_rating += 4
         bat_rating -= 1
     elif match.pitch == "Sticky":
-        bowl_rating += 5
-        bat_rating -= 4
+        bowl_rating += 4
+        bat_rating -= 2
         
     # Weather Mechanics — new-ball conditions (Overcast, Cloudy, Humid, Windy) scale with
     # innings.total_balls so the advantage applies to the START of BOTH innings equally.
@@ -225,8 +225,8 @@ def execute_ball_math_t20(match):
     elif match.weather == "Cloudy" and "Pace" in bowler["role"]:
         bowl_rating += (3 if _new_ball else 1)
     elif match.weather == "Overcast":
-        if "Pace" in bowler["role"]: bowl_rating += (5 if _new_ball else 2)
-        bat_rating -= (3 if _new_ball else 1)
+        if "Pace" in bowler["role"]: bowl_rating += (4 if _new_ball else 2)
+        bat_rating -= (2 if _new_ball else 1)
     elif match.weather == "Humid" and "Pace" in bowler["role"]:
         bowl_rating += (3 if _new_ball else 1)
     elif match.weather == "Dry Heat":

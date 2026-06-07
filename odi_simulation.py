@@ -198,27 +198,27 @@ def execute_ball_math_odi(match):
         bowl_rating += 3
         bat_rating -= 2
     elif match.pitch == "Damp":
-        if "Pace" in bowler["role"] and innings.total_balls < 90: bowl_rating += 5
+        if "Pace" in bowler["role"] and innings.total_balls < 90: bowl_rating += 4
         if innings.total_balls < 90: bat_rating -= 3
     elif match.pitch == "Dead":
-        bat_rating += 5
-        bowl_rating -= 5
+        bat_rating += 4
+        bowl_rating -= 3
     elif match.pitch == "Worn":
-        if "Spin" in bowler["role"] and innings.total_balls > 150: bowl_rating += 6
+        if "Spin" in bowler["role"] and innings.total_balls > 150: bowl_rating += 5
         if innings.total_balls > 150: bat_rating -= 2
     elif match.pitch == "Turning":
-        if "Spin" in bowler["role"]: bowl_rating += 6
-        bat_rating -= 4
-    elif match.pitch == "Two-Paced":
-        bat_rating -= 4
-    elif match.pitch == "Slow":
         if "Spin" in bowler["role"]: bowl_rating += 5
-        bat_rating -= 3
+        bat_rating -= 2
+    elif match.pitch == "Two-Paced":
+        bat_rating -= 2
+    elif match.pitch == "Slow":
+        if "Spin" in bowler["role"]: bowl_rating += 4
+        bat_rating -= 2
     elif match.pitch == "Bouncy":
-        if "Pace" in bowler["role"]: bowl_rating += 6
+        if "Pace" in bowler["role"]: bowl_rating += 5
         bat_rating -= 1
     elif match.pitch == "Sticky":
-        bowl_rating += 7
+        bowl_rating += 5
         bat_rating -= 2
         
     # Weather Mechanics — new-ball conditions scale with innings.total_balls so the
@@ -228,23 +228,23 @@ def execute_ball_math_odi(match):
     if match.weather == "Clear":
         bat_rating += 3
     elif match.weather == "Cloudy" and "Pace" in bowler["role"]:
-        bowl_rating += (5 if _new_ball else 2 if _mid_ball else 0)
+        bowl_rating += (4 if _new_ball else 1 if _mid_ball else 0)
     elif match.weather == "Overcast":
-        if "Pace" in bowler["role"]: bowl_rating += (12 if _new_ball else 5 if _mid_ball else 2)
-        bat_rating -= (5 if _new_ball else 2 if _mid_ball else 1)
+        if "Pace" in bowler["role"]: bowl_rating += (5 if _new_ball else 2 if _mid_ball else 1)
+        bat_rating -= (2 if _new_ball else 1 if _mid_ball else 0)
     elif match.weather == "Humid" and "Pace" in bowler["role"]:
-        bowl_rating += (7 if _new_ball else 3 if _mid_ball else 1)
+        bowl_rating += (5 if _new_ball else 2 if _mid_ball else 0)
     elif match.weather == "Dry Heat":
         if "Pace" in bowler["role"]: bowl_rating -= 5
-        elif "Spin" in bowler["role"] and innings.total_balls > 150: bowl_rating += 6
+        elif "Spin" in bowler["role"] and innings.total_balls > 150: bowl_rating += 5
     elif match.weather == "Windy":
-        if "Pace" in bowler["role"]: bowl_rating += (8 if _new_ball else 4 if _mid_ball else 2)
+        if "Pace" in bowler["role"]: bowl_rating += (5 if _new_ball else 3 if _mid_ball else 1)
     elif match.weather in ["Light Rain", "Drizzle"]:
         bowl_rating -= 4
-        bat_rating += 4
+        bat_rating += 2
     elif match.weather in ["Heavy Rain", "Thunderstorm"]:
-        bowl_rating -= 8
-        bat_rating += 5
+        bowl_rating -= 3
+        bat_rating += 2
 
     # ODI Batter form progression (Realistic pacing & late fatigue prevents 180+ spam)
     if b_stats.balls_faced < 10:
