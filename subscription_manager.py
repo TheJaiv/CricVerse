@@ -38,7 +38,21 @@ def _get_db():
     if _db is None:
         if not MONGO_URI:
             raise RuntimeError("MONGO_URI environment variable is not set.")
-        _client = MongoClient(_encode_mongo_uri(MONGO_URI), tlsCAFile=certifi.where())
+        try:
+            _client = MongoClient(
+                _encode_mongo_uri(MONGO_URI),
+                tlsCAFile=certifi.where(),
+                serverSelectionTimeoutMS=30000,
+            )
+            _client.admin.command("ping")  # verify the connection actually works
+        except Exception:
+            # Fallback: some hosting platforms have outdated OpenSSL that fails
+            # the strict TLS handshake — relax cert verification as a fallback
+            _client = MongoClient(
+                _encode_mongo_uri(MONGO_URI),
+                tlsAllowInvalidCertificates=True,
+                serverSelectionTimeoutMS=30000,
+            )
         _db = _client[MONGO_DB]
     return _db
 
