@@ -830,9 +830,10 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
 
     @app_commands.command(name="standings", description="View the Tournament Points Table & NRR.")
     async def standings(self, interaction: discord.Interaction):
+        await interaction.response.defer()
         server_id = str(interaction.guild.id)
         tourney = get_server_tournament(server_id)
-        if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
+        if not tourney: return await interaction.followup.send("❌ No tournament exists.", ephemeral=True)
         
         standings = get_tournament_standings(tourney)
         theme = tourney.get("theme", "Default")
@@ -889,7 +890,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                 buf = io.BytesIO()
                 img.save(buf, format="PNG")
                 buf.seek(0)
-                return await interaction.response.send_message(file=discord.File(fp=buf, filename="crimson_standings.png"))
+                return await interaction.followup.send(file=discord.File(fp=buf, filename="crimson_standings.png"))
                 
             except FileNotFoundError:
                 # If you misspelled the file or it's missing, gracefully fall back to the default!
@@ -968,7 +969,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         img.save(buf, format="PNG")
         buf.seek(0)
         
-        await interaction.response.send_message(file=discord.File(fp=buf, filename="standings.png"))
+        await interaction.followup.send(file=discord.File(fp=buf, filename="standings.png"))
 
     @app_commands.command(name="leaderboard", description="View the top performing players in the tournament.")
     @app_commands.choices(category=[

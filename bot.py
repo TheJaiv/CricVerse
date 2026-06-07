@@ -63,7 +63,8 @@ async def on_ready():
     print(f"🏏 Logged in successfully as {bot.user.name}")
     load_data_from_bin()
     load_tournament_data_from_bin()
-    auto_sync_db.start()
+    if not auto_sync_db.is_running():
+        auto_sync_db.start()
     print("✅ Memory Cache Loaded and Ready.")
 # ==========================================
 # 📊 2. CORE DATA STRUCTURES & FALLBACKS
