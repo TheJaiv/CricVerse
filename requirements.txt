@@ -2,3 +2,5 @@ discord.py
 Pillow
 Flask
 requests
+pymongo[srv]
+certifi

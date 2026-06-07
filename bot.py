@@ -53,8 +53,8 @@ active_setups = {}
 # 🗄️ 1.5 CLOUD DATABASE & SECURITY
 # ==========================================
 @tasks.loop(hours=1)
-async def auto_sync_jsonbin():
-    """Refresh in-memory cache from JSONBin every hour (picks up manual edits)"""
+async def auto_sync_db():
+    """Refresh in-memory cache from MongoDB every hour (picks up manual edits)"""
     load_data_from_bin()
     load_tournament_data_from_bin()
 
@@ -63,7 +63,7 @@ async def on_ready():
     print(f"🏏 Logged in successfully as {bot.user.name}")
     load_data_from_bin()
     load_tournament_data_from_bin()
-    auto_sync_jsonbin.start()
+    auto_sync_db.start()
     print("✅ Memory Cache Loaded and Ready.")
 # ==========================================
 # 📊 2. CORE DATA STRUCTURES & FALLBACKS
@@ -3279,7 +3279,7 @@ class PlayerRoleSelectView(discord.ui.View):
             if not success:
                 return await inter.followup.send(f"❌ Cancelled: `{self.n}` already exists in DB!", ephemeral=True)
                 
-            await inter.followup.send(f"✅ Saved `{self.n}` to JSONBin!", ephemeral=True)
+            await inter.followup.send(f"✅ Saved `{self.n}` to database!", ephemeral=True)
             await log_db_update("Player Added", self.n, inter.user, f"Bat: {self.bat} | Bowl: {self.bowl}\nRole: {self.s_role}\nArchetype: {self.s_arch}")
 
 @bot.tree.command(name="addplayer", description="[ADMIN] Add player to Cloud DB.")
@@ -3301,18 +3301,18 @@ async def force_sync_cmd(interaction: discord.Interaction):
         res_t = save_tournament_data_to_bin()
         lines = []
         if res is None:
-            lines.append("❌ Main bin skipped — credentials missing.")
-        elif res.status_code in (200, 201, 204):
-            lines.append(f"✅ Main bin synced (HTTP {res.status_code})")
-            await log_db_update("Manual Cloud Sync", "Database Backup", interaction.user, "Force synced local memory cache to JSONBin.")
+            lines.append("❌ Main DB skipped — MONGO_URI missing.")
+        elif res:
+            lines.append("✅ Main DB synced to MongoDB.")
+            await log_db_update("Manual Cloud Sync", "Database Backup", interaction.user, "Force synced local memory cache to MongoDB.")
         else:
-            lines.append(f"❌ Main bin failed — HTTP {res.status_code}: {res.text[:200]}")
+            lines.append("❌ Main DB save failed — check bot logs.")
         if res_t is None:
-            lines.append("❌ Tournament bin skipped — JSONBIN_TOURNAMENT_BIN_ID missing.")
-        elif res_t.status_code in (200, 201, 204):
-            lines.append(f"✅ Tournament bin synced (HTTP {res_t.status_code})")
+            lines.append("❌ Tournament DB skipped — MONGO_URI missing.")
+        elif res_t:
+            lines.append("✅ Tournament DB synced to MongoDB.")
         else:
-            lines.append(f"❌ Tournament bin failed — HTTP {res_t.status_code}: {res_t.text[:200]}")
+            lines.append("❌ Tournament DB save failed — check bot logs.")
         await interaction.followup.send("\n".join(lines))
     except Exception as e:
         await interaction.followup.send(f"❌ Error during sync: {e}")
@@ -3327,7 +3327,7 @@ async def dump_cache_cmd(interaction: discord.Interaction):
         raw = json.dumps(data, indent=2, ensure_ascii=False)
         file = discord.File(fp=io.BytesIO(raw.encode("utf-8")), filename="tournament_cache_dump.json")
         await interaction.followup.send(
-            "📦 Current in-memory tournament data. Paste the contents of `tournaments` into your JSONBin manually if saves are failing.",
+            "📦 Current in-memory tournament data. You can import this into MongoDB manually if saves are failing.",
             file=file,
             ephemeral=True
         )
@@ -3360,7 +3360,7 @@ async def sync_csv_cmd(interaction: discord.Interaction):
         added_count = add_players_bulk(new_players)
         
         if added_count > 0:
-            await interaction.followup.send(f"✅ Sync complete! Added **{added_count}** new players to the JSONBin database.")
+            await interaction.followup.send(f"✅ Sync complete! Added **{added_count}** new players to the database.")
             await log_db_update("CSV Sync", "Batch Import", interaction.user, f"Added {added_count} new players from CSV.")
         else:
             await interaction.followup.send("✅ Sync complete! No new players found in CSV (database is already up to date).")
@@ -3494,7 +3494,7 @@ class UpdateRoleSelectView(discord.ui.View):
                 "archetype": self.s_arch
             })
             
-            await inter.followup.send(f"✅ Successfully updated `{self.new_name}` in JSONBin!", ephemeral=True)
+            await inter.followup.send(f"✅ Successfully updated `{self.new_name}` in the database!", ephemeral=True)
             change_str = f"Old Name: {self.old_name}\n" if self.old_name != self.new_name else ""
             change_str += f"Bat: {self.bat} | Bowl: {self.bowl}\nRole: {self.s_role}\nArchetype: {self.s_arch}"
             await log_db_update("Player Updated", self.new_name, inter.user, change_str)
@@ -3696,17 +3696,17 @@ class PrefixCog(commands.Cog):
             res_t = save_tournament_data_to_bin()
             lines = []
             if res is None:
-                lines.append("❌ Main bin skipped — credentials missing.")
-            elif res.status_code in (200, 201, 204):
-                lines.append(f"✅ Main bin synced (HTTP {res.status_code})")
+                lines.append("❌ Main DB skipped — MONGO_URI missing.")
+            elif res:
+                lines.append("✅ Main DB synced to MongoDB.")
             else:
-                lines.append(f"❌ Main bin failed — HTTP {res.status_code}: {res.text[:200]}")
+                lines.append("❌ Main DB save failed — check bot logs.")
             if res_t is None:
-                lines.append("❌ Tournament bin skipped — JSONBIN_TOURNAMENT_BIN_ID missing.")
-            elif res_t.status_code in (200, 201, 204):
-                lines.append(f"✅ Tournament bin synced (HTTP {res_t.status_code})")
+                lines.append("❌ Tournament DB skipped — MONGO_URI missing.")
+            elif res_t:
+                lines.append("✅ Tournament DB synced to MongoDB.")
             else:
-                lines.append(f"❌ Tournament bin failed — HTTP {res_t.status_code}: {res_t.text[:200]}")
+                lines.append("❌ Tournament DB save failed — check bot logs.")
             await ctx.send("\n".join(lines))
         except Exception as e:
             await ctx.send(f"❌ Error during sync: {e}")
