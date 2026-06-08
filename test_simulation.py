@@ -214,7 +214,10 @@ def _batting_intent(match: TestMatch) -> float:
 
     wickets_left  = 10 - innings.wickets
     sessions_left = (5 - match.day) * 3 + (3 - match.session)
-    overs_left    = max(0, sessions_left * 30)
+    # Include remaining overs in the CURRENT session — sessions_left only counts
+    # FUTURE sessions, so without this correction, a last-session chase reads
+    # overs_left = 0 and drops into "survive" mode even with 25 overs remaining.
+    overs_left = max(0, sessions_left * 30 + max(0, 30 - match.overs_in_session))
 
     if overs_left == 0:
         return 0.2   # time up — just survive last over
@@ -844,16 +847,22 @@ def _start_next_innings(match: TestMatch):
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DECLARATION LOGIC
+
+# Typical runs-per-over on each pitch type (used by both declaration and intent)
+_PITCH_SCORING_RATE: dict = {
+    "Dead": 3.8, "Flat": 3.6, "Slow": 3.1, "Hard": 3.0, "Bouncy": 3.1,
+    "Green": 2.7, "Damp": 2.7, "Turning": 2.6, "Cracked": 2.5, "Sticky": 2.5,
+    "Dusty": 2.8, "Worn": 2.7, "Two-Paced": 3.0, "Soft": 2.8, "Dry": 3.1,
+}
+
 def _should_declare(match: TestMatch) -> bool:
     """Return True if the current batting team should declare.
 
     Based on real Test cricket patterns (research of 100+ Tests):
-    - First innings: NEVER declared (teams bat until all out — historical first-innings
-      declarations are extreme outliers requiring specific pitch/weather conditions).
-    - Second innings: declare when required run rate (lead ÷ overs remaining) ≥ 2.5 RPO.
-      At 2.5 RPO, the chase is achievable at Test pace but challenging given bowling
-      pressure and pitch deterioration. This covers the range from aggressive (Day 4
-      evening, ~150 lead, 60 overs: 2.5 RPO) to moderate (350 lead, 135 overs: 2.59 RPO).
+    - First innings: NEVER declared.
+    - Second innings onward: declare when required run rate (lead ÷ overs remaining)
+      exceeds 85% of the pitch's natural scoring rate. This prevents soft declarations
+      on batting-friendly pitches (e.g. Flat needs RRR ≥ 3.06, not just ≥ 2.5).
     """
     if match.current_innings_idx == 3 or match.result:
         return False
@@ -884,8 +893,11 @@ def _should_declare(match: TestMatch) -> bool:
     if overs_left < 15:    # almost no time — declare regardless
         return True
 
-    # Required run rate for opposition to win; declare when RRR ≥ 2.5
-    return (lead / overs_left) >= 2.5
+    # Pitch-aware threshold: declare only when RRR ≥ 85% of expected pitch scoring rate.
+    # On Flat (3.6 RPO) → threshold 3.06; on Turning (2.6) → 2.21; default 3.0 → 2.55.
+    typical_rpo = _PITCH_SCORING_RATE.get(match.pitch, 3.0)
+    threshold   = typical_rpo * 0.85
+    return (lead / overs_left) >= threshold
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -894,126 +906,111 @@ def _should_declare(match: TestMatch) -> bool:
 MAX_SESSION_OVERS = 30
 
 def simulate_session(match: TestMatch) -> str:
-    """Simulate one session (~30 overs).
-    If an innings ends mid-session the next innings starts immediately and the
-    remaining session overs are bowled — exactly as in real Test cricket."""
-    if match.current_innings.is_complete:
+    """Simulate up to (30 − already_bowled) overs in the current session.
+    Stops at the session boundary OR when the innings ends — whichever comes first.
+    Does NOT carry over into the next innings; the caller (simulate_match /
+    simulate_innings / the Discord buttons) handles innings transitions."""
+
+    innings = match.current_innings
+
+    # Advance past already-complete innings without bowling
+    if innings.is_complete:
+        if match.overs_in_session >= 30:
+            match.advance_session()
+        return ""
+
+    remaining = 30 - match.overs_in_session
+    if remaining <= 0:
         match.advance_session()
         return ""
 
     sess_label    = f"Day {match.day}, {SESSION_NAMES[match.session]} Session"
-    session_overs = 0        # total overs bowled this session across all innings
-    output_parts  = []       # one summary block per innings stint
-    is_first_part = True
+    session_overs = 0   # overs bowled in this particular call
+    start_runs    = innings.total_runs
+    start_wkts    = innings.wickets
+    start_balls   = innings.total_balls
+    fallen: list  = []
 
-    while session_overs < MAX_SESSION_OVERS:
-        innings = match.current_innings
-
-        # Innings already flagged complete at top of loop — try to start the next one
+    while session_overs < remaining:
+        # Innings complete — stop session, no carry-over
         if innings.is_complete or innings.wickets >= 10:
             innings.is_complete = True
             res = _check_result(match)
             if match.follow_on_msg:
-                output_parts.append(f"\n{match.follow_on_msg}")
-                match.follow_on_msg = ""
+                pass   # caller reads follow_on_msg from match
             if res:
                 match.result = res
-                break
-            if len(match.innings_list) >= 4:
-                break
-            _start_next_innings(match)
-            output_parts.append(
-                f"  {'─'*53}\n"
-                f"  ✦ {match.current_innings.batting_team['name']} — Innings "
-                f"{match.current_innings.innings_num} begins"
-            )
-            continue  # keep bowling the remaining session overs
+            break
 
-        # ── Simulate overs for this innings stint ──────────────────────────
-        start_runs  = innings.total_runs
-        start_wkts  = innings.wickets
-        start_balls = innings.total_balls
-        fallen      = []
-        stint_overs = 0
+        # Chase target reached mid-over
+        if match.current_innings_idx == 3:
+            tgt = _get_chase_target(match)
+            if tgt is not None and innings.total_runs >= tgt:
+                innings.is_complete = True
+                break
 
-        while session_overs + stint_overs < MAX_SESSION_OVERS:
+        _select_bowler(match)
+        wkts_before = innings.wickets
+
+        legal_balls_this_over = 0
+        while legal_balls_this_over < 6:
             if innings.is_complete or innings.wickets >= 10:
                 innings.is_complete = True
                 break
+            legal = execute_test_ball(match)
+            if legal:
+                legal_balls_this_over += 1
             if match.current_innings_idx == 3:
                 tgt = _get_chase_target(match)
                 if tgt is not None and innings.total_runs >= tgt:
                     innings.is_complete = True
                     break
+            if match.over_completed:
+                match.over_completed = False
+                session_overs           += 1
+                match.overs_in_session  += 1
+                match.total_match_overs += 1
+                break
 
-            _select_bowler(match)
-            wkts_before = innings.wickets
+        for i in range(wkts_before, innings.wickets):
+            if i < len(innings.fow):
+                fallen.append(innings.fow[i])
 
-            legal_balls_this_over = 0
-            while legal_balls_this_over < 6:
-                if innings.is_complete or innings.wickets >= 10:
-                    innings.is_complete = True
-                    break
-                legal = execute_test_ball(match)
-                if legal:
-                    legal_balls_this_over += 1
-                if match.current_innings_idx == 3:
-                    tgt = _get_chase_target(match)
-                    if tgt is not None and innings.total_runs >= tgt:
-                        innings.is_complete = True
-                        break
-                if match.over_completed:
-                    match.over_completed = False
-                    stint_overs          += 1
-                    match.overs_in_session  += 1
-                    match.total_match_overs += 1
-                    break
+        # Declaration check after each completed over
+        if not innings.is_complete and _should_declare(match):
+            innings.is_complete = True
+            innings.declared    = True
 
-            for i in range(wkts_before, innings.wickets):
-                if i < len(innings.fow):
-                    fallen.append(innings.fow[i])
+    # ── Build text summary (used by simulate_match text output) ──────────────
+    runs_scored  = innings.total_runs  - start_runs
+    wkts_fallen  = innings.wickets     - start_wkts
+    balls_played = innings.total_balls - start_balls
+    ovs   = balls_played // 6
+    balls = balls_played % 6
+    rr    = round((runs_scored / max(1, balls_played)) * 6, 2)
 
-            # Declaration check after each completed over
-            if not innings.is_complete and _should_declare(match):
-                innings.is_complete = True
-                innings.declared    = True
+    lines = [
+        f"\n{'═'*57}",
+        f"  {sess_label}",
+        f"{'─'*57}",
+        f"  {innings.batting_team['name']}  —  Innings {innings.innings_num}",
+        f"  Score :  {innings.total_runs}/{innings.wickets}  ({innings.overs_str} ov)",
+        f"  Session:  +{runs_scored} runs / {wkts_fallen} wkts  ({ovs}.{balls} ov @ {rr} RPO)",
+    ]
+    if fallen:
+        lines.append(f"  FoW   :  " + " | ".join(fallen))
+    if innings.is_complete:
+        tag = "DECLARED" if innings.declared else "INNINGS COMPLETE"
+        lines.append(f"  *** {tag} ***")
+    lines.append(f"{'═'*57}")
 
-        session_overs += stint_overs
+    # Advance session only when the full 30 overs are done
+    if match.overs_in_session >= 30:
+        time_up = match.advance_session()
+        if time_up:
+            lines.append(f"  *** DAY 5 COMPLETE — MATCH DRAWN ***")
 
-        # ── Build stint summary ────────────────────────────────────────────
-        runs_scored  = innings.total_runs  - start_runs
-        wkts_fallen  = innings.wickets     - start_wkts
-        balls_played = innings.total_balls - start_balls
-        ovs   = balls_played // 6
-        balls = balls_played % 6
-        rr    = round((runs_scored / max(1, balls_played)) * 6, 2)
-
-        if is_first_part:
-            header = [f"\n{'═'*57}", f"  {sess_label}", f"{'─'*57}"]
-            is_first_part = False
-        else:
-            header = [f"{'─'*57}"]
-
-        header += [
-            f"  {innings.batting_team['name']}  —  Innings {innings.innings_num}",
-            f"  Score :  {innings.total_runs}/{innings.wickets}  ({innings.overs_str} ov)",
-            f"  Session:  +{runs_scored} runs / {wkts_fallen} wkts  ({ovs}.{balls} ov @ {rr} RPO)",
-        ]
-        if fallen:
-            header.append(f"  FoW   :  " + " | ".join(fallen))
-        if innings.is_complete:
-            tag = "DECLARED" if innings.declared else "INNINGS COMPLETE"
-            header.append(f"  *** {tag} ***")
-        output_parts.append("\n".join(header))
-        # Loop back — if innings ended, the next iteration will start the new innings
-
-    output_parts.append(f"{'═'*57}")
-
-    time_up = match.advance_session()
-    if time_up:
-        output_parts.append(f"  *** DAY 5 COMPLETE — MATCH DRAWN ***")
-
-    return "\n".join(output_parts)
+    return "\n".join(lines)
 
 def simulate_innings(match: TestMatch) -> str:
     """Simulate the full current innings. Returns innings scorecard."""
@@ -1044,7 +1041,6 @@ def simulate_match(match: TestMatch) -> str:
             match.result = match.result or "Match Drawn (time)"
             break
 
-        prev_innings_count = len(match.innings_list)
         sc = simulate_innings(match)
         lines.append(sc)
 
@@ -1072,9 +1068,7 @@ def simulate_match(match: TestMatch) -> str:
             match.result = "Match Drawn (time)"
             break
 
-        # Only start next innings if simulate_session didn't already do it mid-session
-        if len(match.innings_list) == prev_innings_count:
-            _start_next_innings(match)
+        _start_next_innings(match)
 
     lines += [
         f"\n{'═'*62}",

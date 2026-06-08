@@ -3472,15 +3472,40 @@ class TestSimView(discord.ui.View):
     async def sim_session(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await interaction.message.edit(view=None)
-        match = self.match
-        snap  = _test_take_snapshot(match)
+        match   = self.match
+        snap    = _test_take_snapshot(match)
+        inn_idx = match.current_innings_idx   # capture before simulation
+
         await asyncio.to_thread(_test_sim_session, match)
+
+        # Detect mid-session innings end.
+        # After a FULL session: advance_session() resets overs_in_session → 0.
+        # After MID-SESSION stop: overs_in_session is left at the partial count (> 0).
+        sim_inn         = match.innings_list[inn_idx]
+        innings_ended   = sim_inn.is_complete and match.overs_in_session > 0
+        remaining_overs = 30 - match.overs_in_session if innings_ended else 0
+
+        # Post-innings logic: result check + start next innings if needed
         _test_post_innings_logic(match)
+
         sess_embed = _render_test_session_embed(match, snap)
+        if innings_ended and remaining_overs > 0:
+            sess_embed.set_footer(
+                text=f"⚠️  Innings ended mid-session — {remaining_overs} over{'s' if remaining_overs != 1 else ''} still remain. Next 'Simulate Session' will continue this session."
+            )
+
         if match.result or match.day > 5:
             await interaction.channel.send(embed=sess_embed)
+            if innings_ended:
+                await interaction.channel.send(embed=_render_test_innings_embed(match, inn_idx))
             return await self._finish(interaction.channel)
+
         await interaction.channel.send(embed=sess_embed)
+
+        # When innings ended mid-session: show full innings scorecard before live board
+        if innings_ended:
+            await interaction.channel.send(embed=_render_test_innings_embed(match, inn_idx))
+
         await interaction.channel.send(embed=render_test_embed(match), view=TestSimView(match, self.channel_id))
 
     @discord.ui.button(label="Simulate Innings", style=discord.ButtonStyle.success, row=0)
