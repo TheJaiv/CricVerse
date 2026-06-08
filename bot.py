@@ -13,6 +13,18 @@ import math
 from keep_alive import keep_alive
 from odi_simulation import execute_ball_math_odi, get_smart_ai_bowler_odi
 from t20_simulation import execute_ball_math_t20, get_smart_ai_bowler_t20
+from test_simulation import (
+    TestMatch as TestMatchObj,
+    simulate_session as _test_sim_session,
+    simulate_innings as _test_sim_innings,
+    simulate_match as _test_sim_match,
+    PITCH_TYPES as TEST_PITCH_TYPES,
+    WEATHER_TYPES as TEST_WEATHER_TYPES,
+    TEAM_ALPHA, TEAM_BETA,
+    _check_result as _test_check_result,
+    _start_next_innings as _test_start_next_innings,
+    _format_scorecard as _test_format_scorecard,
+)
 from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings
 from subscription_manager import (
     load_data_from_bin, load_tournament_data_from_bin,
@@ -50,6 +62,7 @@ class CricketBot(commands.Bot):
 bot = CricketBot()
 active_games = {}
 active_setups = {}
+active_test_matches = {}   # channel_id → TestMatchObj
 
 # ==========================================
 # 🗄️ 1.5 CLOUD DATABASE & SECURITY
@@ -2715,6 +2728,10 @@ class PitchWeatherView(discord.ui.View):
 # --- Step 5: Toss Engine ---
 
 async def begin_toss(channel, state):
+    # Test format (90 overs) uses a completely different simulation engine
+    if state.format_overs == 90:
+        return await _begin_test_match(channel, state)
+
     t1 = {"name": state.t1_name, "players": state.t1_roster, "subs": getattr(state, 't1_subs', []), "color": getattr(state, 't1_color', '#6B7280')}
     t2 = {"name": state.t2_name, "players": state.t2_roster, "subs": getattr(state, 't2_subs', []), "color": getattr(state, 't2_color', '#6B7280')}
 
@@ -2960,6 +2977,414 @@ async def match_cmd(interaction: discord.Interaction, opponent: discord.Member =
     
     await interaction.edit_original_response(content=f"🏏 **Match Setup**\n**Host:** {interaction.user.mention}\n**Opponent:** {opp_str}\n\nStep 1: Select Format below:", view=FormatSelectView(state, interaction.channel))
 
+# ==========================================
+# 🏏 TEST MATCH SIMULATION
+# ==========================================
+
+_TEST_SESSION_NAMES = {1: "Morning", 2: "Afternoon", 3: "Evening"}
+
+# Rain weather types aren't in the test engine — map them to closest equivalent
+_TEST_WEATHER_MAP = {
+    "Light Rain": "Overcast", "Drizzle": "Overcast",
+    "Heavy Rain": "Cloudy",   "Thunderstorm": "Cloudy",
+}
+
+def _test_map_weather(w: str) -> str:
+    return _TEST_WEATHER_MAP.get(w, w)
+
+
+def render_test_embed(match: TestMatchObj) -> discord.Embed:
+    """Live scoreboard embed — Day/Session instead of CRR, lead/trail instead of target."""
+    innings = match.current_innings
+    embed   = discord.Embed(color=0x1D4ED8)
+
+    sess = _TEST_SESSION_NAMES.get(match.session, "Morning")
+    desc  = f"**🏏 TEST MATCH — Day {match.day} | {sess} Session**\n"
+    desc += f"*Pitch: {match.pitch} | Weather: {match.weather}*\n\n"
+
+    for inn in match.innings_list:
+        arrow = " ◄" if inn is innings else ""
+        desc += f"**{inn.batting_team['name']}**  {inn.total_runs}/{inn.wickets}  ({inn.overs_str} ov){arrow}\n"
+
+    # Lead / Trail
+    inns   = match.innings_list
+    t1_tot = sum(i.total_runs for i in inns if i.batting_team["name"] == match.team1["name"])
+    t2_tot = sum(i.total_runs for i in inns if i.batting_team["name"] == match.team2["name"])
+    diff   = abs(t1_tot - t2_tot)
+    if diff == 0:
+        lead_str = "Scores level"
+    else:
+        leading  = match.team1["name"] if t1_tot > t2_tot else match.team2["name"]
+        lead_str = (f"Lead by **{diff}**" if innings.batting_team["name"] == leading
+                    else f"Trail by **{diff}**")
+
+    desc += f"\n**`{'BATTER':<16}{'R':<5}{'B':<5}{'SR':<6}`**\n"
+    for idx in range(min(innings.next_batter_idx, len(innings.batting_team["players"]))):
+        p  = innings.batting_team["players"][idx]
+        st = innings.batting_stats[p["name"]]
+        if st.dismissal == "not out":
+            mk = "*" if idx == innings.current_striker_idx else " "
+            sr = round(st.runs_scored / st.balls_faced * 100, 1) if st.balls_faced else 0.0
+            desc += f"`{p['name'][:14]:<14}{mk:<2}{st.runs_scored:<5}{st.balls_faced:<5}{sr:<6.1f}`\n"
+
+    desc += f"\n`P'Ship: {innings.partnership_runs}`  ·  {lead_str}\n"
+    if innings.current_bowler:
+        cb  = innings.current_bowler
+        cbs = innings.bowling_stats[cb["name"]]
+        desc += (f"\n**`{'BOWLER':<17}{'O':<8}{'R':<5}{'W'}`**\n"
+                 f"`{cb['name'][:16]:<17}{cbs.overs_str:<8}{cbs.runs_conceded:<5}{cbs.wickets_taken}`\n")
+
+    embed.description = desc
+    return embed
+
+
+def _test_post_innings_logic(match: TestMatchObj):
+    """After a session/innings completes: check result, handle follow-on, start next innings if needed.
+    Returns the follow-on message string (empty if none)."""
+    follow_on_msg = ""
+    if match.follow_on_msg:
+        follow_on_msg = match.follow_on_msg
+        match.follow_on_msg = ""
+
+    curr = match.current_innings
+    if curr.wickets >= 10:
+        curr.is_complete = True
+
+    res = _test_check_result(match)
+    if res:
+        match.result = res
+
+    if not match.result and match.day <= 5 and curr.is_complete:
+        if len(match.innings_list) < 4:
+            _test_start_next_innings(match)
+        else:
+            match.result = match.result or "Match Drawn"
+
+    if match.day > 5 and not match.result:
+        match.result = "Match Drawn (time)"
+
+    return follow_on_msg
+
+
+async def _send_test_chunks(channel, text: str):
+    text = text.strip()
+    for i in range(0, len(text), 1900):
+        await channel.send(f"```\n{text[i:i+1900]}\n```")
+
+
+def generate_test_scorecard_image(match: TestMatchObj) -> io.BytesIO:
+    """Crimson-Cricket-inspired 4-innings Test scorecard (1200 × 750)."""
+    _W, _H = 1200, 750
+    _HDR_H, _RES_H = 120, 38
+    _PANEL_W = 600
+    _PANEL_H = (_H - _HDR_H - _RES_H) // 2   # ≈ 296 px per row
+
+    _GRAD_L = (10, 15, 50);  _GRAD_M = (15, 60, 110);  _GRAD_R = (20, 100, 145)
+    _C_EVEN = (248, 248, 248);  _C_ODD = (236, 236, 236);  _C_DIV = (200, 200, 200)
+    _C_WH   = "#FFFFFF";  _C_GY = "#888888";  _C_NM = "#111111";  _C_SC = "#00D4FF"
+    _C_GOLD = (255, 215, 0)
+
+    img = Image.new("RGB", (_W, _H), "#F5F5F5")
+    d   = ImageDraw.Draw(img)
+
+    def _lerp(a, b, t): return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
+    def _hex(h):
+        h = h.lstrip('#')
+        return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+    def _tw(text, font):
+        return font.getbbox(text)[2] if hasattr(font, 'getbbox') else len(text) * 10
+    def _th(font):
+        bb = font.getbbox("Ag") if hasattr(font, 'getbbox') else None
+        return (bb[3] - bb[1]) if bb else 14
+
+    try:
+        _fbd = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+        _frg = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+        fHUGE = ImageFont.truetype(_fbd, 38);  fRES = ImageFont.truetype(_fbd, 17)
+        fSUB  = ImageFont.truetype(_frg, 14);  fTEAM = ImageFont.truetype(_fbd, 18)
+        fSC   = ImageFont.truetype(_fbd, 24);  fOVR = ImageFont.truetype(_frg, 12)
+        fCOL  = ImageFont.truetype(_fbd, 12);  fNM  = ImageFont.truetype(_fbd, 14)
+        fRUN  = ImageFont.truetype(_fbd, 16);  fSM  = ImageFont.truetype(_frg, 12)
+    except Exception:
+        fHUGE = fRES = fSUB = fTEAM = fSC = fOVR = fCOL = fNM = fRUN = fSM = ImageFont.load_default()
+
+    # Gradient header
+    for x in range(_W):
+        t   = x / (_W - 1)
+        col = _lerp(_GRAD_L, _GRAD_M, t * 2) if t < 0.5 else _lerp(_GRAD_M, _GRAD_R, (t - 0.5) * 2)
+        d.line([(x, 0), (x, _HDR_H)], fill=col)
+    d.text((40, 18), "TEST MATCH", fill=_C_WH, font=fHUGE)
+    sub = f"{match.team1['name']}  vs  {match.team2['name']}  ·  {match.pitch} / {match.weather}"
+    d.text((44, 18 + _th(fHUGE) + 6), sub[:72], fill="#BBBBBB", font=fSUB)
+
+    # Result bar
+    d.rectangle([(0, _HDR_H), (_W, _HDR_H + _RES_H)], fill=(22, 22, 22))
+    res_str = (match.result or "IN PROGRESS").upper()
+    rx = 600 - _tw(res_str, fRES) // 2
+    d.text((rx, _HDR_H + (_RES_H - _th(fRES)) // 2), res_str, fill="#FFD700", font=fRES)
+
+    # 4 innings panels  (positions: top-left, top-right, bot-left, bot-right)
+    panel_top = _HDR_H + _RES_H
+    for inn_idx in range(4):
+        col  = inn_idx % 2
+        row  = inn_idx // 2
+        x0   = col * _PANEL_W
+        y0   = panel_top + row * _PANEL_H
+        x1, y1 = x0 + _PANEL_W, y0 + _PANEL_H
+        bg   = _C_EVEN if inn_idx % 2 == 0 else _C_ODD
+        d.rectangle([(x0, y0), (x1, y1)], fill=bg)
+        d.rectangle([(x0, y0), (x1, y1)], outline=_C_DIV, width=1)
+
+        _BAR = 48
+        if inn_idx < len(match.innings_list):
+            inn  = match.innings_list[inn_idx]
+            tc   = _hex(inn.batting_team.get("color", "#1D4ED8"))
+            d.rectangle([(x0, y0), (x1, y0 + _BAR)], fill=tc)
+
+            lbl  = f"INNINGS {inn_idx + 1}"
+            d.text((x0 + 10, y0 + 5),  lbl, fill="#DDDDDD", font=fOVR)
+            tnm  = inn.batting_team["name"][:20].upper()
+            d.text((x0 + 10, y0 + 18), tnm, fill=_C_WH,     font=fTEAM)
+
+            sc   = f"{inn.total_runs}/{inn.wickets}"
+            d.text((x1 - _tw(sc, fSC) - 10, y0 + (_BAR - _th(fSC)) // 2), sc, fill=_C_SC, font=fSC)
+            ovr  = f"{inn.overs_str} ov  RR:{inn.run_rate}"
+            d.text((x1 - _tw(ovr, fOVR) - 10, y0 + _BAR - _th(fOVR) - 3), ovr, fill="#CCCCCC", font=fOVR)
+
+            # Stats columns
+            _NX, _RX, _BX = x0 + 10, x0 + 400, x0 + 460
+            sy = y0 + _BAR + 6
+
+            # Batting
+            d.text((_NX, sy), "BATTER", fill=_C_GY, font=fCOL)
+            d.text((_RX, sy), "R",      fill=_C_GY, font=fCOL)
+            d.text((_BX, sy), "B",      fill=_C_GY, font=fCOL)
+            sy += _th(fCOL) + 3;  d.line([(x0, sy), (x1, sy)], fill=_C_DIV, width=1);  sy += 4
+
+            bats = sorted(
+                [(p, inn.batting_stats[p["name"]]) for p in inn.batting_team["players"]
+                 if inn.batting_stats[p["name"]].balls_faced > 0],
+                key=lambda x: x[1].runs_scored, reverse=True
+            )[:2]
+            for p, st in bats:
+                nm = p["name"][:22].upper()
+                rs = f"{st.runs_scored}{'*' if st.dismissal == 'not out' else ''}"
+                d.text((_NX, sy), nm, fill=_C_NM, font=fNM)
+                d.text((_RX, sy), rs, fill=_C_NM, font=fRUN)
+                d.text((_BX, sy), str(st.balls_faced), fill="#555555", font=fSM)
+                sy += _th(fNM) + 5
+
+            sy += 4;  d.line([(x0 + 10, sy), (x1 - 10, sy)], fill=_C_DIV, width=1);  sy += 6
+
+            # Bowling
+            _WX = x0 + 400;  _OX = x0 + 470
+            d.text((_NX, sy), "BOWLER", fill=_C_GY, font=fCOL)
+            d.text((_WX, sy), "W-R",    fill=_C_GY, font=fCOL)
+            d.text((_OX, sy), "O",      fill=_C_GY, font=fCOL)
+            sy += _th(fCOL) + 3;  d.line([(x0, sy), (x1, sy)], fill=_C_DIV, width=1);  sy += 4
+
+            bowls = sorted(
+                [(p, inn.bowling_stats[p["name"]]) for p in inn.bowling_team["players"]
+                 if inn.bowling_stats[p["name"]].balls_bowled > 0],
+                key=lambda x: (x[1].wickets_taken, -x[1].runs_conceded), reverse=True
+            )[:2]
+            for p, st in bowls:
+                nm  = p["name"][:22].upper()
+                wr  = f"{st.wickets_taken}-{st.runs_conceded}"
+                d.text((_NX, sy), nm, fill=_C_NM, font=fNM)
+                d.text((_WX, sy), wr, fill=_C_NM, font=fRUN)
+                d.text((_OX, sy), st.overs_str, fill="#555555", font=fSM)
+                sy += _th(fNM) + 5
+        else:
+            # Panel not yet played
+            d.rectangle([(x0, y0), (x1, y0 + _BAR)], fill=(70, 70, 70))
+            d.text((x0 + 10, y0 + 5),  f"INNINGS {inn_idx + 1}", fill="#CCCCCC", font=fOVR)
+            ytb = "YET TO BAT"
+            d.text((x0 + (_PANEL_W - _tw(ytb, fTEAM)) // 2, y0 + _BAR + 30), ytb, fill="#AAAAAA", font=fTEAM)
+
+    # Grid lines
+    d.line([(_PANEL_W, panel_top), (_PANEL_W, _H)], fill=_C_DIV, width=2)
+    d.line([(0, panel_top + _PANEL_H), (_W, panel_top + _PANEL_H)], fill=_C_DIV, width=2)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
+class TestSimView(discord.ui.View):
+    def __init__(self, match: TestMatchObj, channel_id: int):
+        super().__init__(timeout=600)
+        self.match      = match
+        self.channel_id = channel_id
+
+    async def _finish(self, channel):
+        result = self.match.result or "Match Drawn"
+        await channel.send(f"**Match Result:** {result}")
+        try:
+            img_buf = generate_test_scorecard_image(self.match)
+            await channel.send(file=discord.File(fp=img_buf, filename="test_scorecard.png"))
+        except Exception:
+            pass
+        active_test_matches.pop(self.channel_id, None)
+
+    @discord.ui.button(label="Simulate Session", style=discord.ButtonStyle.primary, row=0)
+    async def sim_session(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await interaction.message.edit(view=None)
+        match        = self.match
+        session_text = await asyncio.to_thread(_test_sim_session, match)
+        await _send_test_chunks(interaction.channel, session_text)
+        follow_msg   = _test_post_innings_logic(match)
+        if follow_msg:
+            await interaction.channel.send(f"```{follow_msg}```")
+        if match.result or match.day > 5:
+            return await self._finish(interaction.channel)
+        await interaction.channel.send(embed=render_test_embed(match), view=TestSimView(match, self.channel_id))
+
+    @discord.ui.button(label="Simulate Innings", style=discord.ButtonStyle.success, row=0)
+    async def sim_innings(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await interaction.message.edit(view=None)
+        match    = self.match
+        sc_text  = await asyncio.to_thread(_test_sim_innings, match)
+        await _send_test_chunks(interaction.channel, sc_text)
+        follow_msg = _test_post_innings_logic(match)
+        if follow_msg:
+            await interaction.channel.send(f"```{follow_msg}```")
+        if match.result or match.day > 5:
+            return await self._finish(interaction.channel)
+        await interaction.channel.send(embed=render_test_embed(match), view=TestSimView(match, self.channel_id))
+
+    @discord.ui.button(label="Simulate Full Match", style=discord.ButtonStyle.danger, row=0)
+    async def sim_full(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await interaction.message.edit(view=None)
+        result_text = await asyncio.to_thread(_test_sim_match, self.match)
+        await _send_test_chunks(interaction.channel, result_text)
+        try:
+            img_buf = generate_test_scorecard_image(self.match)
+            await interaction.channel.send(file=discord.File(fp=img_buf, filename="test_scorecard.png"))
+        except Exception:
+            pass
+        active_test_matches.pop(self.channel_id, None)
+
+
+# ── Test match toss views ──────────────────────────────────────────────────────
+
+class TestTossCallView(discord.ui.View):
+    """P2 calls heads/tails for the Test match toss."""
+    def __init__(self, state, channel):
+        super().__init__(timeout=120)
+        self.state   = state
+        self.channel = channel
+
+    async def _call(self, interaction: discord.Interaction, call: str):
+        if interaction.user.id != self.state.p2_id:
+            return await interaction.response.send_message("Only the opponent calls the toss.", ephemeral=True)
+        flip = random.choice(["Heads", "Tails"])
+        winner_id = self.state.p2_id if call == flip else self.state.p1_id
+        self.state._test_toss_winner = winner_id
+        await interaction.response.defer()
+        await interaction.message.edit(view=None)
+        await interaction.channel.send(
+            f"🪙 Landed on **{flip}**! <@{winner_id}> wins the toss — choose:",
+            view=TestTossDecisionView(self.state, self.channel))
+
+    @discord.ui.button(label="Heads", style=discord.ButtonStyle.primary)
+    async def heads(self, i, b): await self._call(i, "Heads")
+    @discord.ui.button(label="Tails", style=discord.ButtonStyle.secondary)
+    async def tails(self, i, b): await self._call(i, "Tails")
+
+
+class TestTossDecisionView(discord.ui.View):
+    """Toss winner picks Bat/Bowl for the Test match."""
+    def __init__(self, state, channel):
+        super().__init__(timeout=120)
+        self.state   = state
+        self.channel = channel
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.state._test_toss_winner:
+            await interaction.response.send_message("Only the toss winner can decide.", ephemeral=True)
+            return False
+        return True
+
+    async def _decide(self, interaction: discord.Interaction, choice: str):
+        state = self.state
+        t1 = {"name": state.t1_name, "players": state.t1_roster, "color": getattr(state, 't1_color', '#1D4ED8')}
+        t2 = {"name": state.t2_name, "players": state.t2_roster, "color": getattr(state, 't2_color', '#DC2626')}
+        winner_is_p1 = (state._test_toss_winner == state.p1_id)
+        winning_team = t1 if winner_is_p1 else t2
+        losing_team  = t2 if winner_is_p1 else t1
+        t_bat  = winning_team if choice == "Bat" else losing_team
+        t_bowl = losing_team  if choice == "Bat" else winning_team
+
+        weather = _test_map_weather(state.pitch if hasattr(state, 'pitch') else "Clear")
+        weather = _test_map_weather(state.weather)
+        match   = TestMatchObj(t_bat, t_bowl, state.pitch, weather)
+        active_test_matches[self.channel.id] = match
+
+        await interaction.response.defer()
+        await interaction.message.edit(view=None)
+        await self.channel.send(
+            f"**{t_bat['name']}** will bat first.\n\nChoose how to simulate:")
+        await self.channel.send(embed=render_test_embed(match), view=TestSimView(match, self.channel.id))
+
+    @discord.ui.button(label="🏏 Bat First", style=discord.ButtonStyle.success)
+    async def bat(self, i, b): await self._decide(i, "Bat")
+    @discord.ui.button(label="🎯 Bowl First", style=discord.ButtonStyle.danger)
+    async def bowl(self, i, b): await self._decide(i, "Bowl")
+
+
+async def _begin_test_match(channel, state):
+    """Branch from begin_toss for Test (format_overs == 90) matches."""
+    t1 = {"name": state.t1_name, "players": state.t1_roster, "color": getattr(state, 't1_color', '#1D4ED8')}
+    t2 = {"name": state.t2_name, "players": state.t2_roster, "color": getattr(state, 't2_color', '#DC2626')}
+    weather = _test_map_weather(state.weather)
+
+    # sim_only (/simulatematch): fully auto
+    if getattr(state, 'sim_only', False):
+        winner_team = random.choice([t1, t2])
+        loser_team  = t2 if winner_team is t1 else t1
+        decision    = random.choice(["Bat", "Bowl"])
+        t_bat  = winner_team if decision == "Bat" else loser_team
+        t_bowl = loser_team  if decision == "Bat" else winner_team
+        await channel.send(
+            f"🪙 **Toss!** **{winner_team['name']}** wins and elects to **{decision}** first!\n"
+            f"*Simulating 5-day Test... ⚙️*")
+        match = TestMatchObj(t_bat, t_bowl, state.pitch, weather)
+        active_test_matches[channel.id] = match
+        result_text = await asyncio.to_thread(_test_sim_match, match)
+        await _send_test_chunks(channel, result_text)
+        try:
+            img_buf = generate_test_scorecard_image(match)
+            await channel.send(file=discord.File(fp=img_buf, filename="test_scorecard.png"))
+        except Exception:
+            pass
+        active_test_matches.pop(channel.id, None)
+        return
+
+    # AI game: auto-toss, show TestSimView
+    if state.p2_id is None:
+        ai_choice   = random.choice(["Bat", "Bowl"])
+        t_bat  = t2 if ai_choice == "Bat" else t1   # AI is team2
+        t_bowl = t1 if ai_choice == "Bat" else t2
+        await channel.send(
+            f"🪙 **Toss!** AI wins and elects to **{ai_choice}** first! "
+            f"**{t_bat['name']}** will bat.\n\nChoose simulation mode:")
+        match = TestMatchObj(t_bat, t_bowl, state.pitch, weather)
+        active_test_matches[channel.id] = match
+        await channel.send(embed=render_test_embed(match), view=TestSimView(match, channel.id))
+        return
+
+    # Two-player: interactive toss
+    state._test_toss_winner = None
+    await channel.send(
+        f"🪙 **Toss Time!** <@{state.p2_id}> — call the coin!",
+        view=TestTossCallView(state, channel))
+
+
 @bot.tree.command(name="simulatematch", description="Simulate a full match between two custom teams instantly.")
 async def simulatematch_cmd(interaction: discord.Interaction):
     
@@ -3021,11 +3446,15 @@ async def endmatch_cmd(interaction: discord.Interaction):
     if channel_id in active_games:
         del active_games[channel_id]
         cleared = True
-        
+
     if channel_id in active_setups:
         del active_setups[channel_id]
         cleared = True
-        
+
+    if channel_id in active_test_matches:
+        del active_test_matches[channel_id]
+        cleared = True
+
     if cleared:
         await interaction.response.send_message("🛑 **Match and setup forcefully terminated.** Memory cleared.")
     else:
@@ -3059,6 +3488,7 @@ def _help_match_embed():
     e = discord.Embed(title="🎮 Match Play", color=discord.Color.green())
     e.add_field(name="/match [@opponent]  ·  `cv match`  ·  `cv m`",  value="Start an interactive match vs a user, or leave blank to play vs AI.", inline=False)
     e.add_field(name="/simulatematch",                                  value="Instantly simulate a full match — pick teams, format and conditions.", inline=False)
+    e.add_field(name="TEST format in /match",                           value="Select 'TEST (90 overs)' in the format dropdown to play a 5-day Test with session/innings/full-match modes.", inline=False)
     e.add_field(name="/impactplayer",                                   value="During an active match, swap in your Impact Player (if rule is on).", inline=False)
     e.add_field(name="/endmatch  ·  `cv endmatch`  ·  `cv em`",       value="Force-cancel the current match or setup in this channel.", inline=False)
     e.add_field(name="/my_tier",                                        value="Check your subscription tier and remaining daily match limits.", inline=False)
@@ -3641,6 +4071,9 @@ class PrefixCog(commands.Cog):
             cleared = True
         if channel_id in active_setups:
             del active_setups[channel_id]
+            cleared = True
+        if channel_id in active_test_matches:
+            del active_test_matches[channel_id]
             cleared = True
         if cleared:
             await ctx.send("🛑 **Match and setup forcefully terminated.** Memory cleared.")
