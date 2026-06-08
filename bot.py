@@ -3031,51 +3031,166 @@ async def endmatch_cmd(interaction: discord.Interaction):
     else:
         await interaction.response.send_message("⚠️ There is no active match or setup running in this channel.", ephemeral=True)
 
-class HelpView(discord.ui.View):
-    def __init__(self, pages):
+# ── Help embeds ──────────────────────────────────────────────────────────────
+
+def _help_home_embed():
+    e = discord.Embed(
+        title="🏏 CricVerse",
+        description="Cricket simulation bot — play matches, run tournaments, manage players.\n\nPick a category below to explore commands.",
+        color=0x1D4ED8
+    )
+    e.add_field(name="🎮 Match Play",   value="Interactive & instant matches",   inline=True)
+    e.add_field(name="🔍 Players",      value="Search & manage player database", inline=True)
+    e.add_field(name="🏆 Tournament",   value="Create & run tournaments",        inline=True)
+    e.add_field(
+        name="⚡ Shortcut aliases",
+        value=(
+            "`cv m` · `cv em` · `cv sp` · `cv ap` · `cv up` · `cv dp` · `cv cd`\n"
+            "`cv fs` · `cv fl` · `cv dc` · `cv sc` · `cv sut` · `cv sst`\n"
+            "`cv tcl` · `cv slc` · `cv trc` · `cv aa` · `cvt` · `cv sq`\n"
+            "-# All shortcuts use the same `cv` prefix"
+        ),
+        inline=False
+    )
+    e.set_footer(text="cv help <command>  for detailed prefix command usage  ·  cvt = cv tournament")
+    return e
+
+def _help_match_embed():
+    e = discord.Embed(title="🎮 Match Play", color=discord.Color.green())
+    e.add_field(name="/match [@opponent]  ·  `cv match`  ·  `cv m`",  value="Start an interactive match vs a user, or leave blank to play vs AI.", inline=False)
+    e.add_field(name="/simulatematch",                                  value="Instantly simulate a full match — pick teams, format and conditions.", inline=False)
+    e.add_field(name="/impactplayer",                                   value="During an active match, swap in your Impact Player (if rule is on).", inline=False)
+    e.add_field(name="/endmatch  ·  `cv endmatch`  ·  `cv em`",       value="Force-cancel the current match or setup in this channel.", inline=False)
+    e.add_field(name="/my_tier",                                        value="Check your subscription tier and remaining daily match limits.", inline=False)
+    e.set_footer(text="Slash commands work from anywhere  ·  cv / cv<shortcut> need the cv prefix")
+    return e
+
+def _help_players_embed(is_admin: bool):
+    e = discord.Embed(title="🔍 Players & Database", color=discord.Color.blue())
+    e.add_field(name="/searchplayer <name>  ·  `cv sp`", value="Search for a player — shows role, archetype and (if permitted) ratings.", inline=False)
+    e.add_field(name="📋 How to enter Playing XI",        value="When prompted during a match, paste 11 player names (one per line). Names must match the database exactly.", inline=False)
+    e.add_field(name="🏟️ Pitch & Weather Conditions",    value="15 pitch types · 10 weather conditions — each affects pace, spin and batting differently across T20 and ODI.", inline=False)
+    if is_admin:
+        e.add_field(name="​", value="─── **Admin — DB Management** ───", inline=False)
+        e.add_field(name="/addplayer  ·  `cv ap`",            value="Add a player: name & ratings modal → then role & archetype dropdowns.", inline=False)
+        e.add_field(name="/updateplayer <name>  ·  `cv up`",  value="Edit an existing player — all fields pre-filled, change only what you need.", inline=False)
+        e.add_field(name="`cv deleteplayer`  ·  `cv dp`",     value="Remove a player from the database.", inline=False)
+        e.add_field(name="`cv cleanduplicates`  ·  `cv cd`",  value="Remove duplicate entries from the database.", inline=False)
+    e.set_footer(text="Ratings are hidden in public channels — use a ratings channel or contact owner")
+    return e
+
+def _help_tournament_embed():
+    e = discord.Embed(title="🏆 Tournament", color=discord.Color.gold())
+    e.description = "All commands: **`cv tournament <cmd>`** · shortcut **`cvt <cmd>`** · group alias **`cv t <cmd>`**"
+    e.add_field(name="👁️ View",
+        value=("`status` · `standings` · `leaderboard <category>`\n"
+               "`squad [team]`  ·  shortcut: **`cv squad`** / **`cv sq`**\n"
+               "`player_stats <team> <player>` · `match_scorecard <id>`"),
+        inline=False)
+    e.add_field(name="🏏 Play",     value="`submit_squad` · `next_match` · `play <id>` · `play_next`", inline=False)
+    e.add_field(name="⚙️ Manage",  value="`create <name> <format>` · `add_team <name> @owner` · `start`\n`set_theme` · `set_team_color` · `generate_knockouts` · `force_delete`", inline=False)
+    e.add_field(name="📊 Leaderboard categories", value="`runs` · `wickets` · `sr` · `bat_avg` · `fours` · `sixes` · `fifties` · `hundreds` · `econ` · `bowl_avg`", inline=False)
+    e.set_footer(text="cvt help  for full argument details on any tournament subcommand")
+    return e
+
+def _help_admin_embed():
+    e = discord.Embed(title="🛡️ Admin Commands", color=discord.Color.red())
+    e.add_field(name="Channel Controls",
+        value=("`cv toggle_channel_lock`  ·  `cv tcl` — lock/unlock matches in this channel\n"
+               "`cv set_log_channel`  ·  `cv slc` — set/unset this channel as match log\n"
+               "`cv toggle_ratings_channel`  ·  `cv trc` — toggle rating visibility here"),
+        inline=False)
+    e.add_field(name="Tournament Admin",
+        value=("`cvt add_manager @user` · `cvt remove_team` · `cvt replace_player`\n"
+               "`cvt force_result <id> ...` · `cvt admin_record_result` · `cvt force_delete`"),
+        inline=False)
+    e.set_footer(text="Player DB commands are in the 🔍 Players section")
+    return e
+
+def _help_owner_embed():
+    e = discord.Embed(title="👑 Owner Commands", color=discord.Color.purple())
+    e.add_field(name="Cache",
+        value=("`cv force_sync`  ·  `cv fs` — save cache to MongoDB\n"
+               "`cv force_load`  ·  `cv fl` — reload cache from MongoDB\n"
+               "`cv dump_cache`  ·  `cv dc` — export tournament cache as JSON\n"
+               "`cv sync_csv`  ·  `cv sc` — import players from CSV"),
+        inline=False)
+    e.add_field(name="Subscriptions",
+        value=("`/set_user_tier @user <tier>`  ·  `cv sut @user <tier>`\n"
+               "`/set_server_tier <server_id> <tier>`  ·  `cv sst <id> <tier>`\n"
+               "`cv authadmin @user`  ·  `cv aa` — toggle admin access"),
+        inline=False)
+    e.add_field(name="User Tiers",   value="`Basic` · `Standard` · `Single` · `Server Pro` · `None`", inline=True)
+    e.add_field(name="Server Tiers", value="`Bronze` · `Silver` · `Gold` · `Diamond` · `None`",       inline=True)
+    return e
+
+# ── Help navigation view ──────────────────────────────────────────────────────
+
+class HelpNavigator(discord.ui.View):
+    _PAGES = {"home": _help_home_embed, "match": _help_match_embed,
+              "tournament": _help_tournament_embed, "admin": _help_admin_embed, "owner": _help_owner_embed}
+
+    def __init__(self, user_id: int, is_admin: bool, is_owner: bool, page: str = "home"):
         super().__init__(timeout=180)
-        self.pages = pages
-        self.current_page = 0
-        self.update_buttons()
+        self._user     = user_id
+        self._is_admin = is_admin
+        self._is_owner = is_owner
+        self._page     = page
+        if is_admin or is_owner:
+            b = discord.ui.Button(label="🛡️ Admin", style=discord.ButtonStyle.danger, row=1)
+            b.callback = self._admin_cb
+            self.add_item(b)
+        if is_owner:
+            b = discord.ui.Button(label="👑 Owner", style=discord.ButtonStyle.danger, row=1)
+            b.callback = self._owner_cb
+            self.add_item(b)
+        self._sync_disabled()
 
-    def update_buttons(self):
-        self.prev_button.disabled = self.current_page == 0
-        self.next_button.disabled = self.current_page == len(self.pages) - 1
+    def _sync_disabled(self):
+        label_map = {"🏠 Home": "home", "🎮 Match": "match", "🔍 Players": "players",
+                     "🏆 Tournament": "tournament", "🛡️ Admin": "admin", "👑 Owner": "owner"}
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = (label_map.get(item.label) == self._page)
 
-    @discord.ui.button(label="◀️ Prev", style=discord.ButtonStyle.secondary)
-    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.current_page -= 1
-        self.update_buttons()
-        await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
+    def _current_embed(self):
+        if self._page == "players":
+            return _help_players_embed(self._is_admin)
+        fn = self._PAGES.get(self._page, _help_home_embed)
+        return fn()
 
-    @discord.ui.button(label="Next ▶️", style=discord.ButtonStyle.primary)
-    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.current_page += 1
-        self.update_buttons()
-        await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self._user:
+            await interaction.response.send_message("Not your help menu.", ephemeral=True)
+            return False
+        return True
 
-@bot.tree.command(name="help", description="Show the list of bot commands and how to use them.")
+    async def _goto(self, interaction: discord.Interaction, page: str):
+        self._page = page
+        self._sync_disabled()
+        await interaction.response.edit_message(embed=self._current_embed(), view=self)
+
+    @discord.ui.button(label="🏠 Home",        style=discord.ButtonStyle.secondary, row=0, disabled=True)
+    async def home_btn(self, interaction, _):    await self._goto(interaction, "home")
+
+    @discord.ui.button(label="🎮 Match",        style=discord.ButtonStyle.primary, row=0)
+    async def match_btn(self, interaction, _):   await self._goto(interaction, "match")
+
+    @discord.ui.button(label="🔍 Players",      style=discord.ButtonStyle.primary, row=0)
+    async def players_btn(self, interaction, _): await self._goto(interaction, "players")
+
+    @discord.ui.button(label="🏆 Tournament",   style=discord.ButtonStyle.primary, row=0)
+    async def tourn_btn(self, interaction, _):   await self._goto(interaction, "tournament")
+
+    async def _admin_cb(self, interaction):      await self._goto(interaction, "admin")
+    async def _owner_cb(self, interaction):      await self._goto(interaction, "owner")
+
+@bot.tree.command(name="help", description="Show CricVerse commands and how to use them.")
 async def help_cmd(interaction: discord.Interaction):
-    embed1 = discord.Embed(title="🏏 Help - Playing Matches (1/3)", color=discord.Color.green())
-    embed1.add_field(name="`/match [opponent]`", value="Start an interactive match. Challenge a user or play vs AI.", inline=False)
-    embed1.add_field(name="`/simulatematch`", value="Instantly simulate a custom match with AI teams.", inline=False)
-    embed1.add_field(name="`/endmatch`", value="Force stop the current match in the channel.", inline=False)
-    embed1.add_field(name="`/my_tier`", value="Check your current subscription tier and daily match limits.", inline=False)
-
-    embed2 = discord.Embed(title="🔍 Help - Players & DB (2/3)", color=discord.Color.blue())
-    embed2.add_field(name="`/searchplayer [name]`", value="Search for a player in the database to see stats & roles.", inline=False)
-    embed2.add_field(name="📋 How to enter Playing XI?", value="Copy and paste a list of 11 player names (one per line) from the database when prompted.", inline=False)
-    embed2.add_field(name="🏟️ Conditions", value="Choose from 15 Pitches and 10 Weather conditions, dynamically affecting the simulation engine!", inline=False)
-    
-    embed3 = discord.Embed(title="🛡️ Help - Admin Settings (3/3)", color=discord.Color.red())
-    embed3.add_field(name="`/addplayer`, `/updateplayer`, `/deleteplayer`", value="Manage the player database.", inline=False)
-    embed3.add_field(name="`/cleanduplicates`", value="Clean up duplicate players in the DB.", inline=False)
-    embed3.add_field(name="`/authadmin`", value="Toggle Admin permissions for player management.", inline=False)
-    embed3.add_field(name="`/set_user_tier`, `/set_server_tier`", value="Manage Subscriptions & Daily limits.", inline=False)
-
-    pages = [embed1, embed2, embed3]
-    view = HelpView(pages)
-    await interaction.response.send_message(embed=pages[0], view=view, ephemeral=True)
+    is_owner = interaction.user.id == ADMIN_DISCORD_ID
+    is_admin = is_owner or str(interaction.user.id) in get_auth_admins()
+    view = HelpNavigator(interaction.user.id, is_admin, is_owner)
+    await interaction.response.send_message(embed=_help_home_embed(), view=view, ephemeral=True)
 
 class ImpactPlayerSelectView(discord.ui.View):
     def __init__(self, match: CricketMatch, team_id: int):
@@ -3457,78 +3572,8 @@ class CustomHelpCommand(commands.HelpCommand):
     async def send_bot_help(self, mapping):
         is_owner = self.context.author.id == ADMIN_DISCORD_ID
         is_admin = is_owner or str(self.context.author.id) in get_auth_admins()
-
-        embed = discord.Embed(
-            title="🏏 CricVerse",
-            description=(
-                "Cricket simulation bot — play matches, run tournaments, track players.\n"
-                "-# `cv help <command>` for details  ·  `cvt` = shortcut for `cv tournament`"
-            ),
-            color=0x1D4ED8
-        )
-
-        # Row 1: Match | Info  (2-column)
-        embed.add_field(
-            name="🎮 Match",
-            value=(
-                "`cv match [@opp]`\n"
-                "`/simulatematch`\n"
-                "`/impactplayer`\n"
-                "`cv endmatch`"
-            ),
-            inline=True
-        )
-        embed.add_field(
-            name="🔍 Lookup",
-            value=(
-                "`cv searchplayer <name>`\n"
-                "`/my_tier`\n"
-                "`cv help`"
-            ),
-            inline=True
-        )
-
-        # Spacer to force tournament onto its own row
-        embed.add_field(name="​", value="​", inline=True)
-
-        # Row 2: Tournament (full width)
-        embed.add_field(
-            name="🏆 Tournament  —  `cvt <cmd>`  or  `cv t <cmd>`",
-            value=(
-                "**View —** `status` · `standings` · `leaderboard` · `squad` · `player_stats` · `match_scorecard`\n"
-                "**Play —** `submit_squad` · `next_match` · `play` · `play_next`\n"
-                "**Manage —** `create` · `add_team` · `start` · `set_theme` · `generate_knockouts` · `force_delete`\n"
-                "-# Run `cvt help` for full usage and argument details"
-            ),
-            inline=False
-        )
-
-        # Admin section (if applicable)
-        if is_admin:
-            embed.add_field(
-                name="🛡️ Admin",
-                value=(
-                    "`addplayer` · `updateplayer` · `deleteplayer` · `cleanduplicates`\n"
-                    "`toggle_channel_lock` · `set_log_channel` · `toggle_ratings_channel`\n"
-                    "-# Prefix all with `cv ` · Run `cv help <cmd>` for arguments"
-                ),
-                inline=True if is_owner else False
-            )
-
-        if is_owner:
-            embed.add_field(
-                name="👑 Owner",
-                value=(
-                    "`force_sync` · `force_load` · `dump_cache` · `sync_csv`\n"
-                    "`authadmin @user` · `/set_user_tier` · `/set_server_tier`\n"
-                    "-# User tiers: Basic · Standard · Single · Server Pro\n"
-                    "-# Server tiers: Bronze · Silver · Gold · Diamond"
-                ),
-                inline=True
-            )
-
-        embed.set_footer(text="Powered by CricVerse  ·  /match  /simulatematch  /searchplayer  /my_tier")
-        await self.get_destination().send(embed=embed)
+        view = HelpNavigator(self.context.author.id, is_admin, is_owner)
+        await self.get_destination().send(embed=_help_home_embed(), view=view)
 
     async def send_command_help(self, command):
         embed = discord.Embed(title=f"Help: `{command.name}`", color=discord.Color.green())

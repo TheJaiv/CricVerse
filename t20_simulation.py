@@ -50,118 +50,111 @@ def get_smart_ai_shot_t20(deliv, is_collapse, is_death_overs, archetype, pressur
         return random.choices(["Drive", "Cut", "Flick", "Block", "Loft"], weights=[30, 20, 20, 15, 15], k=1)[0]
 
 def get_smart_ai_bowler_t20(innings, pitch, weather="Clear", format_overs=20):
-    valid_bowlers = []
     bowler_quota = max(1, (format_overs + 4) // 5)
-    
-    for p in innings.bowling_team["players"]:
-        if not getattr(innings.bowling_stats.get(p["name"]), "is_subbed_out", False):
-            if ("Bowler" in p["role"] or "All-Rounder" in p["role"]):
-                stats = innings.bowling_stats[p["name"]]
-                if (stats.balls_bowled // 6) < bowler_quota:
-                    # Make sure they aren't bowling two overs in a row
-                    if not innings.current_bowler or innings.current_bowler["name"] != p["name"]:
-                        valid_bowlers.append(p)
-                    
-    if not valid_bowlers:
+    current_over = innings.total_balls // 6
+    overs_remaining = format_overs - current_over
+
+    def _live(p):   return not getattr(innings.bowling_stats.get(p["name"]), "is_subbed_out", False)
+    def _quota(p):  return innings.bowling_stats[p["name"]].balls_bowled // 6 < bowler_quota
+    def _nc(p):     return not innings.current_bowler or innings.current_bowler["name"] != p["name"]
+    def _main(p):   return "Bowler" in p["role"] or "All-Rounder" in p["role"]
+
+    all_live = [p for p in innings.bowling_team["players"] if _live(p)]
+
+    # ── Tier-based pool: part-timers NEVER enter until all mains with quota are gone ──
+    # Tier 1: main bowlers, quota ok, not consecutive  (normal case)
+    pool = [p for p in all_live if _main(p) and _quota(p) and _nc(p)]
+    if not pool:
+        # Tier 2: main bowlers, quota ok, allow consecutive
+        # (only 1 main bowler left — they MUST cover remaining overs back-to-back)
+        pool = [p for p in all_live if _main(p) and _quota(p)]
+    if not pool:
+        # Tier 3: part-timers, quota ok, not consecutive
+        pool = [p for p in all_live if _quota(p) and _nc(p)]
+    if not pool:
+        # Tier 4: part-timers, quota ok, allow consecutive
+        pool = [p for p in all_live if _quota(p)]
+    if not pool:
+        # Tier 5: absolute last resort — ignore quota entirely
+        pool = [p for p in all_live if _nc(p)] or all_live
+    if not pool:
         return None
 
-    current_over = innings.total_balls // 6
+    valid_bowlers = pool
+
     weights = []
-    
     for p in valid_bowlers:
         stats = innings.bowling_stats[p["name"]]
         overs_bowled = stats.balls_bowled // 6
-        overs_left = bowler_quota - overs_bowled
-        
+        overs_left   = bowler_quota - overs_bowled
+
         is_frontline = "Bowler" in p["role"] or float(p["bowl"]) >= 80
-        base_score = (float(p["bowl"]) / 10.0) ** 2.0 # Toned down to allow slight bowler rotation
-        if is_frontline:
-            base_score *= 3.0
-        else:
-            base_score *= 0.1 
-        
+        base_score = (float(p["bowl"]) / 10.0) ** 2.0
+        base_score *= (3.0 if is_frontline else 0.1)
+
+        # ── Urgency boost: bowler has more overs left than available slots ──
+        # Prevents wasted quota when match ends early
+        if overs_remaining > 0 and overs_left > 0:
+            urgency = overs_left / max(1, overs_remaining)
+            if urgency >= 1.0:       base_score *= 6.0  # must bowl now or waste overs
+            elif urgency >= 0.6:     base_score *= 2.5
+
         # Pitch adjustments
-        if pitch == "Dusty" and "Spin" in p["role"]:
-            base_score *= 1.5
-        elif pitch == "Dry" and "Spin" in p["role"] and current_over >= 10:
-            base_score *= 1.3
-        elif pitch == "Green" and "Pace" in p["role"]:
-            base_score *= 1.5
-        elif pitch == "Hard" and "Pace" in p["role"] and current_over < 6:
-            base_score *= 1.4
-        elif pitch == "Cracked":
-            base_score *= 1.3
-        elif pitch == "Damp" and "Pace" in p["role"] and current_over < 6:
-            base_score *= 1.6
-        elif pitch == "Worn" and "Spin" in p["role"] and current_over >= 10:
-            base_score *= 1.5
-        elif pitch == "Dead":
-            base_score *= 0.8
-        elif pitch == "Turning" and "Spin" in p["role"]:
-            base_score *= 2.0
-        elif pitch == "Slow" and "Spin" in p["role"]:
-            base_score *= 1.4
-        elif pitch == "Bouncy" and "Pace" in p["role"]:
-            base_score *= 1.5
-        elif pitch == "Sticky":
-            base_score *= 1.5
-            
-        # Weather Adjustments
-        if weather == "Cloudy" and "Pace" in p["role"] and current_over < 6:
-            base_score *= 1.1
+        if pitch == "Dusty" and "Spin" in p["role"]:             base_score *= 1.5
+        elif pitch == "Dry" and "Spin" in p["role"] and current_over >= 10: base_score *= 1.3
+        elif pitch == "Green" and "Pace" in p["role"]:            base_score *= 1.5
+        elif pitch == "Hard" and "Pace" in p["role"] and current_over < 6:  base_score *= 1.4
+        elif pitch == "Cracked":                                  base_score *= 1.3
+        elif pitch == "Damp" and "Pace" in p["role"] and current_over < 6:  base_score *= 1.6
+        elif pitch == "Worn" and "Spin" in p["role"] and current_over >= 10: base_score *= 1.5
+        elif pitch == "Dead":                                     base_score *= 0.8
+        elif pitch == "Turning" and "Spin" in p["role"]:         base_score *= 2.0
+        elif pitch == "Slow" and "Spin" in p["role"]:            base_score *= 1.4
+        elif pitch == "Bouncy" and "Pace" in p["role"]:          base_score *= 1.5
+        elif pitch == "Sticky":                                   base_score *= 1.5
+
+        # Weather adjustments
+        if weather == "Cloudy" and "Pace" in p["role"] and current_over < 6:   base_score *= 1.1
         elif weather == "Overcast":
             if "Pace" in p["role"]: base_score *= 1.3
             elif "Spin" in p["role"]: base_score *= 0.8
-        elif weather == "Humid" and "Pace" in p["role"]:
-            base_score *= 1.2
+        elif weather == "Humid" and "Pace" in p["role"]:         base_score *= 1.2
         elif weather == "Dry Heat":
-            if "Spin" in p["role"] and current_over >= 10:
-                base_score *= 1.2
-            elif "Pace" in p["role"] and current_over >= 10:
-                base_score *= 0.8
-        elif weather == "Windy" and "Pace" in p["role"]:
-            base_score *= 1.3
+            if "Spin" in p["role"] and current_over >= 10:       base_score *= 1.2
+            elif "Pace" in p["role"] and current_over >= 10:     base_score *= 0.8
+        elif weather == "Windy" and "Pace" in p["role"]:         base_score *= 1.3
         elif weather in ["Light Rain", "Drizzle"]:
-            if "Spin" in p["role"]: base_score *= 0.6
-            else: base_score *= 0.9
+            base_score *= (0.6 if "Spin" in p["role"] else 0.9)
         elif weather in ["Heavy Rain", "Thunderstorm"]:
-            if "Spin" in p["role"]: base_score *= 0.4
-            else: base_score *= 0.7
-        
+            base_score *= (0.4 if "Spin" in p["role"] else 0.7)
+
         # Phase adjustments
-        if current_over < 6: 
-            if "Pace" in p["role"]:
-                base_score *= 1.5
-            if "Spin" in p["role"]:
-                base_score *= 0.2 
-        elif current_over < 15: 
-            if "Spin" in p["role"]:
-                base_score *= 1.5 
-        else: 
-            if "Pace" in p["role"] and p["archetype"] == "Finisher":
-                base_score *= 2.0 
-            if "Spin" in p["role"]:
-                base_score *= 0.3 
+        if current_over < 6:
+            if "Pace" in p["role"]:  base_score *= 1.5
+            if "Spin" in p["role"]:  base_score *= 0.2
+        elif current_over < 14:
+            if "Spin" in p["role"]:  base_score *= 1.5
+        else:
+            if "Pace" in p["role"] and p["archetype"] == "Finisher": base_score *= 2.0
+            if "Spin" in p["role"]:  base_score *= 0.3
 
-        # Death Over Specialist Logic
-        if current_over >= 16 and p["bowl"] >= 90 and overs_left > 0:
-            base_score *= 50.0 
+        # Death specialist priority (over 13+, widened from 16)
+        if current_over >= 13 and float(p["bowl"]) >= 88 and "Pace" in p["role"] and overs_left > 0:
+            base_score *= 8.0
 
-        # Prevent finishing pace bowlers from bowling out early
-        if current_over < 15 and p["archetype"] == "Finisher" and "Pace" in p["role"]:
-            if overs_left <= 2:
-                base_score *= 0.1 
-                
-        # Form / Economy factor
+        # Light saving penalty for Finisher before over 10 (only if they still have overs to spare)
+        if current_over < 10 and p["archetype"] == "Finisher" and "Pace" in p["role"]:
+            if overs_left >= 3 and overs_remaining >= 12:
+                base_score *= 0.35  # soft save, not hard block
+
+        # Economy factor
         if overs_bowled > 0:
             eco = (stats.runs_conceded / max(1, stats.balls_bowled)) * 6
-            if eco <= 6.0:
-                base_score *= 2.5 
-            elif eco > 11.0:
-                base_score *= 0.3 
-                
+            if eco <= 6.0:   base_score *= 2.5
+            elif eco > 11.0: base_score *= 0.3
+
         weights.append(max(1.0, base_score))
-        
+
     return random.choices(valid_bowlers, weights=weights, k=1)[0]
 
 def execute_ball_math_t20(match):
