@@ -3211,6 +3211,140 @@ async def searchplayer(interaction: discord.Interaction, name: str):
         msg += "\n\n📂 **Alternatives:**\n" + "\n".join(f"• {o}" for o in other[:5])
     await interaction.followup.send(msg)
 
+_ROLE_OPTIONS = [
+    discord.SelectOption(label="Batter",                value="Batter"),
+    discord.SelectOption(label="Wicket-Keeper",         value="Batter_WK"),
+    discord.SelectOption(label="Pace Bowler",           value="Bowler_Pace"),
+    discord.SelectOption(label="Off-Spin Bowler",       value="Bowler_Spin_Off"),
+    discord.SelectOption(label="Leg-Spin Bowler",       value="Bowler_Spin_Leg"),
+    discord.SelectOption(label="Pace All-Rounder",      value="All-Rounder_Pace"),
+    discord.SelectOption(label="Off-Spin All-Rounder",  value="All-Rounder_Spin_Off"),
+    discord.SelectOption(label="Leg-Spin All-Rounder",  value="All-Rounder_Spin_Leg"),
+]
+_ARCH_OPTIONS = [
+    discord.SelectOption(label="Aggressor", value="Aggressor"),
+    discord.SelectOption(label="Anchor",    value="Anchor"),
+    discord.SelectOption(label="Finisher",  value="Finisher"),
+    discord.SelectOption(label="Standard",  value="Standard"),
+]
+
+class AddPlayerModal(discord.ui.Modal, title="Add New Player"):
+    p_name = discord.ui.TextInput(label="Player Name", placeholder="e.g. Virat Kohli", max_length=50)
+    bat    = discord.ui.TextInput(label="Bat Rating (0–100)", placeholder="e.g. 88", max_length=3)
+    bowl   = discord.ui.TextInput(label="Bowl Rating (0–100)", placeholder="e.g. 45", max_length=3)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            bat_v  = int(self.bat.value)
+            bowl_v = int(self.bowl.value)
+        except ValueError:
+            return await interaction.response.send_message("❌ Bat/Bowl must be whole numbers.", ephemeral=True)
+        if not (0 <= bat_v <= 100 and 0 <= bowl_v <= 100):
+            return await interaction.response.send_message("❌ Bat/Bowl must be 0–100.", ephemeral=True)
+        name_v = self.p_name.value.strip()
+        view = PlayerRoleView(interaction.user.id, name_v, bat_v, bowl_v, mode="add")
+        await interaction.response.send_message(
+            f"**{name_v}** — Bat `{bat_v}` | Bowl `{bowl_v}`\nNow pick Role and Archetype:",
+            view=view, ephemeral=True
+        )
+
+class UpdatePlayerModal(discord.ui.Modal, title="Update Player"):
+    p_name = discord.ui.TextInput(label="Player Name", max_length=50)
+    bat    = discord.ui.TextInput(label="Bat Rating (0–100)", max_length=3)
+    bowl   = discord.ui.TextInput(label="Bowl Rating (0–100)", max_length=3)
+
+    def __init__(self, cur: dict):
+        super().__init__()
+        self._original  = cur["name"]
+        self._cur_role  = cur["role"]
+        self._cur_arch  = cur["archetype"]
+        self.p_name.default = cur["name"]
+        self.bat.default    = str(cur["bat"])
+        self.bowl.default   = str(cur["bowl"])
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            bat_v  = int(self.bat.value)
+            bowl_v = int(self.bowl.value)
+        except ValueError:
+            return await interaction.response.send_message("❌ Bat/Bowl must be whole numbers.", ephemeral=True)
+        if not (0 <= bat_v <= 100 and 0 <= bowl_v <= 100):
+            return await interaction.response.send_message("❌ Bat/Bowl must be 0–100.", ephemeral=True)
+        name_v = self.p_name.value.strip()
+        view = PlayerRoleView(interaction.user.id, name_v, bat_v, bowl_v, mode="update", original_name=self._original)
+        view._role = self._cur_role
+        view._arch = self._cur_arch
+        await interaction.response.send_message(
+            f"**{name_v}** — Bat `{bat_v}` | Bowl `{bowl_v}`\n"
+            f"Change Role/Archetype if needed (current: **{self._cur_role}** | **{self._cur_arch}**):",
+            view=view, ephemeral=True
+        )
+
+class PlayerRoleView(discord.ui.View):
+    def __init__(self, author_id: int, name: str, bat: int, bowl: int, mode: str, original_name: str = None):
+        super().__init__(timeout=120)
+        self._author   = author_id
+        self._name     = name
+        self._bat      = bat
+        self._bowl     = bowl
+        self._mode     = mode
+        self._original = original_name
+        self._role     = None
+        self._arch     = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self._author:
+            await interaction.response.send_message("Not your form.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.select(placeholder="Select Role…", options=_ROLE_OPTIONS)
+    async def role_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self._role = select.values[0]
+        await interaction.response.defer()
+
+    @discord.ui.select(placeholder="Select Archetype…", options=_ARCH_OPTIONS)
+    async def arch_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self._arch = select.values[0]
+        await interaction.response.defer()
+
+    @discord.ui.button(label="Confirm →", style=discord.ButtonStyle.success, row=2)
+    async def confirm_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self._role or not self._arch:
+            return await interaction.response.send_message("⚠️ Select both Role and Archetype first.", ephemeral=True)
+        if self._mode == "add":
+            success = add_player({"name": self._name, "bat": self._bat, "bowl": self._bowl, "role": self._role, "archetype": self._arch})
+            if not success:
+                return await interaction.response.send_message(f"❌ `{self._name}` already exists in the database!", ephemeral=True)
+            await interaction.response.send_message(f"✅ Added **{self._name}** to the database!")
+            await log_db_update("Player Added", self._name, interaction.user, f"Bat: {self._bat} | Bowl: {self._bowl}\nRole: {self._role}\nArchetype: {self._arch}")
+        else:
+            all_p = get_all_players()
+            if self._name.lower() != self._original.lower() and any(p["name"].lower() == self._name.lower() for p in all_p):
+                return await interaction.response.send_message(f"❌ A player named `{self._name}` already exists!", ephemeral=True)
+            update_player(self._original, {"name": self._name, "bat": self._bat, "bowl": self._bowl, "role": self._role, "archetype": self._arch})
+            await interaction.response.send_message(f"✅ Updated **{self._name}** in the database!")
+            await log_db_update("Player Updated", self._name, interaction.user, f"Bat: {self._bat} | Bowl: {self._bowl}\nRole: {self._role}\nArchetype: {self._arch}")
+        self.stop()
+
+@bot.tree.command(name="addplayer", description="[ADMIN] Add a new player to the Cloud DB.")
+async def addplayer_slash(interaction: discord.Interaction):
+    admins = get_auth_admins()
+    if interaction.user.id != ADMIN_DISCORD_ID and str(interaction.user.id) not in admins:
+        return await interaction.response.send_message("❌ Access Denied: Admin only.", ephemeral=True)
+    await interaction.response.send_modal(AddPlayerModal())
+
+@bot.tree.command(name="updateplayer", description="[ADMIN] Update an existing player in the Cloud DB.")
+async def updateplayer_slash(interaction: discord.Interaction, name: str):
+    admins = get_auth_admins()
+    if interaction.user.id != ADMIN_DISCORD_ID and str(interaction.user.id) not in admins:
+        return await interaction.response.send_message("❌ Access Denied: Admin only.", ephemeral=True)
+    all_p = get_all_players()
+    cur = next((p for p in all_p if p["name"].lower() == name.strip().lower()), None)
+    if not cur:
+        return await interaction.response.send_message(f"❌ `{name}` not found in the database.", ephemeral=True)
+    await interaction.response.send_modal(UpdatePlayerModal(cur))
+
 @bot.tree.command(name="my_tier", description="Check your current subscription tier and daily match limits.")
 async def my_tier_cmd(interaction: discord.Interaction):
     server_id = str(interaction.guild.id) if interaction.guild else None
@@ -3435,7 +3569,7 @@ class PrefixCog(commands.Cog):
             print(f"An error occurred in a prefix command '{ctx.command}': {error}")
             await ctx.send(f"An unexpected error occurred while running that command.")
 
-    @commands.command(name="match", help="Start a new Cricket Match simulation.\nUsage: match [@opponent]")
+    @commands.command(name="match", aliases=["m"], help="Start a new Cricket Match simulation.\nUsage: match [@opponent]")
     async def match(self, ctx, opponent: discord.Member = None):
         if is_channel_restricted(str(ctx.channel.id)):
             return await ctx.send("❌ Matches are **disabled** in this channel.")
@@ -3453,7 +3587,7 @@ class PrefixCog(commands.Cog):
         opp_str = opponent.mention if opponent else "🤖 AI"
         await ctx.send(f"🏏 **Match Setup**\n**Host:** {ctx.author.mention}\n**Opponent:** {opp_str}\n\nStep 1: Select Format below:", view=FormatSelectView(state, ctx.channel))
 
-    @commands.command(name="endmatch", help="Force cancel the current match or setup in this channel.\nUsage: endmatch")
+    @commands.command(name="endmatch", aliases=["em"], help="Force cancel the current match or setup in this channel.\nUsage: endmatch")
     async def endmatch(self, ctx):
         channel_id = ctx.channel.id
         cleared = False
@@ -3468,7 +3602,7 @@ class PrefixCog(commands.Cog):
         else:
             await ctx.send("⚠️ There is no active match or setup running in this channel.")
 
-    @commands.command(name="searchplayer", help="Search for a player in the Cloud DB.\nUsage: searchplayer <name>")
+    @commands.command(name="searchplayer", aliases=["sp"], help="Search for a player in the Cloud DB.\nUsage: searchplayer <name>")
     async def searchplayer(self, ctx, *, name: str):
         search_query = name.strip()
         all_players = get_all_players()
@@ -3505,7 +3639,7 @@ class PrefixCog(commands.Cog):
             msg += "\n\n📂 **Alternatives:**\n" + "\n".join(f"• {o}" for o in other[:5])
         await ctx.send(msg)
 
-    @commands.command(name="force_sync", help="[OWNER] Manually force backup memory cache to Cloud DB.\nUsage: force_sync")
+    @commands.command(name="force_sync", aliases=["fs"], help="[OWNER] Manually force backup memory cache to Cloud DB.\nUsage: force_sync")
     async def force_sync(self, ctx):
         if ctx.author.id != ADMIN_DISCORD_ID:
             return await ctx.send("❌ Owner only.")
@@ -3529,7 +3663,7 @@ class PrefixCog(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ Error during sync: {e}")
 
-    @commands.command(name="force_load", help="[OWNER] Reload in-memory cache from MongoDB.\nUsage: force_load")
+    @commands.command(name="force_load", aliases=["fl"], help="[OWNER] Reload in-memory cache from MongoDB.\nUsage: force_load")
     async def force_load(self, ctx):
         if ctx.author.id != ADMIN_DISCORD_ID:
             return await ctx.send("❌ Owner only.")
@@ -3543,7 +3677,7 @@ class PrefixCog(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ Error during reload: {e}")
 
-    @commands.command(name="addplayer", help="[ADMIN] Add player to DB.\nUsage: addplayer \"<name>\" <bat> <bowl> <role> <archetype>")
+    @commands.command(name="addplayer", aliases=["ap"], help="[ADMIN] Add player to DB.\nUsage: addplayer \"<name>\" <bat> <bowl> <role> <archetype>")
     async def addplayer(self, ctx, name: str, bat: int, bowl: int, role: str, archetype: str):
         admins = get_auth_admins()
         if ctx.author.id != ADMIN_DISCORD_ID and str(ctx.author.id) not in admins:
@@ -3562,7 +3696,7 @@ class PrefixCog(commands.Cog):
         await ctx.send(f"✅ Added `{name}` to the database!")
         await log_db_update("Player Added", name, ctx.author, f"Bat: {bat} | Bowl: {bowl}\nRole: {role}\nArchetype: {archetype}")
 
-    @commands.command(name="updateplayer", help="[ADMIN] Update player in DB.\nUsage: updateplayer \"<name>\" <bat> <bowl> <role> <archetype> [\"<newname>\"]")
+    @commands.command(name="updateplayer", aliases=["up"], help="[ADMIN] Update player in DB.\nUsage: updateplayer \"<name>\" <bat> <bowl> <role> <archetype> [\"<newname>\"]")
     async def updateplayer(self, ctx, name: str, bat: int, bowl: int, role: str, archetype: str, *, new_name: str = None):
         admins = get_auth_admins()
         if ctx.author.id != ADMIN_DISCORD_ID and str(ctx.author.id) not in admins:
@@ -3586,7 +3720,7 @@ class PrefixCog(commands.Cog):
         await ctx.send(f"✅ Updated `{final_name}` in the database!")
         await log_db_update("Player Updated", final_name, ctx.author, f"Bat: {bat} | Bowl: {bowl}\nRole: {role}\nArchetype: {archetype}")
 
-    @commands.command(name="deleteplayer", help="[ADMIN] Delete a player from DB.\nUsage: deleteplayer \"<name>\"")
+    @commands.command(name="deleteplayer", aliases=["dp"], help="[ADMIN] Delete a player from DB.\nUsage: deleteplayer \"<name>\"")
     async def deleteplayer(self, ctx, *, name: str):
         admins = get_auth_admins()
         if ctx.author.id != ADMIN_DISCORD_ID and str(ctx.author.id) not in admins:
@@ -3599,7 +3733,7 @@ class PrefixCog(commands.Cog):
         await ctx.send(f"✅ Deleted `{', '.join(found)}` from the database.")
         await log_db_update("Player Deleted", name, ctx.author, f"Removed: {', '.join(found)}")
 
-    @commands.command(name="cleanduplicates", help="[ADMIN] Remove duplicate players from DB.\nUsage: cleanduplicates")
+    @commands.command(name="cleanduplicates", aliases=["cd"], help="[ADMIN] Remove duplicate players from DB.\nUsage: cleanduplicates")
     async def cleanduplicates(self, ctx):
         admins = get_auth_admins()
         if ctx.author.id != ADMIN_DISCORD_ID and str(ctx.author.id) not in admins:
@@ -3611,7 +3745,7 @@ class PrefixCog(commands.Cog):
         else:
             await ctx.send("✅ No duplicates found. Database is clean.")
 
-    @commands.command(name="dump_cache", help="[OWNER] Export tournament cache as JSON file.\nUsage: dump_cache")
+    @commands.command(name="dump_cache", aliases=["dc"], help="[OWNER] Export tournament cache as JSON file.\nUsage: dump_cache")
     async def dump_cache(self, ctx):
         if ctx.author.id != ADMIN_DISCORD_ID:
             return await ctx.send("❌ Owner only.")
@@ -3623,7 +3757,7 @@ class PrefixCog(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ Dump failed: {e}")
 
-    @commands.command(name="sync_csv", help="[OWNER] Sync players from players_master.csv to DB.\nUsage: sync_csv")
+    @commands.command(name="sync_csv", aliases=["sc"], help="[OWNER] Sync players from players_master.csv to DB.\nUsage: sync_csv")
     async def sync_csv(self, ctx):
         if ctx.author.id != ADMIN_DISCORD_ID:
             return await ctx.send("❌ Owner only.")
@@ -3650,7 +3784,7 @@ class PrefixCog(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ Error during sync: {e}")
 
-    @commands.command(name="set_user_tier", help="[OWNER] Assign subscription tier to a user.\nUsage: set_user_tier @user <tier>\nTiers: Basic, Standard, Single, Server Pro, None")
+    @commands.command(name="set_user_tier", aliases=["sut"], help="[OWNER] Assign subscription tier to a user.\nUsage: set_user_tier @user <tier>\nTiers: Basic, Standard, Single, Server Pro, None")
     async def set_user_tier(self, ctx, user: discord.Member, *, tier: str):
         if ctx.author.id != ADMIN_DISCORD_ID:
             return await ctx.send("❌ Owner only.")
@@ -3667,7 +3801,7 @@ class PrefixCog(commands.Cog):
         msg = update_user_tier(str(user.id), tier, valid[tier], user.mention)
         await ctx.send(msg)
 
-    @commands.command(name="set_server_tier", help="[OWNER] Assign subscription tier to a server.\nUsage: set_server_tier <server_id> <tier>\nTiers: Bronze, Silver, Gold, Diamond, None")
+    @commands.command(name="set_server_tier", aliases=["sst"], help="[OWNER] Assign subscription tier to a server.\nUsage: set_server_tier <server_id> <tier>\nTiers: Bronze, Silver, Gold, Diamond, None")
     async def set_server_tier(self, ctx, server_id: str, *, tier: str):
         if ctx.author.id != ADMIN_DISCORD_ID:
             return await ctx.send("❌ Owner only.")
@@ -3684,7 +3818,7 @@ class PrefixCog(commands.Cog):
         msg = update_server_tier(server_id, tier, valid[tier])
         await ctx.send(msg)
 
-    @commands.command(name="authadmin", help="[OWNER] Toggle admin permissions for a user.\nUsage: authadmin @user")
+    @commands.command(name="authadmin", aliases=["aa"], help="[OWNER] Toggle admin permissions for a user.\nUsage: authadmin @user")
     async def authadmin(self, ctx, user: discord.Member):
         if ctx.author.id != ADMIN_DISCORD_ID:
             return await ctx.send("❌ Owner only.")
@@ -3694,7 +3828,7 @@ class PrefixCog(commands.Cog):
         else:
             await ctx.send(f"🚫 Admin permissions **revoked** for {user.mention}.")
 
-    @commands.command(name="toggle_channel_lock", help="[ADMIN] Lock or unlock matches in this channel.\nUsage: toggle_channel_lock")
+    @commands.command(name="toggle_channel_lock", aliases=["tcl"], help="[ADMIN] Lock or unlock matches in this channel.\nUsage: toggle_channel_lock")
     async def toggle_channel_lock(self, ctx):
         is_owner = ctx.author.id == ADMIN_DISCORD_ID
         has_perms = ctx.author.guild_permissions.manage_channels
@@ -3706,7 +3840,7 @@ class PrefixCog(commands.Cog):
         else:
             await ctx.send("🔓 **Channel Unlocked:** Matches can now be played in this channel.")
 
-    @commands.command(name="toggle_ratings_channel", help="[OWNER] Toggle player ratings visibility in this channel.\nUsage: toggle_ratings_channel")
+    @commands.command(name="toggle_ratings_channel", aliases=["trc"], help="[OWNER] Toggle player ratings visibility in this channel.\nUsage: toggle_ratings_channel")
     async def toggle_ratings_channel_cmd(self, ctx):
         if ctx.author.id != ADMIN_DISCORD_ID:
             return await ctx.send("❌ Owner only.")
@@ -3716,7 +3850,7 @@ class PrefixCog(commands.Cog):
         else:
             await ctx.send("🔒 **Ratings Channel Disabled:** Player ratings are now hidden in this channel.")
 
-    @commands.command(name="set_log_channel", help="[ADMIN] Set this channel as the match log channel for this server. Run again to disable.\nUsage: set_log_channel")
+    @commands.command(name="set_log_channel", aliases=["slc"], help="[ADMIN] Set this channel as the match log channel for this server. Run again to disable.\nUsage: set_log_channel")
     async def set_log_channel_cmd(self, ctx):
         if not ctx.author.guild_permissions.administrator and ctx.author.id != ADMIN_DISCORD_ID:
             return await ctx.send("❌ Server Admins only.")
@@ -3730,6 +3864,51 @@ class PrefixCog(commands.Cog):
         else:
             set_match_log_channel(server_id, str(ctx.channel.id))
             await ctx.send(f"📋 **Match Log Enabled:** Final scorecards for all matches on this server will be sent here.")
+
+    @commands.command(name="squad", aliases=["sq"], help="View a team's tournament squad.\nUsage: squad [team_name]")
+    async def squad_shortcut(self, ctx, *, team_name: str = None):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists on this server.")
+
+        if team_name:
+            team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.lower()), None)
+            if not team: return await ctx.send(f"❌ Team '{team_name}' not found.")
+        else:
+            team = next((t for t in tourney["teams"] if t["owner_id"] == str(ctx.author.id)), None)
+            if not team: return await ctx.send("❌ You do not own a team. Please specify a `team_name`.")
+
+        if not team.get("squad"):
+            return await ctx.send(f"❌ **{team['name']}** has not submitted their squad yet.")
+
+        batters, wks, all_rounders, bowlers = [], [], [], []
+        for p in team["squad"]:
+            role = p["role"]
+            if "WK" in role: wks.append(p)
+            elif "All-Rounder" in role: all_rounders.append(p)
+            elif "Bowler" in role: bowlers.append(p)
+            else: batters.append(p)
+
+        batters.sort(key=lambda x: x["bat"], reverse=True)
+        wks.sort(key=lambda x: x["bat"], reverse=True)
+        all_rounders.sort(key=lambda x: (x["bat"] + x["bowl"]), reverse=True)
+        bowlers.sort(key=lambda x: x["bowl"], reverse=True)
+
+        embed = discord.Embed(title=f"📋 Squad: {team['name']}", description=f"👤 **Owner:** <@{team['owner_id']}> | **Total Players:** {len(team['squad'])}", color=discord.Color.blue())
+
+        def _fmt(p, cat):
+            arch = p["archetype"]
+            style = p["role"].split("_", 1)[1].replace("_", " ") if "_" in p["role"] else ""
+            if cat in ["bat", "wk"]: return f"`{p['bat']:>2} BAT` • **{p['name']}** *(Type: {arch})*"
+            elif cat == "ar": return f"`{p['bat']:>2} BAT | {p['bowl']:>2} BWL` • **{p['name']}** *({style} | {arch})*"
+            else: return f"`{p['bowl']:>2} BWL` • **{p['name']}** *({style})*"
+
+        if batters: embed.add_field(name="🏏 Batters", value="\n".join([_fmt(p, "bat") for p in batters]), inline=False)
+        if wks: embed.add_field(name="🧤 Wicket-Keepers", value="\n".join([_fmt(p, "wk") for p in wks]), inline=False)
+        if all_rounders: embed.add_field(name="⚔️ All-Rounders", value="\n".join([_fmt(p, "ar") for p in all_rounders]), inline=False)
+        if bowlers: embed.add_field(name="🎯 Bowlers", value="\n".join([_fmt(p, "bowl") for p in bowlers]), inline=False)
+
+        await ctx.send(embed=embed)
 
     @commands.group(name="tournament", aliases=["t"], invoke_without_command=True, help="Main command for tournaments.\nUsage: tournament")
     async def tournament(self, ctx):
