@@ -502,16 +502,20 @@ def execute_test_ball(match: TestMatch) -> bool:
     if raw_bat_penalty > 14:
         bat_r = float(striker["bat"]) * 0.70 - 14
 
+    # ── ±2 rating randomness (Test format: smaller variance than T20/ODI ±4) ──
+    bat_r  += random.uniform(-2.0, 2.0)
+    bowl_r += random.uniform(-2.0, 2.0)
+
     diff = bat_r - bowl_r   # positive = batter advantage
 
-    # ── Base weights: ~3.5 RPO at diff=0, 1 wicket per 65 balls ──────────────
-    dot_w  = max(50.0,  68.0 - diff * 0.16)
-    sing_w = 25.0
-    two_w  = 6.0
-    thr_w  = 0.3
+    # ── Base weights: ~3.7 RPO at diff=0, 1 wicket per 65 balls ──────────────
+    dot_w  = max(46.0,  63.0 - diff * 0.15)
+    sing_w = 27.0
+    two_w  = 7.0
+    thr_w  = 0.5
     four_w = max(0.5,   6.0  + diff * 0.07)
-    six_w  = max(0.05,  0.55 + diff * 0.018)
-    wkt_w  = max(0.30,  1.6  - diff * 0.040)
+    six_w  = max(0.05,  0.60 + diff * 0.018)
+    wkt_w  = max(0.30,  1.5  - diff * 0.038)
 
     wkt_w *= wkt_mult
 
@@ -839,87 +843,120 @@ def _start_next_innings(match: TestMatch):
 MAX_SESSION_OVERS = 30
 
 def simulate_session(match: TestMatch) -> str:
-    """Simulate one session (~30 overs). Returns session summary string."""
-    innings = match.current_innings
-    if innings.is_complete:
+    """Simulate one session (~30 overs).
+    If an innings ends mid-session the next innings starts immediately and the
+    remaining session overs are bowled — exactly as in real Test cricket."""
+    if match.current_innings.is_complete:
         match.advance_session()
         return ""
 
-    sess_label  = f"Day {match.day}, {SESSION_NAMES[match.session]} Session"
-    start_runs  = innings.total_runs
-    start_wkts  = innings.wickets
-    start_balls = innings.total_balls
-    fallen      = []
-
-    session_overs = 0
+    sess_label    = f"Day {match.day}, {SESSION_NAMES[match.session]} Session"
+    session_overs = 0        # total overs bowled this session across all innings
+    output_parts  = []       # one summary block per innings stint
+    is_first_part = True
 
     while session_overs < MAX_SESSION_OVERS:
+        innings = match.current_innings
+
+        # Innings already flagged complete at top of loop — try to start the next one
         if innings.is_complete or innings.wickets >= 10:
             innings.is_complete = True
-            break
-        # 4th-innings chase complete?
-        if match.current_innings_idx == 3:
-            tgt = _get_chase_target(match)
-            if tgt is not None and innings.total_runs >= tgt:
+            res = _check_result(match)
+            if match.follow_on_msg:
+                output_parts.append(f"\n{match.follow_on_msg}")
+                match.follow_on_msg = ""
+            if res:
+                match.result = res
                 break
+            if len(match.innings_list) >= 4:
+                break
+            _start_next_innings(match)
+            output_parts.append(
+                f"  {'─'*53}\n"
+                f"  ✦ {match.current_innings.batting_team['name']} — Innings "
+                f"{match.current_innings.innings_num} begins"
+            )
+            continue  # keep bowling the remaining session overs
 
-        _select_bowler(match)
-        wkts_before      = innings.wickets
-        runs_over_start  = innings.total_runs
+        # ── Simulate overs for this innings stint ──────────────────────────
+        start_runs  = innings.total_runs
+        start_wkts  = innings.wickets
+        start_balls = innings.total_balls
+        fallen      = []
+        stint_overs = 0
 
-        # Bowl one OVER (6 legal balls, wides don't count)
-        legal_balls_this_over = 0
-        while legal_balls_this_over < 6:
+        while session_overs + stint_overs < MAX_SESSION_OVERS:
             if innings.is_complete or innings.wickets >= 10:
                 innings.is_complete = True
                 break
-            legal = execute_test_ball(match)
-            if legal:
-                legal_balls_this_over += 1
-            # Chase won mid-over — stop immediately
             if match.current_innings_idx == 3:
                 tgt = _get_chase_target(match)
                 if tgt is not None and innings.total_runs >= tgt:
                     innings.is_complete = True
                     break
-            if match.over_completed:
-                match.over_completed = False
-                session_overs        += 1
-                match.overs_in_session += 1
-                match.total_match_overs += 1
-                break   # over is done
 
-        # Collect wicket strings
-        for i in range(wkts_before, innings.wickets):
-            if i < len(innings.fow):
-                fallen.append(innings.fow[i])
+            _select_bowler(match)
+            wkts_before = innings.wickets
 
-    runs_scored  = innings.total_runs  - start_runs
-    wkts_fallen  = innings.wickets     - start_wkts
-    balls_played = innings.total_balls - start_balls
-    ovs   = balls_played // 6
-    balls = balls_played % 6
-    rr    = round((runs_scored / max(1, balls_played)) * 6, 2)
+            legal_balls_this_over = 0
+            while legal_balls_this_over < 6:
+                if innings.is_complete or innings.wickets >= 10:
+                    innings.is_complete = True
+                    break
+                legal = execute_test_ball(match)
+                if legal:
+                    legal_balls_this_over += 1
+                if match.current_innings_idx == 3:
+                    tgt = _get_chase_target(match)
+                    if tgt is not None and innings.total_runs >= tgt:
+                        innings.is_complete = True
+                        break
+                if match.over_completed:
+                    match.over_completed = False
+                    stint_overs          += 1
+                    match.overs_in_session  += 1
+                    match.total_match_overs += 1
+                    break
 
-    lines = [
-        f"\n{'═'*57}",
-        f"  {sess_label}",
-        f"{'─'*57}",
-        f"  {innings.batting_team['name']}  —  Innings {innings.innings_num}",
-        f"  Score :  {innings.total_runs}/{innings.wickets}  ({innings.overs_str} ov)",
-        f"  Session:  +{runs_scored} runs / {wkts_fallen} wkts  ({ovs}.{balls} ov @ {rr} RPO)",
-    ]
-    if fallen:
-        lines.append(f"  FoW   :  " + " | ".join(fallen))
-    if innings.is_complete:
-        lines.append(f"  *** INNINGS COMPLETE ***")
-    lines.append(f"{'═'*57}")
+            for i in range(wkts_before, innings.wickets):
+                if i < len(innings.fow):
+                    fallen.append(innings.fow[i])
+
+        session_overs += stint_overs
+
+        # ── Build stint summary ────────────────────────────────────────────
+        runs_scored  = innings.total_runs  - start_runs
+        wkts_fallen  = innings.wickets     - start_wkts
+        balls_played = innings.total_balls - start_balls
+        ovs   = balls_played // 6
+        balls = balls_played % 6
+        rr    = round((runs_scored / max(1, balls_played)) * 6, 2)
+
+        if is_first_part:
+            header = [f"\n{'═'*57}", f"  {sess_label}", f"{'─'*57}"]
+            is_first_part = False
+        else:
+            header = [f"{'─'*57}"]
+
+        header += [
+            f"  {innings.batting_team['name']}  —  Innings {innings.innings_num}",
+            f"  Score :  {innings.total_runs}/{innings.wickets}  ({innings.overs_str} ov)",
+            f"  Session:  +{runs_scored} runs / {wkts_fallen} wkts  ({ovs}.{balls} ov @ {rr} RPO)",
+        ]
+        if fallen:
+            header.append(f"  FoW   :  " + " | ".join(fallen))
+        if innings.is_complete:
+            header.append(f"  *** INNINGS COMPLETE ***")
+        output_parts.append("\n".join(header))
+        # Loop back — if innings ended, the next iteration will start the new innings
+
+    output_parts.append(f"{'═'*57}")
 
     time_up = match.advance_session()
     if time_up:
-        lines.append(f"  *** DAY 5 COMPLETE — MATCH DRAWN ***")
+        output_parts.append(f"  *** DAY 5 COMPLETE — MATCH DRAWN ***")
 
-    return "\n".join(lines)
+    return "\n".join(output_parts)
 
 def simulate_innings(match: TestMatch) -> str:
     """Simulate the full current innings. Returns innings scorecard."""
@@ -950,6 +987,7 @@ def simulate_match(match: TestMatch) -> str:
             match.result = match.result or "Match Drawn (time)"
             break
 
+        prev_innings_count = len(match.innings_list)
         sc = simulate_innings(match)
         lines.append(sc)
 
@@ -977,7 +1015,9 @@ def simulate_match(match: TestMatch) -> str:
             match.result = "Match Drawn (time)"
             break
 
-        _start_next_innings(match)
+        # Only start next innings if simulate_session didn't already do it mid-session
+        if len(match.innings_list) == prev_innings_count:
+            _start_next_innings(match)
 
     lines += [
         f"\n{'═'*62}",

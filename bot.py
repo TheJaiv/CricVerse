@@ -2994,31 +2994,51 @@ def _test_map_weather(w: str) -> str:
 
 
 def render_test_embed(match: TestMatchObj) -> discord.Embed:
-    """Live scoreboard embed — Day/Session, lead/trail, innings-4 target equation."""
+    """Live scoreboard — ODI/T20 style with per-team rows showing all innings."""
     innings = match.current_innings
     embed   = discord.Embed(color=0xFFFFFF)
 
-    sess = _TEST_SESSION_NAMES.get(match.session, "Morning")
-    desc  = f"**🏏 TEST MATCH — Day {match.day} | {sess} Session**\n"
-    desc += f"*Pitch: {match.pitch}  ·  Weather: {match.weather}*\n"
+    sess  = _TEST_SESSION_NAMES.get(match.session, "Morning")
+    inns  = match.innings_list
+
+    desc  = f"**<a:ball:1510370830163640320> LIVE SCOREBOARD**\n"
+    desc += f"-# Day {match.day} · {sess} Session  ·  {match.pitch} / {match.weather}"
     if match.follow_on_enforced:
-        desc += f"*⚠️ Follow-on enforced*\n"
-    desc += "\n"
+        desc += "  ·  ⚠️ Follow-on"
+    desc += "\n\n"
 
-    # All innings scores (### for current)
-    for inn in match.innings_list:
-        is_curr = inn is innings
-        prefix  = "### " if is_curr else ""
-        arrow   = " ◄" if is_curr else ""
-        status  = "" if is_curr else (" *(batting)*" if not inn.is_complete else "")
-        desc   += f"{prefix}🏏 **{inn.batting_team['name']}**  {inn.total_runs}/{inn.wickets}  ({inn.overs_str} ov){arrow}{status}\n"
+    # Helper: format one innings score
+    def _sc(inn):
+        if inn is innings and not inn.is_complete:
+            return f"{inn.total_runs}/{inn.wickets}  ({inn.overs_str})"
+        return f"{inn.total_runs}/{inn.wickets}"
 
-    # Lead/Trail or innings-4 target
-    inns   = match.innings_list
+    # One row per team — both innings on the same line separated by " & "
+    for team in [match.team1, match.team2]:
+        tnm         = team["name"]
+        is_batting  = (innings.batting_team["name"] == tnm)
+        team_inns   = [i for i in inns if i.batting_team["name"] == tnm]
+
+        if not team_inns:
+            score_str = "Yet to Bat"
+        else:
+            score_str = " & ".join(_sc(i) for i in team_inns)
+
+        ball   = "<a:ball:1510370830163640320> " if is_batting else ""
+        prefix = "### "
+        desc  += f"{prefix}{ball}**{tnm}**  {score_str}\n"
+
+    # Lead / Trail totals
     t1_tot = sum(i.total_runs for i in inns if i.batting_team["name"] == match.team1["name"])
     t2_tot = sum(i.total_runs for i in inns if i.batting_team["name"] == match.team2["name"])
+    diff   = abs(t1_tot - t2_tot)
+    if diff == 0:
+        lead_str = "Scores level"
+    else:
+        leading  = match.team1["name"] if t1_tot > t2_tot else match.team2["name"]
+        lead_str = f"{leading[:12]} lead by {diff}"
 
-    # Batting stats
+    # Current batters
     desc += f"\n**`{'BATTER':<16}{'R':<5}{'B':<5}{'SR':<6}`**\n"
     for idx in range(min(innings.next_batter_idx, len(innings.batting_team["players"]))):
         p  = innings.batting_team["players"][idx]
@@ -3028,13 +3048,6 @@ def render_test_embed(match: TestMatchObj) -> discord.Embed:
             sr = round(st.runs_scored / st.balls_faced * 100, 1) if st.balls_faced else 0.0
             desc += f"`{p['name'][:14]:<14}{mk:<2}{st.runs_scored:<5}{st.balls_faced:<5}{sr:<6.1f}`\n"
 
-    # Partnership + lead/trail summary line
-    diff = abs(t1_tot - t2_tot)
-    if diff == 0:
-        lead_str = "Scores level"
-    else:
-        leading  = match.team1["name"] if t1_tot > t2_tot else match.team2["name"]
-        lead_str = (f"Lead: {diff}" if innings.batting_team["name"] == leading else f"Trail: {diff}")
     desc += f"\n`P'Ship: {innings.partnership_runs}  {lead_str}`\n"
 
     # Current bowler
@@ -3044,14 +3057,13 @@ def render_test_embed(match: TestMatchObj) -> discord.Embed:
         desc += (f"\n**`{'BOWLER':<17}{'O':<8}{'R':<5}{'W'}`**\n"
                  f"`{cb['name'][:16]:<17}{cbs.overs_str:<8}{cbs.runs_conceded:<5}{cbs.wickets_taken}`\n")
 
-    # Innings-4 chase equation (like ODI/T20 target line)
+    # Innings-4 chase equation
     if match.current_innings_idx == 3:
         bat_nm     = innings.batting_team["name"]
         t_bat_prev = sum(i.total_runs for i in inns[:-1] if i.batting_team["name"] == bat_nm)
         t_field    = sum(i.total_runs for i in inns if i.batting_team["name"] != bat_nm)
         still_need = max(0, t_field - t_bat_prev - innings.total_runs + 1)
         if still_need > 0:
-            overs_left = innings.overs_str
             desc += f"-# Equation: Need **{still_need}** more runs to win"
         else:
             desc += f"-# 🏆 Target reached!"
@@ -3127,10 +3139,132 @@ def _test_post_innings_logic(match: TestMatchObj):
     return follow_on_msg
 
 
-async def _send_test_chunks(channel, text: str):
-    text = text.strip()
-    for i in range(0, len(text), 1900):
-        await channel.send(f"```\n{text[i:i+1900]}\n```")
+def _test_take_snapshot(match: TestMatchObj) -> dict:
+    """Capture match state before a simulation step so we can compute deltas afterwards."""
+    return {
+        "day": match.day,
+        "session": match.session,
+        "innings_count": len(match.innings_list),
+        "innings": [
+            {
+                "runs":     inn.total_runs,
+                "wkts":     inn.wickets,
+                "balls":    inn.total_balls,
+                "fow_len":  len(inn.fow),
+                "complete": inn.is_complete,
+                "inn_num":  inn.innings_num,
+                "bat_name": inn.batting_team["name"],
+            }
+            for inn in match.innings_list
+        ],
+    }
+
+
+def _render_test_session_embed(match: TestMatchObj, snap: dict) -> discord.Embed:
+    """Session summary embed — replaces the old ASCII code-block output."""
+    embed    = discord.Embed(color=0xFFFFFF)
+    sess_nm  = _TEST_SESSION_NAMES.get(snap["session"], "Morning")
+    embed.title = f"🏏 Day {snap['day']} · {sess_nm} Session"
+
+    desc       = ""
+    curr_inns  = match.innings_list
+    snap_inns  = snap["innings"]
+
+    for i, sdata in enumerate(snap_inns):
+        if i >= len(curr_inns):
+            break
+        inn        = curr_inns[i]
+        runs_added = inn.total_runs  - sdata["runs"]
+        wkts_fell  = inn.wickets     - sdata["wkts"]
+        balls_used = inn.total_balls - sdata["balls"]
+        if balls_used == 0:
+            continue
+
+        ovs = f"{balls_used // 6}.{balls_used % 6}"
+        rr  = round(runs_added / max(1, balls_used) * 6, 2)
+        wkt_str = f"{wkts_fell} wkt{'s' if wkts_fell != 1 else ''}"
+
+        completed = inn.is_complete and not sdata["complete"]
+        status    = "  ✅ *All Out*" if completed else ""
+        desc += f"### **{inn.batting_team['name']}**  ·  Innings {inn.innings_num}{status}\n"
+        desc += f"Score: **{inn.total_runs}/{inn.wickets}** ({inn.overs_str} ov)"
+        desc += f"  ·  +{runs_added} runs  ·  {wkt_str}  ·  {ovs} ov  ·  {rr} RPO\n"
+
+        new_fow = inn.fow[sdata["fow_len"]:]
+        if new_fow:
+            desc += "```\n"
+            for w in new_fow[:6]:
+                desc += f"  {w}\n"
+            desc += "```\n"
+        desc += "\n"
+
+    # New innings started mid-session (carry-over)
+    for i in range(snap["innings_count"], len(curr_inns)):
+        inn = curr_inns[i]
+        desc += f"### ✦ **{inn.batting_team['name']}**  ·  Innings {inn.innings_num} *(new innings)*\n"
+        desc += f"Score: **{inn.total_runs}/{inn.wickets}** ({inn.overs_str} ov)\n\n"
+
+    if match.follow_on_enforced:
+        desc += "⚠️ *Follow-on enforced*\n\n"
+
+    # Lead/trail line
+    inns = match.innings_list
+    t1   = sum(i.total_runs for i in inns if i.batting_team["name"] == match.team1["name"])
+    t2   = sum(i.total_runs for i in inns if i.batting_team["name"] == match.team2["name"])
+    if t1 != t2:
+        leading = match.team1["name"] if t1 > t2 else match.team2["name"]
+        desc += f"-# {leading} lead by {abs(t1 - t2)} runs"
+    else:
+        desc += "-# Scores are level"
+
+    embed.description = desc.strip()
+    embed.set_footer(text=f"Pitch: {match.pitch}  ·  Weather: {match.weather}")
+    return embed
+
+
+def _render_test_innings_embed(match: TestMatchObj, inn_idx: int) -> discord.Embed:
+    """Innings-complete summary embed — top batters and bowlers in the completed innings."""
+    inn   = match.innings_list[inn_idx]
+    embed = discord.Embed(
+        title  = f"📋 Innings {inn.innings_num} Complete — {inn.batting_team['name']}",
+        color  = discord.Color.gold(),
+    )
+    rr  = round(inn.total_runs / max(1, inn.total_balls) * 6, 2)
+    desc = f"**Total: {inn.total_runs}/{inn.wickets}**  ({inn.overs_str} ov)  ·  RR: {rr}\n\n"
+
+    # Top batters
+    bats = sorted(
+        [(p, inn.batting_stats[p["name"]]) for p in inn.batting_team["players"]
+         if inn.batting_stats[p["name"]].balls_faced > 0],
+        key=lambda x: x[1].runs_scored, reverse=True,
+    )[:5]
+    if bats:
+        desc += "**Top Batters**\n```\n"
+        desc += f"{'Name':<18} {'R':>4}  {'B':>4}   SR\n"
+        desc += "─" * 36 + "\n"
+        for p, st in bats:
+            no  = "*" if st.dismissal == "not out" else " "
+            sr  = round(st.runs_scored / st.balls_faced * 100, 1) if st.balls_faced else 0.0
+            desc += f"{p['name'][:16]:<18} {str(st.runs_scored)+no:>5}  {st.balls_faced:>4}  {sr:>5.1f}\n"
+        desc += "```\n"
+
+    # Top bowlers
+    bowls = sorted(
+        [(p, inn.bowling_stats[p["name"]]) for p in inn.bowling_team["players"]
+         if inn.bowling_stats[p["name"]].balls_bowled > 0],
+        key=lambda x: (x[1].wickets_taken, -x[1].runs_conceded), reverse=True,
+    )[:4]
+    if bowls:
+        desc += "**Top Bowlers**\n```\n"
+        desc += f"{'Name':<18} {'O':>5}  {'R':>4}  {'W':>2}   ECO\n"
+        desc += "─" * 38 + "\n"
+        for p, st in bowls:
+            eco = round(st.runs_conceded / st.balls_bowled * 6, 2) if st.balls_bowled else 0.0
+            desc += f"{p['name'][:16]:<18} {st.overs_str:>5}  {st.runs_conceded:>4}  {st.wickets_taken:>2}  {eco:>5.2f}\n"
+        desc += "```"
+
+    embed.description = desc
+    return embed
 
 
 def generate_test_scorecard_image(match: TestMatchObj) -> io.BytesIO:
@@ -3297,36 +3431,37 @@ class TestSimView(discord.ui.View):
     async def sim_session(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await interaction.message.edit(view=None)
-        match        = self.match
-        session_text = await asyncio.to_thread(_test_sim_session, match)
-        await _send_test_chunks(interaction.channel, session_text)
-        follow_msg   = _test_post_innings_logic(match)
-        if follow_msg:
-            await interaction.channel.send(f"```{follow_msg}```")
+        match = self.match
+        snap  = _test_take_snapshot(match)
+        await asyncio.to_thread(_test_sim_session, match)
+        _test_post_innings_logic(match)
+        sess_embed = _render_test_session_embed(match, snap)
         if match.result or match.day > 5:
+            await interaction.channel.send(embed=sess_embed)
             return await self._finish(interaction.channel)
+        await interaction.channel.send(embed=sess_embed)
         await interaction.channel.send(embed=render_test_embed(match), view=TestSimView(match, self.channel_id))
 
     @discord.ui.button(label="Simulate Innings", style=discord.ButtonStyle.success, row=0)
     async def sim_innings(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await interaction.message.edit(view=None)
-        match    = self.match
-        sc_text  = await asyncio.to_thread(_test_sim_innings, match)
-        await _send_test_chunks(interaction.channel, sc_text)
-        follow_msg = _test_post_innings_logic(match)
-        if follow_msg:
-            await interaction.channel.send(f"```{follow_msg}```")
+        match   = self.match
+        inn_idx = match.current_innings_idx
+        await asyncio.to_thread(_test_sim_innings, match)
+        _test_post_innings_logic(match)
+        inn_embed = _render_test_innings_embed(match, inn_idx)
         if match.result or match.day > 5:
+            await interaction.channel.send(embed=inn_embed)
             return await self._finish(interaction.channel)
+        await interaction.channel.send(embed=inn_embed)
         await interaction.channel.send(embed=render_test_embed(match), view=TestSimView(match, self.channel_id))
 
     @discord.ui.button(label="Simulate Full Match", style=discord.ButtonStyle.danger, row=0)
     async def sim_full(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await interaction.message.edit(view=None)
-        result_text = await asyncio.to_thread(_test_sim_match, self.match)
-        await _send_test_chunks(interaction.channel, result_text)
+        await asyncio.to_thread(_test_sim_match, self.match)
         await self._finish(interaction.channel)
 
 
@@ -3415,8 +3550,7 @@ async def _begin_test_match(channel, state):
             f"*Simulating 5-day Test... ⚙️*")
         match = TestMatchObj(t_bat, t_bowl, state.pitch, weather)
         active_test_matches[channel.id] = match
-        result_text = await asyncio.to_thread(_test_sim_match, match)
-        await _send_test_chunks(channel, result_text)
+        await asyncio.to_thread(_test_sim_match, match)
         embed = render_test_final_embed(match)
         try:
             img_buf = generate_test_scorecard_image(match)
