@@ -3009,9 +3009,10 @@ def render_test_embed(match: TestMatchObj) -> discord.Embed:
 
     # Helper: format one innings score
     def _sc(inn):
+        dec = "(d)" if getattr(inn, "declared", False) else ""
         if inn is innings and not inn.is_complete:
             return f"{inn.total_runs}/{inn.wickets}  ({inn.overs_str})"
-        return f"{inn.total_runs}/{inn.wickets}"
+        return f"{inn.total_runs}/{inn.wickets}{dec}"
 
     # One row per team — both innings on the same line separated by " & "
     for team in [match.team1, match.team2]:
@@ -3154,6 +3155,14 @@ def _test_take_snapshot(match: TestMatchObj) -> dict:
                 "complete": inn.is_complete,
                 "inn_num":  inn.innings_num,
                 "bat_name": inn.batting_team["name"],
+                "bowl_stats": {
+                    p["name"]: {
+                        "balls": inn.bowling_stats[p["name"]].balls_bowled,
+                        "runs":  inn.bowling_stats[p["name"]].runs_conceded,
+                        "wkts":  inn.bowling_stats[p["name"]].wickets_taken,
+                    }
+                    for p in inn.bowling_team["players"]
+                },
             }
             for inn in match.innings_list
         ],
@@ -3185,7 +3194,10 @@ def _render_test_session_embed(match: TestMatchObj, snap: dict) -> discord.Embed
         wkt_str = f"{wkts_fell} wkt{'s' if wkts_fell != 1 else ''}"
 
         completed = inn.is_complete and not sdata["complete"]
-        status    = "  ✅ *All Out*" if completed else ""
+        if completed:
+            status = "  ✅ *Declared*" if getattr(inn, "declared", False) else "  ✅ *All Out*"
+        else:
+            status = ""
         desc += f"### **{inn.batting_team['name']}**  ·  Innings {inn.innings_num}{status}\n"
         desc += f"Score: **{inn.total_runs}/{inn.wickets}** ({inn.overs_str} ov)"
         desc += f"  ·  +{runs_added} runs  ·  {wkt_str}  ·  {ovs} ov  ·  {rr} RPO\n"
@@ -3196,6 +3208,29 @@ def _render_test_session_embed(match: TestMatchObj, snap: dict) -> discord.Embed
             for w in new_fow[:6]:
                 desc += f"  {w}\n"
             desc += "```\n"
+
+        # Session bowling figures
+        snap_bowl = sdata.get("bowl_stats", {})
+        sess_bowlers = []
+        for p in inn.bowling_team["players"]:
+            pn  = p["name"]
+            old = snap_bowl.get(pn, {"balls": 0, "runs": 0, "wkts": 0})
+            bs  = inn.bowling_stats[pn]
+            db  = bs.balls_bowled  - old["balls"]
+            dr  = bs.runs_conceded - old["runs"]
+            dw  = bs.wickets_taken - old["wkts"]
+            if db > 0:
+                ovs = f"{db // 6}.{db % 6}"
+                sess_bowlers.append((dw, -dr, pn, ovs, dr, dw))
+        sess_bowlers.sort(reverse=True)
+        if sess_bowlers:
+            desc += "**Bowling:**\n```\n"
+            desc += f"{'Name':<18} {'O':>5}  {'R':>4}  W\n"
+            desc += "─" * 33 + "\n"
+            for _, _, name, ovs, runs, wkts in sess_bowlers:
+                desc += f"{name[:17]:<18} {ovs:>5}  {runs:>4}  {wkts}\n"
+            desc += "```\n"
+
         desc += "\n"
 
     # New innings started mid-session (carry-over)
@@ -3223,47 +3258,53 @@ def _render_test_session_embed(match: TestMatchObj, snap: dict) -> discord.Embed
 
 
 def _render_test_innings_embed(match: TestMatchObj, inn_idx: int) -> discord.Embed:
-    """Innings-complete summary embed — top batters and bowlers in the completed innings."""
+    """Full innings scorecard embed — all batters with dismissals and all bowlers."""
     inn   = match.innings_list[inn_idx]
+    rr    = round(inn.total_runs / max(1, inn.total_balls) * 6, 2)
+    dec   = "(dec)" if inn.declared else ""
     embed = discord.Embed(
-        title  = f"📋 Innings {inn.innings_num} Complete — {inn.batting_team['name']}",
-        color  = discord.Color.gold(),
+        title = f"📋 Innings {inn.innings_num} {dec}— {inn.batting_team['name']}",
+        color = discord.Color.gold(),
     )
-    rr  = round(inn.total_runs / max(1, inn.total_balls) * 6, 2)
-    desc = f"**Total: {inn.total_runs}/{inn.wickets}**  ({inn.overs_str} ov)  ·  RR: {rr}\n\n"
 
-    # Top batters
-    bats = sorted(
-        [(p, inn.batting_stats[p["name"]]) for p in inn.batting_team["players"]
-         if inn.batting_stats[p["name"]].balls_faced > 0],
-        key=lambda x: x[1].runs_scored, reverse=True,
-    )[:5]
-    if bats:
-        desc += "**Top Batters**\n```\n"
-        desc += f"{'Name':<18} {'R':>4}  {'B':>4}   SR\n"
-        desc += "─" * 36 + "\n"
-        for p, st in bats:
-            no  = "*" if st.dismissal == "not out" else " "
-            sr  = round(st.runs_scored / st.balls_faced * 100, 1) if st.balls_faced else 0.0
-            desc += f"{p['name'][:16]:<18} {str(st.runs_scored)+no:>5}  {st.balls_faced:>4}  {sr:>5.1f}\n"
-        desc += "```\n"
+    total_line = f"**{inn.total_runs}/{inn.wickets}{dec}**  ({inn.overs_str} ov)  ·  RR: {rr}\n\n"
 
-    # Top bowlers
-    bowls = sorted(
-        [(p, inn.bowling_stats[p["name"]]) for p in inn.bowling_team["players"]
-         if inn.bowling_stats[p["name"]].balls_bowled > 0],
-        key=lambda x: (x[1].wickets_taken, -x[1].runs_conceded), reverse=True,
-    )[:4]
-    if bowls:
-        desc += "**Top Bowlers**\n```\n"
-        desc += f"{'Name':<18} {'O':>5}  {'R':>4}  {'W':>2}   ECO\n"
-        desc += "─" * 38 + "\n"
-        for p, st in bowls:
-            eco = round(st.runs_conceded / st.balls_bowled * 6, 2) if st.balls_bowled else 0.0
-            desc += f"{p['name'][:16]:<18} {st.overs_str:>5}  {st.runs_conceded:>4}  {st.wickets_taken:>2}  {eco:>5.2f}\n"
-        desc += "```"
+    # ── All batters ──────────────────────────────────────────────────────────
+    bat_lines = []
+    for p in inn.batting_team["players"]:
+        st = inn.batting_stats[p["name"]]
+        if st.balls_faced == 0 and st.dismissal == "not out":
+            continue
+        no  = "*" if st.dismissal == "not out" else ""
+        dis = st.dismissal if st.dismissal == "not out" else st.dismissal[:22]
+        bat_lines.append(f"{p['name'][:14]:<14}  {dis:<22}  {str(st.runs_scored)+no:>4}  {st.balls_faced:>4}")
+    if inn.extras:
+        bat_lines.append(f"{'Extras':<14}  {'':22}  {inn.extras:>4}")
 
-    embed.description = desc
+    bat_block  = "**Batting**\n```\n"
+    bat_block += f"{'Name':<14}  {'Dismissal':<22}  {'R':>4}  {'B':>4}\n"
+    bat_block += "─" * 50 + "\n"
+    bat_block += "\n".join(bat_lines) + "\n"
+    bat_block += "```\n"
+
+    # ── All bowlers ──────────────────────────────────────────────────────────
+    bowl_lines = []
+    for p in inn.bowling_team["players"]:
+        st = inn.bowling_stats[p["name"]]
+        if st.balls_bowled == 0:
+            continue
+        eco = round(st.runs_conceded / st.balls_bowled * 6, 2)
+        bowl_lines.append(
+            f"{p['name'][:16]:<16}  {st.overs_str:>5}  {st.runs_conceded:>4}  {st.wickets_taken:>2}  {eco:>5.2f}"
+        )
+
+    bowl_block  = "**Bowling**\n```\n"
+    bowl_block += f"{'Name':<16}  {'O':>5}  {'R':>4}  {'W':>2}  {'ECO':>7}\n"
+    bowl_block += "─" * 40 + "\n"
+    bowl_block += "\n".join(bowl_lines) + "\n"
+    bowl_block += "```"
+
+    embed.description = total_line + bat_block + bowl_block
     return embed
 
 

@@ -91,6 +91,7 @@ class TestInnings:
         self.last_ball_boundary = False
         self.partnership_runs   = 0
         self.is_complete        = False
+        self.declared           = False   # innings closed by declaration (not all-out)
 
         # Ball condition
         self.ball_age              = 0    # legal balls since last new ball
@@ -786,12 +787,16 @@ def _check_result(match: TestMatch) -> Optional[str]:
     t1 = sum(i.total_runs for i in inns if i.batting_team["name"] == match.team1["name"])
     t2 = sum(i.total_runs for i in inns if i.batting_team["name"] == match.team2["name"])
 
-    if n == 2:
+    if n == 2 and len(inns) == 2:
+        # Guard len(inns)==2: if inn3 already started, t1/t2 include its partial runs
+        # which would falsely re-trigger the follow-on check.
         if not match.follow_on_enforced:
-            lead = t1 - t2
+            lead = inns[0].total_runs - inns[1].total_runs   # raw first-innings scores only
             if lead >= 200:
                 match.follow_on_enforced = True
-                match.follow_on_msg = f"\n  *** FOLLOW-ON ENFORCED — {match.team1['name']} lead by {lead} ***\n"
+                match.follow_on_msg = (
+                    f"\n  *** FOLLOW-ON ENFORCED — {match.team1['name']} lead by {lead} ***\n"
+                )
         return None
 
     if n == 3:
@@ -836,6 +841,52 @@ def _start_next_innings(match: TestMatch):
         else:
             match._new_innings(match.team2, match.team1)
     match.current_innings_idx = len(match.innings_list) - 1
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DECLARATION LOGIC
+def _should_declare(match: TestMatch) -> bool:
+    """Return True if the current batting team should declare.
+
+    Based on real Test cricket patterns (research of 100+ Tests):
+    - First innings: NEVER declared (teams bat until all out — historical first-innings
+      declarations are extreme outliers requiring specific pitch/weather conditions).
+    - Second innings: declare when required run rate (lead ÷ overs remaining) ≥ 2.5 RPO.
+      At 2.5 RPO, the chase is achievable at Test pace but challenging given bowling
+      pressure and pitch deterioration. This covers the range from aggressive (Day 4
+      evening, ~150 lead, 60 overs: 2.5 RPO) to moderate (350 lead, 135 overs: 2.59 RPO).
+    """
+    if match.current_innings_idx == 3 or match.result:
+        return False
+
+    inn      = match.current_innings
+    bat_name = inn.batting_team["name"]
+
+    # No first-innings declarations
+    batted_before = sum(
+        1 for i in match.innings_list[:-1]
+        if i.batting_team["name"] == bat_name and i.is_complete
+    )
+    if batted_before == 0:
+        return False
+
+    # Lead from batting team's perspective
+    inns = match.innings_list
+    t1   = sum(i.total_runs for i in inns if i.batting_team["name"] == match.team1["name"])
+    t2   = sum(i.total_runs for i in inns if i.batting_team["name"] == match.team2["name"])
+    lead = (t1 - t2) if bat_name == match.team1["name"] else (t2 - t1)
+    if lead < 80:          # no meaningful declaration below 80-run lead
+        return False
+
+    # Overs remaining = full future sessions + remainder of current session
+    sessions_after = 15 - (match.day - 1) * 3 - match.session
+    overs_left     = sessions_after * 30 + max(0, 30 - match.overs_in_session)
+
+    if overs_left < 15:    # almost no time — declare regardless
+        return True
+
+    # Required run rate for opposition to win; declare when RRR ≥ 2.5
+    return (lead / overs_left) >= 2.5
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SIMULATION MODES
@@ -922,6 +973,11 @@ def simulate_session(match: TestMatch) -> str:
                 if i < len(innings.fow):
                     fallen.append(innings.fow[i])
 
+            # Declaration check after each completed over
+            if not innings.is_complete and _should_declare(match):
+                innings.is_complete = True
+                innings.declared    = True
+
         session_overs += stint_overs
 
         # ── Build stint summary ────────────────────────────────────────────
@@ -946,7 +1002,8 @@ def simulate_session(match: TestMatch) -> str:
         if fallen:
             header.append(f"  FoW   :  " + " | ".join(fallen))
         if innings.is_complete:
-            header.append(f"  *** INNINGS COMPLETE ***")
+            tag = "DECLARED" if innings.declared else "INNINGS COMPLETE"
+            header.append(f"  *** {tag} ***")
         output_parts.append("\n".join(header))
         # Loop back — if innings ended, the next iteration will start the new innings
 
@@ -1055,7 +1112,8 @@ def _format_scorecard(innings: TestInnings) -> str:
     lines += [
         f"  {'·'*60}",
         f"  Extras : {innings.extras}",
-        f"  TOTAL  : {innings.total_runs}/{innings.wickets}  ({innings.overs_str} ov)"
+        f"  TOTAL  : {innings.total_runs}/{innings.wickets}"
+        f"{'(dec)' if innings.declared else ''}  ({innings.overs_str} ov)"
         f"  RR: {innings.run_rate}",
     ]
     if innings.fow:
