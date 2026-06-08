@@ -2994,30 +2994,31 @@ def _test_map_weather(w: str) -> str:
 
 
 def render_test_embed(match: TestMatchObj) -> discord.Embed:
-    """Live scoreboard embed — Day/Session instead of CRR, lead/trail instead of target."""
+    """Live scoreboard embed — Day/Session, lead/trail, innings-4 target equation."""
     innings = match.current_innings
-    embed   = discord.Embed(color=0x1D4ED8)
+    embed   = discord.Embed(color=0xFFFFFF)
 
     sess = _TEST_SESSION_NAMES.get(match.session, "Morning")
     desc  = f"**🏏 TEST MATCH — Day {match.day} | {sess} Session**\n"
-    desc += f"*Pitch: {match.pitch} | Weather: {match.weather}*\n\n"
+    desc += f"*Pitch: {match.pitch}  ·  Weather: {match.weather}*\n"
+    if match.follow_on_enforced:
+        desc += f"*⚠️ Follow-on enforced*\n"
+    desc += "\n"
 
+    # All innings scores (### for current)
     for inn in match.innings_list:
-        arrow = " ◄" if inn is innings else ""
-        desc += f"**{inn.batting_team['name']}**  {inn.total_runs}/{inn.wickets}  ({inn.overs_str} ov){arrow}\n"
+        is_curr = inn is innings
+        prefix  = "### " if is_curr else ""
+        arrow   = " ◄" if is_curr else ""
+        status  = "" if is_curr else (" *(batting)*" if not inn.is_complete else "")
+        desc   += f"{prefix}🏏 **{inn.batting_team['name']}**  {inn.total_runs}/{inn.wickets}  ({inn.overs_str} ov){arrow}{status}\n"
 
-    # Lead / Trail
+    # Lead/Trail or innings-4 target
     inns   = match.innings_list
     t1_tot = sum(i.total_runs for i in inns if i.batting_team["name"] == match.team1["name"])
     t2_tot = sum(i.total_runs for i in inns if i.batting_team["name"] == match.team2["name"])
-    diff   = abs(t1_tot - t2_tot)
-    if diff == 0:
-        lead_str = "Scores level"
-    else:
-        leading  = match.team1["name"] if t1_tot > t2_tot else match.team2["name"]
-        lead_str = (f"Lead by **{diff}**" if innings.batting_team["name"] == leading
-                    else f"Trail by **{diff}**")
 
+    # Batting stats
     desc += f"\n**`{'BATTER':<16}{'R':<5}{'B':<5}{'SR':<6}`**\n"
     for idx in range(min(innings.next_batter_idx, len(innings.batting_team["players"]))):
         p  = innings.batting_team["players"][idx]
@@ -3027,14 +3028,74 @@ def render_test_embed(match: TestMatchObj) -> discord.Embed:
             sr = round(st.runs_scored / st.balls_faced * 100, 1) if st.balls_faced else 0.0
             desc += f"`{p['name'][:14]:<14}{mk:<2}{st.runs_scored:<5}{st.balls_faced:<5}{sr:<6.1f}`\n"
 
-    desc += f"\n`P'Ship: {innings.partnership_runs}`  ·  {lead_str}\n"
+    # Partnership + lead/trail summary line
+    diff = abs(t1_tot - t2_tot)
+    if diff == 0:
+        lead_str = "Scores level"
+    else:
+        leading  = match.team1["name"] if t1_tot > t2_tot else match.team2["name"]
+        lead_str = (f"Lead: {diff}" if innings.batting_team["name"] == leading else f"Trail: {diff}")
+    desc += f"\n`P'Ship: {innings.partnership_runs}  {lead_str}`\n"
+
+    # Current bowler
     if innings.current_bowler:
         cb  = innings.current_bowler
         cbs = innings.bowling_stats[cb["name"]]
         desc += (f"\n**`{'BOWLER':<17}{'O':<8}{'R':<5}{'W'}`**\n"
                  f"`{cb['name'][:16]:<17}{cbs.overs_str:<8}{cbs.runs_conceded:<5}{cbs.wickets_taken}`\n")
 
+    # Innings-4 chase equation (like ODI/T20 target line)
+    if match.current_innings_idx == 3:
+        bat_nm     = innings.batting_team["name"]
+        t_bat_prev = sum(i.total_runs for i in inns[:-1] if i.batting_team["name"] == bat_nm)
+        t_field    = sum(i.total_runs for i in inns if i.batting_team["name"] != bat_nm)
+        still_need = max(0, t_field - t_bat_prev - innings.total_runs + 1)
+        if still_need > 0:
+            overs_left = innings.overs_str
+            desc += f"-# Equation: Need **{still_need}** more runs to win"
+        else:
+            desc += f"-# 🏆 Target reached!"
+
     embed.description = desc
+    return embed
+
+
+def render_test_final_embed(match: TestMatchObj) -> discord.Embed:
+    """Final match embed — compact per-innings summary (image has the full detail)."""
+    embed = discord.Embed(title="📋 Test Match Scorecard", color=discord.Color.gold())
+    result = match.result or "Match Drawn"
+    embed.description = f"**Result:** {result}\n"
+
+    for inn in match.innings_list:
+        # Top 3 batters by runs
+        top_bat = sorted(
+            [(p, inn.batting_stats[p["name"]]) for p in inn.batting_team["players"]
+             if inn.batting_stats[p["name"]].balls_faced > 0],
+            key=lambda x: x[1].runs_scored, reverse=True
+        )[:3]
+        # Top 2 bowlers by wickets
+        top_bowl = sorted(
+            [(p, inn.bowling_stats[p["name"]]) for p in inn.bowling_team["players"]
+             if inn.bowling_stats[p["name"]].balls_bowled > 0],
+            key=lambda x: (x[1].wickets_taken, -x[1].runs_conceded), reverse=True
+        )[:2]
+
+        lines = [f"**Total: {inn.total_runs}/{inn.wickets}** ({inn.overs_str} ov)\n```"]
+        for p, st in top_bat:
+            not_out = "*" if st.dismissal == "not out" else ""
+            lines.append(f"{p['name'][:18]:<20} {st.runs_scored}{not_out} ({st.balls_faced}b)")
+        lines.append("---")
+        for p, st in top_bowl:
+            lines.append(f"{p['name'][:18]:<20} {st.wickets_taken}/{st.runs_conceded} ({st.overs_str})")
+        lines.append("```")
+
+        embed.add_field(
+            name=f"Innings {inn.innings_num} — {inn.batting_team['name']}",
+            value="\n".join(lines),
+            inline=True
+        )
+
+    embed.set_footer(text=f"Pitch: {match.pitch}  ·  Weather: {match.weather}")
     return embed
 
 
@@ -3219,13 +3280,17 @@ class TestSimView(discord.ui.View):
         self.channel_id = channel_id
 
     async def _finish(self, channel):
-        result = self.match.result or "Match Drawn"
-        await channel.send(f"**Match Result:** {result}")
+        embed = render_test_final_embed(self.match)
         try:
             img_buf = generate_test_scorecard_image(self.match)
-            await channel.send(file=discord.File(fp=img_buf, filename="test_scorecard.png"))
+            file    = discord.File(fp=img_buf, filename="test_scorecard.png")
+            await channel.send(
+                "🏆 **Test Match over! Here is the final scorecard and broadcast graphic:**",
+                embed=embed, file=file
+            )
         except Exception:
-            pass
+            result = self.match.result or "Match Drawn"
+            await channel.send(f"🏆 **Test Match Result:** {result}", embed=embed)
         active_test_matches.pop(self.channel_id, None)
 
     @discord.ui.button(label="Simulate Session", style=discord.ButtonStyle.primary, row=0)
@@ -3262,12 +3327,7 @@ class TestSimView(discord.ui.View):
         await interaction.message.edit(view=None)
         result_text = await asyncio.to_thread(_test_sim_match, self.match)
         await _send_test_chunks(interaction.channel, result_text)
-        try:
-            img_buf = generate_test_scorecard_image(self.match)
-            await interaction.channel.send(file=discord.File(fp=img_buf, filename="test_scorecard.png"))
-        except Exception:
-            pass
-        active_test_matches.pop(self.channel_id, None)
+        await self._finish(interaction.channel)
 
 
 # ── Test match toss views ──────────────────────────────────────────────────────
@@ -3357,11 +3417,16 @@ async def _begin_test_match(channel, state):
         active_test_matches[channel.id] = match
         result_text = await asyncio.to_thread(_test_sim_match, match)
         await _send_test_chunks(channel, result_text)
+        embed = render_test_final_embed(match)
         try:
             img_buf = generate_test_scorecard_image(match)
-            await channel.send(file=discord.File(fp=img_buf, filename="test_scorecard.png"))
+            file    = discord.File(fp=img_buf, filename="test_scorecard.png")
+            await channel.send(
+                "🏆 **Test Match over! Here is the final scorecard and broadcast graphic:**",
+                embed=embed, file=file
+            )
         except Exception:
-            pass
+            await channel.send(f"🏆 **Test Match Result:** {match.result or 'Match Drawn'}", embed=embed)
         active_test_matches.pop(channel.id, None)
         return
 

@@ -762,15 +762,17 @@ def _select_bowler(match: TestMatch):
 # RESULT HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 def _get_chase_target(match: TestMatch) -> Optional[int]:
-    """Returns runs needed by the CURRENT batting team (4th innings only)."""
+    """Returns runs STILL NEEDED in innings 4 by the current batting team."""
     if match.current_innings_idx != 3:
         return None
-    inns = match.innings_list
-    t1 = sum(i.total_runs for i in inns if i.batting_team["name"] == match.team1["name"])
-    t2 = sum(i.total_runs for i in inns if i.batting_team["name"] == match.team2["name"])
-    if match.current_innings.batting_team["name"] == match.team1["name"]:
-        return t2 + 1
-    return t1 + 1
+    inns    = match.innings_list
+    curr    = match.current_innings
+    bat_nm  = curr.batting_team["name"]
+    # Runs batting team scored in ALL previous innings (not including innings 4 in progress)
+    t_bat_prev  = sum(i.total_runs for i in inns[:-1] if i.batting_team["name"] == bat_nm)
+    # Total runs for fielding team (innings 4 is excluded since they are not batting)
+    t_field     = sum(i.total_runs for i in inns if i.batting_team["name"] != bat_nm)
+    return max(1, t_field - t_bat_prev + 1)
 
 def _check_result(match: TestMatch) -> Optional[str]:
     inns = match.innings_list
