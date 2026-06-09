@@ -1041,6 +1041,7 @@ def simulate_session(match: TestMatch) -> str:
                 break
 
         _select_bowler(match)
+        innings.over_log = []          # reset timeline for each new over
         wkts_before = innings.wickets
 
         legal_balls_this_over = 0

@@ -3139,15 +3139,15 @@ def render_test_embed(match: TestMatchObj) -> discord.Embed:
 
     desc += f"\n`P'Ship: {innings.partnership_runs}  {lead_str}`\n"
 
-    # Current bowler + over timeline
-    if innings.current_bowler:
-        cb  = innings.current_bowler
+    # Current bowler row + over timeline (matches T20/ODI layout)
+    desc += f"\n**`{'BOWLER':<17}{'O':<8}{'R':<5}{'W'}`**\n"
+    cb = innings.current_bowler or innings.prev_bowler
+    if cb:
         cbs = innings.bowling_stats[cb["name"]]
-        desc += (f"\n**`{'BOWLER':<17}{'O':<8}{'R':<5}{'W'}`**\n"
-                 f"`{cb['name'][:16]:<17}{cbs.overs_str:<8}{cbs.runs_conceded:<5}{cbs.wickets_taken}`\n")
-    tl = getattr(innings, "over_log", [])
+        desc += f"`{cb['name'][:16]:<17}{cbs.overs_str:<8}{cbs.runs_conceded:<5}{cbs.wickets_taken}`\n"
+    tl = getattr(innings, "over_log", [])[-6:]
     timeline_str = " ".join(tl) if tl else "Starting over..."
-    desc += f"**This Over**\n{timeline_str}\n"
+    desc += f"**Timeline**\n{timeline_str}\n"
 
     # Innings-4 chase equation
     if match.current_innings_idx == 3:
