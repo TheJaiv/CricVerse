@@ -3695,22 +3695,36 @@ class TestScorecardView(discord.ui.View):
     """Navigate through per-innings scorecards after a Test match ends."""
 
     def __init__(self, match: TestMatchObj):
-        super().__init__(timeout=600)
+        super().__init__(timeout=300)
         self.match = match
         self.idx   = 0
-        self._refresh()
+        self._update_buttons()
 
-    def _refresh(self):
+    def _update_buttons(self):
         total = len(self.match.innings_list)
         self.prev_btn.disabled = (self.idx == 0)
         self.next_btn.disabled = (self.idx >= total - 1)
         self.page_btn.label    = f"Innings {self.idx + 1} / {total}"
 
+    async def _navigate(self, interaction: discord.Interaction):
+        try:
+            embed = _render_test_innings_embed(self.match, self.idx)
+            self._update_buttons()
+            await interaction.response.edit_message(embed=embed, view=self)
+        except Exception as e:
+            try:
+                await interaction.response.send_message(f"❌ Could not load scorecard: {e}", ephemeral=True)
+            except Exception:
+                pass
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
     @discord.ui.button(label="◀ Prev", style=discord.ButtonStyle.secondary, row=0)
     async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.idx -= 1
-        self._refresh()
-        await interaction.response.edit_message(embed=_render_test_innings_embed(self.match, self.idx), view=self)
+        await self._navigate(interaction)
 
     @discord.ui.button(label="Innings 1 / ?", style=discord.ButtonStyle.secondary, disabled=True, row=0)
     async def page_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -3719,8 +3733,7 @@ class TestScorecardView(discord.ui.View):
     @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary, row=0)
     async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.idx += 1
-        self._refresh()
-        await interaction.response.edit_message(embed=_render_test_innings_embed(self.match, self.idx), view=self)
+        await self._navigate(interaction)
 
 
 async def _test_finish_match(match: TestMatchObj, channel_id: int, channel):
