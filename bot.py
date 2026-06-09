@@ -1423,7 +1423,7 @@ async def loop_current_innings_simulation(interaction, match: CricketMatch):
         if innings.wickets >= max_w or innings.total_balls >= match.max_balls or (
                 match.current_innings_num == 2 and
                 innings.total_runs >= getattr(match, "target", match.innings1.total_runs + 1)):
-            orig_sim_only = match.sim_only
+            orig_sim_only = getattr(match, 'sim_only', False)
             match.sim_only = False   # always return to hub after this innings
             await handle_innings_end(interaction, match)
             match.sim_only = orig_sim_only
