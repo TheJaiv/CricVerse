@@ -4989,7 +4989,7 @@ class PrefixCog(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ Dump failed: {e}")
 
-    @commands.command(name="sync_csv", aliases=["sc"], help="[OWNER] Sync players from players_master.csv to DB.\nUsage: sync_csv")
+    @commands.command(name="sync_csv", aliases=["scsv"], help="[OWNER] Sync players from players_master.csv to DB.\nUsage: sync_csv")
     async def sync_csv(self, ctx):
         if ctx.author.id != ADMIN_DISCORD_ID:
             return await ctx.send("❌ Owner only.")
