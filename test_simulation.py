@@ -460,57 +460,60 @@ def execute_test_ball(match: TestMatch) -> bool:
 
     # ── Pitch type ─────────────────────────────────────────────────────────
     cb = innings.total_balls
-    if   match.pitch == "Green"  and "Pace" in bowler["role"]:                  bowl_r += 4
-    elif match.pitch == "Flat":                                                  bat_r  += 6
+    if   match.pitch == "Green"  and "Pace" in bowler["role"]:                  bowl_r += 6
+    elif match.pitch == "Flat":                                                  bat_r  += 10
     elif match.pitch == "Dusty"  and "Spin" in bowler["role"]:
-        bowl_r += 4;  bat_r -= 2
+        bowl_r += 6;  bat_r -= 4
     elif match.pitch == "Hard"   and "Pace" in bowler["role"] and cb < 120:
-        bowl_r += 2;  bat_r  += 2
+        bowl_r += 3;  bat_r  += 3
     elif match.pitch == "Cracked":
-        bowl_r += 3;  bat_r -= 2
+        bowl_r += 5;  bat_r -= 4
     elif match.pitch == "Damp"   and "Pace" in bowler["role"] and cb < 180:
-        bowl_r += 4;  bat_r -= 2
+        bowl_r += 7;  bat_r -= 4
     elif match.pitch == "Dead":
-        bat_r += 5;   bowl_r -= 3
+        bat_r += 10;  bowl_r -= 5
     elif match.pitch == "Worn"   and "Spin" in bowler["role"] and cb > 180:
-        bowl_r += 5;  bat_r -= 2
+        bowl_r += 7;  bat_r -= 4
     elif match.pitch == "Turning" and "Spin" in bowler["role"]:
-        bowl_r += 5;  bat_r -= 3
+        bowl_r += 8;  bat_r -= 5
     elif match.pitch == "Sticky":
-        bowl_r += 5;  bat_r -= 3
+        bowl_r += 8;  bat_r -= 6
     elif match.pitch == "Bouncy" and "Pace" in bowler["role"]:
-        bowl_r += 4;  bat_r -= 2
+        bowl_r += 6;  bat_r -= 4
     elif match.pitch == "Slow"   and "Spin" in bowler["role"]:
-        bowl_r += 3
+        bowl_r += 4
     elif match.pitch == "Dry"    and "Spin" in bowler["role"] and cb > 150:
-        bowl_r += 4;  bat_r -= 2
+        bowl_r += 6;  bat_r -= 4
 
     # ── Weather ────────────────────────────────────────────────────────────
     new_ball_period = cb < 180
     mid_period      = 180 <= cb < 480
-    if   match.weather == "Clear":                                               bat_r  += 2
+    if   match.weather == "Clear":                                               bat_r  += 4
     elif match.weather == "Overcast" and "Pace" in bowler["role"]:
-        if   cb < 90:   bowl_r += 6;  bat_r -= 2   # first 15 overs: heavy swing
-        elif cb < 180:  bowl_r += 3;  bat_r -= 1   # overs 15-30: moderate
-        elif cb < 300:  bowl_r += 1                 # overs 30-50: fading
+        if   cb < 90:   bowl_r += 9;  bat_r -= 4   # first 15 overs: heavy swing
+        elif cb < 180:  bowl_r += 5;  bat_r -= 2   # overs 15-30: moderate
+        elif cb < 300:  bowl_r += 2                 # overs 30-50: fading
         # 50+ overs: no effect
     elif match.weather == "Cloudy"   and "Pace" in bowler["role"]:
-        bowl_r += (3 if new_ball_period else 1 if cb < 300 else 0)
+        bowl_r += (5 if new_ball_period else 2 if cb < 300 else 0)
     elif match.weather == "Humid"    and "Pace" in bowler["role"]:
-        bowl_r += (4 if new_ball_period else 1 if mid_period else 0)
+        bowl_r += (6 if new_ball_period else 2 if mid_period else 0)
     elif match.weather == "Windy"    and "Pace" in bowler["role"]:
-        bowl_r += (4 if new_ball_period else 1)
+        bowl_r += (5 if new_ball_period else 2)
     elif match.weather == "Dry Heat":
-        if "Spin" in bowler["role"] and cb > 180:  bowl_r += 6
-        elif "Pace" in bowler["role"]:             bowl_r -= 4
+        if "Spin" in bowler["role"] and cb > 180:  bowl_r += 8
+        elif "Pace" in bowler["role"]:             bowl_r -= 6
 
-    # ── Cap total condition bonus so stacking never goes extreme ──────────────
+    # ── Cap total condition bonus — raised to 18 to let extremes show through ─
     raw_bowl_bonus = bowl_r - float(bowler["bowl"])
-    if raw_bowl_bonus > 13:
-        bowl_r = float(bowler["bowl"]) + 13
-    raw_bat_penalty = float(striker["bat"]) * 0.70 - bat_r  # how much bat lost
-    if raw_bat_penalty > 14:
-        bat_r = float(striker["bat"]) * 0.70 - 14
+    if raw_bowl_bonus > 18:
+        bowl_r = float(bowler["bowl"]) + 18
+    raw_bat_bonus = bat_r - float(striker["bat"])
+    if raw_bat_bonus > 18:
+        bat_r = float(striker["bat"]) + 18
+    raw_bat_penalty = float(striker["bat"]) - bat_r
+    if raw_bat_penalty > 18:
+        bat_r = float(striker["bat"]) - 18
 
     # ── ±2 rating randomness (Test format: smaller variance than T20/ODI ±4) ──
     bat_r  += random.uniform(-2.0, 2.0)
@@ -518,14 +521,18 @@ def execute_test_ball(match: TestMatch) -> bool:
 
     diff = bat_r - bowl_r   # positive = batter advantage
 
-    # ── Base weights: ~3.7 RPO at diff=0, 1 wicket per 65 balls ──────────────
-    dot_w  = max(46.0,  63.0 - diff * 0.15)
-    sing_w = 27.0
+    # ── Base weights ───────────────────────────────────────────────────────
+    # sing_w is now responsive so RPO reflects conditions.
+    # Higher wkt floor (0.85) prevents infinite innings for dominant teams.
+    # At diff=0, neutral 80v80: ~270 runs, wicket every 42 balls.
+    # Flat+Clear ~380, Sticky+Overcast ~140, 90v70 ~700, 70v90 ~130.
+    dot_w  = max(30.0,  55.0 - diff * 0.28)
+    sing_w = max(12.0,  22.0 + diff * 0.06)
     two_w  = 7.0
     thr_w  = 0.5
-    four_w = max(0.5,   6.0  + diff * 0.07)
-    six_w  = max(0.05,  0.60 + diff * 0.018)
-    wkt_w  = max(0.30,  1.5  - diff * 0.038)
+    four_w = max(0.3,   5.0  + diff * 0.10)
+    six_w  = max(0.05,  0.45 + diff * 0.022)
+    wkt_w  = max(0.85,  2.2  - diff * 0.060)
 
     wkt_w *= wkt_mult
 

@@ -2090,9 +2090,13 @@ class BattingView(discord.ui.View):
         self.processed = True
         self.match.current_shot_selection = label
         await interaction.response.edit_message(view=None)
-        
+
         execute_ball_math(self.match)
-        
+
+        if getattr(self.match, "wide_extra_msg", ""):
+            await interaction.channel.send(self.match.wide_extra_msg)
+            self.match.wide_extra_msg = ""
+
         if getattr(self.match, "pending_drs", False):
             self.match.pending_drs = False
             msg = await interaction.channel.send(f"🚨 **{self.match.drs_dismissal.upper()} GIVEN!**\n<@{self.uid}>, you have 20 seconds to take a review.", view=None)
@@ -3050,8 +3054,11 @@ def render_test_embed(match: TestMatchObj) -> discord.Embed:
     sess  = _TEST_SESSION_NAMES.get(match.session, "Morning")
     inns  = match.innings_list
 
+    overs_done_today = (match.session - 1) * 30 + match.overs_in_session
+    overs_left_today = max(0, 90 - overs_done_today)
+
     desc  = f"**<a:ball:1510370830163640320> LIVE SCOREBOARD**\n"
-    desc += f"-# Day {match.day} · {sess} Session  ·  {match.pitch} / {match.weather}"
+    desc += f"-# Day {match.day} · {sess} Session  ·  {match.pitch} / {match.weather}  ·  {overs_left_today} ov left today"
     if match.follow_on_enforced:
         desc += "  ·  ⚠️ Follow-on"
     desc += "\n\n"
@@ -3432,11 +3439,16 @@ def generate_test_scorecard_image(match: TestMatchObj) -> io.BytesIO:
             d.rectangle([(x0, y0), (x1, y0 + _BAR)], fill=tc)
 
             lbl  = f"INNINGS {inn_idx + 1}"
+            if getattr(inn, "declared", False):
+                lbl += "  (DEC)"
+            elif inn_idx == 2 and match.follow_on_enforced:
+                lbl += "  (FOLLOW-ON)"
             d.text((x0 + 10, y0 + 5),  lbl, fill="#DDDDDD", font=fOVR)
             tnm  = inn.batting_team["name"][:20].upper()
             d.text((x0 + 10, y0 + 18), tnm, fill=_C_WH,     font=fTEAM)
 
-            sc   = f"{inn.total_runs}/{inn.wickets}"
+            dec_tag = "d" if getattr(inn, "declared", False) else ""
+            sc   = f"{inn.total_runs}/{inn.wickets}{dec_tag}"
             d.text((x1 - _tw(sc, fSC) - 10, y0 + (_BAR - _th(fSC)) // 2), sc, fill=_C_SC, font=fSC)
             ovr  = f"{inn.overs_str} ov  RR:{inn.run_rate}"
             d.text((x1 - _tw(ovr, fOVR) - 10, y0 + _BAR - _th(fOVR) - 3), ovr, fill="#CCCCCC", font=fOVR)
@@ -3506,6 +3518,7 @@ async def _test_finish_match(match: TestMatchObj, channel_id: int, channel):
     """Shared finish routine: increment counter, post final scorecard, clean up."""
     _increment_match_count("test")
     embed = render_test_final_embed(match)
+    img_buf = None
     try:
         img_buf = generate_test_scorecard_image(match)
         file    = discord.File(fp=img_buf, filename="test_scorecard.png")
@@ -3515,6 +3528,27 @@ async def _test_finish_match(match: TestMatchObj, channel_id: int, channel):
         )
     except Exception:
         await channel.send(f"🏆 **Test Match Result:** {match.result or 'Match Drawn'}", embed=embed)
+
+    if channel.guild:
+        log_channel_id = get_match_log_channel(str(channel.guild.id))
+        if log_channel_id:
+            try:
+                log_channel = bot.get_channel(int(log_channel_id))
+                if log_channel:
+                    if img_buf:
+                        img_buf.seek(0)
+                        log_file = discord.File(fp=img_buf, filename="test_scorecard.png")
+                    else:
+                        log_file = discord.File(fp=generate_test_scorecard_image(match), filename="test_scorecard.png")
+                    t1 = match.team1["name"]
+                    t2 = match.team2["name"]
+                    await log_channel.send(
+                        f"📋 **Match Log** · {t1} vs {t2} · <#{channel.id}>",
+                        file=log_file
+                    )
+            except Exception as _log_err:
+                print(f"⚠️ Test match log send failed: {_log_err}")
+
     active_test_matches.pop(channel_id, None)
 
 
@@ -3761,17 +3795,9 @@ class TestInteractiveBowlerSelectView(discord.ui.View):
 
 
 class TestInteractiveDeliveryView(discord.ui.View):
-    _PACE_OPTIONS = [
-        ("Inswing Full",       discord.ButtonStyle.primary,   0),
-        ("Outswing Full",      discord.ButtonStyle.primary,   0),
-        ("Seam Good length",   discord.ButtonStyle.primary,   0),
-        ("Fast Bouncer",       discord.ButtonStyle.danger,    1),
-        ("Fast Yorker",        discord.ButtonStyle.danger,    1),
-        ("Fast Short",         discord.ButtonStyle.secondary, 1),
-        ("Off Cutter",         discord.ButtonStyle.secondary, 2),
-        ("Leg Cutter",         discord.ButtonStyle.secondary, 2),
-        ("Knuckle",            discord.ButtonStyle.secondary, 2),
-    ]
+    _PACE_VARIATIONS = ["Inswing", "Outswing", "Seam", "Fast", "Slow"]
+    _PACE_LENGTHS    = ["Bouncer", "Full", "Good length", "Yorker", "Short"]
+    _CUTTERS         = ["Off Cutter", "Leg Cutter", "Knuckle"]
     _OFF_SPIN = [
         ("Off spin",  discord.ButtonStyle.primary,   0),
         ("Arm ball",  discord.ButtonStyle.primary,   0),
@@ -3793,21 +3819,55 @@ class TestInteractiveDeliveryView(discord.ui.View):
         super().__init__(timeout=120)
         self.match      = match
         self.channel_id = channel_id
+        self._temp_var  = None
 
         mystery_used = getattr(match.current_innings, "mystery_bowled_this_over", False)
 
         if is_spin:
             opts = self._OFF_SPIN if "Off" in bowler["role"] else self._LEG_SPIN
+            for label, style, row in opts:
+                disabled = (label == "Mystery" and mystery_used)
+                btn = discord.ui.Button(label=label, style=style, row=row, disabled=disabled)
+                btn.callback = self._make_direct_cb(label)
+                self.add_item(btn)
         else:
-            opts = self._PACE_OPTIONS
+            # Row 0: Variation (same as T20/ODI PaceBowlingView)
+            for var in self._PACE_VARIATIONS:
+                btn = discord.ui.Button(label=var, style=discord.ButtonStyle.primary, row=0)
+                btn.callback = self._make_var_cb(var)
+                self.add_item(btn)
+            # Row 1: Length (disabled until variation selected)
+            for length in self._PACE_LENGTHS:
+                btn = discord.ui.Button(label=length, style=discord.ButtonStyle.danger, row=1, disabled=True)
+                btn.callback = self._make_len_cb(length)
+                self.add_item(btn)
+            # Row 2: Cutters (direct, no variation needed)
+            for cutter in self._CUTTERS:
+                btn = discord.ui.Button(label=cutter, style=discord.ButtonStyle.secondary, row=2)
+                btn.callback = self._make_direct_cb(cutter)
+                self.add_item(btn)
 
-        for label, style, row in opts:
-            disabled = (label == "Mystery" and mystery_used)
-            btn = discord.ui.Button(label=label, style=style, row=row, disabled=disabled)
-            btn.callback = self._make_cb(label)
-            self.add_item(btn)
+    def _make_var_cb(self, var: str):
+        async def cb(interaction: discord.Interaction):
+            self._temp_var = var
+            for item in self.children:
+                if item.row == 0:
+                    item.disabled = True
+                elif item.row == 1:
+                    item.disabled = False
+            await interaction.response.edit_message(view=self)
+        return cb
 
-    def _make_cb(self, delivery: str):
+    def _make_len_cb(self, length: str):
+        async def cb(interaction: discord.Interaction):
+            await interaction.response.defer()
+            await interaction.message.edit(view=None)
+            delivery = f"{self._temp_var} {length}"
+            self.match.current_delivery_selection = delivery
+            await _test_ia_show_shot(interaction.channel, self.match, self.channel_id, delivery)
+        return cb
+
+    def _make_direct_cb(self, delivery: str):
         async def cb(interaction: discord.Interaction):
             await interaction.response.defer()
             await interaction.message.edit(view=None)
@@ -3863,16 +3923,34 @@ class TestSimView(discord.ui.View):
         self.match      = match
         self.channel_id = channel_id
 
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        host = getattr(self.match, "host_id", None)
+        p2   = getattr(self.match, "p2_id",   None)
+        uid  = interaction.user.id
+        if host and uid != host and uid != p2:
+            await interaction.response.send_message("❌ Only match participants can interact with this.", ephemeral=True)
+            return False
+        return True
+
+    async def _check_host(self, interaction: discord.Interaction) -> bool:
+        """Simulation buttons are host-only; batting declare is handled separately."""
+        if interaction.user.id != getattr(self.match, "host_id", interaction.user.id):
+            await interaction.response.send_message("❌ Only the match host can control simulation.", ephemeral=True)
+            return False
+        return True
+
     # ── Row 0: Interactive / quick simulation ──────────────────────────────────
 
     @discord.ui.button(label="🏏 Play Interactive", style=discord.ButtonStyle.success, row=0)
     async def play_interactive(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_host(interaction): return
         await interaction.response.defer()
         await interaction.message.edit(view=None)
         await _test_ia_start_over(interaction.channel, self.match, self.channel_id)
 
     @discord.ui.button(label="1 Over", style=discord.ButtonStyle.primary, row=0)
     async def sim_one_over(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_host(interaction): return
         await interaction.response.defer()
         await interaction.message.edit(view=None)
         match   = self.match
@@ -3904,7 +3982,7 @@ class TestSimView(discord.ui.View):
 
     @discord.ui.button(label="⚡ Multiple Overs", style=discord.ButtonStyle.primary, row=0)
     async def sim_multiple_overs(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.message.edit(view=None)
+        if not await self._check_host(interaction): return
         await interaction.response.send_modal(
             TestMultipleOversModal(self.match, self.channel_id, interaction.channel)
         )
@@ -3913,6 +3991,7 @@ class TestSimView(discord.ui.View):
 
     @discord.ui.button(label="☕ Session", style=discord.ButtonStyle.secondary, row=1)
     async def sim_session(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_host(interaction): return
         await interaction.response.defer()
         await interaction.message.edit(view=None)
         match   = self.match
@@ -3949,6 +4028,7 @@ class TestSimView(discord.ui.View):
 
     @discord.ui.button(label="📅 Full Day", style=discord.ButtonStyle.secondary, row=1)
     async def sim_full_day(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_host(interaction): return
         await interaction.response.defer()
         await interaction.message.edit(view=None)
         match     = self.match
@@ -3985,6 +4065,7 @@ class TestSimView(discord.ui.View):
 
     @discord.ui.button(label="🏟️ Innings", style=discord.ButtonStyle.danger, row=1)
     async def sim_innings(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_host(interaction): return
         await interaction.response.defer()
         await interaction.message.edit(view=None)
         match   = self.match
@@ -3997,6 +4078,68 @@ class TestSimView(discord.ui.View):
             return await _test_finish_match(match, self.channel_id, interaction.channel)
         await interaction.channel.send(embed=inn_embed)
         await interaction.channel.send(embed=render_test_embed(match), view=TestSimView(match, self.channel_id))
+
+    # ── Row 2: Declaration ─────────────────────────────────────────────────────
+
+    @discord.ui.button(label="📣 Declare", style=discord.ButtonStyle.danger, row=2)
+    async def declare_innings(self, interaction: discord.Interaction, button: discord.ui.Button):
+        match = self.match
+        inn   = match.current_innings
+        if inn.is_complete:
+            await interaction.response.send_message("❌ The current innings is already over.", ephemeral=True)
+            return
+        # Only the batting captain may declare
+        batting_owner = match.host_id if inn.batting_team is match.team1 else getattr(match, "p2_id", match.host_id)
+        if interaction.user.id != batting_owner:
+            await interaction.response.send_message("❌ Only the batting captain can declare.", ephemeral=True)
+            return
+        score = f"{inn.total_runs}/{inn.wickets} ({inn.overs_str} ov)"
+        await interaction.response.send_message(
+            f"📣 **Declare at {score}?** This will close the innings immediately.",
+            view=TestDeclareConfirmView(match, self.channel_id, interaction.message),
+            ephemeral=True
+        )
+
+
+class TestDeclareConfirmView(discord.ui.View):
+    def __init__(self, match: TestMatchObj, channel_id: int, sim_message):
+        super().__init__(timeout=60)
+        self.match       = match
+        self.channel_id  = channel_id
+        self.sim_message = sim_message
+
+    @discord.ui.button(label="✅ Yes, Declare", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        match = self.match
+        inn   = match.current_innings
+        inn_idx = match.current_innings_idx
+
+        inn.declared    = True
+        inn.is_complete = True
+
+        _test_post_innings_logic(match)
+
+        score = f"{inn.total_runs}/{inn.wickets}d ({inn.overs_str} ov)"
+        await interaction.response.send_message(
+            f"📣 **{inn.batting_team['name']} have declared at {score}!**"
+        )
+
+        try:
+            await self.sim_message.edit(view=None)
+        except Exception:
+            pass
+
+        if match.result or match.day > 5:
+            await interaction.channel.send(embed=_render_test_innings_embed(match, inn_idx))
+            return await _test_finish_match(match, self.channel_id, interaction.channel)
+
+        await interaction.channel.send(embed=_render_test_innings_embed(match, inn_idx))
+        await interaction.channel.send(embed=render_test_embed(match), view=TestSimView(match, self.channel_id))
+
+    @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("Declaration cancelled.", ephemeral=True)
+        self.stop()
 
 
 # ── Test match toss views ──────────────────────────────────────────────────────
@@ -4051,7 +4194,9 @@ class TestTossDecisionView(discord.ui.View):
 
         weather = _test_map_weather(state.pitch if hasattr(state, 'pitch') else "Clear")
         weather = _test_map_weather(state.weather)
-        match   = TestMatchObj(t_bat, t_bowl, state.pitch, weather)
+        match          = TestMatchObj(t_bat, t_bowl, state.pitch, weather)
+        match.host_id  = state.p1_id
+        match.p2_id    = getattr(state, "p2_id", None)
         active_test_matches[self.channel.id] = match
 
         await interaction.response.defer()
@@ -4096,7 +4241,9 @@ async def _begin_test_match(channel, state):
         await channel.send(
             f"🪙 **Toss!** AI wins and elects to **{ai_choice}** first! "
             f"**{t_bat['name']}** will bat.\n\nChoose simulation mode:")
-        match = TestMatchObj(t_bat, t_bowl, state.pitch, weather)
+        match          = TestMatchObj(t_bat, t_bowl, state.pitch, weather)
+        match.host_id  = state.p1_id
+        match.p2_id    = getattr(state, "p2_id", None)
         active_test_matches[channel.id] = match
         await channel.send(embed=render_test_embed(match), view=TestSimView(match, channel.id))
         return

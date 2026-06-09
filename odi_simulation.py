@@ -351,6 +351,7 @@ def execute_ball_math_odi(match):
                 f"this is the {nth} cutter of the over (50% slip chance per extra cutter).**\n"
                 f"💥 **Result:** 1 Extra"
             )
+            match.wide_extra_msg = match.last_commentary
             if free_hit_active: match.last_commentary_prefix = "🛡️ *(Free Hit continues)*\n"
             return
     else:
