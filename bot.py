@@ -18,6 +18,10 @@ from test_simulation import (
     simulate_session as _test_sim_session,
     simulate_innings as _test_sim_innings,
     simulate_match as _test_sim_match,
+    simulate_one_over_verbose as _test_sim_one_over_verbose,
+    simulate_n_overs_verbose as _test_sim_n_overs_verbose,
+    simulate_one_ball_interactive as _test_sim_one_ball,
+    prepare_over_interactive as _test_prepare_over,
     PITCH_TYPES as TEST_PITCH_TYPES,
     WEATHER_TYPES as TEST_WEATHER_TYPES,
     TEAM_ALPHA, TEAM_BETA,
@@ -34,7 +38,8 @@ from subscription_manager import (
     get_all_players, add_player, add_players_bulk, update_player, delete_players, clean_duplicate_players,
     get_tier_status, is_channel_restricted, toggle_restricted_channel,
     is_ratings_channel, toggle_ratings_channel,
-    get_match_log_channel, set_match_log_channel, clear_match_log_channel, DB_CACHE
+    get_match_log_channel, set_match_log_channel, clear_match_log_channel, DB_CACHE,
+    get_match_counts, increment_match_count, set_match_count,
 )
 
 # ==========================================
@@ -43,6 +48,21 @@ from subscription_manager import (
 ADMIN_DISCORD_ID = 1087369198801526836 # Your ID
 _log_env = os.environ.get("LOG_CHANNEL_ID")
 LOG_CHANNEL_ID = int(_log_env) if _log_env and _log_env.isdigit() else 0
+
+# ── Match counters (backed by MongoDB via subscription_manager) ───────────────
+
+def _increment_match_count(fmt: str) -> int:
+    """Increment and return the new match number for the given format."""
+    return increment_match_count(fmt)
+
+def _set_match_count(fmt: str, n: int):
+    set_match_count(fmt, n)
+
+def _format_match_no_label(fmt: str) -> str:
+    """Return 'T20-Match No 25' style label for the given format key."""
+    c = get_match_counts()
+    display = {"t20": "T20", "odi": "ODI", "test": "TEST"}.get(fmt, fmt.upper())
+    return f"{display}-Match No {c.get(fmt, 0)}"
 
 class CricketBot(commands.Bot):
     def __init__(self):
@@ -570,11 +590,13 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
         font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 32)
         font_bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 24)
         font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20)
+        font_micro = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 13)
     except:
         font_large = ImageFont.load_default()
         font_title = ImageFont.load_default()
         font_bold = ImageFont.load_default()
         font_small = ImageFont.load_default()
+        font_micro = ImageFont.load_default()
 
     # Helper to get text width dynamically to align elements
     def get_tw(text, font):
@@ -697,6 +719,12 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
     else:
         t2_name = match.innings1.bowling_team['name'][:18].upper()
     d.text((900 - get_tw(t2_name, font_large)//2, 30), t2_name, fill=c_navy, font=font_large)
+
+    # Match number — top-right corner, small/unobtrusive
+    _base_fmt = "odi" if _base_overs == 50 else "t20"
+    _ctr_text = _format_match_no_label(_base_fmt)
+    _ctr_w = get_tw(_ctr_text, font_micro)
+    d.text((1195 - _ctr_w, 8), _ctr_text, fill=c_text_grey, font=font_micro)
 
     # Center Custom Logo (or Placeholder)
     try:
@@ -1417,7 +1445,7 @@ async def loop_entire_match_simulation(interaction, match: CricketMatch):
                 await channel.send(embed=render_embed_scoreboard(match))
                 await asyncio.sleep(0.5)
             innings.over_log.clear()
-            innings.bouncers_in_over = 0
+            innings.bouncers_in_over = 0; innings.cutters_in_over = 0
             innings.mystery_bowled_this_over = False
             
 class ODISuperOverPrompt(discord.ui.View):
@@ -1545,11 +1573,17 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
             original_match.tiebreak_winner_name = so_winner_name
             match_to_finalize = original_match
 
+        # Increment counter BEFORE generating image so the scorecard shows the correct match number.
+        # Skip super overs — they're continuations, not standalone matches.
+        if not getattr(match_to_finalize, 'is_super_over', False):
+            _base = getattr(match_to_finalize, 'original_format_overs', match_to_finalize.format_overs)
+            _increment_match_count("odi" if _base == 50 else "t20")
+
         if getattr(match_to_finalize, "tournament_server_id", None):
             img_buf = generate_tournament_score_image(match_to_finalize)
         else:
             img_buf = generate_final_score_image(match_to_finalize)
-            
+
         file = discord.File(fp=img_buf, filename="final_scoreboard.png")
         embed_full = render_full_scorecard_embed(match_to_finalize, 2)
 
@@ -1658,7 +1692,7 @@ async def prompt_new_over_bowler(interaction, match: CricketMatch):
             return
         innings.current_bowler = new_bowler
         innings.over_log.clear()
-        innings.bouncers_in_over = 0
+        innings.bouncers_in_over = 0; innings.cutters_in_over = 0
         innings.mystery_bowled_this_over = False
         
         class DummyInt: pass
@@ -1701,7 +1735,7 @@ async def prompt_new_over_bowler(interaction, match: CricketMatch):
             
         innings.current_bowler = next(p for p in innings.bowling_team["players"] if p["name"] == b_name)
         innings.over_log.clear()
-        innings.bouncers_in_over = 0
+        innings.bouncers_in_over = 0; innings.cutters_in_over = 0
         innings.mystery_bowled_this_over = False
         await inter.response.defer()
         await inter.message.edit(view=None)
@@ -1740,7 +1774,7 @@ async def prompt_bowler_then_hub(interaction, match: CricketMatch):
             return
         innings.current_bowler = new_bowler
         innings.over_log.clear()
-        innings.bouncers_in_over = 0
+        innings.bouncers_in_over = 0; innings.cutters_in_over = 0
         innings.mystery_bowled_this_over = False
         await prompt_over_pacing_hub(interaction, match)
         return
@@ -1849,7 +1883,7 @@ class OverControlHubView(discord.ui.View):
             innings.current_bowler = pending
             self.match._pending_bowler = None
             innings.over_log.clear()
-            innings.bouncers_in_over = 0
+            innings.bouncers_in_over = 0; innings.cutters_in_over = 0
             innings.mystery_bowled_this_over = False
         await run_interactive_delivery_sequence(interaction, self.match)
         
@@ -1869,7 +1903,7 @@ class OverControlHubView(discord.ui.View):
             innings.current_bowler = pending
             self.match._pending_bowler = None
             innings.over_log.clear()
-            innings.bouncers_in_over = 0
+            innings.bouncers_in_over = 0; innings.cutters_in_over = 0
             innings.mystery_bowled_this_over = False
         elif not innings.current_bowler:
             new_bowler = get_smart_ai_bowler(innings, self.match.pitch, self.match.weather, self.match.format_overs)
@@ -1879,7 +1913,7 @@ class OverControlHubView(discord.ui.View):
                 return
             innings.current_bowler = new_bowler
             innings.over_log.clear()
-            innings.bouncers_in_over = 0
+            innings.bouncers_in_over = 0; innings.cutters_in_over = 0
             innings.mystery_bowled_this_over = False
             
         target_balls = (innings.total_balls // 6 + 1) * 6
@@ -1907,7 +1941,7 @@ class OverControlHubView(discord.ui.View):
         self.match._pending_bowler = None  # AI handles all bowlers from here
         innings = self.match.current_innings
         innings.over_log.clear()
-        innings.bouncers_in_over = 0
+        innings.bouncers_in_over = 0; innings.cutters_in_over = 0
         innings.mystery_bowled_this_over = False
         await loop_entire_match_simulation(interaction, self.match)
 
@@ -1920,7 +1954,7 @@ class OverControlHubView(discord.ui.View):
         self.match._pending_bowler = None  # AI handles all bowlers from here
         innings = self.match.current_innings
         innings.over_log.clear()
-        innings.bouncers_in_over = 0
+        innings.bouncers_in_over = 0; innings.cutters_in_over = 0
         innings.mystery_bowled_this_over = False
         await loop_entire_match_simulation(interaction, self.match)
         
@@ -1952,9 +1986,12 @@ class PaceBowlingView(discord.ui.View):
         
         for var in ["Inswing", "Outswing", "Slow", "Fast"]:
             self.add_item(ActionButton(var, discord.ButtonStyle.primary, 0, "var"))
-            
+
         for length in ["Bouncer", "Full", "Good", "Yorker"]:
             self.add_item(ActionButton(length, discord.ButtonStyle.danger, 1, "len", True))
+
+        for cutter in ["Off Cutter", "Leg Cutter", "Knuckle"]:
+            self.add_item(ActionButton(cutter, discord.ButtonStyle.secondary, 2, "cutter"))
             
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.channel.id not in active_games or active_games[interaction.channel.id] != self.match:
@@ -1977,6 +2014,11 @@ class PaceBowlingView(discord.ui.View):
             
         elif action_type == "len":
             self.match.current_delivery_selection = f"{self.match.temp_variation} {label}"
+            await interaction.response.edit_message(view=None)
+            await prompt_batter_shot(interaction.channel, self.match, interaction)
+
+        elif action_type == "cutter":
+            self.match.current_delivery_selection = label
             await interaction.response.edit_message(view=None)
             await prompt_batter_shot(interaction.channel, self.match, interaction)
 
@@ -2028,7 +2070,8 @@ class BattingView(discord.ui.View):
             ("Loft", discord.ButtonStyle.danger, 1),
             ("Sweep", discord.ButtonStyle.danger, 1),
             ("Scoop", discord.ButtonStyle.danger, 1),
-            ("Block", discord.ButtonStyle.secondary, 1)
+            ("Block", discord.ButtonStyle.secondary, 1),
+            ("Leave", discord.ButtonStyle.secondary, 1)
         ]
         for label, style, row in shots:
             self.add_item(ActionButton(label, style, row, "shot"))
@@ -2343,32 +2386,38 @@ class FormatSelectView(discord.ui.View):
     @discord.ui.select(placeholder="Select Match Format...", options=[
         discord.SelectOption(label="T20 (20 Overs)", value="20", emoji="⚡"),
         discord.SelectOption(label="ODI (50 Overs)", value="50", emoji="🏆"),
-        discord.SelectOption(label="TEST (90 Overs/Innings)", value="90", emoji="🎩"),
+        discord.SelectOption(label="TEST (5 Days · 4 Innings)", value="90", emoji="🎩"),
         discord.SelectOption(label="Custom Format", value="custom", emoji="⚙️")
     ])
     async def select_format(self, interaction: discord.Interaction, select: discord.ui.Select):
-        if interaction.user.id != self.state.p1_id and interaction.user.id != getattr(self.state, "manager_id", None): 
+        if interaction.user.id != self.state.p1_id and interaction.user.id != getattr(self.state, "manager_id", None):
             return await interaction.response.send_message("Only Host or Manager.", ephemeral=True)
-            
+
         val = select.values[0]
         if val == "custom":
             await interaction.response.send_modal(CustomOversModal(self.state, self.channel))
         else:
-        
             await interaction.response.defer()
+
+            # Test format is restricted to admins and bot owner only
+            if val == "90":
+                is_owner = interaction.user.id == ADMIN_DISCORD_ID
+                is_admin_user = is_owner or str(interaction.user.id) in get_auth_admins()
+                if not is_admin_user:
+                    return await interaction.followup.send(
+                        "❌ **Test format** is currently restricted to **admins and bot owner** only.",
+                        ephemeral=True
+                    )
+
             allowed, reason = await asyncio.to_thread(consume_quota, str(interaction.user.id), str(interaction.guild.id) if interaction.guild else None, val, str(ADMIN_DISCORD_ID))
             if not allowed:
-            
                 return await interaction.followup.send(reason, ephemeral=True)
 
             self.state.format_overs = int(val)
-            # 🚨 FIX: Atomic edit prevents the "Already Acknowledged" Crash
             if val == "20":
-            
                 await interaction.edit_original_response(content=f"✅ Format set: **T20 (20 overs)**\n\n🌟 <@{self.state.p1_id}> — Enable **Impact Player** rule?", view=ImpactPlayerView(self.state, self.channel))
             else:
-                label = {"50": "ODI (50 overs)", "90": "Test (90 overs/innings)"}.get(val, f"{val} overs")
-                
+                label = {"50": "ODI (50 overs)", "90": "Test (5 Days · 4 Innings)"}.get(val, f"{val} overs")
                 await interaction.edit_original_response(content=f"✅ Format set: **{label}**", view=None)
                 if getattr(self.state, "tournament_server_id", None):
                     await prompt_tournament_xi(self.channel, self.state, 1)
@@ -3353,6 +3402,11 @@ def generate_test_scorecard_image(match: TestMatchObj) -> io.BytesIO:
     sub = f"{match.team1['name']}  vs  {match.team2['name']}  ·  {match.pitch} / {match.weather}"
     d.text((44, 18 + _th(fHUGE) + 6), sub[:72], fill="#BBBBBB", font=fSUB)
 
+    # Match number — top-right of header, small/unobtrusive
+    _ctr = _format_match_no_label("test")
+    _ctr_w = _tw(_ctr, fSM)
+    d.text((_W - 12 - _ctr_w, _HDR_H - _th(fSM) - 8), _ctr, fill="#AAAAAA", font=fSM)
+
     # Result bar
     d.rectangle([(0, _HDR_H), (_W, _HDR_H + _RES_H)], fill=(22, 22, 22))
     res_str = (match.result or "IN PROGRESS").upper()
@@ -3448,67 +3502,488 @@ def generate_test_scorecard_image(match: TestMatchObj) -> io.BytesIO:
     return buf
 
 
+async def _test_finish_match(match: TestMatchObj, channel_id: int, channel):
+    """Shared finish routine: increment counter, post final scorecard, clean up."""
+    _increment_match_count("test")
+    embed = render_test_final_embed(match)
+    try:
+        img_buf = generate_test_scorecard_image(match)
+        file    = discord.File(fp=img_buf, filename="test_scorecard.png")
+        await channel.send(
+            "🏆 **Test Match over! Here is the final scorecard and broadcast graphic:**",
+            embed=embed, file=file
+        )
+    except Exception:
+        await channel.send(f"🏆 **Test Match Result:** {match.result or 'Match Drawn'}", embed=embed)
+    active_test_matches.pop(channel_id, None)
+
+
+def _split_text_chunks(text: str, limit: int = 4000) -> list:
+    """Break a string into chunks of at most `limit` chars, splitting on newlines."""
+    chunks = []
+    while len(text) > limit:
+        idx = text.rfind("\n", 0, limit)
+        if idx == -1:
+            idx = limit
+        chunks.append(text[:idx])
+        text = text[idx:].lstrip("\n")
+    if text:
+        chunks.append(text)
+    return chunks
+
+
+class TestMultipleOversModal(discord.ui.Modal, title="Simulate Multiple Overs"):
+    overs_input = discord.ui.TextInput(
+        label="Number of overs to simulate (1–30)",
+        placeholder="e.g. 10",
+        min_length=1,
+        max_length=2,
+        required=True,
+    )
+
+    def __init__(self, match: TestMatchObj, channel_id: int, channel):
+        super().__init__()
+        self.match      = match
+        self.channel_id = channel_id
+        self.channel    = channel
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            n = int(self.overs_input.value.strip())
+            if not (1 <= n <= 30):
+                raise ValueError
+        except ValueError:
+            return await interaction.response.send_message(
+                "❌ Enter a whole number between 1 and 30.", ephemeral=True
+            )
+
+        await interaction.response.defer()
+        match      = self.match
+        inn_idx    = match.current_innings_idx
+
+        verbose_text, innings_ended = await asyncio.to_thread(_test_sim_n_overs_verbose, match, n)
+
+        if match.overs_in_session >= 30:
+            match.advance_session()
+
+        _test_post_innings_logic(match)
+
+        if verbose_text:
+            for chunk in _split_text_chunks(verbose_text):
+                emb = discord.Embed(description=chunk, color=0x3498db)
+                await self.channel.send(embed=emb)
+
+        if match.result or match.day > 5:
+            return await _test_finish_match(match, self.channel_id, self.channel)
+
+        if innings_ended:
+            await self.channel.send(embed=_render_test_innings_embed(match, inn_idx))
+
+        await self.channel.send(embed=render_test_embed(match), view=TestSimView(match, self.channel_id))
+
+
+# ── Interactive over-by-over mode ─────────────────────────────────────────────
+#
+# Flow per over:
+#   1. TestInteractiveBowlerSelectView  — pick who bowls
+#   2. TestInteractiveDeliveryView      — pick delivery type (each ball)
+#   3. TestInteractiveShotView          — pick shot (each ball) → execute → show result
+#   After over: loop back to step 1.
+
+async def _test_ia_start_over(channel, match: TestMatchObj, channel_id: int):
+    """Show bowler-select for the next over, or handle innings/match end."""
+    innings = match.current_innings
+    if innings.is_complete:
+        _test_post_innings_logic(match)
+        if match.result or match.day > 5:
+            return await _test_finish_match(match, channel_id, channel)
+        return await _test_ia_start_over(channel, match, channel_id)
+
+    ov_num   = innings.total_balls // 6 + 1
+    prev_nm  = innings.prev_bowler["name"] if innings.prev_bowler else None
+    bowlers  = [p for p in innings.bowling_team["players"]
+                if ("Bowler" in p["role"] or "All-Rounder" in p["role"])
+                and p["name"] != prev_nm]
+    if not bowlers:
+        bowlers = [p for p in innings.bowling_team["players"]
+                   if "Bowler" in p["role"] or "All-Rounder" in p["role"]]
+
+    options = []
+    for p in bowlers[:25]:
+        st  = innings.bowling_stats[p["name"]]
+        ovs = f"{st.balls_bowled // 6}.{st.balls_bowled % 6}"
+        options.append(discord.SelectOption(
+            label=p["name"],
+            value=p["name"],
+            description=f"{ovs} ov · {st.runs_conceded}r · {st.wickets_taken}w",
+        ))
+
+    striker = innings.batting_team["players"][innings.current_striker_idx]
+    embed = discord.Embed(
+        title=f"🎳 Over {ov_num} — Select Bowler",
+        description=(
+            f"**{innings.bowling_team['name']}** bowling to **{innings.batting_team['name']}**\n"
+            f"Striker: **{striker['name']}**"
+        ),
+        color=0x2c3e50,
+    )
+    embed.add_field(
+        name="Score",
+        value=f"**{innings.total_runs}/{innings.wickets}** ({innings.overs_str} ov)  "
+              f"Day {match.day} · {'MornAftnEvng'.split('Aftn')[0] if match.session==1 else ('Afternoon' if match.session==2 else 'Evening')}",
+        inline=False,
+    )
+    await channel.send(embed=embed, view=TestInteractiveBowlerSelectView(match, channel_id, options))
+
+
+async def _test_ia_show_delivery(channel, match: TestMatchObj, channel_id: int):
+    """Show delivery-type buttons for the current ball."""
+    innings = match.current_innings
+    bowler  = innings.current_bowler
+    striker = innings.batting_team["players"][innings.current_striker_idx]
+    ball_in_ov = innings.total_balls % 6 + 1
+    ov_num     = innings.total_balls // 6 + 1
+
+    embed = discord.Embed(
+        title=f"🏏 Over {ov_num}, Ball {ball_in_ov}",
+        description=(
+            f"**{bowler['name']}** bowling to **{striker['name']}**\n"
+            f"Score: **{innings.total_runs}/{innings.wickets}** ({innings.overs_str} ov)"
+        ),
+        color=0x1a252f,
+    )
+    is_spin = "Spin" in bowler["role"]
+    await channel.send(embed=embed, view=TestInteractiveDeliveryView(match, channel_id, is_spin, bowler))
+
+
+async def _test_ia_show_shot(channel, match: TestMatchObj, channel_id: int, delivery: str):
+    """Show shot-selection buttons after bowler has committed to a delivery."""
+    innings = match.current_innings
+    striker = innings.batting_team["players"][innings.current_striker_idx]
+    embed   = discord.Embed(
+        title=f"🏏 {striker['name']} faces {delivery}",
+        description=f"Score: **{innings.total_runs}/{innings.wickets}** ({innings.overs_str} ov)",
+        color=0x27ae60,
+    )
+    await channel.send(embed=embed, view=TestInteractiveShotView(match, channel_id))
+
+
+async def _test_ia_ball_result(channel, match: TestMatchObj, channel_id: int,
+                                desc: str, over_ended: bool, innings_ended: bool,
+                                session_ended: bool, inn_idx: int):
+    """Post ball result and advance to next delivery/over/innings as needed."""
+    innings = match.innings_list[inn_idx]
+
+    if "WICKET" in desc:
+        color = 0xe74c3c
+    elif "FOUR" in desc:
+        color = 0xf39c12
+    elif "SIX" in desc:
+        color = 0x9b59b6
+    elif "Dot" in desc:
+        color = 0x7f8c8d
+    else:
+        color = 0x2ecc71
+
+    embed = discord.Embed(description=desc, color=color)
+    embed.add_field(
+        name="Score",
+        value=f"**{innings.total_runs}/{innings.wickets}** ({innings.overs_str} ov)",
+        inline=True,
+    )
+    if not innings_ended:
+        striker = innings.batting_team["players"][innings.current_striker_idx]
+        embed.add_field(name="On Strike", value=striker["name"], inline=True)
+
+    footer_parts = []
+    if over_ended:
+        footer_parts.append(f"Over complete")
+    if session_ended:
+        footer_parts.append("Session over!")
+    if footer_parts:
+        embed.set_footer(text=" · ".join(footer_parts))
+
+    if session_ended:
+        time_up = match.advance_session()
+        if time_up:
+            match.result = match.result or "Match Drawn"
+            embed.set_footer(text="Day 5 complete — Match Drawn")
+
+    _test_post_innings_logic(match)
+
+    await channel.send(embed=embed)
+
+    if match.result or match.day > 5:
+        return await _test_finish_match(match, channel_id, channel)
+
+    if innings_ended:
+        # Show innings card then start fresh over
+        await channel.send(embed=_render_test_innings_embed(match, inn_idx))
+        return await _test_ia_start_over(channel, match, channel_id)
+
+    if over_ended:
+        # Show live scoreboard then pick next bowler
+        await channel.send(embed=render_test_embed(match))
+        return await _test_ia_start_over(channel, match, channel_id)
+
+    # Same over continues — show next delivery prompt
+    await _test_ia_show_delivery(channel, match, channel_id)
+
+
+class TestInteractiveBowlerSelectView(discord.ui.View):
+    def __init__(self, match: TestMatchObj, channel_id: int, options: list):
+        super().__init__(timeout=300)
+        self.match      = match
+        self.channel_id = channel_id
+
+        sel = discord.ui.Select(placeholder="Pick bowler...", options=options)
+        sel.callback = self._on_select
+        self.add_item(sel)
+
+        exit_btn = discord.ui.Button(label="⏩ Exit to Menu", style=discord.ButtonStyle.secondary, row=1)
+        exit_btn.callback = self._exit
+        self.add_item(exit_btn)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await interaction.message.edit(view=None)
+        bowler_name = interaction.data["values"][0]
+        _test_prepare_over(self.match, bowler_name)
+        await _test_ia_show_delivery(interaction.channel, self.match, self.channel_id)
+
+    async def _exit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await interaction.message.edit(view=None)
+        await interaction.channel.send(
+            embed=render_test_embed(self.match),
+            view=TestSimView(self.match, self.channel_id)
+        )
+
+
+class TestInteractiveDeliveryView(discord.ui.View):
+    _PACE_OPTIONS = [
+        ("Inswing Full",       discord.ButtonStyle.primary,   0),
+        ("Outswing Full",      discord.ButtonStyle.primary,   0),
+        ("Seam Good length",   discord.ButtonStyle.primary,   0),
+        ("Fast Bouncer",       discord.ButtonStyle.danger,    1),
+        ("Fast Yorker",        discord.ButtonStyle.danger,    1),
+        ("Fast Short",         discord.ButtonStyle.secondary, 1),
+        ("Off Cutter",         discord.ButtonStyle.secondary, 2),
+        ("Leg Cutter",         discord.ButtonStyle.secondary, 2),
+        ("Knuckle",            discord.ButtonStyle.secondary, 2),
+    ]
+    _OFF_SPIN = [
+        ("Off spin",  discord.ButtonStyle.primary,   0),
+        ("Arm ball",  discord.ButtonStyle.primary,   0),
+        ("Doosra",    discord.ButtonStyle.danger,    0),
+        ("Carrom",    discord.ButtonStyle.secondary, 0),
+        ("Top spin",  discord.ButtonStyle.secondary, 1),
+        ("Mystery",   discord.ButtonStyle.danger,    1),
+    ]
+    _LEG_SPIN = [
+        ("Leg spin",  discord.ButtonStyle.primary,   0),
+        ("Googly",    discord.ButtonStyle.danger,    0),
+        ("Flipper",   discord.ButtonStyle.primary,   0),
+        ("Slider",    discord.ButtonStyle.secondary, 0),
+        ("Drifter",   discord.ButtonStyle.secondary, 1),
+        ("Mystery",   discord.ButtonStyle.danger,    1),
+    ]
+
+    def __init__(self, match: TestMatchObj, channel_id: int, is_spin: bool, bowler: dict):
+        super().__init__(timeout=120)
+        self.match      = match
+        self.channel_id = channel_id
+
+        mystery_used = getattr(match.current_innings, "mystery_bowled_this_over", False)
+
+        if is_spin:
+            opts = self._OFF_SPIN if "Off" in bowler["role"] else self._LEG_SPIN
+        else:
+            opts = self._PACE_OPTIONS
+
+        for label, style, row in opts:
+            disabled = (label == "Mystery" and mystery_used)
+            btn = discord.ui.Button(label=label, style=style, row=row, disabled=disabled)
+            btn.callback = self._make_cb(label)
+            self.add_item(btn)
+
+    def _make_cb(self, delivery: str):
+        async def cb(interaction: discord.Interaction):
+            await interaction.response.defer()
+            await interaction.message.edit(view=None)
+            if delivery == "Mystery":
+                self.match.current_innings.mystery_bowled_this_over = True
+            self.match.current_delivery_selection = delivery
+            await _test_ia_show_shot(interaction.channel, self.match, self.channel_id, delivery)
+        return cb
+
+
+class TestInteractiveShotView(discord.ui.View):
+    _SHOTS = [
+        ("Drive",  discord.ButtonStyle.primary,   0),
+        ("Cut",    discord.ButtonStyle.primary,   0),
+        ("Pull",   discord.ButtonStyle.success,   0),
+        ("Flick",  discord.ButtonStyle.success,   0),
+        ("Loft",   discord.ButtonStyle.danger,    1),
+        ("Sweep",  discord.ButtonStyle.danger,    1),
+        ("Scoop",  discord.ButtonStyle.danger,    1),
+        ("Block",  discord.ButtonStyle.secondary, 1),
+        ("Leave",  discord.ButtonStyle.secondary, 1),
+    ]
+
+    def __init__(self, match: TestMatchObj, channel_id: int):
+        super().__init__(timeout=120)
+        self.match      = match
+        self.channel_id = channel_id
+
+        for label, style, row in self._SHOTS:
+            btn = discord.ui.Button(label=label, style=style, row=row)
+            btn.callback = self._make_cb(label)
+            self.add_item(btn)
+
+    def _make_cb(self, shot: str):
+        async def cb(interaction: discord.Interaction):
+            await interaction.response.defer()
+            await interaction.message.edit(view=None)
+            self.match.current_shot_selection = shot
+            inn_idx = self.match.current_innings_idx
+            desc, over_ended, innings_ended, session_ended = await asyncio.to_thread(
+                _test_sim_one_ball, self.match
+            )
+            await _test_ia_ball_result(
+                interaction.channel, self.match, self.channel_id,
+                desc, over_ended, innings_ended, session_ended, inn_idx
+            )
+        return cb
+
+
 class TestSimView(discord.ui.View):
     def __init__(self, match: TestMatchObj, channel_id: int):
         super().__init__(timeout=600)
         self.match      = match
         self.channel_id = channel_id
 
-    async def _finish(self, channel):
-        embed = render_test_final_embed(self.match)
-        try:
-            img_buf = generate_test_scorecard_image(self.match)
-            file    = discord.File(fp=img_buf, filename="test_scorecard.png")
-            await channel.send(
-                "🏆 **Test Match over! Here is the final scorecard and broadcast graphic:**",
-                embed=embed, file=file
-            )
-        except Exception:
-            result = self.match.result or "Match Drawn"
-            await channel.send(f"🏆 **Test Match Result:** {result}", embed=embed)
-        active_test_matches.pop(self.channel_id, None)
+    # ── Row 0: Interactive / quick simulation ──────────────────────────────────
 
-    @discord.ui.button(label="Simulate Session", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="🏏 Play Interactive", style=discord.ButtonStyle.success, row=0)
+    async def play_interactive(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await interaction.message.edit(view=None)
+        await _test_ia_start_over(interaction.channel, self.match, self.channel_id)
+
+    @discord.ui.button(label="1 Over", style=discord.ButtonStyle.primary, row=0)
+    async def sim_one_over(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await interaction.message.edit(view=None)
+        match   = self.match
+        snap    = _test_take_snapshot(match)
+        inn_idx = match.current_innings_idx
+
+        await asyncio.to_thread(_test_sim_one_over_verbose, match)
+
+        if match.overs_in_session >= 30:
+            match.advance_session()
+
+        sim_inn       = match.innings_list[inn_idx]
+        innings_ended = sim_inn.is_complete and match.overs_in_session > 0
+
+        _test_post_innings_logic(match)
+
+        sess_embed = _render_test_session_embed(match, snap)
+
+        if match.result or match.day > 5:
+            await interaction.channel.send(embed=sess_embed)
+            if innings_ended:
+                await interaction.channel.send(embed=_render_test_innings_embed(match, inn_idx))
+            return await _test_finish_match(match, self.channel_id, interaction.channel)
+
+        await interaction.channel.send(embed=sess_embed)
+        if innings_ended:
+            await interaction.channel.send(embed=_render_test_innings_embed(match, inn_idx))
+        await interaction.channel.send(embed=render_test_embed(match), view=TestSimView(match, self.channel_id))
+
+    @discord.ui.button(label="⚡ Multiple Overs", style=discord.ButtonStyle.primary, row=0)
+    async def sim_multiple_overs(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.message.edit(view=None)
+        await interaction.response.send_modal(
+            TestMultipleOversModal(self.match, self.channel_id, interaction.channel)
+        )
+
+    # ── Row 1: Session / Day / Innings ─────────────────────────────────────────
+
+    @discord.ui.button(label="☕ Session", style=discord.ButtonStyle.secondary, row=1)
     async def sim_session(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await interaction.message.edit(view=None)
         match   = self.match
         snap    = _test_take_snapshot(match)
-        inn_idx = match.current_innings_idx   # capture before simulation
+        inn_idx = match.current_innings_idx
 
         await asyncio.to_thread(_test_sim_session, match)
 
         # Detect mid-session innings end.
-        # After a FULL session: advance_session() resets overs_in_session → 0.
-        # After MID-SESSION stop: overs_in_session is left at the partial count (> 0).
+        # After FULL session: advance_session() resets overs_in_session → 0.
+        # After MID-SESSION stop: overs_in_session left at partial count (> 0).
         sim_inn         = match.innings_list[inn_idx]
         innings_ended   = sim_inn.is_complete and match.overs_in_session > 0
         remaining_overs = 30 - match.overs_in_session if innings_ended else 0
 
-        # Post-innings logic: result check + start next innings if needed
         _test_post_innings_logic(match)
 
         sess_embed = _render_test_session_embed(match, snap)
         if innings_ended and remaining_overs > 0:
             sess_embed.set_footer(
-                text=f"⚠️  Innings ended mid-session — {remaining_overs} over{'s' if remaining_overs != 1 else ''} still remain. Next 'Simulate Session' will continue this session."
+                text=f"⚠️  Innings ended mid-session — {remaining_overs} over{'s' if remaining_overs != 1 else ''} still remain. Next 'Session' will continue this session."
             )
 
         if match.result or match.day > 5:
             await interaction.channel.send(embed=sess_embed)
             if innings_ended:
                 await interaction.channel.send(embed=_render_test_innings_embed(match, inn_idx))
-            return await self._finish(interaction.channel)
+            return await _test_finish_match(match, self.channel_id, interaction.channel)
 
         await interaction.channel.send(embed=sess_embed)
-
-        # When innings ended mid-session: show full innings scorecard before live board
         if innings_ended:
             await interaction.channel.send(embed=_render_test_innings_embed(match, inn_idx))
+        await interaction.channel.send(embed=render_test_embed(match), view=TestSimView(match, self.channel_id))
+
+    @discord.ui.button(label="📅 Full Day", style=discord.ButtonStyle.secondary, row=1)
+    async def sim_full_day(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await interaction.message.edit(view=None)
+        match     = self.match
+        start_day = match.day
+        iters     = 0
+
+        while match.day == start_day and not match.result and match.day <= 5 and iters < 8:
+            iters  += 1
+            inn_idx = match.current_innings_idx
+            snap    = _test_take_snapshot(match)
+
+            await asyncio.to_thread(_test_sim_session, match)
+
+            sim_inn         = match.innings_list[inn_idx]
+            innings_ended   = sim_inn.is_complete and match.overs_in_session > 0
+            remaining_overs = 30 - match.overs_in_session if innings_ended else 0
+
+            _test_post_innings_logic(match)
+
+            sess_embed = _render_test_session_embed(match, snap)
+            if innings_ended and remaining_overs > 0:
+                sess_embed.set_footer(
+                    text=f"⚠️  Innings ended mid-session — {remaining_overs} over{'s' if remaining_overs != 1 else ''} still remain."
+                )
+
+            await interaction.channel.send(embed=sess_embed)
+            if innings_ended:
+                await interaction.channel.send(embed=_render_test_innings_embed(match, inn_idx))
+
+            if match.result or match.day > 5:
+                return await _test_finish_match(match, self.channel_id, interaction.channel)
 
         await interaction.channel.send(embed=render_test_embed(match), view=TestSimView(match, self.channel_id))
 
-    @discord.ui.button(label="Simulate Innings", style=discord.ButtonStyle.success, row=0)
+    @discord.ui.button(label="🏟️ Innings", style=discord.ButtonStyle.danger, row=1)
     async def sim_innings(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await interaction.message.edit(view=None)
@@ -3519,16 +3994,9 @@ class TestSimView(discord.ui.View):
         inn_embed = _render_test_innings_embed(match, inn_idx)
         if match.result or match.day > 5:
             await interaction.channel.send(embed=inn_embed)
-            return await self._finish(interaction.channel)
+            return await _test_finish_match(match, self.channel_id, interaction.channel)
         await interaction.channel.send(embed=inn_embed)
         await interaction.channel.send(embed=render_test_embed(match), view=TestSimView(match, self.channel_id))
-
-    @discord.ui.button(label="Simulate Full Match", style=discord.ButtonStyle.danger, row=0)
-    async def sim_full(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        await interaction.message.edit(view=None)
-        await asyncio.to_thread(_test_sim_match, self.match)
-        await self._finish(interaction.channel)
 
 
 # ── Test match toss views ──────────────────────────────────────────────────────
@@ -3617,17 +4085,7 @@ async def _begin_test_match(channel, state):
         match = TestMatchObj(t_bat, t_bowl, state.pitch, weather)
         active_test_matches[channel.id] = match
         await asyncio.to_thread(_test_sim_match, match)
-        embed = render_test_final_embed(match)
-        try:
-            img_buf = generate_test_scorecard_image(match)
-            file    = discord.File(fp=img_buf, filename="test_scorecard.png")
-            await channel.send(
-                "🏆 **Test Match over! Here is the final scorecard and broadcast graphic:**",
-                embed=embed, file=file
-            )
-        except Exception:
-            await channel.send(f"🏆 **Test Match Result:** {match.result or 'Match Drawn'}", embed=embed)
-        active_test_matches.pop(channel.id, None)
+        await _test_finish_match(match, channel.id, channel)
         return
 
     # AI game: auto-toss, show TestSimView
@@ -4344,6 +4802,37 @@ class PrefixCog(commands.Cog):
             await ctx.send("🛑 **Match and setup forcefully terminated.** Memory cleared.")
         else:
             await ctx.send("⚠️ There is no active match or setup running in this channel.")
+
+    @commands.command(name="counts", aliases=["matchcounts"], help="Show the total number of matches played per format.\nUsage: counts")
+    async def counts(self, ctx):
+        c = get_match_counts()
+        await ctx.send(
+            f"📊 **Matches Played on CricVerse**\n"
+            f"⚡ T20: **{c['t20']}**\n"
+            f"🏆 ODI: **{c['odi']}**\n"
+            f"🎩 TEST: **{c['test']}**"
+        )
+
+    @commands.command(name="setcount", aliases=["sc"], help="[ADMIN] Set the match counter for a format.\nUsage: setcount <t20|odi|test> <number>")
+    async def setcount(self, ctx, fmt: str = None, count: str = None):
+        is_owner = ctx.author.id == ADMIN_DISCORD_ID
+        is_admin_user = is_owner or str(ctx.author.id) in get_auth_admins()
+        if not is_admin_user:
+            return await ctx.send("❌ Admin or owner only.")
+
+        fmt_key = (fmt or "").lower().strip()
+        if fmt_key not in ("t20", "odi", "test"):
+            return await ctx.send("❌ Format must be one of: `t20`, `odi`, `test`\nExample: `cv setcount t20 150`")
+
+        try:
+            n = int(count)
+            if n < 0: raise ValueError
+        except (TypeError, ValueError):
+            return await ctx.send("❌ Count must be a non-negative integer.\nExample: `cv setcount t20 150`")
+
+        old = get_match_counts().get(fmt_key, 0)
+        _set_match_count(fmt_key, n)
+        await ctx.send(f"✅ **{fmt_key.upper()}** count updated: `{old}` → `{n}`")
 
     @commands.command(name="searchplayer", aliases=["sp"], help="Search for a player in the Cloud DB.\nUsage: searchplayer <name>")
     async def searchplayer(self, ctx, *, name: str):

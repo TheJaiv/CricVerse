@@ -55,7 +55,8 @@ DB_CACHE = {
     "restricted_channels": [],
     "ratings_channels": [],
     "match_log_channels": {},
-    "tournaments": []
+    "tournaments": [],
+    "match_counts": {"t20": 0, "odi": 0, "test": 0},
 }
 
 def load_data_from_bin():
@@ -72,6 +73,12 @@ def load_data_from_bin():
             DB_CACHE["restricted_channels"] = doc.get("restricted_channels", [])
             DB_CACHE["ratings_channels"]    = doc.get("ratings_channels", [])
             DB_CACHE["match_log_channels"]  = doc.get("match_log_channels", {})
+            raw_mc = doc.get("match_counts", {})
+            DB_CACHE["match_counts"] = {
+                "t20":  int(raw_mc.get("t20",  0)),
+                "odi":  int(raw_mc.get("odi",  0)),
+                "test": int(raw_mc.get("test", 0)),
+            }
             print(f"✅ Loaded {len(DB_CACHE['players'])} players & subscriptions from MongoDB!")
         else:
             print("⚠️ No main data document found in MongoDB. Starting with empty cache.")
@@ -255,6 +262,25 @@ def update_server_tier(server_id: str, tier_value: str, tier_name: str):
 
 def get_auth_admins():
     return [a["admin_id"] for a in DB_CACHE["auth_admins"]]
+
+# ── Match counters (stored in DB_CACHE["match_counts"], persisted to MongoDB) ──
+
+def get_match_counts() -> dict:
+    return dict(DB_CACHE["match_counts"])
+
+def increment_match_count(fmt: str) -> int:
+    """Increment counter for fmt ('t20'|'odi'|'test'). Returns the NEW count."""
+    if fmt not in DB_CACHE["match_counts"]:
+        return 0
+    DB_CACHE["match_counts"][fmt] += 1
+    async_save_to_bin()
+    return DB_CACHE["match_counts"][fmt]
+
+def set_match_count(fmt: str, n: int):
+    """Set counter for fmt to n. Saves to DB."""
+    if fmt in DB_CACHE["match_counts"]:
+        DB_CACHE["match_counts"][fmt] = n
+        async_save_to_bin()
 
 def toggle_auth_admin(admin_id: str):
     global DB_CACHE

@@ -128,6 +128,10 @@ class TestMatch:
         self.follow_on_msg: str = ""
         self.over_completed     = False
 
+        # Interactive mode: player-chosen delivery/shot (empty string = auto)
+        self.current_delivery_selection: str = ""
+        self.current_shot_selection: str     = ""
+
         self._new_innings(team1, team2)
 
     def _new_innings(self, batting: dict, bowling: dict):
@@ -266,6 +270,8 @@ def _get_delivery(bowler: dict, innings: TestInnings) -> str:
         if deliv == "Mystery":
             innings.mystery_bowled_this_over = True
         return deliv
+    if random.random() < 0.08:
+        return random.choice(["Off Cutter", "Leg Cutter", "Knuckle"])
     swing = random.choice(["Inswing","Outswing","Seam","Fast","Slow"])
     length = random.choice(["Bouncer","Full","Good length","Yorker","Short"])
     return f"{swing} {length}"
@@ -542,8 +548,17 @@ def execute_test_ball(match: TestMatch) -> bool:
         four_w *= 0.70; six_w *= 0.50; dot_w *= 1.15
 
     # ── Delivery + Shot ────────────────────────────────────────────────────
-    deliv = _get_delivery(bowler, innings)
-    shot  = _get_shot(deliv, is_collapse, b_stats.balls_faced, striker["archetype"], intent)
+    if match.current_delivery_selection:
+        deliv = match.current_delivery_selection
+        match.current_delivery_selection = ""
+    else:
+        deliv = _get_delivery(bowler, innings)
+
+    if match.current_shot_selection:
+        shot = match.current_shot_selection
+        match.current_shot_selection = ""
+    else:
+        shot = _get_shot(deliv, is_collapse, b_stats.balls_faced, striker["archetype"], intent)
 
     bad_shot  = False
     perf_shot = False
@@ -554,6 +569,9 @@ def execute_test_ball(match: TestMatch) -> bool:
     elif "Bouncer" in deliv or "Short" in deliv:
         if shot in ["Drive","Flick"]:            bad_shot  = True
         elif shot in ["Pull","Hook","Duck","Leave"]: perf_shot = True
+    elif deliv in ("Off Cutter", "Leg Cutter", "Knuckle"):
+        if shot in ["Block","Leave","Defensive"]: perf_shot = True
+        elif shot in ["Loft","Scoop"]:            bad_shot  = True
     elif deliv in SPIN_SHOT_MATRIX:
         if shot in SPIN_SHOT_MATRIX[deliv]:      perf_shot = True
         elif shot == "Leave":                    bad_shot  = True
@@ -585,10 +603,15 @@ def execute_test_ball(match: TestMatch) -> bool:
     if "Mystery" in deliv:
         wkt_w *= 1.6; dot_w *= 1.35; four_w *= 0.50
 
+    if deliv in ("Off Cutter", "Leg Cutter", "Knuckle"):
+        dot_w *= 1.35; four_w *= 0.65; wkt_w *= 1.15
+        if deliv == "Knuckle": dot_w *= 1.10; four_w *= 0.85
+
     # Swing / seam dismissal probability
     if "Outswing" in deliv and shot in ["Drive","Cut"]:  wkt_w *= 1.45; four_w *= 1.1
     elif "Inswing" in deliv and shot in ["Drive","Flick"]: wkt_w *= 1.40
     elif "Seam"    in deliv and shot in ["Drive","Cut","Flick"]: wkt_w *= 1.20
+    elif deliv in ("Off Cutter", "Leg Cutter", "Knuckle") and shot in ["Drive","Cut"]: wkt_w *= 1.25; four_w *= 0.85
 
     # Hard caps
     four_w = max(0.1, min(four_w, 18.0))
@@ -654,6 +677,10 @@ def execute_test_ball(match: TestMatch) -> bool:
                 d = "Bowled"
             elif bad_shot and ("Bouncer" in deliv or "Short" in deliv):
                 d = "Caught"
+            elif deliv in ("Off Cutter","Leg Cutter","Knuckle") and shot in ["Loft","Scoop"]:
+                d = "Caught"
+            elif deliv in ("Off Cutter","Leg Cutter","Knuckle") and shot in ["Drive","Cut"]:
+                d = random.choice(["Caught","Bowled"])
             elif shot in ["Loft","Scoop","Hook"]:
                 d = "Caught"
             elif "Spin" in bowler["role"] and perf_shot:
@@ -765,6 +792,35 @@ def _select_bowler(match: TestMatch):
     innings.bowling_stats[bowler["name"]].over_run_start = (
         innings.bowling_stats[bowler["name"]].runs_conceded
     )
+
+
+def prepare_over_interactive(match: TestMatch, bowler_name: str):
+    """Apply a human bowler choice for interactive mode.
+    Handles maiden-check for previous over, spell-resets, second new ball, then sets the bowler."""
+    innings = match.current_innings
+
+    # Maiden check for the bowler who just finished
+    if innings.prev_bowler:
+        st = innings.bowling_stats[innings.prev_bowler["name"]]
+        if st.runs_conceded == st.over_run_start:
+            st.maidens += 1
+
+    # Reset spell counter for any bowler rested 4+ overs
+    current_over = innings.total_balls // 6
+    for p in innings.bowling_team["players"]:
+        st = innings.bowling_stats[p["name"]]
+        if current_over - st.last_over_bowled >= 4:
+            st.spell_balls = 0
+
+    # Take second new ball if available
+    if innings.ball_age >= 480 and not innings.second_new_ball_taken:
+        innings.second_new_ball_taken = True
+        innings.ball_age = 0
+
+    bowler = next(p for p in innings.bowling_team["players"] if p["name"] == bowler_name)
+    innings.current_bowler = bowler
+    innings.bowling_stats[bowler_name].over_run_start = innings.bowling_stats[bowler_name].runs_conceded
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RESULT HELPERS
@@ -1011,6 +1067,181 @@ def simulate_session(match: TestMatch) -> str:
             lines.append(f"  *** DAY 5 COMPLETE — MATCH DRAWN ***")
 
     return "\n".join(lines)
+
+
+def simulate_one_over_verbose(match: TestMatch) -> tuple:
+    """Simulate exactly one over with ball-by-ball commentary.
+    Returns (text, innings_ended). Updates overs_in_session / total_match_overs.
+    Does NOT advance the session even when full — caller checks overs_in_session >= 30."""
+    innings = match.current_innings
+    if innings.is_complete:
+        return "", True
+
+    _select_bowler(match)
+    bowler    = innings.current_bowler
+    ov_num    = innings.total_balls // 6          # 0-indexed over number
+    ov_start_runs = innings.total_runs
+    ov_start_wkts = innings.wickets
+
+    ball_parts: list = []
+    legal_balls = 0
+
+    while legal_balls < 6:
+        if innings.is_complete or innings.wickets >= 10:
+            innings.is_complete = True
+            break
+        if match.current_innings_idx == 3:
+            tgt = _get_chase_target(match)
+            if tgt is not None and innings.total_runs >= tgt:
+                innings.is_complete = True
+                break
+
+        striker     = innings.batting_team["players"][innings.current_striker_idx]
+        runs_before = innings.total_runs
+        wkts_before = innings.wickets
+        balls_before = innings.total_balls
+
+        legal = execute_test_ball(match)
+        if legal:
+            legal_balls += 1
+            ball_label  = f"{ov_num}.{legal_balls}"
+            runs_this   = innings.total_runs - runs_before
+            if innings.wickets > wkts_before:
+                b_stats = innings.batting_stats[striker["name"]]
+                ball_parts.append(f"{ball_label} **W** _{b_stats.dismissal}_")
+            elif runs_this == 4:
+                ball_parts.append(f"{ball_label} **4**")
+            elif runs_this == 6:
+                ball_parts.append(f"{ball_label} **6**")
+            elif runs_this == 0:
+                ball_parts.append(f"{ball_label} •")
+            else:
+                ball_parts.append(f"{ball_label} {runs_this}")
+        else:
+            ball_parts.append("Wd")
+
+        if match.over_completed:
+            match.over_completed    = False
+            match.overs_in_session  += 1
+            match.total_match_overs += 1
+            break
+
+    if not innings.is_complete and _should_declare(match):
+        innings.is_complete = True
+        innings.declared    = True
+
+    ov_runs = innings.total_runs - ov_start_runs
+    ov_wkts = innings.wickets    - ov_start_wkts
+    balls_str = "  ".join(ball_parts)
+    footer = (
+        f"{innings.batting_team['name']} "
+        f"**{innings.total_runs}/{innings.wickets}** ({innings.overs_str} ov)"
+        f"  +{ov_runs}r {ov_wkts}w"
+    )
+    if innings.is_complete:
+        tag = "DECLARED" if getattr(innings, "declared", False) else "ALL OUT"
+        footer += f"  **[{tag}]**"
+
+    text = f"**Ov {ov_num + 1}** ({bowler['name']})\n{balls_str}\n{footer}"
+    return text, innings.is_complete
+
+
+def simulate_n_overs_verbose(match: TestMatch, n: int) -> tuple:
+    """Simulate up to n overs with verbose over-by-over commentary.
+    Stops at innings end or session boundary. Returns (text, innings_ended)."""
+    blocks: list   = []
+    innings_ended  = False
+
+    for _ in range(n):
+        innings = match.current_innings
+        if innings.is_complete:
+            innings_ended = True
+            break
+
+        remaining = 30 - match.overs_in_session
+        if remaining <= 0:
+            time_up = match.advance_session()
+            blocks.append("☕ **Session complete.**" + (" Day 5 done — Match Drawn." if time_up else ""))
+            break
+
+        text, ended = simulate_one_over_verbose(match)
+        if text:
+            blocks.append(text)
+
+        if ended:
+            innings_ended = True
+            break
+
+        if match.overs_in_session >= 30:
+            time_up = match.advance_session()
+            blocks.append("☕ **Session complete.**" + (" Day 5 done — Match Drawn." if time_up else ""))
+            break
+
+    return "\n\n".join(blocks), innings_ended
+
+
+def simulate_one_ball_interactive(match: TestMatch) -> tuple:
+    """Execute one legal delivery (wides auto-replayed). Returns
+    (description, over_ended, innings_ended, session_ended).
+    session_ended=True means overs_in_session >= 30; caller decides on advance_session()."""
+    innings = match.current_innings
+    if innings.is_complete:
+        return "", False, True, False
+
+    if innings.current_bowler is None:
+        _select_bowler(match)
+
+    bowler      = innings.current_bowler
+    striker     = innings.batting_team["players"][innings.current_striker_idx]
+    runs_before = innings.total_runs
+    wkts_before = innings.wickets
+    balls_before = innings.total_balls
+
+    wide_extras = 0
+    legal = False
+    while not legal:
+        legal = execute_test_ball(match)
+        if not legal:
+            wide_extras += 1
+
+    ball_label = f"{balls_before // 6}.{balls_before % 6 + 1}"
+    runs_this  = innings.total_runs - runs_before - wide_extras
+
+    if innings.wickets > wkts_before:
+        b_stats = innings.batting_stats[striker["name"]]
+        desc = f"**{ball_label}** WICKET — _{b_stats.dismissal}_"
+    elif runs_this == 4:
+        desc = f"**{ball_label}** FOUR!  (+4)"
+    elif runs_this == 6:
+        desc = f"**{ball_label}** SIX!  (+6)"
+    elif runs_this == 0 and wide_extras == 0:
+        desc = f"**{ball_label}** Dot ball"
+    else:
+        desc = f"**{ball_label}** {runs_this} run(s)"
+    if wide_extras:
+        desc += f"  +{wide_extras} wide(s)"
+
+    over_ended = session_ended = False
+    if match.over_completed:
+        match.over_completed    = False
+        match.overs_in_session  += 1
+        match.total_match_overs += 1
+        over_ended = True
+        if not innings.is_complete and _should_declare(match):
+            innings.is_complete = True
+            innings.declared    = True
+        if match.overs_in_session >= 30:
+            session_ended = True
+
+    if innings.wickets >= 10:
+        innings.is_complete = True
+    if match.current_innings_idx == 3:
+        tgt = _get_chase_target(match)
+        if tgt is not None and innings.total_runs >= tgt:
+            innings.is_complete = True
+
+    return desc, over_ended, innings.is_complete, session_ended
+
 
 def simulate_innings(match: TestMatch) -> str:
     """Simulate the full current innings. Returns innings scorecard."""

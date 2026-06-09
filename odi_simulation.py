@@ -301,7 +301,10 @@ def execute_ball_math_odi(match):
             if deliv == "Mystery":
                 innings.mystery_bowled_this_over = True
         else:
-            deliv = f"{random.choice(['Inswing', 'Outswing', 'Fast', 'Slow'])} {random.choice(['Bouncer', 'Full', 'Good', 'Yorker'])}"
+            if random.random() < 0.08:
+                deliv = random.choice(["Off Cutter", "Leg Cutter", "Knuckle"])
+            else:
+                deliv = f"{random.choice(['Inswing', 'Outswing', 'Fast', 'Slow'])} {random.choice(['Bouncer', 'Full', 'Good', 'Yorker'])}"
             
     shot = match.current_shot_selection or get_smart_ai_shot_odi(deliv, innings, is_death_overs, striker["archetype"], pressure_multiplier)
         
@@ -326,6 +329,32 @@ def execute_ball_math_odi(match):
             is_bouncer_no_ball = True
             prefix += "🚨 **NO BALL!** (Second bouncer of the over — ODI limit is 1)\n"
             # Bouncer no balls do NOT give free hits in ODI (ICC rules)
+
+    # Cutter tracking — Off Cutter / Leg Cutter / Knuckle
+    # 1st cutter per over: safe. 2nd+ in same over: 50% chance of wide (grip loss)
+    _CUTTERS = ("Off Cutter", "Leg Cutter", "Knuckle")
+    is_cutter = deliv in _CUTTERS
+    if not hasattr(innings, "cutters_in_over"): innings.cutters_in_over = 0
+    if is_cutter:
+        innings.cutters_in_over += 1
+        if innings.cutters_in_over > 1 and random.random() < 0.50:
+            innings.total_runs += 1
+            if not hasattr(innings, "extras"): innings.extras = 0
+            innings.extras += 1
+            bow_stats.runs_conceded += 1
+            innings.over_log.append("WD")
+            nth = {2: "2nd", 3: "3rd"}.get(innings.cutters_in_over, f"{innings.cutters_in_over}th")
+            match.last_commentary = (
+                prefix +
+                f"**{bowler['name']}** bowls a **{deliv}**!\n"
+                f"💨 **Wide!** **Bowling multiple cutters in one over reduces grip and control — "
+                f"this is the {nth} cutter of the over (50% slip chance per extra cutter).**\n"
+                f"💥 **Result:** 1 Extra"
+            )
+            if free_hit_active: match.last_commentary_prefix = "🛡️ *(Free Hit continues)*\n"
+            return
+    else:
+        is_cutter = False
 
     if not is_no_ball and random.random() < 0.04 and "Yorker" not in deliv and "Slow" not in deliv:
         is_wide = True
@@ -468,6 +497,9 @@ def execute_ball_math_odi(match):
     elif "Bouncer" in deliv:
         if shot in ["Drive", "Sweep", "Scoop"]: bad_shot_selection = True
         elif shot in ["Pull", "Leave"]: perfect_shot_selection = True
+    elif is_cutter:
+        if shot in ["Block", "Leave", "Defensive"]: perfect_shot_selection = True
+        elif shot in ["Loft", "Scoop"]:             bad_shot_selection = True
     elif "Full Toss" in deliv:
         if shot in ["Defensive", "Leave"]: bad_shot_selection = True
         elif shot in ["Loft", "Drive"]: perfect_shot_selection = True
@@ -526,6 +558,10 @@ def execute_ball_math_odi(match):
         boundary_weight *= 0.6
         single_weight *= 0.8
 
+    if is_cutter:
+        dot_weight *= 1.35; boundary_weight *= 0.65; wicket_weight *= 1.15
+        if deliv == "Knuckle": dot_weight *= 1.10; boundary_weight *= 0.85
+
     four_weight = boundary_weight
     six_weight = boundary_weight * 0.25
     
@@ -549,6 +585,7 @@ def execute_ball_math_odi(match):
     elif "Fast" in deliv and shot in ["Scoop", "Sweep", "Pull", "Loft"]: wicket_weight *= 1.5
     elif "Outswing" in deliv and shot in ["Drive", "Cut"]: wicket_weight *= 1.4; four_weight *= 1.2
     elif "Inswing" in deliv and shot in ["Drive", "Flick", "Sweep"]: wicket_weight *= 1.4
+    elif is_cutter and shot in ["Drive", "Cut"]: wicket_weight *= 1.25; four_weight *= 0.85
         
     # 🚨 ANTI-OVERCOOK SAFETIES (Prevents stacked conditions from breaking the game)
     four_weight = max(0.5, min(four_weight, 25.0)) # Hard cap to prevent 450+ scores
@@ -579,6 +616,8 @@ def execute_ball_math_odi(match):
         elif "Slow" in deliv and shot in ["Loft", "Pull", "Scoop"]: dismissal_type = "Caught"
         elif bad_shot_selection and "Yorker" in deliv: dismissal_type = "Bowled"
         elif bad_shot_selection and "Bouncer" in deliv: dismissal_type = "Caught"
+        elif is_cutter and shot in ["Loft", "Scoop"]:  dismissal_type = "Caught"
+        elif is_cutter and shot in ["Drive", "Cut"]:   dismissal_type = random.choice(["Caught", "Bowled"])
         elif shot in ["Loft", "Scoop"]: dismissal_type = "Caught"
         else: dismissal_type = random.choice(d_types)
             
