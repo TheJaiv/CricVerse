@@ -28,6 +28,7 @@ from test_simulation import (
     _check_result as _test_check_result,
     _start_next_innings as _test_start_next_innings,
     _format_scorecard as _test_format_scorecard,
+    _player_of_match as _test_player_of_match,
 )
 from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings
 from subscription_manager import (
@@ -3384,7 +3385,7 @@ def _test_session_commentary(
     elif pitch in ("Green", "Damp") and match.current_innings_idx == 0:
         lines.append("The lush surface continued to offer the seamers generous movement throughout.")
 
-    return "\n".join(f"-# {l}" for l in lines)
+    return "\n".join(f"> *{l}*" for l in lines)
 
 
 def _render_test_session_embed(match: TestMatchObj, snap: dict) -> discord.Embed:
@@ -3492,6 +3493,8 @@ def _render_test_innings_embed(match: TestMatchObj, inn_idx: int) -> discord.Emb
         color = discord.Color.gold(),
     )
 
+    potm  = _test_player_of_match(match)
+    potm_line = f"⭐ **Player of the Match:** {potm}\n\n" if potm else ""
     total_line = f"**{inn.total_runs}/{inn.wickets}{dec}**  ({inn.overs_str} ov)  ·  RR: {rr}\n\n"
 
     # ── All batters ──────────────────────────────────────────────────────────
@@ -3529,7 +3532,7 @@ def _render_test_innings_embed(match: TestMatchObj, inn_idx: int) -> discord.Emb
     bowl_block += "\n".join(bowl_lines) + "\n"
     bowl_block += "```"
 
-    embed.description = total_line + bat_block + bowl_block
+    embed.description = potm_line + total_line + bat_block + bowl_block
     return embed
 
 
@@ -3588,6 +3591,11 @@ def generate_test_scorecard_image(match: TestMatchObj) -> io.BytesIO:
     res_str = (match.result or "IN PROGRESS").upper()
     rx = 600 - _tw(res_str, fRES) // 2
     d.text((rx, _HDR_H + (_RES_H - _th(fRES)) // 2), res_str, fill="#FFD700", font=fRES)
+    _potm = _test_player_of_match(match)
+    if _potm:
+        _potm_str = f"★ POTM: {_potm.upper()}"
+        _py = _HDR_H + (_RES_H - _th(fSUB)) // 2
+        d.text((_W - 12 - _tw(_potm_str, fSUB), _py), _potm_str, fill=_C_GOLD, font=fSUB)
 
     # 4 innings panels  (positions: top-left, top-right, bot-left, bot-right)
     panel_top = _HDR_H + _RES_H
@@ -3683,20 +3691,57 @@ def generate_test_scorecard_image(match: TestMatchObj) -> io.BytesIO:
     return buf
 
 
+class TestScorecardView(discord.ui.View):
+    """Navigate through per-innings scorecards after a Test match ends."""
+
+    def __init__(self, match: TestMatchObj):
+        super().__init__(timeout=600)
+        self.match = match
+        self.idx   = 0
+        self._refresh()
+
+    def _refresh(self):
+        total = len(self.match.innings_list)
+        self.prev_btn.disabled = (self.idx == 0)
+        self.next_btn.disabled = (self.idx >= total - 1)
+        self.page_btn.label    = f"Innings {self.idx + 1} / {total}"
+
+    @discord.ui.button(label="◀ Prev", style=discord.ButtonStyle.secondary, row=0)
+    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.idx -= 1
+        self._refresh()
+        await interaction.response.edit_message(embed=_render_test_innings_embed(self.match, self.idx), view=self)
+
+    @discord.ui.button(label="Innings 1 / ?", style=discord.ButtonStyle.secondary, disabled=True, row=0)
+    async def page_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary, row=0)
+    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.idx += 1
+        self._refresh()
+        await interaction.response.edit_message(embed=_render_test_innings_embed(self.match, self.idx), view=self)
+
+
 async def _test_finish_match(match: TestMatchObj, channel_id: int, channel):
     """Shared finish routine: increment counter, post final scorecard, clean up."""
     _increment_match_count("test")
-    embed = render_test_final_embed(match)
+    result_text = match.result or "Match Drawn"
     img_buf = None
     try:
         img_buf = generate_test_scorecard_image(match)
         file    = discord.File(fp=img_buf, filename="test_scorecard.png")
         await channel.send(
-            "🏆 **Test Match over! Here is the final scorecard and broadcast graphic:**",
-            embed=embed, file=file
+            f"🏆 **Test Match Complete · {result_text}**",
+            file=file
         )
     except Exception:
-        await channel.send(f"🏆 **Test Match Result:** {match.result or 'Match Drawn'}", embed=embed)
+        await channel.send(f"🏆 **Test Match Result:** {result_text}")
+
+    # Interactive per-innings scorecard navigator
+    view  = TestScorecardView(match)
+    embed = _render_test_innings_embed(match, 0)
+    await channel.send("📋 **Full Scorecard** — use the arrows to browse innings:", embed=embed, view=view)
 
     if channel.guild:
         log_channel_id = get_match_log_channel(str(channel.guild.id))
@@ -4957,8 +5002,8 @@ def _player_overall(p: dict) -> float:
     if role.startswith("All-Rounder"):
         return (bat + bowl) / 2
     if role.startswith("Bowler"):
-        return bat * 0.20 + bowl * 0.80
-    return bat * 0.80 + bowl * 0.20   # Batter / WK-Batter
+        return bowl
+    return bat   # Batter / WK-Batter
 
 def _build_playerlist_txt(players: list) -> str:
     tiers = {"LEGENDS": [], "ELITE": [], "GOLD": [], "SILVER": [], "BRONZE": []}
