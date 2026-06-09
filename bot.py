@@ -4721,8 +4721,8 @@ def _help_match_embed():
 
 def _help_players_embed(is_admin: bool):
     e = discord.Embed(title="🔍 Players & Database", color=discord.Color.blue())
-    e.add_field(name="/searchplayer <name>  ·  `cv sp`", value="Search for a player — shows role, archetype and (if permitted) ratings.", inline=False)
-    e.add_field(name="/playerlist  ·  `cv playerlist`  ·  `cv pl`", value="Download the full player database as a .txt file — grouped by tier, ratings hidden, order shuffled within each tier.", inline=False)
+    e.add_field(name="/searchplayer <name>  ·  `cv sp`", value="Search for a player — shows their role (ratings & archetype hidden unless you're an admin in a ratings channel).", inline=False)
+    e.add_field(name="/playerlist  ·  `cv playerlist`  ·  `cv pl`", value="Download the full player database as a .txt file — names only, grouped by tier, shuffled within each tier.", inline=False)
     e.add_field(name="📋 How to enter Playing XI",        value="When prompted during a match, paste 11 player names (one per line). Names must match the database exactly.", inline=False)
     e.add_field(name="🏟️ Pitch & Weather Conditions",    value="15 pitch types · 10 weather conditions — each affects pace, spin and batting differently across T20 and ODI.", inline=False)
     if is_admin:
@@ -4938,11 +4938,11 @@ async def send_player_profile(interaction, player: dict, show_ratings: bool = Tr
         embed.add_field(name="📋 Role", value=player["role"].replace("_", " "), inline=True)
         embed.add_field(name="🧠 Archetype", value=player["archetype"], inline=True)
     else:
+        role_str = _ROLE_DISPLAY.get(player.get("role", ""), player.get("role", "Unknown"))
         embed = discord.Embed(title=f"🏏 {player['name']}", color=0x1D4ED8)
-        embed.description = (
-            "✅ This player is in the database.\n\n"
-            "*Ratings are hidden here — use `/match` to pick this player and put them to the test!*"
-        )
+        embed.add_field(name="📋 Role", value=role_str, inline=False)
+        embed.description = "*Use `/match` to pick this player and put them to the test!*"
+        embed.set_footer(text="Ratings & archetype are hidden.")
     await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="searchplayer", description="Search for a player in the Cloud DB.")
@@ -5036,8 +5036,7 @@ def _build_playerlist_txt(players: list) -> str:
             continue
         lines.append(f"── {label} ({len(grp)}) " + "─" * max(1, 44 - len(label) - len(str(len(grp)))))
         for p in grp:
-            role_str = _ROLE_DISPLAY.get(p.get("role", ""), p.get("role", "Unknown"))
-            lines.append(f"  {p['name']:<28}  {role_str}")
+            lines.append(f"  {p['name']}")
         lines.append("")
 
     lines.append("═" * 52)
