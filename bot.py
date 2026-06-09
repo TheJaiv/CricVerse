@@ -1983,7 +1983,7 @@ class PaceBowlingView(discord.ui.View):
         super().__init__(timeout=120)
         self.match = match
         self.uid = match.get_bowler_user_id()
-        
+
         for var in ["Inswing", "Outswing", "Slow", "Fast"]:
             self.add_item(ActionButton(var, discord.ButtonStyle.primary, 0, "var"))
 
@@ -1992,6 +1992,8 @@ class PaceBowlingView(discord.ui.View):
 
         for cutter in ["Off Cutter", "Leg Cutter", "Knuckle"]:
             self.add_item(ActionButton(cutter, discord.ButtonStyle.secondary, 2, "cutter"))
+
+        self.add_item(ActionButton("🎲 Auto Ball", discord.ButtonStyle.secondary, 3, "auto"))
             
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.channel.id not in active_games or active_games[interaction.channel.id] != self.match:
@@ -2022,6 +2024,18 @@ class PaceBowlingView(discord.ui.View):
             await interaction.response.edit_message(view=None)
             await prompt_batter_shot(interaction.channel, self.match, interaction)
 
+        elif action_type == "auto":
+            var    = random.choice(["Inswing", "Outswing", "Fast", "Slow"])
+            length = random.choice(["Bouncer", "Full", "Good", "Yorker"])
+            self.match.current_delivery_selection = f"{var} {length}"
+            self.match.current_shot_selection = ""  # simulation auto-picks
+            await interaction.response.edit_message(view=None)
+            execute_ball_math(self.match)
+            await interaction.channel.send(embed=render_embed_scoreboard(self.match))
+            class _D: pass
+            d = _D(); d.channel = interaction.channel
+            await run_interactive_delivery_sequence(d, self.match)
+
 class SpinBowlingView(discord.ui.View):
     def __init__(self, match: CricketMatch, spin_type: str):
         super().__init__(timeout=120)
@@ -2039,6 +2053,8 @@ class SpinBowlingView(discord.ui.View):
             row = 0 if idx < 3 else 1
             disabled = (spin == "Mystery" and mystery_used)
             self.add_item(ActionButton(spin, discord.ButtonStyle.primary, row, "spin", disabled=disabled))
+
+        self.add_item(ActionButton("🎲 Auto Ball", discord.ButtonStyle.secondary, 2, "auto"))
             
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.channel.id not in active_games or active_games[interaction.channel.id] != self.match:
@@ -2050,6 +2066,22 @@ class SpinBowlingView(discord.ui.View):
         return True
         
     async def process_action(self, interaction: discord.Interaction, label: str, action_type: str):
+        if action_type == "auto":
+            innings = self.match.current_innings
+            role = innings.current_bowler.get("role", "") if innings.current_bowler else ""
+            if "Off" in role:
+                opts = ["Off spin", "Carrom", "Arm ball", "Doosra", "Top spin"]
+            else:
+                opts = ["Leg spin", "Googly", "Flipper", "Drifter", "Slider"]
+            self.match.current_delivery_selection = random.choice(opts)
+            self.match.current_shot_selection = ""
+            await interaction.response.edit_message(view=None)
+            execute_ball_math(self.match)
+            await interaction.channel.send(embed=render_embed_scoreboard(self.match))
+            class _D: pass
+            d = _D(); d.channel = interaction.channel
+            await run_interactive_delivery_sequence(d, self.match)
+            return
         if label == "Mystery":
             self.match.current_innings.mystery_bowled_this_over = True
         self.match.current_delivery_selection = label
@@ -3107,12 +3139,15 @@ def render_test_embed(match: TestMatchObj) -> discord.Embed:
 
     desc += f"\n`P'Ship: {innings.partnership_runs}  {lead_str}`\n"
 
-    # Current bowler
+    # Current bowler + over timeline
     if innings.current_bowler:
         cb  = innings.current_bowler
         cbs = innings.bowling_stats[cb["name"]]
         desc += (f"\n**`{'BOWLER':<17}{'O':<8}{'R':<5}{'W'}`**\n"
                  f"`{cb['name'][:16]:<17}{cbs.overs_str:<8}{cbs.runs_conceded:<5}{cbs.wickets_taken}`\n")
+    tl = getattr(innings, "over_log", [])
+    timeline_str = " ".join(tl) if tl else "Starting over..."
+    desc += f"**This Over**\n{timeline_str}\n"
 
     # Innings-4 chase equation
     if match.current_innings_idx == 3:
@@ -3633,6 +3668,20 @@ async def _test_ia_start_over(channel, match: TestMatchObj, channel_id: int):
             return await _test_finish_match(match, channel_id, channel)
         return await _test_ia_start_over(channel, match, channel_id)
 
+    # AI auto-selects its own bowler
+    if _test_ai_bowling(match):
+        prev_nm = innings.prev_bowler["name"] if innings.prev_bowler else None
+        candidates = [p for p in innings.bowling_team["players"]
+                      if ("Bowler" in p["role"] or "All-Rounder" in p["role"])
+                      and p["name"] != prev_nm]
+        if not candidates:
+            candidates = [p for p in innings.bowling_team["players"]
+                          if "Bowler" in p["role"] or "All-Rounder" in p["role"]]
+        if candidates:
+            _test_prepare_over(match, random.choice(candidates)["name"])
+        innings.over_log = []
+        return await _test_ia_show_delivery(channel, match, channel_id)
+
     ov_num   = innings.total_balls // 6 + 1
     prev_nm  = innings.prev_bowler["name"] if innings.prev_bowler else None
     bowlers  = [p for p in innings.bowling_team["players"]
@@ -3653,6 +3702,7 @@ async def _test_ia_start_over(channel, match: TestMatchObj, channel_id: int):
         ))
 
     striker = innings.batting_team["players"][innings.current_striker_idx]
+    sess_name = "Morning" if match.session == 1 else ("Afternoon" if match.session == 2 else "Evening")
     embed = discord.Embed(
         title=f"🎳 Over {ov_num} — Select Bowler",
         description=(
@@ -3664,20 +3714,43 @@ async def _test_ia_start_over(channel, match: TestMatchObj, channel_id: int):
     embed.add_field(
         name="Score",
         value=f"**{innings.total_runs}/{innings.wickets}** ({innings.overs_str} ov)  "
-              f"Day {match.day} · {'MornAftnEvng'.split('Aftn')[0] if match.session==1 else ('Afternoon' if match.session==2 else 'Evening')}",
+              f"Day {match.day} · {sess_name}",
         inline=False,
     )
     await channel.send(embed=embed, view=TestInteractiveBowlerSelectView(match, channel_id, options))
 
 
 async def _test_ia_show_delivery(channel, match: TestMatchObj, channel_id: int):
-    """Show delivery-type buttons for the current ball."""
+    """Show delivery-type buttons for the current ball (AI auto-picks if bowling)."""
     innings = match.current_innings
     bowler  = innings.current_bowler
     striker = innings.batting_team["players"][innings.current_striker_idx]
+
+    # AI auto-selects its delivery
+    if _test_ai_bowling(match):
+        role = bowler.get("role", "")
+        if "Spin" in role:
+            if "Off" in role:
+                opts = ["Off spin", "Carrom", "Arm ball", "Doosra", "Top spin", "Mystery"]
+            else:
+                opts = ["Leg spin", "Googly", "Flipper", "Drifter", "Slider", "Mystery"]
+            if getattr(innings, "mystery_bowled_this_over", False):
+                opts = [o for o in opts if o != "Mystery"]
+            delivery = random.choice(opts)
+            if delivery == "Mystery":
+                innings.mystery_bowled_this_over = True
+        else:
+            if random.random() < 0.08:
+                delivery = random.choice(["Off Cutter", "Leg Cutter", "Knuckle"])
+            else:
+                var    = random.choice(["Inswing", "Outswing", "Seam", "Fast", "Slow"])
+                length = random.choice(["Bouncer", "Full", "Good length", "Yorker", "Short"])
+                delivery = f"{var} {length}"
+        match.current_delivery_selection = delivery
+        return await _test_ia_show_shot(channel, match, channel_id, delivery)
+
     ball_in_ov = innings.total_balls % 6 + 1
     ov_num     = innings.total_balls // 6 + 1
-
     embed = discord.Embed(
         title=f"🏏 Over {ov_num}, Ball {ball_in_ov}",
         description=(
@@ -3691,10 +3764,20 @@ async def _test_ia_show_delivery(channel, match: TestMatchObj, channel_id: int):
 
 
 async def _test_ia_show_shot(channel, match: TestMatchObj, channel_id: int, delivery: str):
-    """Show shot-selection buttons after bowler has committed to a delivery."""
+    """Show shot-selection buttons, or auto-execute if AI is batting."""
     innings = match.current_innings
     striker = innings.batting_team["players"][innings.current_striker_idx]
-    embed   = discord.Embed(
+
+    # AI auto-picks shot and executes
+    if _test_ai_batting(match):
+        _ai_shots = ["Drive", "Cut", "Pull", "Flick", "Loft", "Sweep", "Scoop", "Block", "Leave"]
+        match.current_shot_selection = random.choice(_ai_shots)
+        inn_idx = match.current_innings_idx
+        desc, over_ended, innings_ended, session_ended = await asyncio.to_thread(_test_sim_one_ball, match)
+        await _test_ia_ball_result(channel, match, channel_id, desc, over_ended, innings_ended, session_ended, inn_idx)
+        return
+
+    embed = discord.Embed(
         title=f"🏏 {striker['name']} faces {delivery}",
         description=f"Score: **{innings.total_runs}/{innings.wickets}** ({innings.overs_str} ov)",
         color=0x27ae60,
@@ -3764,6 +3847,29 @@ async def _test_ia_ball_result(channel, match: TestMatchObj, channel_id: int,
     await _test_ia_show_delivery(channel, match, channel_id)
 
 
+def _test_bowling_owner(match: TestMatchObj):
+    """Return the user ID that owns the bowling team (None = AI owns it)."""
+    inn = match.current_innings
+    if inn.bowling_team is match.team1:
+        return getattr(match, "host_id", None)
+    return getattr(match, "p2_id", None)
+
+def _test_batting_owner(match: TestMatchObj):
+    """Return the user ID that owns the batting team (None = AI owns it)."""
+    inn = match.current_innings
+    if inn.batting_team is match.team1:
+        return getattr(match, "host_id", None)
+    return getattr(match, "p2_id", None)
+
+def _test_ai_bowling(match: TestMatchObj) -> bool:
+    """True when the AI (no p2) controls the bowling team."""
+    return getattr(match, "p2_id", None) is None and match.current_innings.bowling_team is match.team2
+
+def _test_ai_batting(match: TestMatchObj) -> bool:
+    """True when the AI (no p2) controls the batting team."""
+    return getattr(match, "p2_id", None) is None and match.current_innings.batting_team is match.team2
+
+
 class TestInteractiveBowlerSelectView(discord.ui.View):
     def __init__(self, match: TestMatchObj, channel_id: int, options: list):
         super().__init__(timeout=300)
@@ -3778,11 +3884,19 @@ class TestInteractiveBowlerSelectView(discord.ui.View):
         exit_btn.callback = self._exit
         self.add_item(exit_btn)
 
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        owner = _test_bowling_owner(self.match)
+        if owner and interaction.user.id != owner:
+            await interaction.response.send_message("❌ Only the bowling captain can select the bowler.", ephemeral=True)
+            return False
+        return True
+
     async def _on_select(self, interaction: discord.Interaction):
         await interaction.response.defer()
         await interaction.message.edit(view=None)
         bowler_name = interaction.data["values"][0]
         _test_prepare_over(self.match, bowler_name)
+        self.match.current_innings.over_log = []   # fresh over
         await _test_ia_show_delivery(interaction.channel, self.match, self.channel_id)
 
     async def _exit(self, interaction: discord.Interaction):
@@ -3820,6 +3934,7 @@ class TestInteractiveDeliveryView(discord.ui.View):
         self.match      = match
         self.channel_id = channel_id
         self._temp_var  = None
+        self._is_spin   = is_spin
 
         mystery_used = getattr(match.current_innings, "mystery_bowled_this_over", False)
 
@@ -3846,6 +3961,13 @@ class TestInteractiveDeliveryView(discord.ui.View):
                 btn = discord.ui.Button(label=cutter, style=discord.ButtonStyle.secondary, row=2)
                 btn.callback = self._make_direct_cb(cutter)
                 self.add_item(btn)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        owner = _test_bowling_owner(self.match)
+        if owner and interaction.user.id != owner:
+            await interaction.response.send_message("❌ Only the bowling captain selects the delivery.", ephemeral=True)
+            return False
+        return True
 
     def _make_var_cb(self, var: str):
         async def cb(interaction: discord.Interaction):
@@ -3901,6 +4023,13 @@ class TestInteractiveShotView(discord.ui.View):
             btn.callback = self._make_cb(label)
             self.add_item(btn)
 
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        owner = _test_batting_owner(self.match)
+        if owner and interaction.user.id != owner:
+            await interaction.response.send_message("❌ Only the batting captain selects the shot.", ephemeral=True)
+            return False
+        return True
+
     def _make_cb(self, shot: str):
         async def cb(interaction: discord.Interaction):
             await interaction.response.defer()
@@ -3954,30 +4083,74 @@ class TestSimView(discord.ui.View):
         await interaction.response.defer()
         await interaction.message.edit(view=None)
         match   = self.match
-        snap    = _test_take_snapshot(match)
         inn_idx = match.current_innings_idx
 
-        await asyncio.to_thread(_test_sim_one_over_verbose, match)
+        verbose_text, _ = await asyncio.to_thread(_test_sim_one_over_verbose, match)
 
         if match.overs_in_session >= 30:
             match.advance_session()
 
         sim_inn       = match.innings_list[inn_idx]
-        innings_ended = sim_inn.is_complete and match.overs_in_session > 0
+        innings_ended = sim_inn.is_complete
 
         _test_post_innings_logic(match)
 
-        sess_embed = _render_test_session_embed(match, snap)
+        if verbose_text:
+            await interaction.channel.send(embed=discord.Embed(description=verbose_text, color=0x2c3e50))
 
         if match.result or match.day > 5:
-            await interaction.channel.send(embed=sess_embed)
             if innings_ended:
                 await interaction.channel.send(embed=_render_test_innings_embed(match, inn_idx))
             return await _test_finish_match(match, self.channel_id, interaction.channel)
 
-        await interaction.channel.send(embed=sess_embed)
         if innings_ended:
             await interaction.channel.send(embed=_render_test_innings_embed(match, inn_idx))
+        await interaction.channel.send(embed=render_test_embed(match), view=TestSimView(match, self.channel_id))
+
+    @discord.ui.button(label="🎲 1 Ball", style=discord.ButtonStyle.secondary, row=0)
+    async def sim_one_ball(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_host(interaction): return
+        await interaction.response.defer()
+        await interaction.message.edit(view=None)
+        match   = self.match
+        inn_idx = match.current_innings_idx
+
+        desc, over_ended, innings_ended, session_ended = await asyncio.to_thread(_test_sim_one_ball, match)
+
+        if "WICKET" in desc:    color = 0xe74c3c
+        elif "FOUR" in desc:    color = 0xf39c12
+        elif "SIX" in desc:     color = 0x9b59b6
+        elif "Dot" in desc:     color = 0x7f8c8d
+        else:                   color = 0x2ecc71
+
+        inn    = match.innings_list[inn_idx]
+        embed  = discord.Embed(description=desc, color=color)
+        embed.add_field(name="Score", value=f"**{inn.total_runs}/{inn.wickets}** ({inn.overs_str} ov)", inline=True)
+        if not innings_ended:
+            striker = inn.batting_team["players"][inn.current_striker_idx]
+            embed.add_field(name="On Strike", value=striker["name"], inline=True)
+        if session_ended:
+            time_up = match.advance_session()
+            if time_up:
+                match.result = match.result or "Match Drawn"
+                embed.set_footer(text="Day 5 complete — Match Drawn")
+            else:
+                embed.set_footer(text="Session complete")
+        elif over_ended:
+            embed.set_footer(text="Over complete")
+            inn.over_log = []   # reset timeline for the next over
+
+        _test_post_innings_logic(match)
+        await interaction.channel.send(embed=embed)
+
+        if match.result or match.day > 5:
+            if innings_ended:
+                await interaction.channel.send(embed=_render_test_innings_embed(match, inn_idx))
+            return await _test_finish_match(match, self.channel_id, interaction.channel)
+
+        if innings_ended:
+            await interaction.channel.send(embed=_render_test_innings_embed(match, inn_idx))
+
         await interaction.channel.send(embed=render_test_embed(match), view=TestSimView(match, self.channel_id))
 
     @discord.ui.button(label="⚡ Multiple Overs", style=discord.ButtonStyle.primary, row=0)
@@ -4087,6 +4260,10 @@ class TestSimView(discord.ui.View):
         inn   = match.current_innings
         if inn.is_complete:
             await interaction.response.send_message("❌ The current innings is already over.", ephemeral=True)
+            return
+        # AI team cannot declare via button (simulation handles AI declarations automatically)
+        if _test_ai_batting(match):
+            await interaction.response.send_message("❌ The AI team manages its own innings.", ephemeral=True)
             return
         # Only the batting captain may declare
         batting_owner = match.host_id if inn.batting_team is match.team1 else getattr(match, "p2_id", match.host_id)

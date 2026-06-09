@@ -35,6 +35,16 @@ PITCH_WEAR_RATE: Dict[str, float] = {
 PITCH_TYPES   = list(PITCH_WEAR_RATE.keys())
 WEATHER_TYPES = ["Clear", "Cloudy", "Overcast", "Humid", "Windy", "Dry Heat"]
 
+# Ball-outcome emojis (shared with T20/ODI over_log convention)
+_OV_DOT = "<a:0run:1510601371483897896>"
+_OV_1   = "<a:1run:1510600760570679356>"
+_OV_2   = "<a:2runs:1510601044818788403>"
+_OV_3   = "<a:3runs:1510600945053073508>"
+_OV_4   = "<a:4runs:1510600613556125787>"
+_OV_6   = "<a:6runs:1510600650613063761>"
+_OV_W   = "<a:wickett:1510369641959264429>"
+_OV_WD  = "`Wd`"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # DATA CLASSES
 # ─────────────────────────────────────────────────────────────────────────────
@@ -92,6 +102,7 @@ class TestInnings:
         self.partnership_runs   = 0
         self.is_complete        = False
         self.declared           = False   # innings closed by declaration (not all-out)
+        self.over_log: list     = []      # emoji timeline for current over (reset each over)
 
         # Ball condition
         self.ball_age              = 0    # legal balls since last new ball
@@ -631,6 +642,7 @@ def execute_test_ball(match: TestMatch) -> bool:
         innings.total_runs += 1
         innings.extras     += 1
         bow_stats.runs_conceded += 1
+        innings.over_log.append(_OV_WD)
         return False   # illegal — caller must re-loop
 
     # ── No ball (1 extra, then STILL bowl a legal delivery this call) ──────
@@ -758,6 +770,22 @@ def execute_test_ball(match: TestMatch) -> bool:
 
         innings.prev_bowler    = innings.current_bowler
         innings.current_bowler = None   # new bowler must be chosen next over
+
+    # Append emoji to current over timeline
+    if outcome == "wicket":
+        innings.over_log.append(_OV_W)
+    elif outcome == "four":
+        innings.over_log.append(_OV_4)
+    elif outcome == "six":
+        innings.over_log.append(_OV_6)
+    elif outcome == "single":
+        innings.over_log.append(_OV_1)
+    elif outcome == "two":
+        innings.over_log.append(_OV_2)
+    elif outcome == "three":
+        innings.over_log.append(_OV_3)
+    else:
+        innings.over_log.append(_OV_DOT)
 
     return True   # legal delivery
 
@@ -1077,21 +1105,27 @@ def simulate_session(match: TestMatch) -> str:
 
 
 def simulate_one_over_verbose(match: TestMatch) -> tuple:
-    """Simulate exactly one over with ball-by-ball commentary.
+    """Simulate one over (or remaining balls of a partial over) with emoji timeline.
     Returns (text, innings_ended). Updates overs_in_session / total_match_overs.
-    Does NOT advance the session even when full — caller checks overs_in_session >= 30."""
+    Does NOT advance the session — caller checks overs_in_session >= 30."""
     innings = match.current_innings
     if innings.is_complete:
         return "", True
 
-    _select_bowler(match)
-    bowler    = innings.current_bowler
-    ov_num    = innings.total_balls // 6          # 0-indexed over number
+    # Mid-over support: if balls are already done in the current over, keep the
+    # existing bowler and start the legal-ball counter from where we are.
+    balls_done = innings.total_balls % 6
+    if balls_done > 0 and innings.current_bowler is not None:
+        bowler = innings.current_bowler        # continue same bowler
+    else:
+        innings.over_log = []                  # fresh over — reset timeline
+        _select_bowler(match)
+        bowler = innings.current_bowler
+
+    ov_num        = innings.total_balls // 6   # 0-indexed
     ov_start_runs = innings.total_runs
     ov_start_wkts = innings.wickets
-
-    ball_parts: list = []
-    legal_balls = 0
+    legal_balls   = balls_done                 # count from where we are
 
     while legal_balls < 6:
         if innings.is_complete or innings.wickets >= 10:
@@ -1103,29 +1137,9 @@ def simulate_one_over_verbose(match: TestMatch) -> tuple:
                 innings.is_complete = True
                 break
 
-        striker     = innings.batting_team["players"][innings.current_striker_idx]
-        runs_before = innings.total_runs
-        wkts_before = innings.wickets
-        balls_before = innings.total_balls
-
         legal = execute_test_ball(match)
         if legal:
             legal_balls += 1
-            ball_label  = f"{ov_num}.{legal_balls}"
-            runs_this   = innings.total_runs - runs_before
-            if innings.wickets > wkts_before:
-                b_stats = innings.batting_stats[striker["name"]]
-                ball_parts.append(f"{ball_label} **W** _{b_stats.dismissal}_")
-            elif runs_this == 4:
-                ball_parts.append(f"{ball_label} **4**")
-            elif runs_this == 6:
-                ball_parts.append(f"{ball_label} **6**")
-            elif runs_this == 0:
-                ball_parts.append(f"{ball_label} •")
-            else:
-                ball_parts.append(f"{ball_label} {runs_this}")
-        else:
-            ball_parts.append("Wd")
 
         if match.over_completed:
             match.over_completed    = False
@@ -1137,10 +1151,10 @@ def simulate_one_over_verbose(match: TestMatch) -> tuple:
         innings.is_complete = True
         innings.declared    = True
 
-    ov_runs = innings.total_runs - ov_start_runs
-    ov_wkts = innings.wickets    - ov_start_wkts
-    balls_str = "  ".join(ball_parts)
-    footer = (
+    ov_runs   = innings.total_runs - ov_start_runs
+    ov_wkts   = innings.wickets    - ov_start_wkts
+    timeline  = " ".join(innings.over_log) if innings.over_log else "•"
+    footer    = (
         f"{innings.batting_team['name']} "
         f"**{innings.total_runs}/{innings.wickets}** ({innings.overs_str} ov)"
         f"  +{ov_runs}r {ov_wkts}w"
@@ -1149,7 +1163,7 @@ def simulate_one_over_verbose(match: TestMatch) -> tuple:
         tag = "DECLARED" if getattr(innings, "declared", False) else "ALL OUT"
         footer += f"  **[{tag}]**"
 
-    text = f"**Ov {ov_num + 1}** ({bowler['name']})\n{balls_str}\n{footer}"
+    text = f"**Ov {ov_num + 1}** ({bowler['name']})\n{timeline}\n{footer}"
     return text, innings.is_complete
 
 
