@@ -33,7 +33,8 @@ PITCH_WEAR_RATE: Dict[str, float] = {
     "Flat":    0.7, "Dead":    0.5, "Dry":       1.1,
 }
 PITCH_TYPES   = list(PITCH_WEAR_RATE.keys())
-WEATHER_TYPES = ["Clear", "Cloudy", "Overcast", "Humid", "Windy", "Dry Heat"]
+WEATHER_TYPES = ["Clear", "Cloudy", "Overcast", "Humid", "Windy", "Dry Heat",
+                 "Drizzle", "Light Rain", "Heavy Rain", "Thunderstorm"]
 
 # Ball-outcome emojis (shared with T20/ODI over_log convention)
 _OV_DOT = "<a:0run:1510601371483897896>"
@@ -142,6 +143,7 @@ class TestMatch:
         # Interactive mode: player-chosen delivery/shot (empty string = auto)
         self.current_delivery_selection: str = ""
         self.current_shot_selection: str     = ""
+        self.new_ball_msg: str               = ""   # set when second new ball is taken
 
         self._new_innings(team1, team2)
 
@@ -287,9 +289,27 @@ def _get_delivery(bowler: dict, innings: TestInnings) -> str:
     length = random.choice(["Bouncer","Full","Good length","Yorker","Short"])
     return f"{swing} {length}"
 
-def _get_shot(deliv: str, is_collapse: bool, balls_faced: int, archetype: str, intent: float) -> str:
-    is_new = balls_faced < 15
-    is_set = balls_faced > 50
+def _get_shot(deliv: str, is_collapse: bool, balls_faced: int, archetype: str, intent: float, bat_position: int = 0) -> str:
+    is_new  = balls_faced < 15
+    is_set  = balls_faced > 50
+    is_tail = bat_position >= 7   # No. 8-11: different shot instincts
+
+    # Tail-enders: survival first, no expansive drives against swing
+    if is_tail:
+        if intent < 0.5:
+            return random.choices(["Block", "Leave", "Defensive"], [50, 35, 15])[0]
+        if "Bouncer" in deliv or "Short" in deliv:
+            return random.choices(["Duck", "Leave", "Block"], [45, 40, 15])[0]
+        if "Yorker" in deliv:
+            return random.choices(["Block", "Defensive"], [65, 35])[0]
+        # Never drive at swing — tail-enders prod/leave it
+        if "Outswing" in deliv or "Inswing" in deliv or "Seam" in deliv:
+            return random.choices(["Block", "Leave", "Defensive"], [42, 38, 20])[0]
+        if deliv in SPIN_SHOT_MATRIX:
+            return random.choices(["Block", "Leave", "Defensive", "Sweep"], [38, 28, 22, 12])[0]
+        # Other pace: mostly defend, rare prod drive
+        return random.choices(["Block", "Leave", "Defensive", "Drive"], [44, 30, 20, 6])[0]
+
     # Survival mode: leave/block everything
     if intent < 0.35:
         if "Bouncer" in deliv or "Short" in deliv:
@@ -414,6 +434,12 @@ def get_smart_test_bowler(innings: TestInnings, match: TestMatch) -> Optional[di
         # Weather
         if match.weather == "Overcast" and _pace(p) and ball_age < 180:
             base *= 1.5
+        elif match.weather == "Drizzle" and _pace(p) and ball_age < 180:
+            base *= 1.4
+        elif match.weather in ("Light Rain", "Heavy Rain") and _pace(p) and ball_age < 180:
+            base *= 1.8
+        elif match.weather == "Thunderstorm" and _pace(p) and ball_age < 180:
+            base *= 2.2
         elif match.weather == "Dry Heat" and _spin(p) and ball_age > 180:
             base *= 1.4
 
@@ -455,6 +481,15 @@ def execute_test_ball(match: TestMatch) -> bool:
     elif bf < 250:  bat_r *= 1.04
     else:           bat_r *= 1.02
 
+    # ── Batting position — tail-enders are less equipped ───────────────────
+    # Kept modest: tail bat ratings are already low; we just add a small
+    # context penalty for the pressure of batting with the tail.
+    position = innings.current_striker_idx
+    if position >= 9:       # No. 10, 11 — genuine rabbits
+        bat_r -= 0
+    elif position >= 7:     # No. 8, 9 — lower-order
+        bat_r -= 0
+
     # ── Bowler spell fatigue ────────────────────────────────────────────────
     if "Pace" in bowler["role"]:
         if bow_stats.spell_balls >= 108:  bowl_r -= 14   # 18+ over spell
@@ -470,7 +505,8 @@ def execute_test_ball(match: TestMatch) -> bool:
     bat_r  += bat_pen
 
     # ── Pitch type ─────────────────────────────────────────────────────────
-    cb = innings.total_balls
+    cb       = innings.total_balls             # balls in this innings (new-ball periods)
+    total_cb = match.total_match_overs * 6    # balls across whole match (cross-innings wear)
     if   match.pitch == "Green"  and "Pace" in bowler["role"]:                  bowl_r += 6
     elif match.pitch == "Flat":                                                  bat_r  += 10
     elif match.pitch == "Dusty"  and "Spin" in bowler["role"]:
@@ -483,7 +519,7 @@ def execute_test_ball(match: TestMatch) -> bool:
         bowl_r += 7;  bat_r -= 4
     elif match.pitch == "Dead":
         bat_r += 10;  bowl_r -= 5
-    elif match.pitch == "Worn"   and "Spin" in bowler["role"] and cb > 180:
+    elif match.pitch == "Worn"   and "Spin" in bowler["role"] and total_cb > 180:
         bowl_r += 7;  bat_r -= 4
     elif match.pitch == "Turning" and "Spin" in bowler["role"]:
         bowl_r += 8;  bat_r -= 5
@@ -493,7 +529,7 @@ def execute_test_ball(match: TestMatch) -> bool:
         bowl_r += 6;  bat_r -= 4
     elif match.pitch == "Slow"   and "Spin" in bowler["role"]:
         bowl_r += 4
-    elif match.pitch == "Dry"    and "Spin" in bowler["role"] and cb > 150:
+    elif match.pitch == "Dry"    and "Spin" in bowler["role"] and total_cb > 150:
         bowl_r += 6;  bat_r -= 4
 
     # ── Weather ────────────────────────────────────────────────────────────
@@ -514,6 +550,14 @@ def execute_test_ball(match: TestMatch) -> bool:
     elif match.weather == "Dry Heat":
         if "Spin" in bowler["role"] and cb > 180:  bowl_r += 8
         elif "Pace" in bowler["role"]:             bowl_r -= 6
+    elif match.weather == "Drizzle" and "Pace" in bowler["role"]:
+        bowl_r += (5 if new_ball_period else 2 if cb < 300 else 0)
+    elif match.weather == "Light Rain" and "Pace" in bowler["role"]:
+        bowl_r += (7 if new_ball_period else 4);  bat_r -= 1
+    elif match.weather == "Heavy Rain" and "Pace" in bowler["role"]:
+        bowl_r += (9 if new_ball_period else 5);  bat_r -= 3
+    elif match.weather == "Thunderstorm" and "Pace" in bowler["role"]:
+        bowl_r += (11 if new_ball_period else 6); bat_r -= 4
 
     # ── Cap total condition bonus — raised to 18 to let extremes show through ─
     raw_bowl_bonus = bowl_r - float(bowler["bowl"])
@@ -576,7 +620,7 @@ def execute_test_ball(match: TestMatch) -> bool:
         shot = match.current_shot_selection
         match.current_shot_selection = ""
     else:
-        shot = _get_shot(deliv, is_collapse, b_stats.balls_faced, striker["archetype"], intent)
+        shot = _get_shot(deliv, is_collapse, b_stats.balls_faced, striker["archetype"], intent, innings.current_striker_idx)
 
     bad_shot  = False
     perf_shot = False
@@ -815,6 +859,7 @@ def _select_bowler(match: TestMatch):
     if innings.ball_age >= 480 and not innings.second_new_ball_taken:
         innings.second_new_ball_taken = True
         innings.ball_age = 0
+        match.new_ball_msg = f"🆕 **New ball taken** ({innings.overs_str} overs)"
 
     bowler = get_smart_test_bowler(innings, match)
     if bowler is None:
@@ -851,6 +896,7 @@ def prepare_over_interactive(match: TestMatch, bowler_name: str):
     if innings.ball_age >= 480 and not innings.second_new_ball_taken:
         innings.second_new_ball_taken = True
         innings.ball_age = 0
+        match.new_ball_msg = f"🆕 **New ball taken** ({innings.overs_str} overs)"
 
     bowler = next(p for p in innings.bowling_team["players"] if p["name"] == bowler_name)
     innings.current_bowler = bowler
@@ -996,6 +1042,15 @@ def _should_declare(match: TestMatch) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 MAX_SESSION_OVERS = 30
 
+def _rain_overs_lost(weather: str, available: int) -> int:
+    """Return overs lost to rain interruption at the start of a session (0 = no rain)."""
+    prob = {"Drizzle": 0.25, "Light Rain": 0.50, "Heavy Rain": 0.80, "Thunderstorm": 0.92}.get(weather, 0.0)
+    if prob == 0.0 or random.random() > prob:
+        return 0
+    max_loss = {"Drizzle": 5, "Light Rain": 12, "Heavy Rain": available, "Thunderstorm": available}
+    return min(available, random.randint(1, max(1, max_loss.get(weather, 5))))
+
+
 def simulate_session(match: TestMatch) -> str:
     """Simulate up to (30 − already_bowled) overs in the current session.
     Stops at the session boundary OR when the innings ends — whichever comes first.
@@ -1014,6 +1069,22 @@ def simulate_session(match: TestMatch) -> str:
     if remaining <= 0:
         match.advance_session()
         return ""
+
+    # Rain interruption: lose some overs at the start of this session
+    rain_lost = _rain_overs_lost(match.weather, remaining)
+    rain_note = ""
+    if rain_lost:
+        if rain_lost >= remaining:
+            # Entire session washed out
+            match.overs_in_session = 30
+            time_up = match.advance_session() if match.overs_in_session >= 30 else False
+            label = f"Day {match.day}, {SESSION_NAMES[match.session]} Session"
+            msg = f"\n{'═'*57}\n  {label}\n{'─'*57}\n  🌧️  Session washed out — {rain_lost} overs lost to rain.\n{'═'*57}"
+            if time_up:
+                msg += "\n  *** DAY 5 COMPLETE — MATCH DRAWN ***"
+            return msg
+        remaining  -= rain_lost
+        rain_note   = f"  🌧️  {rain_lost} over(s) lost to rain — {remaining} overs available this session.\n"
 
     sess_label    = f"Day {match.day}, {SESSION_NAMES[match.session]} Session"
     session_overs = 0   # overs bowled in this particular call
@@ -1085,6 +1156,11 @@ def simulate_session(match: TestMatch) -> str:
         f"\n{'═'*57}",
         f"  {sess_label}",
         f"{'─'*57}",
+    ]
+    if rain_note:
+        lines.append(rain_note.strip())
+        lines.append(f"{'─'*57}")
+    lines += [
         f"  {innings.batting_team['name']}  —  Innings {innings.innings_num}",
         f"  Score :  {innings.total_runs}/{innings.wickets}  ({innings.overs_str} ov)",
         f"  Session:  +{runs_scored} runs / {wkts_fallen} wkts  ({ovs}.{balls} ov @ {rr} RPO)",
@@ -1164,7 +1240,11 @@ def simulate_one_over_verbose(match: TestMatch) -> tuple:
         tag = "DECLARED" if getattr(innings, "declared", False) else "ALL OUT"
         footer += f"  **[{tag}]**"
 
+    nb_msg = match.new_ball_msg
+    match.new_ball_msg = ""
     text = f"**Ov {ov_num + 1}** ({bowler['name']})\n{timeline}\n{footer}"
+    if nb_msg:
+        text = nb_msg + "\n" + text
     return text, innings.is_complete
 
 

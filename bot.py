@@ -1412,6 +1412,43 @@ async def advance_match_loop(interaction, match: CricketMatch):
         elif match.simulation_mode == "interactive":
             await run_interactive_delivery_sequence(interaction, match)
 
+async def loop_current_innings_simulation(interaction, match: CricketMatch):
+    """Simulate the current innings only, then hand back to the Over Hub for the next innings."""
+    channel = interaction.channel if hasattr(interaction, 'channel') else interaction
+
+    while True:
+        innings = match.current_innings
+        max_w = 2 if getattr(match, 'is_super_over', False) else 10
+        if innings.wickets >= max_w or innings.total_balls >= match.max_balls or (
+                match.current_innings_num == 2 and
+                innings.total_runs >= getattr(match, "target", match.innings1.total_runs + 1)):
+            orig_sim_only = match.sim_only
+            match.sim_only = False   # always return to hub after this innings
+            await handle_innings_end(interaction, match)
+            match.sim_only = orig_sim_only
+            break
+
+        if innings.total_balls % 6 == 0 and not innings.over_log:
+            try_ai_impact_player(match, innings)
+            new_bowler = get_smart_ai_bowler(innings, match.pitch, match.weather, match.format_overs)
+            if not new_bowler:
+                await channel.send("🚨 **CRITICAL ERROR:** Could not find a valid bowler.")
+                if channel.id in active_games:
+                    del active_games[channel.id]
+                return
+            innings.current_bowler = new_bowler
+
+        execute_ball_math(match)
+
+        if innings.total_balls % 6 == 0 and innings.total_balls > 0:
+            if getattr(match, 'verbose', False):
+                await channel.send(embed=render_embed_scoreboard(match))
+                await asyncio.sleep(0.5)
+            innings.over_log.clear()
+            innings.bouncers_in_over = 0; innings.cutters_in_over = 0
+            innings.mystery_bowled_this_over = False
+
+
 async def loop_entire_match_simulation(interaction, match: CricketMatch):
     channel = interaction.channel if hasattr(interaction, 'channel') else interaction
     
@@ -1932,31 +1969,31 @@ class OverControlHubView(discord.ui.View):
         await interaction.channel.send(f"⏩ **Simulated Over Complete!**\n**Timeline:** {events_str}\n**Yield:** {innings.total_runs - start_runs} Runs, {innings.wickets - start_wkts} Wickets")
         await advance_match_loop(interaction, self.match)
         
-    @discord.ui.button(label="Simulate Match (Fast)", style=discord.ButtonStyle.danger)
-    async def sim_match_fast(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="⏩ Sim Innings", style=discord.ButtonStyle.danger)
+    async def sim_innings_fast(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await interaction.message.edit(view=None)
         self.match.simulation_mode = "whole_match"
         self.match.verbose = False
-        self.match._pending_bowler = None  # AI handles all bowlers from here
+        self.match._pending_bowler = None
         innings = self.match.current_innings
         innings.over_log.clear()
         innings.bouncers_in_over = 0; innings.cutters_in_over = 0
         innings.mystery_bowled_this_over = False
-        await loop_entire_match_simulation(interaction, self.match)
+        await loop_current_innings_simulation(interaction, self.match)
 
-    @discord.ui.button(label="Simulate Match (Verbose)", style=discord.ButtonStyle.secondary)
-    async def sim_match_verbose(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="📋 Sim Innings (Verbose)", style=discord.ButtonStyle.secondary)
+    async def sim_innings_verbose(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await interaction.message.edit(view=None)
         self.match.simulation_mode = "whole_match"
         self.match.verbose = True
-        self.match._pending_bowler = None  # AI handles all bowlers from here
+        self.match._pending_bowler = None
         innings = self.match.current_innings
         innings.over_log.clear()
         innings.bouncers_in_over = 0; innings.cutters_in_over = 0
         innings.mystery_bowled_this_over = False
-        await loop_entire_match_simulation(interaction, self.match)
+        await loop_current_innings_simulation(interaction, self.match)
         
     async def impact_btn(self, interaction: discord.Interaction):
         team_id = 1 if interaction.user.id == self.match.p1_id else (2 if interaction.user.id == self.match.p2_id else None)
@@ -3069,13 +3106,6 @@ async def match_cmd(interaction: discord.Interaction, opponent: discord.Member =
 _TEST_SESSION_NAMES = {1: "Morning", 2: "Afternoon", 3: "Evening"}
 
 # Rain weather types aren't in the test engine — map them to closest equivalent
-_TEST_WEATHER_MAP = {
-    "Light Rain": "Overcast", "Drizzle": "Overcast",
-    "Heavy Rain": "Cloudy",   "Thunderstorm": "Cloudy",
-}
-
-def _test_map_weather(w: str) -> str:
-    return _TEST_WEATHER_MAP.get(w, w)
 
 
 def render_test_embed(match: TestMatchObj) -> discord.Embed:
@@ -3260,6 +3290,103 @@ def _test_take_snapshot(match: TestMatchObj) -> dict:
     }
 
 
+def _test_session_commentary(
+    runs_added: int, wkts_fell: int, balls_used: int, rr: float,
+    new_fow: list, sess_bowlers: list, match: TestMatchObj, inn
+) -> str:
+    lines = []
+
+    # ── Session character ──────────────────────────────────────────────────
+    if balls_used == 0:
+        return ""
+    if rr >= 4.5:
+        lines.append(random.choice([
+            "The batting side were in full flow, finding the boundary at will.",
+            "A dominant session with the bat — the bowlers had no answers.",
+            "Runs flowed freely as the batting side took complete control.",
+        ]))
+    elif rr >= 3.5:
+        lines.append(random.choice([
+            "A productive session with bat meeting ball cleanly throughout.",
+            "Good strokeplay from the batting side kept the scoreboard ticking.",
+            "The batters built on a solid base, rotating strike and punishing the bad ball.",
+        ]))
+    elif rr >= 2.5:
+        lines.append(random.choice([
+            "A hard-fought session with neither side gaining a decisive edge.",
+            "Both bat and ball had their moments in a closely contested session.",
+            "Controlled cricket from both sides — the contest remained tight.",
+        ]))
+    elif rr >= 1.5:
+        lines.append(random.choice([
+            "The bowlers were on top, making every run hard to come by.",
+            "A testing session for the batters — survival was as important as scoring.",
+            "Discipline in the field restricted the batting side to a below-par rate.",
+        ]))
+    else:
+        lines.append(random.choice([
+            "A session of extreme bowling dominance — the batting side were under the pump all day.",
+            "The bowlers were virtually unplayable, extracting movement and turn throughout.",
+            "A miserable session for the bat — the pitch and conditions did the bowlers every favour.",
+        ]))
+
+    # ── Wicket narrative ───────────────────────────────────────────────────
+    if wkts_fell == 0:
+        lines.append(random.choice([
+            "No wickets fell — the batting side will be pleased with their discipline.",
+            "The partnership(s) held firm, denying the bowlers any reward.",
+            "A clean session for the batting side — not a single wicket lost.",
+        ]))
+    elif wkts_fell >= 6:
+        lines.append(random.choice([
+            f"A catastrophic collapse saw {wkts_fell} wickets fall in quick succession — the dressing room will be shaking.",
+            f"The bowling side ran through the order, taking {wkts_fell} wickets to wreck the innings.",
+            f"{wkts_fell} wickets tumbled in a remarkable session — the tail is now well and truly exposed.",
+        ]))
+    elif wkts_fell >= 4:
+        lines.append(random.choice([
+            f"{wkts_fell} wickets in the session tipped the balance firmly toward the bowling side.",
+            f"A damaging session — {wkts_fell} wickets have put the batting team on the back foot.",
+            f"Four wickets or more in a session is always significant — the bowling side will be confident.",
+        ]))
+    elif wkts_fell >= 2:
+        lines.append(random.choice([
+            f"{wkts_fell} wickets fell at key moments, keeping the bowling team in the game.",
+            f"A couple of wickets in the session maintained the pressure for the fielding side.",
+            f"The bowling side were rewarded for their patience with {wkts_fell} timely wickets.",
+        ]))
+    else:
+        lines.append(random.choice([
+            "One wicket in the session — a minor success that keeps the bowling side interested.",
+            "A solitary wicket, but it may prove crucial given the match situation.",
+            "Just the one wicket — the batting side largely had the better of the exchange.",
+        ]))
+
+    # ── Standout bowler ────────────────────────────────────────────────────
+    if sess_bowlers:
+        _, _, best_name, best_ovs, best_runs, best_wkts = sess_bowlers[0]
+        if best_wkts >= 4:
+            lines.append(f"**{best_name}** was simply outstanding — **{best_wkts}/{best_runs}** in {best_ovs} overs.")
+        elif best_wkts >= 2:
+            lines.append(f"**{best_name}** led the attack with {best_wkts} wickets for {best_runs} runs.")
+        elif best_runs <= 12 and int(best_ovs.split(".")[0]) >= 5:
+            lines.append(f"**{best_name}** was the standout in economy terms — miserly figures of {best_ovs}-{best_runs}-{best_wkts}.")
+
+    # ── Pitch / weather flavour ────────────────────────────────────────────
+    pitch = match.pitch
+    weather = match.weather
+    if weather in ("Heavy Rain", "Thunderstorm") and balls_used > 0:
+        lines.append("Conditions were extremely tough — the wet outfield and overcast skies made it a bowler's paradise.")
+    elif weather in ("Drizzle", "Light Rain"):
+        lines.append("The drizzle throughout the session made conditions slippery and uncomfortable for the batters.")
+    elif pitch in ("Turning", "Cracked", "Dusty") and match.day >= 3:
+        lines.append(f"The {pitch.lower()} surface is taking more and more spin as the match wears on.")
+    elif pitch in ("Green", "Damp") and match.current_innings_idx == 0:
+        lines.append("The lush surface continued to offer the seamers generous movement throughout.")
+
+    return "\n".join(f"-# {l}" for l in lines)
+
+
 def _render_test_session_embed(match: TestMatchObj, snap: dict) -> discord.Embed:
     """Session summary embed — replaces the old ASCII code-block output."""
     embed    = discord.Embed(color=0xFFFFFF)
@@ -3321,6 +3448,13 @@ def _render_test_session_embed(match: TestMatchObj, snap: dict) -> discord.Embed
             for _, _, name, ovs, runs, wkts in sess_bowlers:
                 desc += f"{name[:17]:<18} {ovs:>5}  {runs:>4}  {wkts}\n"
             desc += "```\n"
+
+        commentary = _test_session_commentary(
+            runs_added, wkts_fell, balls_used, rr,
+            new_fow, sess_bowlers, match, inn
+        )
+        if commentary:
+            desc += commentary + "\n"
 
         desc += "\n"
 
@@ -4369,9 +4503,7 @@ class TestTossDecisionView(discord.ui.View):
         t_bat  = winning_team if choice == "Bat" else losing_team
         t_bowl = losing_team  if choice == "Bat" else winning_team
 
-        weather = _test_map_weather(state.pitch if hasattr(state, 'pitch') else "Clear")
-        weather = _test_map_weather(state.weather)
-        match          = TestMatchObj(t_bat, t_bowl, state.pitch, weather)
+        match          = TestMatchObj(t_bat, t_bowl, state.pitch, state.weather)
         match.host_id  = state.p1_id
         match.p2_id    = getattr(state, "p2_id", None)
         active_test_matches[self.channel.id] = match
@@ -4392,7 +4524,7 @@ async def _begin_test_match(channel, state):
     """Branch from begin_toss for Test (format_overs == 90) matches."""
     t1 = {"name": state.t1_name, "players": state.t1_roster, "color": getattr(state, 't1_color', '#1D4ED8')}
     t2 = {"name": state.t2_name, "players": state.t2_roster, "color": getattr(state, 't2_color', '#DC2626')}
-    weather = _test_map_weather(state.weather)
+    weather = state.weather
 
     # sim_only (/simulatematch): fully auto
     if getattr(state, 'sim_only', False):
@@ -4545,6 +4677,7 @@ def _help_match_embed():
 def _help_players_embed(is_admin: bool):
     e = discord.Embed(title="🔍 Players & Database", color=discord.Color.blue())
     e.add_field(name="/searchplayer <name>  ·  `cv sp`", value="Search for a player — shows role, archetype and (if permitted) ratings.", inline=False)
+    e.add_field(name="/playerlist  ·  `cv playerlist`  ·  `cv pl`", value="Download the full player database as a .txt file — grouped by tier, ratings hidden, order shuffled within each tier.", inline=False)
     e.add_field(name="📋 How to enter Playing XI",        value="When prompted during a match, paste 11 player names (one per line). Names must match the database exactly.", inline=False)
     e.add_field(name="🏟️ Pitch & Weather Conditions",    value="15 pitch types · 10 weather conditions — each affects pace, spin and batting differently across T20 and ODI.", inline=False)
     if is_admin:
@@ -4802,6 +4935,87 @@ async def searchplayer(interaction: discord.Interaction, name: str):
     if other:
         msg += "\n\n📂 **Alternatives:**\n" + "\n".join(f"• {o}" for o in other[:5])
     await interaction.followup.send(msg)
+
+
+# ── Player list helpers ───────────────────────────────────────────────────────
+
+_ROLE_DISPLAY = {
+    "Batter":               "Batter",
+    "Batter_WK":            "WK-Batter",
+    "Bowler_Pace":          "Pace Bowler",
+    "Bowler_Spin_Off":      "Off-Spin Bowler",
+    "Bowler_Spin_Leg":      "Leg-Spin Bowler",
+    "All-Rounder_Pace":     "Pace All-Rounder",
+    "All-Rounder_Spin_Off": "Off-Spin All-Rounder",
+    "All-Rounder_Spin_Leg": "Leg-Spin All-Rounder",
+}
+
+def _player_overall(p: dict) -> float:
+    bat  = float(p.get("bat",  50))
+    bowl = float(p.get("bowl", 50))
+    role = p.get("role", "")
+    if role.startswith("All-Rounder"):
+        return (bat + bowl) / 2
+    if role.startswith("Bowler"):
+        return bat * 0.20 + bowl * 0.80
+    return bat * 0.80 + bowl * 0.20   # Batter / WK-Batter
+
+def _build_playerlist_txt(players: list) -> str:
+    tiers = {"LEGENDS": [], "ELITE": [], "GOLD": [], "SILVER": [], "BRONZE": []}
+    for p in players:
+        ov = _player_overall(p)
+        if   ov > 95: tiers["LEGENDS"].append(p)
+        elif ov > 90: tiers["ELITE"].append(p)
+        elif ov >= 85: tiers["GOLD"].append(p)
+        elif ov >= 80: tiers["SILVER"].append(p)
+        else:          tiers["BRONZE"].append(p)
+    for lst in tiers.values():
+        random.shuffle(lst)
+
+    lines = [
+        "═" * 52,
+        f"  CricVerse Player Database  —  {len(players)} players",
+        "═" * 52,
+        "",
+    ]
+    tier_labels = {
+        "LEGENDS": "👑  LEGENDS",
+        "ELITE":   "⭐⭐⭐  ELITE",
+        "GOLD":    "⭐⭐    GOLD",
+        "SILVER":  "⭐      SILVER",
+        "BRONZE":  "         BRONZE",
+    }
+    for tier, label in tier_labels.items():
+        grp = tiers[tier]
+        if not grp:
+            continue
+        lines.append(f"── {label} ({len(grp)}) " + "─" * max(1, 44 - len(label) - len(str(len(grp)))))
+        for p in grp:
+            role_str = _ROLE_DISPLAY.get(p.get("role", ""), p.get("role", "Unknown"))
+            lines.append(f"  {p['name']:<28}  {role_str}")
+        lines.append("")
+
+    lines.append("═" * 52)
+    from datetime import datetime, timezone
+    lines.append(f"  Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+    lines.append("═" * 52)
+    return "\n".join(lines)
+
+
+@bot.tree.command(name="playerlist", description="Download the full player database grouped by tier (no ratings shown).")
+async def playerlist_cmd(interaction: discord.Interaction):
+    await interaction.response.defer()
+    players = get_all_players()
+    if not players:
+        return await interaction.followup.send("❌ Player database is empty.")
+    txt = _build_playerlist_txt(players)
+    buf = io.BytesIO(txt.encode("utf-8"))
+    buf.seek(0)
+    await interaction.followup.send(
+        f"📋 **Player Database** — {len(players)} players across 4 tiers.\nRatings are hidden. Players within each tier are shuffled.",
+        file=discord.File(fp=buf, filename="cricverse_players.txt")
+    )
+
 
 _ROLE_OPTIONS = [
     discord.SelectOption(label="Batter",                value="Batter"),
@@ -5126,6 +5340,19 @@ class PrefixCog(commands.Cog):
             await ctx.send("🛑 **Match and setup forcefully terminated.** Memory cleared.")
         else:
             await ctx.send("⚠️ There is no active match or setup running in this channel.")
+
+    @commands.command(name="playerlist", aliases=["pl"], help="Download full player database grouped by tier (no ratings).\nUsage: playerlist")
+    async def playerlist(self, ctx):
+        players = get_all_players()
+        if not players:
+            return await ctx.send("❌ Player database is empty.")
+        txt = _build_playerlist_txt(players)
+        buf = io.BytesIO(txt.encode("utf-8"))
+        buf.seek(0)
+        await ctx.send(
+            f"📋 **Player Database** — {len(players)} players across 4 tiers.\nRatings are hidden. Players within each tier are shuffled.",
+            file=discord.File(fp=buf, filename="cricverse_players.txt")
+        )
 
     @commands.command(name="counts", aliases=["matchcounts"], help="Show the total number of matches played per format.\nUsage: counts")
     async def counts(self, ctx):
