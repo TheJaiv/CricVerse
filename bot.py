@@ -3160,7 +3160,7 @@ def render_test_embed(match: TestMatchObj) -> discord.Embed:
         else:
             desc += f"-# 🏆 Target reached!"
 
-    embed.description = desc
+    embed.description = desc[:4096]
     return embed
 
 
