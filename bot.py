@@ -1316,11 +1316,23 @@ def generate_t20wc_scorecard(data: dict) -> io.BytesIO:
     draw_band(t2,  T2B_Y1, T2B_Y2)
     draw_stats(t2, T2B_Y2, T2S_Y2)
 
-    # Result bar: flat top (flush with stats), rounded bottom corners only
-    RES_R = int(W * 0.025)
-    d.rounded_rectangle([(0, RES_Y1), (W, RES_Y2)], radius=RES_R, fill=(0, 30, 138, 255))
-    d.rectangle([(0, RES_Y1), (W, RES_Y1 + RES_R)], fill=(0, 30, 138, 255))
-    res_cy = (RES_Y1 + RES_Y2) // 2
+    # Result area layout
+    SPON_DARK = (0, 4, 29, 255)           # matches template sponsor bar colour
+    RES_PAD_X = int(W * 0.009)
+    RES_PAD_Y = int((RES_Y2 - RES_Y1) * 0.05)
+    RES_R     = int(W * 0.011)
+    bar_y1    = RES_Y1 + RES_PAD_Y
+    bar_y2    = RES_Y2 - RES_PAD_Y
+    bar_mid   = (bar_y1 + bar_y2) // 2
+    # 1. Cover template: white top half, dark bottom half
+    d.rectangle([(0, RES_Y1), (W, bar_mid)], fill=(255, 255, 255, 255))
+    d.rectangle([(0, bar_mid), (W, RES_Y2)], fill=SPON_DARK)
+    # 2. White rounded bottom corners visible against the dark below
+    WH_R = min(int(W * 0.012), (bar_mid - RES_Y1) // 2 - 1)
+    d.rounded_rectangle([(0, RES_Y1), (W, bar_mid)], radius=WH_R, fill=(255, 255, 255, 255))
+    # 3. Blue result bar straddles both halves
+    d.rounded_rectangle([(RES_PAD_X, bar_y1), (W - RES_PAD_X, bar_y2)], radius=RES_R, fill=(0, 30, 138, 255))
+    res_cy = (bar_y1 + bar_y2) // 2
     if potm:
         total_h = _th(fResult) + 3 + _th(fPotm)
         res_y   = res_cy - total_h // 2
