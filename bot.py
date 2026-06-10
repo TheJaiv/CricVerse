@@ -30,7 +30,7 @@ from test_simulation import (
     _format_scorecard as _test_format_scorecard,
     _player_of_match as _test_player_of_match,
 )
-from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings
+from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_status_embed, TournamentStatusView
 from subscription_manager import (
     load_data_from_bin, load_tournament_data_from_bin,
     save_data_to_bin, save_tournament_data_to_bin,
@@ -6009,72 +6009,32 @@ class PrefixCog(commands.Cog):
         if not tourney:
             return await ctx.send("❌ No tournament exists in this server.")
 
-        embed = discord.Embed(title=f"🏆 Tournament: {tourney['name']}", color=discord.Color.gold())
-        fmt = tourney.get('format_overs', 20)
-        embed.set_footer(text=f"Format: {fmt} Overs | Squad Rules: {tourney.get('min_squad', 11)}-{tourney.get('max_squad', 15)} Players")
-
         if tourney["status"] == "registration":
-            embed.description = "📝 **Registration Phase**"
+            t_type = tourney.get("tournament_type", "round_robin")
+            type_label = "T20 World Cup" if t_type == "t20_world_cup" else "Round Robin"
+            embed = discord.Embed(title=f"🏆 {tourney['name']}", color=discord.Color.gold())
+            embed.description = f"📝 **Registration Phase** · {type_label}"
             teams_str = ""
             for t in tourney["teams"]:
-                squad_len = len(t.get("squad", []))
-                teams_str += f"• **{t['name']}** (<@{t['owner_id']}>) - {squad_len}/{tourney.get('max_squad', 15)} Players\n"
-            if not teams_str: teams_str = "No teams added yet."
-            embed.add_field(name="Registered Teams", value=teams_str, inline=False)
+                grp = f" · Group **{t['group']}**" if t.get("group") else ""
+                teams_str += f"• **{t['name']}**{grp} (<@{t['owner_id']}>) — {len(t.get('squad', []))}/{tourney.get('max_squad', 15)} players\n"
+            embed.add_field(name="Registered Teams", value=teams_str or "No teams yet.", inline=False)
+            embed.set_footer(text=f"Format: {tourney.get('format_overs', 20)} overs · Squad: {tourney.get('min_squad', 11)}–{tourney.get('max_squad', 15)} players")
+            return await ctx.send(embed=embed)
 
-        elif tourney["status"] == "active":
-            schedule = tourney.get("schedule", [])
-            pending_matches   = [m for m in schedule if m["status"] == "pending"]
-            completed_matches = [m for m in schedule if m["status"] == "completed"]
+        pages = _build_status_pages(tourney)
+        if not pages:
+            return await ctx.send("❌ No schedule generated yet. Run `cv tournament start` first.")
 
-            if not pending_matches:
-                gs_matches = [m for m in schedule if isinstance(m.get("round"), int)]
-                if all(m["status"] == "completed" for m in gs_matches) and not any(not isinstance(m.get("round"), int) for m in schedule):
-                    return await ctx.send(embed=discord.Embed(title=f"🏆 Tournament: {tourney['name']}", description="🏁 **Group Stage Completed!**\nUse `cv tournament generate_knockouts` to begin the Semi-Finals.", color=discord.Color.gold()))
-                else:
-                    return await ctx.send(embed=discord.Embed(title=f"🏆 Tournament: {tourney['name']}", description="🏁 **All matches are completed!**", color=discord.Color.gold()))
+        view = TournamentStatusView(tourney, pages)
+        embed = _build_status_embed(tourney, pages[view.idx])
 
-            embed.description = f"🔥 **Active Phase**\nUse `cv tournament play <match_id>` to launch your matches!"
-            sched_str = ""
-            for m in pending_matches[:10]:
-                r_label = f"Round {m['round']}" if isinstance(m['round'], int) else m['round']
-                sched_str += f"**Match {m['match_id']}** ({r_label}): **{m['team1']}** vs **{m['team2']}**\n"
-            if len(pending_matches) > 10:
-                sched_str += f"\n*...and {len(pending_matches) - 10} more matches.*"
-            embed.add_field(name="Upcoming Matches", value=sched_str, inline=False)
+        if tourney["status"] == "completed":
+            final = next((m for m in tourney.get("schedule", []) if m.get("round") == "Final"), None)
+            winner = final["result"]["winner"] if final and final.get("result") else "TBD"
+            embed.description = f"👑 **Champions: {winner}**"
 
-            if completed_matches:
-                res_lines = []
-                for m in completed_matches[-5:]:
-                    r = m["result"]
-                    t1_s = f"{r['t1_runs']}/{r['t1_wickets']}"
-                    t2_s = f"{r['t2_runs']}/{r['t2_wickets']}"
-                    w = r["winner"]
-                    t1_fmt = f"**{m['team1']}**" if w == m["team1"] else m["team1"]
-                    t2_fmt = f"**{m['team2']}**" if w == m["team2"] else m["team2"]
-                    res_lines.append(f"`#{m['match_id']}` {t1_fmt} {t1_s} vs {t2_fmt} {t2_s}")
-                embed.add_field(name="Recent Results  ·  cv tournament match_scorecard <id>", value="\n".join(res_lines), inline=False)
-
-        elif tourney["status"] == "completed":
-            final = next((m for m in tourney.get("schedule", []) if m["round"] == "Final"), None)
-            winner = final["result"]["winner"] if final else "TBD"
-            embed.description = f"🏆 **TOURNAMENT COMPLETED!**\n👑 **Champions: {winner}**\n\nCheck `cv tournament leaderboard` for top performers!"
-
-            all_completed = [m for m in tourney.get("schedule", []) if m["status"] == "completed"]
-            if all_completed:
-                res_lines = []
-                for m in all_completed:
-                    r = m["result"]
-                    t1_s = f"{r['t1_runs']}/{r['t1_wickets']}"
-                    t2_s = f"{r['t2_runs']}/{r['t2_wickets']}"
-                    w = r["winner"]
-                    r_label = m.get("round", f"Match {m['match_id']}")
-                    t1_fmt = f"**{m['team1']}**" if w == m["team1"] else m["team1"]
-                    t2_fmt = f"**{m['team2']}**" if w == m["team2"] else m["team2"]
-                    res_lines.append(f"`#{m['match_id']}` {r_label} — {t1_fmt} {t1_s} vs {t2_fmt} {t2_s}")
-                embed.add_field(name="All Results", value="\n".join(res_lines[:15]), inline=False)
-
-        await ctx.send(embed=embed)
+        await ctx.send(embed=embed, view=view)
 
     @tournament.command(name="play_next", help="[MANAGER] Launch the next pending tournament match.\nUsage: tournament play_next")
     async def t_play_next(self, ctx):
