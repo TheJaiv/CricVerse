@@ -964,7 +964,7 @@ def extract_scoreboard_data(match: CricketMatch) -> dict:
             "balls": inn1.total_balls,
             "yet_to_bat": False,
             "batters": _top_bat(inn1),
-            "bowlers": _top_bowl(inn2),
+            "bowlers": _top_bowl(inn1),
             "impact_sub": getattr(match, t1_impact_attr, None),
         },
         "t2": {
@@ -976,7 +976,7 @@ def extract_scoreboard_data(match: CricketMatch) -> dict:
             "balls": inn2.total_balls if inn2 else 0,
             "yet_to_bat": inn2 is None,
             "batters": _top_bat(inn2),
-            "bowlers": _top_bowl(inn1),
+            "bowlers": _top_bowl(inn2),
             "impact_sub": getattr(match, t2_impact_attr, None),
         },
     }
@@ -1085,7 +1085,7 @@ def reconstruct_scorecard_data(tourney: dict, m: dict) -> dict:
             "balls":      top_b,
             "yet_to_bat": False,
             "batters":    _bat(p.get("b1")),
-            "bowlers":    _bowl(p.get("w1")),
+            "bowlers":    _bowl(p.get("w2")),
             "impact_sub": p.get("i1"),
         },
         "t2": {
@@ -1097,7 +1097,7 @@ def reconstruct_scorecard_data(tourney: dict, m: dict) -> dict:
             "balls":      bot_b,
             "yet_to_bat": False,
             "batters":    _bat(p.get("b2")),
-            "bowlers":    _bowl(p.get("w2")),
+            "bowlers":    _bowl(p.get("w1")),
             "impact_sub": p.get("i2"),
         },
     }
