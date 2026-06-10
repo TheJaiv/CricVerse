@@ -6272,6 +6272,114 @@ class PrefixCog(commands.Cog):
         embed.add_field(name="No image", value="No scorecard data for this match.", inline=False)
         await ctx.send(embed=embed)
 
+    @tournament.command(name="dev_setup", help="[OWNER] Instantly fill teams with random squads and auto-start. Usage: tournament dev_setup [no]")
+    async def t_dev_setup(self, ctx, auto_start: str = "yes"):
+        if ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("❌ Owner only.")
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney:
+            return await ctx.send("❌ No tournament found. Run `cv tournament create` first.")
+        if tourney["status"] != "registration":
+            return await ctx.send("❌ Tournament already started. Use `cv tournament force_delete` first.")
+
+        db_players = get_all_players()
+        if len(db_players) < 11:
+            return await ctx.send("❌ Not enough players in the database.")
+
+        t_type = tourney.get("tournament_type", "round_robin")
+        min_s  = tourney.get("min_squad", 11)
+        max_s  = tourney.get("max_squad", 15)
+
+        def make_squad():
+            shuffled = list(db_players)
+            random.shuffle(shuffled)
+            return shuffled[:min(max_s, len(shuffled))]
+
+        if t_type == "t20_world_cup":
+            team_config = [
+                ("India", "A"), ("Pakistan", "A"), ("Australia", "A"), ("England", "A"),
+                ("New Zealand", "B"), ("South Africa", "B"), ("West Indies", "B"), ("Sri Lanka", "B"),
+                ("Bangladesh", "C"), ("Afghanistan", "C"), ("Zimbabwe", "C"), ("Ireland", "C"),
+                ("Scotland", "D"), ("Netherlands", "D"), ("Namibia", "D"), ("Uganda", "D"),
+            ]
+        else:
+            team_config = [
+                ("Thunder Kings", None), ("Lightning Bolts", None), ("Storm Riders", None),
+                ("Fire Hawks", None), ("Ice Wolves", None), ("Steel Giants", None),
+                ("Golden Lions", None), ("Silver Eagles", None),
+            ]
+
+        tourney["teams"] = []
+        for name, grp in team_config:
+            tourney["teams"].append({"name": name, "owner_id": str(ctx.author.id), "squad": make_squad(), "group": grp})
+
+        should_start = auto_start.lower() not in ("no", "false", "0")
+        if not should_start:
+            save_tournament(tourney)
+            return await ctx.send(f"✅ **Dev Setup Complete!** Added {len(tourney['teams'])} teams. Run `cv tournament start` when ready.")
+
+        if t_type == "t20_world_cup":
+            teams_by_group = {"A": [], "B": [], "C": [], "D": []}
+            for t in tourney["teams"]:
+                teams_by_group[t["group"]].append(t["name"])
+            schedule = []
+            match_id = 1
+            for group, group_teams in teams_by_group.items():
+                teams = list(group_teams)
+                random.shuffle(teams)
+                n = len(teams)
+                for r in range(n - 1):
+                    for i in range(n // 2):
+                        t1, t2 = teams[i], teams[n - 1 - i]
+                        schedule.append({
+                            "match_id": match_id, "round": f"Group {group}",
+                            "stage": "group", "group": group, "group_round": r + 1,
+                            "team1": t1 if r % 2 == 0 else t2,
+                            "team2": t2 if r % 2 == 0 else t1,
+                            "status": "pending", "result": None,
+                        })
+                        match_id += 1
+                    teams.insert(1, teams.pop())
+            tourney["schedule"] = schedule
+            tourney["status"] = "active"
+            tourney["current_match_idx"] = 0
+            save_tournament(tourney)
+            await ctx.send(
+                f"⚡ **Dev Setup + Auto-Start!** — T20 World Cup\n"
+                f"**A:** India · Pakistan · Australia · England\n"
+                f"**B:** New Zealand · South Africa · West Indies · Sri Lanka\n"
+                f"**C:** Bangladesh · Afghanistan · Zimbabwe · Ireland\n"
+                f"**D:** Scotland · Netherlands · Namibia · Uganda\n"
+                f"Generated **{len(schedule)} group stage matches**. Use `cv tournament play_next` to begin!"
+            )
+        else:
+            teams = [t["name"] for t in tourney["teams"]]
+            if len(teams) % 2 != 0:
+                teams.append("BYE")
+            n = len(teams)
+            matchups = []
+            for r in range(n - 1):
+                round_matches = []
+                for i in range(n // 2):
+                    t1, t2 = teams[i], teams[n - 1 - i]
+                    if t1 != "BYE" and t2 != "BYE":
+                        round_matches.append((t1, t2) if r % 2 == 0 else (t2, t1))
+                random.shuffle(round_matches)
+                for m in round_matches:
+                    matchups.append({"round": r + 1, "team1": m[0], "team2": m[1]})
+                teams.insert(1, teams.pop())
+            schedule = [{"match_id": i + 1, "round": m["round"], "team1": m["team1"], "team2": m["team2"], "status": "pending", "result": None} for i, m in enumerate(matchups)]
+            tourney["schedule"] = schedule
+            tourney["status"] = "active"
+            tourney["current_match_idx"] = 0
+            save_tournament(tourney)
+            await ctx.send(
+                f"⚡ **Dev Setup + Auto-Start!** — Round Robin\n"
+                f"**Teams:** {' · '.join(t['name'] for t in tourney['teams'])}\n"
+                f"Generated **{len(schedule)} matches**. Use `cv tournament play_next` to begin!"
+            )
+
     @tournament.command(name="next_match", help="[OWNER] Launch your team's next pending match.\nUsage: tournament next_match")
     async def t_next_match(self, ctx):
         server_id = str(ctx.guild.id)
