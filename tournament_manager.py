@@ -4,6 +4,7 @@ from discord.ext import commands
 import difflib
 import io
 import re
+import random
 from PIL import Image, ImageDraw, ImageFont
 import asyncio
 from subscription_manager import DB_CACHE, async_save_tournament_to_bin, get_all_players, get_tier_status
@@ -34,9 +35,9 @@ def get_tournament_standings(tourney):
             t1, t2 = m["team1"], m["team2"]
             if t1 not in teams: teams[t1] = {"P":0, "W":0, "L":0, "T":0, "Pts":0, "RF":0, "OF":0.0, "RA":0, "OA":0.0}
             if t2 not in teams: teams[t2] = {"P":0, "W":0, "L":0, "T":0, "Pts":0, "RF":0, "OF":0.0, "RA":0, "OA":0.0}
-            
+
             teams[t1]["P"] += 1; teams[t2]["P"] += 1
-            
+
             if res["winner"] == "TIE":
                 teams[t1]["T"] += 1; teams[t2]["T"] += 1
                 teams[t1]["Pts"] += 1; teams[t2]["Pts"] += 1
@@ -44,29 +45,174 @@ def get_tournament_standings(tourney):
                 teams[t1]["W"] += 1; teams[t2]["L"] += 1; teams[t1]["Pts"] += 2
             else:
                 teams[t2]["W"] += 1; teams[t1]["L"] += 1; teams[t2]["Pts"] += 2
-                
+
             def get_overs(w, b, fmt): return float(fmt) if w >= 10 else b / 6.0
             t1_o = get_overs(res["t1_wickets"], res["t1_balls"], res["format_overs"])
             t2_o = get_overs(res["t2_wickets"], res["t2_balls"], res["format_overs"])
-            
+
             teams[t1]["RF"] += res["t1_runs"]; teams[t1]["OF"] += t1_o
             teams[t1]["RA"] += res["t2_runs"]; teams[t1]["OA"] += t2_o
             teams[t2]["RF"] += res["t2_runs"]; teams[t2]["OF"] += t2_o
             teams[t2]["RA"] += res["t1_runs"]; teams[t2]["OA"] += t1_o
-            
+
     for _, data in teams.items():
         data["NRR"] = ((data["RF"]/data["OF"]) if data["OF"] > 0 else 0) - ((data["RA"]/data["OA"]) if data["OA"] > 0 else 0)
-        
+
     return sorted(teams.items(), key=lambda x: (x[1]["Pts"], x[1]["NRR"]), reverse=True)
+
+
+def get_group_standings(tourney, stage: str, group: str):
+    """Standings for a specific stage+group combo (T20 WC group stage or super8)."""
+    teams = {}
+    for m in tourney.get("schedule", []):
+        if m.get("stage") != stage or m.get("group") != group:
+            continue
+        for name in [m["team1"], m["team2"]]:
+            if name not in teams:
+                teams[name] = {"P":0,"W":0,"L":0,"T":0,"Pts":0,"RF":0,"OF":0.0,"RA":0,"OA":0.0}
+
+    for m in tourney.get("schedule", []):
+        if m.get("stage") != stage or m.get("group") != group:
+            continue
+        if m["status"] != "completed" or not m.get("result"):
+            continue
+        res = m["result"]
+        t1, t2 = m["team1"], m["team2"]
+        teams[t1]["P"] += 1; teams[t2]["P"] += 1
+        if res["winner"] == "TIE":
+            teams[t1]["T"] += 1; teams[t2]["T"] += 1
+            teams[t1]["Pts"] += 1; teams[t2]["Pts"] += 1
+        elif res["winner"] == t1:
+            teams[t1]["W"] += 1; teams[t2]["L"] += 1; teams[t1]["Pts"] += 2
+        else:
+            teams[t2]["W"] += 1; teams[t1]["L"] += 1; teams[t2]["Pts"] += 2
+        def _ov(w, b, fmt): return float(fmt) if w >= 10 else b / 6.0
+        t1_o = _ov(res["t1_wickets"], res["t1_balls"], res["format_overs"])
+        t2_o = _ov(res["t2_wickets"], res["t2_balls"], res["format_overs"])
+        teams[t1]["RF"] += res["t1_runs"]; teams[t1]["OF"] += t1_o
+        teams[t1]["RA"] += res["t2_runs"]; teams[t1]["OA"] += t2_o
+        teams[t2]["RF"] += res["t2_runs"]; teams[t2]["OF"] += t2_o
+        teams[t2]["RA"] += res["t1_runs"]; teams[t2]["OA"] += t1_o
+
+    for _, d in teams.items():
+        d["NRR"] = ((d["RF"]/d["OF"]) if d["OF"] > 0 else 0) - ((d["RA"]/d["OA"]) if d["OA"] > 0 else 0)
+    return sorted(teams.items(), key=lambda x: (x[1]["Pts"], x[1]["NRR"]), reverse=True)
+
+
+def _build_status_pages(tourney):
+    """Returns list of (title, stage_type, group_key, matches) tuples."""
+    schedule = tourney.get("schedule", [])
+    t_type = tourney.get("tournament_type", "round_robin")
+    pages = []
+
+    if t_type == "t20_world_cup":
+        for grp in ["A", "B", "C", "D"]:
+            matches = [m for m in schedule if m.get("stage") == "group" and m.get("group") == grp]
+            if matches:
+                pages.append((f"Group {grp}", "group", grp, matches))
+        for sg in ["A", "B"]:
+            matches = [m for m in schedule if m.get("stage") == "super8" and m.get("group") == sg]
+            if matches:
+                pages.append((f"Super 8 — Group {sg}", "super8", sg, matches))
+        ko = [m for m in schedule if m.get("stage") == "knockout"]
+        if ko:
+            pages.append(("Knockouts", "knockout", None, ko))
+    else:
+        rounds = sorted(set(m["round"] for m in schedule if isinstance(m.get("round"), int)))
+        for r in rounds:
+            matches = [m for m in schedule if m.get("round") == r]
+            pages.append((f"Round {r}", "round", r, matches))
+        ko = [m for m in schedule if not isinstance(m.get("round"), int)]
+        if ko:
+            pages.append(("Knockouts", "knockout", None, ko))
+
+    return pages
+
+
+def _build_status_embed(tourney, page_info):
+    """Build the embed for one status page."""
+    title, stage_type, group_key, matches = page_info
+    embed = discord.Embed(
+        title=f"🏆 {tourney['name']} — {title}",
+        color=discord.Color.gold()
+    )
+
+    lines = []
+    for m in matches:
+        if m["status"] == "completed" and m.get("result"):
+            r = m["result"]
+            w = r["winner"]
+            t1b = f"**{m['team1']}**" if w == m["team1"] else m["team1"]
+            t2b = f"**{m['team2']}**" if w == m["team2"] else m["team2"]
+            lines.append(f"`#{m['match_id']}` {t1b} {r['t1_runs']}/{r['t1_wickets']} vs {t2b} {r['t2_runs']}/{r['t2_wickets']} ✅")
+        else:
+            lines.append(f"`#{m['match_id']}` {m['team1']} vs {m['team2']} ⏳")
+    embed.add_field(name="Matches", value="\n".join(lines) or "No matches", inline=False)
+
+    if stage_type in ("group", "super8") and group_key:
+        st = get_group_standings(tourney, stage_type, group_key)
+        if st:
+            rows = ["```", f"{'':2}{'#':<3}{'Team':<20}{'P':>2}{'W':>2}{'L':>2}{'Pts':>4}{'NRR':>7}", "─"*44]
+            for i, (nm, d) in enumerate(st, 1):
+                arrow = "→ " if i <= 2 else "  "
+                rows.append(f"{arrow}{i:<3}{nm[:18]:<20}{d['P']:>2}{d['W']:>2}{d['L']:>2}{d['Pts']:>4}{d['NRR']:>+7.2f}")
+            rows.append("```")
+            label = "Standings  (→ top 2 advance)" if stage_type == "group" else "Super 8 Standings  (→ top 2 to SF)"
+            embed.add_field(name=label, value="\n".join(rows), inline=False)
+
+    pending = sum(1 for m in matches if m["status"] == "pending")
+    done = len(matches) - pending
+    embed.set_footer(text=f"✅ {done} completed  ·  ⏳ {pending} remaining  ·  {tourney.get('format_overs', 20)} overs")
+    return embed
+
+
+class TournamentStatusView(discord.ui.View):
+    def __init__(self, tourney, pages):
+        super().__init__(timeout=120)
+        self.tourney = tourney
+        self.pages = pages
+        self.idx = 0
+        for i, (_, _, _, matches) in enumerate(pages):
+            if any(m["status"] == "pending" for m in matches):
+                self.idx = i
+                break
+        else:
+            self.idx = max(0, len(pages) - 1)
+        self._update_nav()
+
+    def _update_nav(self):
+        self.prev_btn.disabled = (self.idx == 0)
+        self.next_btn.disabled = (self.idx >= len(self.pages) - 1)
+        self.page_btn.label = f"{self.idx + 1} / {len(self.pages)}"
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary, row=0)
+    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.idx -= 1
+        self._update_nav()
+        await interaction.response.edit_message(embed=_build_status_embed(self.tourney, self.pages[self.idx]), view=self)
+
+    @discord.ui.button(label="1 / 1", style=discord.ButtonStyle.secondary, disabled=True, row=0)
+    async def page_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary, row=0)
+    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.idx += 1
+        self._update_nav()
+        await interaction.response.edit_message(embed=_build_status_embed(self.tourney, self.pages[self.idx]), view=self)
+
 
 class TournamentCog(commands.GroupCog, group_name="tournament"):
     def __init__(self, bot):
         self.bot = bot
 
-    # Helper to authenticate Tournament Managers safely
     def is_manager(self, interaction: discord.Interaction, tourney):
-        if interaction.user.id == 1087369198801526836: return True # Global Admin Override
-        if interaction.user.guild_permissions.administrator: return True # Server Admin Override
+        if interaction.user.id == 1087369198801526836: return True
+        if interaction.user.guild_permissions.administrator: return True
         return str(interaction.user.id) in tourney.get("managers", [])
 
     @app_commands.command(name="create", description="[ADMIN] Create a new tournament for this server.")
@@ -76,52 +222,62 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         app_commands.Choice(name="Test (90 Overs/Inn)", value="90"),
         app_commands.Choice(name="Custom Format", value="custom")
     ])
-    async def create(self, interaction: discord.Interaction, name: str, format: app_commands.Choice[str], min_squad: int = 11, max_squad: int = 15, impact_player: bool = False, custom_overs: int = None):
+    @app_commands.choices(event_type=[
+        app_commands.Choice(name="Round Robin", value="round_robin"),
+        app_commands.Choice(name="T20 World Cup (4 Groups → Super 8 → Final)", value="t20_world_cup"),
+    ])
+    async def create(self, interaction: discord.Interaction, name: str, format: app_commands.Choice[str], event_type: app_commands.Choice[str] = None, min_squad: int = 11, max_squad: int = 15, impact_player: bool = False, custom_overs: int = None):
         if not interaction.user.guild_permissions.administrator and interaction.user.id != 1087369198801526836:
             return await interaction.response.send_message("❌ Only Server Admins can initialize a tournament.", ephemeral=True)
-            
+
         server_id = str(interaction.guild.id)
-        
+
         _, _, _, s_tier, _ = get_tier_status(str(interaction.user.id), server_id)
         if s_tier not in ["Gold", "Diamond"]:
             return await interaction.response.send_message("❌ **Access Denied:** Only servers with an active **Gold** or **Diamond** tier can host tournaments! Contact the bot owner to upgrade.", ephemeral=True)
 
         if get_server_tournament(server_id):
             return await interaction.response.send_message("❌ A tournament already exists in this server! Use `/tournament status` to check.", ephemeral=True)
-            
+
         if format.value == "custom" and not custom_overs:
             return await interaction.response.send_message("❌ You must provide `custom_overs` if selecting Custom Format.", ephemeral=True)
-            
+
         if format.value != "custom": custom_overs = int(format.value)
         if min_squad < 11: return await interaction.response.send_message("❌ Minimum squad size must be at least 11.", ephemeral=True)
         if impact_player and min_squad < 12: return await interaction.response.send_message("❌ Minimum squad size must be at least 12 if Impact Player is enabled.", ephemeral=True)
         if max_squad < min_squad: return await interaction.response.send_message("❌ Max squad size cannot be less than Min squad size.", ephemeral=True)
-            
+
+        t_type = event_type.value if event_type else "round_robin"
+        type_label = "T20 World Cup" if t_type == "t20_world_cup" else "Round Robin"
+
         t_data = {
             "server_id": server_id,
             "name": name,
             "managers": [str(interaction.user.id)],
             "teams": [],
-            "status": "registration", # Modes: registration, active, completed
+            "status": "registration",
             "schedule": [],
             "current_match_idx": 0,
             "stats": {},
             "format_overs": custom_overs,
             "min_squad": min_squad,
             "max_squad": max_squad,
-            "impact_player": impact_player
+            "impact_player": impact_player,
+            "tournament_type": t_type,
         }
         save_tournament(t_data)
-        await interaction.response.send_message(f"🏆 **Tournament Created:** `{name}`\nYou have been automatically assigned as a Manager.\nUse `/tournament add_manager` or `/tournament add_team` to get started!")
+
+        extra = "\n⚠️ **T20 World Cup requires exactly 16 teams (4 groups of 4). Assign each team a group (A/B/C/D) when using `/tournament add_team`.**" if t_type == "t20_world_cup" else ""
+        await interaction.response.send_message(
+            f"🏆 **Tournament Created:** `{name}`  ·  {type_label}\nYou have been automatically assigned as a Manager.\nUse `/tournament add_manager` or `/tournament add_team` to get started!{extra}"
+        )
 
     @app_commands.command(name="add_manager", description="[MANAGER] Assign a tournament manager.")
     async def add_manager(self, interaction: discord.Interaction, user: discord.Member):
         server_id = str(interaction.guild.id)
         tourney = get_server_tournament(server_id)
-        
         if not tourney: return await interaction.response.send_message("❌ No tournament exists here.", ephemeral=True)
         if not self.is_manager(interaction, tourney): return await interaction.response.send_message("❌ You are not a Tournament Manager.", ephemeral=True)
-        
         uid = str(user.id)
         if uid not in tourney["managers"]:
             tourney["managers"].append(uid)
@@ -129,41 +285,51 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         await interaction.response.send_message(f"✅ {user.mention} is now a Tournament Manager!")
 
     @app_commands.command(name="add_team", description="[MANAGER] Add a team and assign a Team Owner.")
-    async def add_team(self, interaction: discord.Interaction, team_name: str, owner: discord.Member):
+    async def add_team(self, interaction: discord.Interaction, team_name: str, owner: discord.Member, group: str = None):
         server_id = str(interaction.guild.id)
         tourney = get_server_tournament(server_id)
-        
         if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
         if not self.is_manager(interaction, tourney): return await interaction.response.send_message("❌ Managers only.", ephemeral=True)
         if tourney["status"] != "registration": return await interaction.response.send_message("❌ Cannot add teams after tournament has started.", ephemeral=True)
-        
+
+        t_type = tourney.get("tournament_type", "round_robin")
+        group_val = None
+        if t_type == "t20_world_cup":
+            if not group:
+                return await interaction.response.send_message("❌ **Group (A/B/C/D) is required** for T20 World Cup tournaments. Use the `group` parameter.", ephemeral=True)
+            group_val = group.strip().upper()
+            if group_val not in ["A", "B", "C", "D"]:
+                return await interaction.response.send_message("❌ Group must be **A**, **B**, **C**, or **D**.", ephemeral=True)
+            group_count = sum(1 for t in tourney["teams"] if t.get("group") == group_val)
+            if group_count >= 4:
+                return await interaction.response.send_message(f"❌ Group **{group_val}** already has 4 teams.", ephemeral=True)
+
         for t in tourney["teams"]:
             if t["name"].lower() == team_name.lower():
                 return await interaction.response.send_message("❌ Team name already exists.", ephemeral=True)
             if t["owner_id"] == str(owner.id):
                 return await interaction.response.send_message(f"❌ {owner.mention} already owns a team.", ephemeral=True)
-                
+
         tourney["teams"].append({
             "name": team_name,
             "owner_id": str(owner.id),
-            "squad": []
+            "squad": [],
+            "group": group_val,
         })
         save_tournament(tourney)
-        await interaction.response.send_message(f"✅ Team **{team_name}** added!\n👤 Owner: {owner.mention}\n*The owner can now use `/tournament submit_squad` to register their players.*")
+        grp_txt = f" · Group **{group_val}**" if group_val else ""
+        await interaction.response.send_message(f"✅ Team **{team_name}**{grp_txt} added!\n👤 Owner: {owner.mention}\n*The owner can now use `/tournament submit_squad` to register their players.*")
 
     @app_commands.command(name="remove_team", description="[MANAGER] Remove a team from the tournament.")
     async def remove_team(self, interaction: discord.Interaction, team_name: str):
         server_id = str(interaction.guild.id)
         tourney = get_server_tournament(server_id)
-        
         if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
         if not self.is_manager(interaction, tourney): return await interaction.response.send_message("❌ Managers only.", ephemeral=True)
         if tourney["status"] != "registration": return await interaction.response.send_message("❌ Cannot remove teams after the tournament has started.", ephemeral=True)
-        
         team_idx = next((i for i, t in enumerate(tourney["teams"]) if t["name"].lower() == team_name.lower()), None)
         if team_idx is None:
             return await interaction.response.send_message(f"❌ Team **{team_name}** not found.", ephemeral=True)
-            
         del tourney["teams"][team_idx]
         save_tournament(tourney)
         await interaction.response.send_message(f"✅ Team **{team_name}** has been successfully removed from the tournament.")
@@ -172,35 +338,27 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
     async def replace_player(self, interaction: discord.Interaction, team_name: str, out_player: str, in_player: str):
         server_id = str(interaction.guild.id)
         tourney = get_server_tournament(server_id)
-        
         if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
         if not self.is_manager(interaction, tourney): return await interaction.response.send_message("❌ Managers only.", ephemeral=True)
-        
         team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.lower()), None)
         if not team: return await interaction.response.send_message(f"❌ Team '{team_name}' not found.", ephemeral=True)
-        
         if not team.get("squad"):
             return await interaction.response.send_message(f"❌ Team '{team_name}' has no squad submitted yet.", ephemeral=True)
-            
         old_p = next((p for p in team["squad"] if p["name"].lower() == out_player.lower()), None)
         if not old_p:
             close = difflib.get_close_matches(out_player, [p["name"] for p in team["squad"]], n=1, cutoff=0.5)
             if close: old_p = next(p for p in team["squad"] if p["name"] == close[0])
             else: return await interaction.response.send_message(f"❌ Player '{out_player}' not found in team '{team_name}'.", ephemeral=True)
-            
         db_players = get_all_players()
         new_p = next((p for p in db_players if p["name"].lower() == in_player.lower()), None)
         if not new_p:
             close = difflib.get_close_matches(in_player, [p["name"] for p in db_players], n=1, cutoff=0.6)
             if close: new_p = next(p for p in db_players if p["name"] == close[0])
             else: return await interaction.response.send_message(f"❌ Player '{in_player}' not found in the global database.", ephemeral=True)
-            
         if any(p["name"] == new_p["name"] for p in team["squad"]):
             return await interaction.response.send_message(f"❌ '{new_p['name']}' is already in the squad.", ephemeral=True)
-            
         idx = team["squad"].index(old_p)
         team["squad"][idx] = new_p
-        
         save_tournament(tourney)
         await interaction.response.send_message(f"✅ **Squad Updated for {team['name']}:**\n🔴 OUT: {old_p['name']}\n🟢 IN: {new_p['name']}")
 
@@ -208,12 +366,9 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
     async def submit_squad(self, interaction: discord.Interaction, team_name: str = None):
         server_id = str(interaction.guild.id)
         tourney = get_server_tournament(server_id)
-        
         if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
         if tourney["status"] != "registration": return await interaction.response.send_message("❌ Registration is closed.", ephemeral=True)
-        
         is_mgr = self.is_manager(interaction, tourney)
-        
         if team_name:
             if not is_mgr:
                 return await interaction.response.send_message("❌ Only Managers can use the team_name parameter to submit for others.", ephemeral=True)
@@ -222,220 +377,257 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         else:
             team = next((t for t in tourney["teams"] if t["owner_id"] == str(interaction.user.id)), None)
             if not team: return await interaction.response.send_message("❌ You do not own a team. Managers must provide the `team_name` parameter.", ephemeral=True)
-        
         min_s = tourney.get("min_squad", 11)
         max_s = tourney.get("max_squad", 15)
         await interaction.response.send_message(f"📋 Please reply to this message with the **{min_s} to {max_s} Player Squad** for **{team['name']}** (One player name per line). You have 3 minutes.", ephemeral=True)
-        
         def check(m):
             return m.author.id == interaction.user.id and m.channel.id == interaction.channel.id
-            
         try:
             msg = await self.bot.wait_for('message', timeout=180.0, check=check)
         except asyncio.TimeoutError:
             return await interaction.followup.send("⏳ Time expired. Please run `/tournament submit_squad` again.", ephemeral=True)
-            
         db_players = get_all_players()
         db_map = {p["name"].lower(): p for p in db_players}
         db_names_list = list(db_map.keys())
-        
         found_players = []
         missing = []
         seen = set()
-        
         lines = [l.strip() for l in msg.content.split("\n") if l.strip()]
-        for line in lines[:(max_s + 3)]: # Allow slight buffer for duplicates/mistakes
+        for line in lines[:(max_s + 3)]:
             q = line.lower()
             match = db_map.get(q)
             if not match:
                 fuzz = difflib.get_close_matches(q, db_names_list, n=1, cutoff=0.6)
                 if fuzz: match = db_map[fuzz[0]]
-            
             if match:
                 if match["name"] not in seen and len(found_players) < max_s:
                     found_players.append(match)
                     seen.add(match["name"])
             else:
                 missing.append(line)
-                
         if missing or len(found_players) < min_s:
             err = f"❌ **Roster Invalid ({len(found_players)}/{min_s} Minimum Found)**\n"
             if missing: err += f"Missing: {', '.join(missing)}\n"
             err += "Please fix the names and try `/tournament submit_squad` again."
             return await msg.reply(err)
-            
         team["squad"] = found_players
         save_tournament(tourney)
         await msg.reply(f"✅ **Squad Verified and Saved for {team['name']}!**\nRegistered {len(found_players)} players.")
 
-    @app_commands.command(name="start", description="[MANAGER] Lock registration and generate Round Robin schedule.")
+    @app_commands.command(name="start", description="[MANAGER] Lock registration and generate the match schedule.")
     async def start(self, interaction: discord.Interaction):
         server_id = str(interaction.guild.id)
         tourney = get_server_tournament(server_id)
-        
         if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
         if not self.is_manager(interaction, tourney): return await interaction.response.send_message("❌ Managers only.", ephemeral=True)
         if tourney["status"] != "registration": return await interaction.response.send_message("❌ Tournament already started.", ephemeral=True)
-        
         if len(tourney["teams"]) < 2:
             return await interaction.response.send_message("❌ Need at least 2 teams.", ephemeral=True)
-            
         min_s = tourney.get("min_squad", 11)
         for t in tourney["teams"]:
             if len(t.get("squad", [])) < min_s:
                 return await interaction.response.send_message(f"❌ Team **{t['name']}** does not have a valid squad yet.", ephemeral=True)
-                
-        teams = [t["name"] for t in tourney["teams"]]
-        if len(teams) % 2 != 0:
-            teams.append("BYE")
-            
-        import random
-        n = len(teams)
-        matchups = []
-        
-        for r in range(n - 1):
-            round_matches = []
-            for i in range(n // 2):
-                t1, t2 = teams[i], teams[n - 1 - i]
-                if t1 != "BYE" and t2 != "BYE":
-                    round_matches.append((t1, t2) if r % 2 == 0 else (t2, t1))
-            random.shuffle(round_matches)
-            for m in round_matches:
-                matchups.append({
-                    "round": r + 1,
-                    "team1": m[0],
-                    "team2": m[1]
-                })
-            teams.insert(1, teams.pop()) # Standard Circle Method Rotation
-            
-        schedule = [{"match_id": i + 1, "round": m["round"], "team1": m["team1"], "team2": m["team2"], "status": "pending", "result": None} for i, m in enumerate(matchups)]
-            
-        tourney["schedule"] = schedule
-        tourney["status"] = "active"
-        tourney["current_match_idx"] = 0
-        save_tournament(tourney)
-        
-        await interaction.response.send_message(f"🏆 **TOURNAMENT STARTED: {tourney['name']}!**\nGenerated **{len(schedule)} matches** in the Round Robin stage.\nUse `/tournament status` to view it!")
 
-    @app_commands.command(name="status", description="View the current tournament schedule and standings.")
+        t_type = tourney.get("tournament_type", "round_robin")
+
+        if t_type == "t20_world_cup":
+            # Validate 4 groups of exactly 4 teams each
+            teams_by_group = {"A": [], "B": [], "C": [], "D": []}
+            for t in tourney["teams"]:
+                g = t.get("group")
+                if g in teams_by_group:
+                    teams_by_group[g].append(t["name"])
+                else:
+                    return await interaction.response.send_message(f"❌ Team **{t['name']}** has no valid group assigned (A/B/C/D).", ephemeral=True)
+            errors = [f"Group {g} has {len(m)}/4 teams" for g, m in teams_by_group.items() if len(m) != 4]
+            if errors:
+                return await interaction.response.send_message("❌ " + " · ".join(errors) + "\nEach group must have exactly 4 teams.", ephemeral=True)
+
+            schedule = []
+            match_id = 1
+            for group, group_teams in teams_by_group.items():
+                teams = list(group_teams)
+                random.shuffle(teams)
+                n = len(teams)
+                for r in range(n - 1):
+                    for i in range(n // 2):
+                        t1, t2 = teams[i], teams[n - 1 - i]
+                        schedule.append({
+                            "match_id": match_id,
+                            "round": f"Group {group}",
+                            "stage": "group",
+                            "group": group,
+                            "group_round": r + 1,
+                            "team1": t1 if r % 2 == 0 else t2,
+                            "team2": t2 if r % 2 == 0 else t1,
+                            "status": "pending",
+                            "result": None,
+                        })
+                        match_id += 1
+                    teams.insert(1, teams.pop())
+
+            tourney["schedule"] = schedule
+            tourney["status"] = "active"
+            tourney["current_match_idx"] = 0
+            save_tournament(tourney)
+            await interaction.response.send_message(
+                f"🌍 **T20 WORLD CUP STARTED: {tourney['name']}!**\n"
+                f"Generated **{len(schedule)} Group Stage matches** (4 groups × 6 matches).\n"
+                f"Use `/tournament status` to view the full schedule!"
+            )
+
+        else:
+            # Round Robin (existing logic)
+            teams = [t["name"] for t in tourney["teams"]]
+            if len(teams) % 2 != 0:
+                teams.append("BYE")
+            n = len(teams)
+            matchups = []
+            for r in range(n - 1):
+                round_matches = []
+                for i in range(n // 2):
+                    t1, t2 = teams[i], teams[n - 1 - i]
+                    if t1 != "BYE" and t2 != "BYE":
+                        round_matches.append((t1, t2) if r % 2 == 0 else (t2, t1))
+                random.shuffle(round_matches)
+                for m in round_matches:
+                    matchups.append({"round": r + 1, "team1": m[0], "team2": m[1]})
+                teams.insert(1, teams.pop())
+            schedule = [{"match_id": i + 1, "round": m["round"], "team1": m["team1"], "team2": m["team2"], "status": "pending", "result": None} for i, m in enumerate(matchups)]
+            tourney["schedule"] = schedule
+            tourney["status"] = "active"
+            tourney["current_match_idx"] = 0
+            save_tournament(tourney)
+            await interaction.response.send_message(f"🏆 **TOURNAMENT STARTED: {tourney['name']}!**\nGenerated **{len(schedule)} matches** in the Round Robin stage.\nUse `/tournament status` to view it!")
+
+    @app_commands.command(name="status", description="View the current tournament schedule — navigate rounds with arrow buttons.")
     async def status(self, interaction: discord.Interaction):
         server_id = str(interaction.guild.id)
         tourney = get_server_tournament(server_id)
-        
         if not tourney:
             return await interaction.response.send_message("❌ No tournament exists in this server.", ephemeral=True)
-            
-        embed = discord.Embed(title=f"🏆 Tournament: {tourney['name']}", color=discord.Color.gold())
-        fmt = tourney.get('format_overs', 20)
-        embed.set_footer(text=f"Format: {fmt} Overs | Squad Rules: {tourney.get('min_squad', 11)}-{tourney.get('max_squad', 15)} Players")
-        
+
+        # Registration phase — no schedule yet
         if tourney["status"] == "registration":
-            embed.description = "📝 **Registration Phase**"
+            t_type = tourney.get("tournament_type", "round_robin")
+            type_label = "T20 World Cup" if t_type == "t20_world_cup" else "Round Robin"
+            embed = discord.Embed(title=f"🏆 {tourney['name']}", color=discord.Color.gold())
+            embed.description = f"📝 **Registration Phase** · {type_label}"
             teams_str = ""
             for t in tourney["teams"]:
-                squad_len = len(t.get("squad", []))
-                teams_str += f"• **{t['name']}** (<@{t['owner_id']}>) - {squad_len}/{tourney.get('max_squad', 15)} Players\n"
-            if not teams_str: teams_str = "No teams added yet."
-            embed.add_field(name="Registered Teams", value=teams_str, inline=False)
-            
-        elif tourney["status"] == "active":
-            schedule = tourney.get("schedule", [])
-            pending_matches   = [m for m in schedule if m["status"] == "pending"]
-            completed_matches = [m for m in schedule if m["status"] == "completed"]
+                grp = f" · Group **{t['group']}**" if t.get("group") else ""
+                teams_str += f"• **{t['name']}**{grp} (<@{t['owner_id']}>) — {len(t.get('squad', []))}/{tourney.get('max_squad', 15)} players\n"
+            embed.add_field(name="Registered Teams", value=teams_str or "No teams yet.", inline=False)
+            embed.set_footer(text=f"Format: {tourney.get('format_overs', 20)} overs · Squad: {tourney.get('min_squad', 11)}–{tourney.get('max_squad', 15)} players")
+            return await interaction.response.send_message(embed=embed)
 
-            if not pending_matches:
-                gs_matches = [m for m in schedule if isinstance(m.get("round"), int)]
-                if all(m["status"] == "completed" for m in gs_matches) and not any(not isinstance(m.get("round"), int) for m in schedule):
-                    return await interaction.response.send_message(embed=discord.Embed(title=f"🏆 Tournament: {tourney['name']}", description="🏁 **Group Stage Completed!**\nUse `/tournament generate_knockouts` to begin the Semi-Finals.", color=discord.Color.gold()))
-                else:
-                    return await interaction.response.send_message(embed=discord.Embed(title=f"🏆 Tournament: {tourney['name']}", description="🏁 **All matches are completed!**", color=discord.Color.gold()))
+        pages = _build_status_pages(tourney)
+        if not pages:
+            return await interaction.response.send_message("❌ No schedule generated yet. Use `/tournament start` first.", ephemeral=True)
 
-            embed.description = f"🔥 **Active Phase**\nUse `/tournament play <match_id>` to launch your matches!"
-            sched_str = ""
-            for m in pending_matches[:10]:
-                r_label = f"Round {m['round']}" if isinstance(m['round'], int) else m['round']
-                sched_str += f"**Match {m['match_id']}** ({r_label}): **{m['team1']}** vs **{m['team2']}**\n"
-            if len(pending_matches) > 10:
-                sched_str += f"\n*...and {len(pending_matches) - 10} more matches.*"
-            embed.add_field(name="Upcoming Matches", value=sched_str, inline=False)
+        view = TournamentStatusView(tourney, pages)
+        embed = _build_status_embed(tourney, pages[view.idx])
 
-            if completed_matches:
-                res_lines = []
-                for m in completed_matches[-5:]:
-                    r = m["result"]
-                    winner = r["winner"]
-                    t1_s = f"{r['t1_runs']}/{r['t1_wickets']}"
-                    t2_s = f"{r['t2_runs']}/{r['t2_wickets']}"
-                    t1_bold = f"**{m['team1']}**" if winner == m["team1"] else m["team1"]
-                    t2_bold = f"**{m['team2']}**" if winner == m["team2"] else m["team2"]
-                    res_lines.append(f"`#{m['match_id']}` {t1_bold} {t1_s} vs {t2_bold} {t2_s}")
-                embed.add_field(
-                    name=f"Recent Results  ·  use `/tournament match_scorecard <id>` to view image",
-                    value="\n".join(res_lines),
-                    inline=False
-                )
+        if tourney["status"] == "completed":
+            final = next((m for m in tourney.get("schedule", []) if m.get("round") == "Final"), None)
+            winner = final["result"]["winner"] if final and final.get("result") else "TBD"
+            embed.description = f"👑 **Champions: {winner}** · Use `/tournament leaderboard` for top performers!"
 
-        elif tourney["status"] == "completed":
-            final = next((m for m in tourney.get("schedule", []) if m["round"] == "Final"), None)
-            winner = final["result"]["winner"] if final else "TBD"
-            embed.description = f"🏆 **TOURNAMENT COMPLETED!**\n👑 **Champions: {winner}**\n\nCheck `/tournament leaderboard` for top performers!"
+        await interaction.response.send_message(embed=embed, view=view)
 
-            all_completed = [m for m in tourney.get("schedule", []) if m["status"] == "completed"]
-            if all_completed:
-                res_lines = []
-                for m in all_completed:
-                    r = m["result"]
-                    t1_s = f"{r['t1_runs']}/{r['t1_wickets']}"
-                    t2_s = f"{r['t2_runs']}/{r['t2_wickets']}"
-                    w = r["winner"]
-                    r_label = m.get("round", f"Match {m['match_id']}")
-                    t1_fmt = f"**{m['team1']}**" if w == m["team1"] else m["team1"]
-                    t2_fmt = f"**{m['team2']}**" if w == m["team2"] else m["team2"]
-                    res_lines.append(f"`#{m['match_id']}` {r_label} — {t1_fmt} {t1_s} vs {t2_fmt} {t2_s}")
-                embed.add_field(name="All Results", value="\n".join(res_lines[:15]), inline=False)
-
-        await interaction.response.send_message(embed=embed)
-
-    @app_commands.command(name="generate_knockouts", description="[MANAGER] Generate Knockouts (Semi-Finals) for Top 4 teams.")
+    @app_commands.command(name="generate_knockouts", description="[MANAGER] Generate Semi-Finals for Top 4 teams. (Round Robin only)")
     async def generate_knockouts(self, interaction: discord.Interaction):
         server_id = str(interaction.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
         if not self.is_manager(interaction, tourney): return await interaction.response.send_message("❌ Managers only.", ephemeral=True)
         if tourney["status"] != "active": return await interaction.response.send_message("❌ Tournament is not active.", ephemeral=True)
-        
+
+        if tourney.get("tournament_type") == "t20_world_cup":
+            return await interaction.response.send_message("❌ This is a T20 World Cup tournament. Use `/tournament generate_super8` instead.", ephemeral=True)
+
         gs_matches = [m for m in tourney["schedule"] if isinstance(m.get("round"), int)]
         if any(m["status"] == "pending" for m in gs_matches):
             return await interaction.response.send_message("❌ Cannot generate knockouts until all Group Stage matches are completed.", ephemeral=True)
-            
         if any(not isinstance(m.get("round"), int) for m in tourney["schedule"]):
             return await interaction.response.send_message("❌ Knockouts have already been generated.", ephemeral=True)
-            
+
         standings = get_tournament_standings(tourney)
         real_teams = [t[0] for t in standings if t[0] != "BYE"]
-        
         if len(real_teams) < 4:
             return await interaction.response.send_message("❌ Need at least 4 teams to play Semi-Finals.", ephemeral=True)
-            
         top4 = real_teams[:4]
-        
-        sf1 = {"match_id": len(tourney["schedule"]) + 1, "round": "Semi-Final 1", "team1": top4[0], "team2": top4[3], "status": "pending", "result": None}
-        sf2 = {"match_id": len(tourney["schedule"]) + 2, "round": "Semi-Final 2", "team1": top4[1], "team2": top4[2], "status": "pending", "result": None}
-        
+        sf1 = {"match_id": len(tourney["schedule"]) + 1, "round": "Semi-Final 1", "stage": "knockout", "team1": top4[0], "team2": top4[3], "status": "pending", "result": None}
+        sf2 = {"match_id": len(tourney["schedule"]) + 2, "round": "Semi-Final 2", "stage": "knockout", "team1": top4[1], "team2": top4[2], "status": "pending", "result": None}
         tourney["schedule"].extend([sf1, sf2])
         save_tournament(tourney)
-        
         await interaction.response.send_message(f"🔥 **Knockout Stage Set!**\n**Semi-Final 1:** {top4[0]} vs {top4[3]}\n**Semi-Final 2:** {top4[1]} vs {top4[2]}\n\nUse `/tournament play_next` to begin!")
+
+    @app_commands.command(name="generate_super8", description="[MANAGER] Generate Super 8 stage after Group Stage. (T20 World Cup only)")
+    async def generate_super8(self, interaction: discord.Interaction):
+        server_id = str(interaction.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
+        if not self.is_manager(interaction, tourney): return await interaction.response.send_message("❌ Managers only.", ephemeral=True)
+        if tourney["status"] != "active": return await interaction.response.send_message("❌ Tournament is not active.", ephemeral=True)
+        if tourney.get("tournament_type") != "t20_world_cup":
+            return await interaction.response.send_message("❌ This command is for T20 World Cup tournaments only. Use `/tournament generate_knockouts` for Round Robin.", ephemeral=True)
+
+        group_matches = [m for m in tourney["schedule"] if m.get("stage") == "group"]
+        if any(m["status"] == "pending" for m in group_matches):
+            return await interaction.response.send_message("❌ All Group Stage matches must be completed before generating the Super 8.", ephemeral=True)
+        if any(m.get("stage") == "super8" for m in tourney["schedule"]):
+            return await interaction.response.send_message("❌ Super 8 has already been generated.", ephemeral=True)
+
+        qualifiers = {}
+        for grp in ["A", "B", "C", "D"]:
+            st = get_group_standings(tourney, "group", grp)
+            real = [n for n, _ in st if n != "BYE"]
+            if len(real) < 2:
+                return await interaction.response.send_message(f"❌ Group {grp} doesn't have enough qualifying teams.", ephemeral=True)
+            qualifiers[grp] = real[:2]  # [1st, 2nd]
+
+        # Super 8 Group A: A1, B2, C1, D2  |  Group B: A2, B1, C2, D1
+        s8a = [qualifiers["A"][0], qualifiers["B"][1], qualifiers["C"][0], qualifiers["D"][1]]
+        s8b = [qualifiers["A"][1], qualifiers["B"][0], qualifiers["C"][1], qualifiers["D"][0]]
+
+        match_id = max(m["match_id"] for m in tourney["schedule"]) + 1
+        for sg, sg_teams in [("A", s8a), ("B", s8b)]:
+            teams = list(sg_teams)
+            n = len(teams)
+            for r in range(n - 1):
+                for i in range(n // 2):
+                    t1, t2 = teams[i], teams[n - 1 - i]
+                    tourney["schedule"].append({
+                        "match_id": match_id,
+                        "round": f"Super 8 — Group {sg}",
+                        "stage": "super8",
+                        "group": sg,
+                        "group_round": r + 1,
+                        "team1": t1 if r % 2 == 0 else t2,
+                        "team2": t2 if r % 2 == 0 else t1,
+                        "status": "pending",
+                        "result": None,
+                    })
+                    match_id += 1
+                teams.insert(1, teams.pop())
+
+        save_tournament(tourney)
+        await interaction.response.send_message(
+            f"🔥 **Super 8 Generated!**\n\n"
+            f"**Super 8 Group A:** {' · '.join(s8a)}\n"
+            f"**Super 8 Group B:** {' · '.join(s8b)}\n\n"
+            f"Each group plays a round robin (6 matches each). Top 2 from each group advance to the Semi-Finals.\n"
+            f"Use `/tournament play_next` to begin!"
+        )
 
     @app_commands.command(name="force_delete", description="[OWNER] Forcefully delete a server's tournament.")
     async def force_delete(self, interaction: discord.Interaction):
         if interaction.user.id != 1087369198801526836:
             return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
-            
         server_id = str(interaction.guild.id)
         if not get_server_tournament(server_id):
             return await interaction.response.send_message("❌ No tournament exists in this server.", ephemeral=True)
-            
         DB_CACHE["tournaments"] = [t for t in DB_CACHE["tournaments"] if t.get("server_id") != server_id]
         async_save_tournament_to_bin()
         await interaction.response.send_message("🗑️ **Tournament Successfully Deleted.** You can now create a new one.")
@@ -444,13 +636,10 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
     async def set_theme(self, interaction: discord.Interaction, theme_name: str):
         if interaction.user.id != 1087369198801526836:
             return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
-            
         server_id = str(interaction.guild.id)
         tourney = get_server_tournament(server_id)
-        
         if not tourney:
             return await interaction.response.send_message("❌ No tournament exists in this server.", ephemeral=True)
-            
         tourney["theme"] = theme_name
         save_tournament(tourney)
         await interaction.response.send_message(f"✅ Tournament theme set to `{theme_name}` for this server.", ephemeral=True)
@@ -459,29 +648,18 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
     async def set_team_color(self, interaction: discord.Interaction, team_name: str, color: str):
         server_id = str(interaction.guild.id)
         tourney = get_server_tournament(server_id)
-
         if not tourney:
             return await interaction.response.send_message("❌ No tournament exists in this server.", ephemeral=True)
         if not self.is_manager(interaction, tourney):
             return await interaction.response.send_message("❌ You are not a Tournament Manager.", ephemeral=True)
-
         if not re.match(r'^#[0-9A-Fa-f]{6}$', color):
-            return await interaction.response.send_message(
-                "❌ Invalid color format. Use a 6-digit hex code like `#FF0000` (red) or `#1DA1F2` (blue).",
-                ephemeral=True
-            )
-
+            return await interaction.response.send_message("❌ Invalid color format. Use a 6-digit hex code like `#FF0000` (red) or `#1DA1F2` (blue).", ephemeral=True)
         team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.lower()), None)
         if not team:
             return await interaction.response.send_message(f"❌ Team **{team_name}** not found.", ephemeral=True)
-
         team["color"] = color.upper()
         save_tournament(tourney)
-
-        preview = discord.Embed(
-            description=f"✅ **{team['name']}** color set to `{color.upper()}`.",
-            color=int(color.lstrip('#'), 16)
-        )
+        preview = discord.Embed(description=f"✅ **{team['name']}** color set to `{color.upper()}`.", color=int(color.lstrip('#'), 16))
         await interaction.response.send_message(embed=preview)
 
     @app_commands.command(name="match_scorecard", description="View the scorecard image for a completed tournament match.")
@@ -490,27 +668,21 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         tourney = get_server_tournament(server_id)
         if not tourney:
             return await interaction.response.send_message("❌ No tournament exists in this server.", ephemeral=True)
-
         m = next((x for x in tourney.get("schedule", []) if x["match_id"] == match_id), None)
         if not m:
             return await interaction.response.send_message(f"❌ Match #{match_id} not found.", ephemeral=True)
         if m["status"] != "completed":
             return await interaction.response.send_message(f"❌ Match #{match_id} hasn't been completed yet.", ephemeral=True)
-
         r = m["result"]
-        t1, t2      = m["team1"], m["team2"]
-        t1_score    = f"{r['t1_runs']}/{r['t1_wickets']}"
-        t2_score    = f"{r['t2_runs']}/{r['t2_wickets']}"
-        winner      = r["winner"]
+        t1, t2 = m["team1"], m["team2"]
+        winner = r["winner"]
         round_label = m.get("round", f"Match {m['match_id']}")
-
         embed = discord.Embed(
             title=f"Match #{match_id} — {round_label}",
-            description=f"**{t1}** {t1_score}  vs  **{t2}** {t2_score}\n🏆 Winner: **{winner}**",
+            description=f"**{t1}** {r['t1_runs']}/{r['t1_wickets']}  vs  **{t2}** {r['t2_runs']}/{r['t2_wickets']}\n🏆 Winner: **{winner}**",
             color=discord.Color.orange()
         )
         embed.set_footer(text=tourney["name"])
-
         from bot import reconstruct_scorecard_data, generate_scorecard_from_data
         full_data = reconstruct_scorecard_data(tourney, m)
         if full_data:
@@ -533,18 +705,14 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
     async def play_next(self, interaction: discord.Interaction):
         server_id = str(interaction.guild.id)
         tourney = get_server_tournament(server_id)
-        
         if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
         if not self.is_manager(interaction, tourney): return await interaction.response.send_message("❌ Managers only.", ephemeral=True)
         if tourney["status"] != "active": return await interaction.response.send_message("❌ Tournament is not active.", ephemeral=True)
-        
         schedule = tourney.get("schedule", [])
         current_round = next((m["round"] for m in schedule if m["status"] == "pending"), None)
-        
         pending = next((m for m in schedule if m["status"] == "pending" and m["round"] == current_round), None)
         if not pending:
             return await interaction.response.send_message("🏆 All matches have been completed!", ephemeral=True)
-            
         r_label = f"Round {current_round}" if isinstance(current_round, int) else current_round
         await interaction.response.send_message(f"🚀 **Launching {r_label} — Match {pending['match_id']}...**")
         self.bot.dispatch("start_tournament_match", interaction.channel, interaction.user.id, tourney, pending)
@@ -553,17 +721,14 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
     async def play_match(self, interaction: discord.Interaction, match_id: int):
         server_id = str(interaction.guild.id)
         tourney = get_server_tournament(server_id)
-        
         if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
         if not self.is_manager(interaction, tourney): return await interaction.response.send_message("❌ Managers only.", ephemeral=True)
         if tourney["status"] != "active": return await interaction.response.send_message("❌ Tournament is not active.", ephemeral=True)
-        
         match = next((m for m in tourney.get("schedule", []) if m["match_id"] == match_id), None)
         if not match:
             return await interaction.response.send_message(f"❌ Match ID {match_id} does not exist.", ephemeral=True)
         if match["status"] != "pending":
             return await interaction.response.send_message(f"❌ Match {match_id} is already completed.", ephemeral=True)
-            
         r_label = f"Round {match['round']}" if isinstance(match['round'], int) else match['round']
         await interaction.response.send_message(f"🚀 **Manually Launching Match {match['match_id']} ({r_label})...**")
         self.bot.dispatch("start_tournament_match", interaction.channel, interaction.user.id, tourney, match)
@@ -572,23 +737,17 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
     async def next_match(self, interaction: discord.Interaction):
         server_id = str(interaction.guild.id)
         tourney = get_server_tournament(server_id)
-        
         if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
         if tourney["status"] != "active": return await interaction.response.send_message("❌ Tournament is not active.", ephemeral=True)
-        
         my_team = next((t for t in tourney["teams"] if t["owner_id"] == str(interaction.user.id)), None)
         if not my_team:
             return await interaction.response.send_message("❌ You are not a Team Owner in this tournament.", ephemeral=True)
-            
         my_team_name = my_team["name"]
         my_matches = [m for m in tourney.get("schedule", []) if m["status"] == "pending" and (m["team1"] == my_team_name or m["team2"] == my_team_name)]
-        
         if not my_matches:
             return await interaction.response.send_message(f"✅ Your team (**{my_team_name}**) has no pending matches right now!", ephemeral=True)
-            
         match = my_matches[0]
         r_label = f"Round {match['round']}" if isinstance(match['round'], int) else match['round']
-        
         await interaction.response.send_message(f"🚀 **Launching Next Match for {my_team_name}: Match {match['match_id']} ({r_label})...**")
         self.bot.dispatch("start_tournament_match", interaction.channel, interaction.user.id, tourney, match)
 
@@ -608,20 +767,15 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             return await interaction.response.send_message("❌ Managers only.", ephemeral=True)
         if tourney["status"] != "active":
             return await interaction.response.send_message("❌ Tournament is not active.", ephemeral=True)
-
         m_data = next((m for m in tourney.get("schedule", []) if m["match_id"] == match_id), None)
         if not m_data:
             return await interaction.response.send_message(f"❌ Match ID {match_id} not found.", ephemeral=True)
         if m_data["status"] == "completed":
             return await interaction.response.send_message(f"❌ Match {match_id} is already marked completed.", ephemeral=True)
-
         t1_name, t2_name = m_data["team1"], m_data["team2"]
         winner_clean = winner.strip()
         if winner_clean not in (t1_name, t2_name, "TIE"):
-            return await interaction.response.send_message(
-                f"❌ Winner must be **{t1_name}**, **{t2_name}**, or **TIE**.", ephemeral=True
-            )
-
+            return await interaction.response.send_message(f"❌ Winner must be **{t1_name}**, **{t2_name}**, or **TIE**.", ephemeral=True)
         m_data["status"] = "completed"
         m_data["result"] = {
             "winner": winner_clean,
@@ -631,23 +785,25 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         }
         tourney["current_match_idx"] = tourney.get("current_match_idx", 0) + 1
 
-        # Auto-generate Final if both semis are now complete
-        sf1 = next((m for m in tourney["schedule"] if m["round"] == "Semi-Final 1"), None)
-        sf2 = next((m for m in tourney["schedule"] if m["round"] == "Semi-Final 2"), None)
-        if sf1 and sf2 and sf1["status"] == "completed" and sf2["status"] == "completed":
-            if not any(m["round"] == "Final" for m in tourney["schedule"]):
-                tourney["schedule"].append({
-                    "match_id": len(tourney["schedule"]) + 1, "round": "Final",
-                    "team1": sf1["result"]["winner"], "team2": sf2["result"]["winner"],
-                    "status": "pending", "result": None
-                })
+        t_type = tourney.get("tournament_type", "round_robin")
+        if t_type == "t20_world_cup":
+            self._try_generate_semis(tourney)
+        else:
+            sf1 = next((m for m in tourney["schedule"] if m.get("round") == "Semi-Final 1"), None)
+            sf2 = next((m for m in tourney["schedule"] if m.get("round") == "Semi-Final 2"), None)
+            if sf1 and sf2 and sf1["status"] == "completed" and sf2["status"] == "completed":
+                if not any(m.get("round") == "Final" for m in tourney["schedule"]):
+                    tourney["schedule"].append({
+                        "match_id": len(tourney["schedule"]) + 1, "round": "Final", "stage": "knockout",
+                        "team1": sf1["result"]["winner"], "team2": sf2["result"]["winner"],
+                        "status": "pending", "result": None
+                    })
 
-        final_match = next((m for m in tourney["schedule"] if m["round"] == "Final"), None)
+        final_match = next((m for m in tourney["schedule"] if m.get("round") == "Final"), None)
         if final_match and final_match["status"] == "completed" and tourney["status"] != "completed":
             tourney["status"] = "completed"
 
         save_tournament(tourney)
-
         r_label = f"Round {m_data['round']}" if isinstance(m_data['round'], int) else m_data['round']
         overs1 = f"{t1_balls // 6}.{t1_balls % 6}"
         overs2 = f"{t2_balls // 6}.{t2_balls % 6}"
@@ -657,9 +813,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                 f"**{r_label}** — {t1_name} vs {t2_name}\n\n"
                 f"🏏 **{t1_name}:** {t1_runs}/{t1_wickets} ({overs1} ov)\n"
                 f"🏏 **{t2_name}:** {t2_runs}/{t2_wickets} ({overs2} ov)\n\n"
-                f"🏆 **Winner: {winner_clean}**\n\n"
-                f"⚠️ *Player stats for this match were not recorded (match object unavailable). "
-                f"Patch them manually in JSONBin if needed.*"
+                f"🏆 **Winner: {winner_clean}**"
             ),
             color=discord.Color.green()
         )
@@ -673,7 +827,8 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
         if not self.is_manager(interaction, tourney):
             return await interaction.response.send_message("❌ Managers only.", ephemeral=True)
-
+        if tourney.get("tournament_type") == "t20_world_cup":
+            return await interaction.response.send_message("❌ Schedule restore is not supported for T20 World Cup tournaments.", ephemeral=True)
         completed = [m for m in tourney.get("schedule", []) if m["status"] == "completed"]
         if completed:
             return await interaction.response.send_message(
@@ -692,84 +847,89 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
         if not self.is_manager(interaction, tourney):
             return await interaction.response.send_message("❌ Managers only.", ephemeral=True)
+        if tourney.get("tournament_type") == "t20_world_cup":
+            return await interaction.response.send_message("❌ Schedule restore is not supported for T20 World Cup tournaments.", ephemeral=True)
         await self._do_restore_schedule(interaction, tourney)
 
     async def _do_restore_schedule(self, interaction: discord.Interaction, tourney: dict):
         teams = [t["name"] for t in tourney["teams"]]
         if len(teams) < 2:
             return await interaction.response.send_message("❌ Need at least 2 teams registered.", ephemeral=True)
-
         if len(teams) % 2 != 0:
             teams.append("BYE")
-
         n = len(teams)
         matchups = []
         for r in range(n - 1):
             for i in range(n // 2):
                 t1, t2 = teams[i], teams[n - 1 - i]
                 if t1 != "BYE" and t2 != "BYE":
-                    matchups.append({
-                        "round": r + 1,
-                        "team1": t1 if r % 2 == 0 else t2,
-                        "team2": t2 if r % 2 == 0 else t1,
-                    })
+                    matchups.append({"round": r + 1, "team1": t1 if r % 2 == 0 else t2, "team2": t2 if r % 2 == 0 else t1})
             teams.insert(1, teams.pop())
-
-        schedule = [
-            {"match_id": i + 1, "round": m["round"], "team1": m["team1"], "team2": m["team2"], "status": "pending", "result": None}
-            for i, m in enumerate(matchups)
-        ]
-
+        schedule = [{"match_id": i + 1, "round": m["round"], "team1": m["team1"], "team2": m["team2"], "status": "pending", "result": None} for i, m in enumerate(matchups)]
         tourney["schedule"] = schedule
         tourney["status"] = "active"
         tourney["current_match_idx"] = 0
         save_tournament(tourney)
-
-        # Build a preview of the first two rounds
         r1 = [m for m in schedule if m["round"] == 1]
         r2 = [m for m in schedule if m["round"] == 2]
         preview = "**Round 1:**\n" + "\n".join(f"  Match {m['match_id']}: {m['team1']} vs {m['team2']}" for m in r1)
         preview += "\n\n**Round 2:**\n" + "\n".join(f"  Match {m['match_id']}: {m['team1']} vs {m['team2']}" for m in r2)
-
         embed = discord.Embed(
             title=f"✅ Schedule Restored — {tourney['name']}",
-            description=(
-                f"Generated **{len(schedule)} matches** across **{n - 1} rounds**.\n"
-                f"All matches set to pending. Use `/tournament admin_record_result` to re-enter already-played results.\n\n"
-                f"{preview}"
-            ),
+            description=f"Generated **{len(schedule)} matches** across **{n - 1} rounds**.\n\n{preview}",
             color=discord.Color.blue()
         )
         await interaction.response.send_message(embed=embed)
+
+    def _try_generate_semis(self, tourney: dict):
+        """Auto-generate SF1/SF2 when both Super 8 groups are complete (T20 WC)."""
+        s8a = [m for m in tourney["schedule"] if m.get("stage") == "super8" and m.get("group") == "A"]
+        s8b = [m for m in tourney["schedule"] if m.get("stage") == "super8" and m.get("group") == "B"]
+        if not (s8a and s8b): return
+        if any(m["status"] == "pending" for m in s8a + s8b): return
+        if any(m.get("round") == "Semi-Final 1" for m in tourney["schedule"]): return
+        s8a_st = get_group_standings(tourney, "super8", "A")
+        s8b_st = get_group_standings(tourney, "super8", "B")
+        a_top2 = [n for n, _ in s8a_st[:2]]
+        b_top2 = [n for n, _ in s8b_st[:2]]
+        if len(a_top2) < 2 or len(b_top2) < 2: return
+        max_id = max(m["match_id"] for m in tourney["schedule"])
+        # SF1: Super 8 Group A 1st vs Super 8 Group B 2nd
+        # SF2: Super 8 Group B 1st vs Super 8 Group A 2nd
+        tourney["schedule"].extend([
+            {"match_id": max_id + 1, "round": "Semi-Final 1", "stage": "knockout",
+             "team1": a_top2[0], "team2": b_top2[1], "status": "pending", "result": None},
+            {"match_id": max_id + 2, "round": "Semi-Final 2", "stage": "knockout",
+             "team1": b_top2[0], "team2": a_top2[1], "status": "pending", "result": None},
+        ])
 
     @commands.Cog.listener()
     async def on_tournament_match_complete(self, match):
         server_id = match.tournament_server_id
         tourney = get_server_tournament(server_id)
         if not tourney: return
-        
+
         match_idx = match.tournament_match_id - 1
         m_data = tourney["schedule"][match_idx]
-        
+
         t1_name, t2_name = match.team1["name"], match.team2["name"]
         if match.innings1.batting_team["name"] == t1_name:
             t1_inn, t2_inn = match.innings1, match.innings2
         else:
             t1_inn, t2_inn = match.innings2, match.innings1
-            
+
         target = getattr(match, "target", match.innings1.total_runs + 1)
         is_tied = (match.innings2.total_runs == target - 1)
-        
+
         if getattr(match, 'tiebreak_winner_name', None):
             winner = match.tiebreak_winner_name
         elif is_tied: winner = "TIE"
         elif match.innings2.total_runs >= target: winner = match.innings2.batting_team["name"]
         else: winner = match.innings1.batting_team["name"]
-            
-        if winner == "TIE" and not isinstance(m_data.get("round"), int):
-            # In knockouts, ties advance the higher seed naturally!
+
+        if winner == "TIE" and not isinstance(m_data.get("round"), int) and m_data.get("stage") in ("knockout", None):
             winner = m_data["team1"]
-            
+
         m_data["status"] = "completed"
         m_data["result"] = {
             "winner": winner, "format_overs": match.format_overs,
@@ -778,18 +938,17 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             "scorecard_players": getattr(match, "_scorecard_players", None),
         }
         tourney["current_match_idx"] += 1
-        
-        # --- PHASE 3: STATS AGGREGATION ---
+
+        # --- STATS AGGREGATION ---
         if "stats" not in tourney: tourney["stats"] = {}
         if t1_name not in tourney["stats"]: tourney["stats"][t1_name] = {}
         if t2_name not in tourney["stats"]: tourney["stats"][t2_name] = {}
-        
+
         def process_team_stats(team_name, batting_inn, bowling_inn):
             for p in batting_inn.batting_team["players"]:
                 p_name = p["name"]
                 p_stats = tourney["stats"][team_name].setdefault(p_name, {"matches": 0, "runs": 0, "balls_faced": 0, "outs": 0, "fours": 0, "sixes": 0, "fifties": 0, "hundreds": 0, "wickets": 0, "runs_conceded": 0, "balls_bowled": 0})
                 p_stats["matches"] += 1
-                
                 if p_name in batting_inn.batting_stats:
                     b_stat = batting_inn.batting_stats[p_name]
                     p_stats["runs"] += b_stat.runs_scored
@@ -799,7 +958,6 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                     p_stats["sixes"] += getattr(b_stat, "sixes", 0)
                     if b_stat.runs_scored >= 100: p_stats["hundreds"] += 1
                     elif b_stat.runs_scored >= 50: p_stats["fifties"] += 1
-                    
             for p_name, bw_stat in bowling_inn.bowling_stats.items():
                 if bw_stat.balls_bowled > 0:
                     p_stats = tourney["stats"][team_name].setdefault(p_name, {"matches": 0, "runs": 0, "balls_faced": 0, "outs": 0, "fours": 0, "sixes": 0, "fifties": 0, "hundreds": 0, "wickets": 0, "runs_conceded": 0, "balls_bowled": 0})
@@ -809,23 +967,29 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
 
         process_team_stats(t1_name, t1_inn, t2_inn)
         process_team_stats(t2_name, t2_inn, t1_inn)
-        
-        # --- PHASE 4: KNOCKOUTS AUTO-PROGRESSION ---
-        sf1 = next((m for m in tourney["schedule"] if m["round"] == "Semi-Final 1"), None)
-        sf2 = next((m for m in tourney["schedule"] if m["round"] == "Semi-Final 2"), None)
-        
+
+        # --- KNOCKOUTS AUTO-PROGRESSION ---
+        t_type = tourney.get("tournament_type", "round_robin")
+
+        if t_type == "t20_world_cup":
+            # Super 8 complete → auto-generate Semi-Finals
+            self._try_generate_semis(tourney)
+
+        # SF complete → auto-generate Final (works for both formats)
+        sf1 = next((m for m in tourney["schedule"] if m.get("round") == "Semi-Final 1"), None)
+        sf2 = next((m for m in tourney["schedule"] if m.get("round") == "Semi-Final 2"), None)
         if sf1 and sf2 and sf1["status"] == "completed" and sf2["status"] == "completed":
-            if not any(m["round"] == "Final" for m in tourney["schedule"]):
+            if not any(m.get("round") == "Final" for m in tourney["schedule"]):
                 tourney["schedule"].append({
-                    "match_id": len(tourney["schedule"]) + 1, "round": "Final",
+                    "match_id": len(tourney["schedule"]) + 1, "round": "Final", "stage": "knockout",
                     "team1": sf1["result"]["winner"], "team2": sf2["result"]["winner"],
                     "status": "pending", "result": None
                 })
-                
-        final_match = next((m for m in tourney["schedule"] if m["round"] == "Final"), None)
+
+        final_match = next((m for m in tourney["schedule"] if m.get("round") == "Final"), None)
         if final_match and final_match["status"] == "completed" and tourney["status"] != "completed":
             tourney["status"] = "completed"
-            
+
         save_tournament(tourney)
 
     @app_commands.command(name="standings", description="View the Tournament Points Table & NRR.")
@@ -834,11 +998,43 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         server_id = str(interaction.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney: return await interaction.followup.send("❌ No tournament exists.", ephemeral=True)
-        
+
+        t_type = tourney.get("tournament_type", "round_robin")
+
+        # T20 World Cup: show per-group standings as embed
+        if t_type == "t20_world_cup":
+            embed = discord.Embed(title=f"🌍 {tourney['name']} — Standings", color=discord.Color.gold())
+            has_data = False
+            for grp in ["A", "B", "C", "D"]:
+                st = get_group_standings(tourney, "group", grp)
+                if st:
+                    has_data = True
+                    rows = ["```", f"{'':2}{'Team':<20}{'P':>2}{'W':>2}{'L':>2}{'Pts':>4}{'NRR':>8}", "─"*42]
+                    for i, (nm, d) in enumerate(st, 1):
+                        arrow = "→ " if i <= 2 else "  "
+                        rows.append(f"{arrow}{nm[:18]:<20}{d['P']:>2}{d['W']:>2}{d['L']:>2}{d['Pts']:>4}{d['NRR']:>+8.2f}")
+                    rows.append("```")
+                    embed.add_field(name=f"Group {grp}", value="\n".join(rows), inline=True)
+            super8_matches = [m for m in tourney.get("schedule", []) if m.get("stage") == "super8"]
+            if super8_matches:
+                for sg in ["A", "B"]:
+                    st = get_group_standings(tourney, "super8", sg)
+                    if st:
+                        rows = ["```", f"{'':2}{'Team':<20}{'P':>2}{'W':>2}{'L':>2}{'Pts':>4}{'NRR':>8}", "─"*42]
+                        for i, (nm, d) in enumerate(st, 1):
+                            arrow = "→ " if i <= 2 else "  "
+                            rows.append(f"{arrow}{nm[:18]:<20}{d['P']:>2}{d['W']:>2}{d['L']:>2}{d['Pts']:>4}{d['NRR']:>+8.2f}")
+                        rows.append("```")
+                        embed.add_field(name=f"Super 8 — Group {sg}", value="\n".join(rows), inline=True)
+            if not has_data:
+                embed.description = "No matches completed yet."
+            embed.set_footer(text="→ marks teams that advance to the next stage")
+            return await interaction.followup.send(embed=embed)
+
+        # Round Robin: existing image-based standings
         standings = get_tournament_standings(tourney)
         theme = tourney.get("theme", "Default")
-        
-        # --- 1. SHARED FONTS ---
+
         try:
             font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 46)
             font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 18)
@@ -847,128 +1043,78 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             font_bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 22)
         except:
             font_title = font_small = font_hdr = font_row = font_bold = ImageFont.load_default()
-            
+
         def get_tw(text, font):
             if hasattr(font, 'getbbox'): return font.getbbox(text)[2]
             return len(text) * 12
-            
-        # --- 2. CRIMSON CRICKET TEMPLATE ---
+
         if theme == "Crimson Cricket":
             try:
                 img = Image.open("points_table_crimson.png").convert("RGB")
                 d = ImageDraw.Draw(img)
-                
-                # 🛠️ CONFIGURATION: Adjust these pixels if it doesn't line up perfectly with your PNG!
-                start_y = 275       # Y-pixel where the first team row starts
-                row_height = 40     # Spacing between each team row
-              
-                c_text = "#FFFFFF"  # Text color
-                
-                # X-pixel coordinates for the center of each column (Adjust left/right as needed)
-                # Note: The template already has 1-10 written for POS, so we skip drawing the rank!
-                
+                start_y = 275
+                row_height = 40
+                c_text = "#FFFFFF"
                 cols = {"TEAM": 140, "P": 445, "W": 555, "L": 665, "NR": 775, "PTS": 885, "NRR": 995}
-                
                 y = start_y
                 for i, (t_name, data) in enumerate(standings, 1):
-                    if i > 10: break # Template only supports up to 10 teams
-                    
-                    # Team Name (Left Aligned)
+                    if i > 10: break
                     d.text((cols["TEAM"], y + 8), t_name[:20].upper(), fill=c_text, font=font_row)
-                    # Stats
                     d.text((cols["P"] - (get_tw(str(data['P']), font_row)/2), y + 8), str(data['P']), fill=c_text, font=font_row)
                     d.text((cols["W"] - (get_tw(str(data['W']), font_row)/2), y + 8), str(data['W']), fill=c_text, font=font_row)
                     d.text((cols["L"] - (get_tw(str(data['L']), font_row)/2), y + 8), str(data['L']), fill=c_text, font=font_row)
                     d.text((cols["NR"] - (get_tw(str(data['T']), font_row)/2), y + 8), str(data['T']), fill=c_text, font=font_row)
                     d.text((cols["PTS"] - (get_tw(str(data['Pts']), font_row)/2), y + 8), str(data['Pts']), fill=c_text, font=font_row)
-                    # NRR
                     nrr_str = f"{data['NRR']:+.2f}"
                     d.text((cols["NRR"] - (get_tw(nrr_str, font_row)/2), y + 8), nrr_str, fill=c_text, font=font_row)
-                    
                     y += row_height
-                    
                 buf = io.BytesIO()
                 img.save(buf, format="PNG")
                 buf.seek(0)
                 return await interaction.followup.send(file=discord.File(fp=buf, filename="crimson_standings.png"))
-                
             except FileNotFoundError:
-                # If you misspelled the file or it's missing, gracefully fall back to the default!
                 print("⚠️ Warning: points_table_crimson.png not found. Falling back to default layout.")
                 pass
-                
-        # --- 3. DEFAULT THEME (Auto-Generated) ---
-        c_bg = "#101820"
-        c_panel = "#F8F9FA"
-        c_header = "#0B2B5C"
-        c_cyan = "#1DA1F2"
-        c_text_navy = "#0F172A"
-        c_text_grey = "#64748B"
-        c_white = "#FFFFFF"
-        c_line = "#E2E8F0"
-        c_green = "#39B54A"
-        c_red = "#E84135"
 
-        row_height = 60
-        header_height = 120
-        footer_height = 80
-        
+        c_bg = "#101820"; c_panel = "#F8F9FA"; c_header = "#0B2B5C"
+        c_cyan = "#1DA1F2"; c_text_navy = "#0F172A"; c_text_grey = "#64748B"
+        c_white = "#FFFFFF"; c_line = "#E2E8F0"; c_green = "#39B54A"; c_red = "#E84135"
+        row_height = 60; header_height = 120; footer_height = 80
         img_height = 80 + header_height + 50 + (len(standings) * row_height) + footer_height + 80
-        
         img = Image.new("RGB", (1200, img_height), color=c_bg)
         d = ImageDraw.Draw(img)
-            
-        # Panel Background
         d.rounded_rectangle([(100, 80), (1100, img_height - 80)], radius=20, fill=c_panel)
-            
-        # Header
         d.rounded_rectangle([(100, 80), (1100, 80 + header_height)], radius=20, fill=c_header)
         d.rectangle([(100, 80 + header_height - 20), (1100, 80 + header_height)], fill=c_header)
-        
         d.text((140, 105), tourney['name'][:30].upper(), fill=c_white, font=font_title)
         d.text((140, 155), "POINTS TABLE - GROUP STAGE", fill="#A5F3FC", font=font_small)
         d.text((1060 - get_tw("SERVER LOGO", font_bold), 120), "SERVER LOGO", fill=c_white, font=font_bold)
-        
-        # Column Headers
         cols = [("POS", 40), ("TEAM", 150), ("P", 550), ("W", 650), ("L", 750), ("T", 850), ("PTS", 950), ("NRR", 1050)]
         for name, x in cols:
             w = get_tw(name, font_hdr)
             align_x = x - w/2 if name != "TEAM" else x
             d.text((align_x, 80 + header_height + 15), name, fill=c_text_grey, font=font_hdr)
-            
-        # Rows
         y = 80 + header_height + 50
         for i, (t_name, data) in enumerate(standings, 1):
             d.line([(100, y), (1100, y)], fill=c_line, width=2)
-            
-            # Rank Accent Line
-            if i <= 4: d.rectangle([(100, y), (108, y + row_height)], fill=c_cyan) 
-            
+            if i <= 4: d.rectangle([(100, y), (108, y + row_height)], fill=c_cyan)
             d.text((140 - (get_tw(str(i), font_row)/2), y + 15), str(i), fill=c_text_navy, font=font_row)
             d.text((220, y + 15), t_name[:20].upper(), fill=c_text_navy, font=font_row)
-            
             d.text((550 - (get_tw(str(data['P']), font_row)/2), y + 15), str(data['P']), fill=c_text_grey, font=font_row)
             d.text((650 - (get_tw(str(data['W']), font_row)/2), y + 15), str(data['W']), fill=c_green, font=font_row)
             d.text((750 - (get_tw(str(data['L']), font_row)/2), y + 15), str(data['L']), fill=c_red, font=font_row)
             d.text((850 - (get_tw(str(data['T']), font_row)/2), y + 15), str(data['T']), fill=c_text_grey, font=font_row)
-            
             d.text((950 - (get_tw(str(data['Pts']), font_row)/2), y + 15), str(data['Pts']), fill=c_text_navy, font=font_row)
             nrr_str = f"{data['NRR']:+.3f}"
             d.text((1050 - (get_tw(nrr_str, font_row)/2), y + 15), nrr_str, fill=c_text_navy, font=font_row)
-            
             y += row_height
-            
-        # Footer Block
         footer_y = img_height - 80 - footer_height
         d.rounded_rectangle([(100, footer_y), (1100, img_height - 80)], radius=20, fill=c_header)
-        d.rectangle([(100, footer_y), (1100, footer_y + 20)], fill=c_header) # square top
-        
+        d.rectangle([(100, footer_y), (1100, footer_y + 20)], fill=c_header)
         d.text((600 - get_tw("SIMULATION ENGINE PRO", font_bold)//2, footer_y + 25), "SIMULATION ENGINE PRO", fill=c_white, font=font_bold)
-            
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         buf.seek(0)
-        
         await interaction.followup.send(file=discord.File(fp=buf, filename="standings.png"))
 
     @app_commands.command(name="leaderboard", description="View the top performing players in the tournament.")
@@ -988,15 +1134,12 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         server_id = str(interaction.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
-        
         all_players = []
         for t_name, players in tourney.get("stats", {}).items():
             for p_name, stats in players.items():
                 all_players.append({"name": p_name, "team": t_name, "stats": stats})
-                
         if not all_players:
             return await interaction.response.send_message("❌ No stats available yet. Complete a match first!", ephemeral=True)
-            
         c_val = category.value
         if c_val == "runs": sorted_players = sorted(all_players, key=lambda x: x["stats"]["runs"], reverse=True)
         elif c_val == "wickets": sorted_players = sorted(all_players, key=lambda x: x["stats"]["wickets"], reverse=True)
@@ -1009,36 +1152,23 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         elif c_val in ["fours", "sixes", "fifties", "hundreds"]:
             sorted_players = sorted(all_players, key=lambda x: x["stats"][c_val], reverse=True)
         elif c_val == "econ":
-            qualifiers = [p for p in all_players if p["stats"]["balls_bowled"] >= 30] 
+            qualifiers = [p for p in all_players if p["stats"]["balls_bowled"] >= 30]
             sorted_players = sorted(qualifiers, key=lambda x: (x["stats"]["runs_conceded"] / x["stats"]["balls_bowled"])*6 if x["stats"]["balls_bowled"]>0 else 999)
         elif c_val == "bowl_avg":
             qualifiers = [p for p in all_players if p["stats"]["wickets"] >= 3]
             sorted_players = sorted(qualifiers, key=lambda x: x["stats"]["runs_conceded"] / x["stats"]["wickets"] if x["stats"]["wickets"]>0 else 999)
-
         embed = discord.Embed(title=f"🏆 Tournament Leaderboard: {category.name}", color=discord.Color.gold())
-        
         lines = []
         for i, p in enumerate(sorted_players[:10], 1):
             s = p["stats"]
             if c_val == "runs": val = f"**{s['runs']}** runs"
             elif c_val == "wickets": val = f"**{s['wickets']}** wickets"
-            elif c_val == "sr": 
-                sr = (s['runs']/s['balls_faced']*100) if s['balls_faced']>0 else 0
-                val = f"**{sr:.1f}** SR"
-            elif c_val == "bat_avg":
-                avg = s['runs']/max(1, s['outs'])
-                val = f"**{avg:.1f}** Avg"
-            elif c_val in ["fours", "sixes", "fifties", "hundreds"]:
-                val = f"**{s[c_val]}**"
-            elif c_val == "econ":
-                econ = (s['runs_conceded']/s['balls_bowled']*6) if s['balls_bowled']>0 else 0
-                val = f"**{econ:.1f}** Econ"
-            elif c_val == "bowl_avg":
-                avg = s['runs_conceded']/s['wickets'] if s['wickets']>0 else 0
-                val = f"**{avg:.1f}** Avg"
-                
+            elif c_val == "sr": val = f"**{(s['runs']/s['balls_faced']*100) if s['balls_faced']>0 else 0:.1f}** SR"
+            elif c_val == "bat_avg": val = f"**{s['runs']/max(1, s['outs']):.1f}** Avg"
+            elif c_val in ["fours", "sixes", "fifties", "hundreds"]: val = f"**{s[c_val]}**"
+            elif c_val == "econ": val = f"**{(s['runs_conceded']/s['balls_bowled']*6) if s['balls_bowled']>0 else 0:.1f}** Econ"
+            elif c_val == "bowl_avg": val = f"**{s['runs_conceded']/s['wickets'] if s['wickets']>0 else 0:.1f}** Avg"
             lines.append(f"`{i:>2}.` **{p['name']}** ({p['team']}) — {val}")
-            
         embed.description = "\n".join(lines) if lines else "No players qualify for this leaderboard yet."
         await interaction.response.send_message(embed=embed)
 
@@ -1047,36 +1177,27 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         server_id = str(interaction.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
-        
         t_match = next((t for t in tourney.get("stats", {}).keys() if t.lower() == team_name.lower()), None)
         if not t_match:
             return await interaction.response.send_message(f"❌ Team '{team_name}' not found or hasn't played a match yet.", ephemeral=True)
-            
         p_match = next((p for p in tourney["stats"][t_match].keys() if p.lower() == player_name.lower()), None)
         if not p_match:
             close = difflib.get_close_matches(player_name, list(tourney["stats"][t_match].keys()), n=1, cutoff=0.5)
             if close: p_match = close[0]
             else: return await interaction.response.send_message(f"❌ Player '{player_name}' not found in team '{t_match}'.", ephemeral=True)
-            
         stats = tourney["stats"][t_match][p_match]
-        
         sr = (stats["runs"] / stats["balls_faced"] * 100) if stats["balls_faced"] > 0 else 0.0
         bat_avg = (stats["runs"] / stats["outs"]) if stats["outs"] > 0 else float(stats["runs"])
         bowl_avg = (stats["runs_conceded"] / stats["wickets"]) if stats["wickets"] > 0 else 0.0
         econ = (stats["runs_conceded"] / stats["balls_bowled"] * 6) if stats["balls_bowled"] > 0 else 0.0
-        
         embed = discord.Embed(title=f"📊 Tournament Stats: {p_match}", description=f"**Team:** {t_match} | **Matches:** {stats['matches']}", color=discord.Color.blue())
-        
         bat_str = f"**Runs:** {stats['runs']}\n**Strike Rate:** {sr:.1f}\n**Average:** {bat_avg:.1f}\n"
         bat_str += f"**4s:** {stats['fours']} | **6s:** {stats['sixes']}\n**50s:** {stats['fifties']} | **100s:** {stats['hundreds']}"
         embed.add_field(name="🏏 Batting", value=bat_str, inline=True)
-        
         bowl_str = f"**Wickets:** {stats['wickets']}\n**Economy:** {econ:.1f}\n**Bowling Avg:** {bowl_avg:.1f}\n"
-        o = stats['balls_bowled'] // 6
-        b = stats['balls_bowled'] % 6
+        o = stats['balls_bowled'] // 6; b = stats['balls_bowled'] % 6
         bowl_str += f"**Overs:** {o}.{b}"
         embed.add_field(name="🎯 Bowling", value=bowl_str, inline=True)
-        
         await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="squad", description="View a team's tournament squad and player ratings.")
@@ -1084,65 +1205,60 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         server_id = str(interaction.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
-        
         if team_name:
             team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.lower()), None)
             if not team: return await interaction.response.send_message(f"❌ Team '{team_name}' not found.", ephemeral=True)
         else:
             team = next((t for t in tourney["teams"] if t["owner_id"] == str(interaction.user.id)), None)
             if not team: return await interaction.response.send_message("❌ You do not own a team. Please specify a `team_name`.", ephemeral=True)
-            
         if not team.get("squad"):
             return await interaction.response.send_message(f"❌ **{team['name']}** has not submitted their squad yet.", ephemeral=True)
-            
         batters, wks, all_rounders, bowlers = [], [], [], []
-        
         for p in team["squad"]:
             role = p["role"]
             if "WK" in role: wks.append(p)
             elif "All-Rounder" in role: all_rounders.append(p)
             elif "Bowler" in role: bowlers.append(p)
             else: batters.append(p)
-            
         batters.sort(key=lambda x: x["bat"], reverse=True)
         wks.sort(key=lambda x: x["bat"], reverse=True)
         all_rounders.sort(key=lambda x: (x["bat"] + x["bowl"]), reverse=True)
         bowlers.sort(key=lambda x: x["bowl"], reverse=True)
-        
-        embed = discord.Embed(title=f"📋 Squad: {team['name']}", description=f"👤 **Owner:** <@{team['owner_id']}> | **Total Players:** {len(team['squad'])}", color=discord.Color.blue())
-        
+        grp_txt = f" · Group **{team['group']}**" if team.get("group") else ""
+        embed = discord.Embed(title=f"📋 Squad: {team['name']}{grp_txt}", description=f"👤 **Owner:** <@{team['owner_id']}> | **Total Players:** {len(team['squad'])}", color=discord.Color.blue())
         def format_player(p, cat):
             arch = p["archetype"]
             style = p["role"].split("_", 1)[1].replace("_", " ") if "_" in p["role"] else ""
-
-            if cat in ["bat", "wk"]:
-                return f"**{p['name']}** *(Type: {arch})*"
-            elif cat == "ar":
-                return f"**{p['name']}** *({style} | {arch})*"
-            else:
-                return f"**{p['name']}** *({style})*"
-
+            if cat in ["bat", "wk"]: return f"**{p['name']}** *(Type: {arch})*"
+            elif cat == "ar": return f"**{p['name']}** *({style} | {arch})*"
+            else: return f"**{p['name']}** *({style})*"
         if batters: embed.add_field(name="🏏 Batters", value="\n".join([format_player(p, "bat") for p in batters]), inline=False)
         if wks: embed.add_field(name="🧤 Wicket-Keepers", value="\n".join([format_player(p, "wk") for p in wks]), inline=False)
         if all_rounders: embed.add_field(name="⚔️ All-Rounders", value="\n".join([format_player(p, "ar") for p in all_rounders]), inline=False)
         if bowlers: embed.add_field(name="🎯 Bowlers", value="\n".join([format_player(p, "bowl") for p in bowlers]), inline=False)
-        
         await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="help", description="Show the Tournament module help guide.")
     async def tournament_help(self, interaction: discord.Interaction):
         embed = discord.Embed(title="🏆 Tournament Commands & Guide", color=discord.Color.gold())
-        
-        setup = "`/tournament create` - [ADMIN] Start a new tournament & set rules.\n`/tournament add_manager` - [MANAGER] Assign a co-manager.\n`/tournament add_team` - [MANAGER] Add a team and assign an Owner.\n`/tournament submit_squad` - [OWNER] Submit your squad.\n`/tournament start` - [MANAGER] Locks registration & generates schedule."
+        setup = ("`/tournament create` — [ADMIN] Create tournament. Choose **Round Robin** or **T20 World Cup** as the event type.\n"
+                 "`/tournament add_manager` — [MANAGER] Assign a co-manager.\n"
+                 "`/tournament add_team` — [MANAGER] Add a team. For T20 WC, specify the **group** (A/B/C/D).\n"
+                 "`/tournament submit_squad` — [OWNER] Submit your squad.\n"
+                 "`/tournament start` — [MANAGER] Lock registration & generate schedule.")
         embed.add_field(name="🛠️ 1. Setup & Registration", value=setup, inline=False)
-        
-        play = "`/tournament next_match` - [OWNER] Instantly launch your team's next match.\n`/tournament play` - [MANAGER] Force start a specific Match ID.\n`/tournament play_next` - [MANAGER] Force start the next sequential match."
+        play = ("`/tournament next_match` — [OWNER] Launch your team's next match.\n"
+                "`/tournament play` — [MANAGER] Force-start a specific Match ID.\n"
+                "`/tournament play_next` — [MANAGER] Launch the next sequential match.")
         embed.add_field(name="🏏 2. Playing Matches", value=play, inline=False)
-        
-        stats = "`/tournament status` - View the live schedule and upcoming matches.\n`/tournament standings` - View the Points Table and NRR.\n`/tournament leaderboard` - View top Runs, Wickets, Strike Rates, etc.\n`/tournament player_stats` - Check a specific player's exact stats.\n`/tournament squad` - View the full roster & ratings of any team."
+        stats = ("`/tournament status` — Live schedule with ◀ ▶ navigation per round/group.\n"
+                 "`/tournament standings` — Points table (image for RR · group embed for T20 WC).\n"
+                 "`/tournament leaderboard` — Top Runs, Wickets, Strike Rates, etc.\n"
+                 "`/tournament player_stats` — A specific player's exact stats.\n"
+                 "`/tournament squad` — Full roster of any team.")
         embed.add_field(name="📊 3. Stats & Standings", value=stats, inline=False)
-        
-        knockouts = "`/tournament generate_knockouts` - [MANAGER] Starts the Semi-Finals for the Top 4 teams!\n`/tournament force_delete` - [OWNER] Completely deletes the tournament."
-        embed.add_field(name="🔥 4. Knockouts & Admin", value=knockouts, inline=False)
-        
+        ko = ("`/tournament generate_knockouts` — [MANAGER] **Round Robin:** Semi-Finals for Top 4.\n"
+              "`/tournament generate_super8` — [MANAGER] **T20 World Cup:** Super 8 after Group Stage.\n"
+              "`/tournament force_delete` — [OWNER] Delete the tournament.")
+        embed.add_field(name="🔥 4. Knockouts & Admin", value=ko, inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
