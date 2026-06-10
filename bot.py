@@ -6622,9 +6622,17 @@ class PrefixCog(commands.Cog):
         is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
         if not is_mgr and team.get("owner_id") != str(ctx.author.id):
             return await ctx.send("❌ Only Managers or the Team Owner can set the logo.")
-        team["logo_emoji"] = emoji.strip()
+        import re as _re
+        raw = emoji.strip()
+        # Resolve :name: shortcode → full <:name:id> using guild emoji list
+        if not _re.match(r'<a?:\w+:\d+>', raw):
+            name = raw.strip(':')
+            ge = discord.utils.get(ctx.guild.emojis, name=name)
+            if ge:
+                raw = str(ge)   # becomes <:england:1234567890>
+        team["logo_emoji"] = raw
         save_tournament(tourney)
-        await ctx.send(f"✅ Logo for **{team['name']}** set to {emoji.strip()} — will appear on future scorecards.")
+        await ctx.send(f"✅ Logo for **{team['name']}** set to {raw} — will appear on future scorecards.")
 
     @tournament.command(name="match_scorecard", help="View the scorecard image for a completed match.\nUsage: tournament match_scorecard <match_id>")
     async def t_match_scorecard(self, ctx, match_id: int):

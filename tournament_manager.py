@@ -617,9 +617,17 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         is_mgr = self.is_manager(interaction, tourney)
         if not is_mgr and team.get("owner_id") != str(interaction.user.id):
             return await interaction.response.send_message("❌ Only Managers or the Team Owner can set the logo.", ephemeral=True)
-        team["logo_emoji"] = emoji.strip()
+        import re as _re
+        raw = emoji.strip()
+        # Resolve :name: shortcode → full <:name:id> using guild emoji list
+        if not _re.match(r'<a?:\w+:\d+>', raw):
+            name = raw.strip(':')
+            ge = discord.utils.get(interaction.guild.emojis, name=name)
+            if ge:
+                raw = str(ge)   # becomes <:england:1234567890>
+        team["logo_emoji"] = raw
         save_tournament(tourney)
-        await interaction.response.send_message(f"✅ Logo for **{team['name']}** set to {emoji.strip()} — will appear on scorecards.")
+        await interaction.response.send_message(f"✅ Logo for **{team['name']}** set to {raw} — will appear on scorecards.")
 
     @app_commands.command(name="match_scorecard", description="View the scorecard image for a completed tournament match.")
     async def match_scorecard(self, interaction: discord.Interaction, match_id: int):
