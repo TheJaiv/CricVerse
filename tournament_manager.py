@@ -14,6 +14,16 @@ def _fetch_emoji_img(emoji_str: str, size: int = 40):
     if not emoji_str:
         return None
     s = emoji_str.strip()
+    # Direct image URL (PNG/JPG logo upload)
+    if s.startswith("http://") or s.startswith("https://"):
+        try:
+            r = requests.get(s, timeout=5)
+            if r.status_code == 200:
+                img = Image.open(io.BytesIO(r.content)).convert("RGBA")
+                return img.resize((size, size), Image.LANCZOS)
+        except Exception:
+            pass
+        return None
     m = re.match(r'<(a?):(\w+):(\d+)>', s)
     if m:
         ext = "gif" if m.group(1) == "a" else "png"
@@ -133,8 +143,7 @@ def generate_t20wc_points_table(tourney) -> io.BytesIO:
     d   = ImageDraw.Draw(img)
     W, H = img.size  # 1508 × 1043
 
-    # Build logo lookup: team name -> logo_emoji
-    team_logos = {t["name"]: t.get("logo_emoji") for t in tourney.get("teams", [])}
+    team_logos = {t["name"]: t.get("logo_url") or t.get("logo_emoji") for t in tourney.get("teams", [])}
 
     try:
         font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", int(H * 0.018))
@@ -721,8 +730,8 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         preview = discord.Embed(description=f"✅ **{team['name']}** color set to `{color.upper()}`.", color=int(color.lstrip('#'), 16))
         await interaction.response.send_message(embed=preview)
 
-    @app_commands.command(name="set_team_logo", description="[MANAGER/OWNER] Set a team's emoji logo for scorecards.")
-    async def set_team_logo(self, interaction: discord.Interaction, team_name: str, emoji: str):
+    @app_commands.command(name="set_team_logo", description="[MANAGER/OWNER] Set a team's logo for scorecards (emoji, image URL, or PNG upload).")
+    async def set_team_logo(self, interaction: discord.Interaction, team_name: str, emoji: str = None, logo_url: str = None, logo_image: discord.Attachment = None):
         server_id = str(interaction.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney:
@@ -733,15 +742,30 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         is_mgr = self.is_manager(interaction, tourney)
         if not is_mgr and team.get("owner_id") != str(interaction.user.id):
             return await interaction.response.send_message("❌ Only Managers or the Team Owner can set the logo.", ephemeral=True)
+        if not emoji and not logo_url and not logo_image:
+            return await interaction.response.send_message("❌ Provide an emoji, a logo_url, or upload a PNG image.", ephemeral=True)
+        # PNG attachment takes priority, then URL, then emoji
+        if logo_image:
+            if not logo_image.content_type or not logo_image.content_type.startswith("image/"):
+                return await interaction.response.send_message("❌ Attachment must be an image file.", ephemeral=True)
+            team["logo_url"] = logo_image.url
+            team.pop("logo_emoji", None)
+            save_tournament(tourney)
+            return await interaction.response.send_message(f"✅ Logo for **{team['name']}** set from uploaded image — will appear on scorecards.")
+        if logo_url:
+            team["logo_url"] = logo_url.strip()
+            team.pop("logo_emoji", None)
+            save_tournament(tourney)
+            return await interaction.response.send_message(f"✅ Logo for **{team['name']}** set from URL — will appear on scorecards.")
         import re as _re
         raw = emoji.strip()
-        # Resolve :name: shortcode → full <:name:id> using guild emoji list
         if not _re.match(r'<a?:\w+:\d+>', raw):
             name = raw.strip(':')
             ge = discord.utils.get(interaction.guild.emojis, name=name)
             if ge:
-                raw = str(ge)   # becomes <:england:1234567890>
+                raw = str(ge)
         team["logo_emoji"] = raw
+        team.pop("logo_url", None)
         save_tournament(tourney)
         await interaction.response.send_message(f"✅ Logo for **{team['name']}** set to {raw} — will appear on scorecards.")
 

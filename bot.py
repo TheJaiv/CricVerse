@@ -30,7 +30,7 @@ from test_simulation import (
     _format_scorecard as _test_format_scorecard,
     _player_of_match as _test_player_of_match,
 )
-from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_status_embed, TournamentStatusView
+from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table
 from subscription_manager import (
     load_data_from_bin, load_tournament_data_from_bin,
     save_data_to_bin, save_tournament_data_to_bin,
@@ -909,7 +909,8 @@ def extract_scoreboard_data(match: CricketMatch) -> dict:
     def _team_logo(team_name):
         if not tourney: return None
         t = next((x for x in tourney.get("teams", []) if x["name"] == team_name), None)
-        return t.get("logo_emoji") if t else None
+        if not t: return None
+        return t.get("logo_url") or t.get("logo_emoji")
 
     potm = get_player_of_the_match(match)
     inn1 = match.innings1
@@ -1079,7 +1080,7 @@ def reconstruct_scorecard_data(tourney: dict, m: dict) -> dict:
         "t1": {
             "name":       top_name.upper(),
             "color":      top_team.get("color", "#6B7280"),
-            "logo_emoji": top_team.get("logo_emoji"),
+            "logo_emoji": top_team.get("logo_url") or top_team.get("logo_emoji"),
             "runs":       top_r,
             "wickets":    top_w,
             "balls":      top_b,
@@ -1091,7 +1092,7 @@ def reconstruct_scorecard_data(tourney: dict, m: dict) -> dict:
         "t2": {
             "name":       bot_name.upper(),
             "color":      bot_team.get("color", "#6B7280"),
-            "logo_emoji": bot_team.get("logo_emoji"),
+            "logo_emoji": bot_team.get("logo_url") or bot_team.get("logo_emoji"),
             "runs":       bot_r,
             "wickets":    bot_w,
             "balls":      bot_b,
@@ -6780,8 +6781,8 @@ class PrefixCog(commands.Cog):
         save_tournament(tourney)
         await ctx.send(embed=discord.Embed(description=f"✅ **{team['name']}** color set to `{color.upper()}`.", color=int(color.lstrip('#'), 16)))
 
-    @tournament.command(name="set_team_logo", help="[MANAGER/OWNER] Set a team's emoji logo for scorecards.\nUsage: tournament set_team_logo \"<team_name>\" <emoji>")
-    async def t_set_team_logo(self, ctx, team_name: str, *, emoji: str):
+    @tournament.command(name="set_team_logo", help="[MANAGER/OWNER] Set a team's logo (emoji, URL, or attach a PNG).\nUsage: tournament set_team_logo \"<team_name>\" <emoji_or_url>  OR attach a PNG")
+    async def t_set_team_logo(self, ctx, team_name: str, *, emoji: str = None):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney:
@@ -6792,15 +6793,33 @@ class PrefixCog(commands.Cog):
         is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
         if not is_mgr and team.get("owner_id") != str(ctx.author.id):
             return await ctx.send("❌ Only Managers or the Team Owner can set the logo.")
+        # PNG attachment
+        if ctx.message.attachments:
+            att = ctx.message.attachments[0]
+            if not (att.content_type and att.content_type.startswith("image/")):
+                return await ctx.send("❌ Attachment must be an image file.")
+            team["logo_url"] = att.url
+            team.pop("logo_emoji", None)
+            save_tournament(tourney)
+            return await ctx.send(f"✅ Logo for **{team['name']}** set from uploaded image — will appear on scorecards.")
+        if not emoji:
+            return await ctx.send("❌ Provide an emoji, a URL, or attach a PNG image.")
         import re as _re
         raw = emoji.strip()
+        # Direct URL
+        if raw.startswith("http://") or raw.startswith("https://"):
+            team["logo_url"] = raw
+            team.pop("logo_emoji", None)
+            save_tournament(tourney)
+            return await ctx.send(f"✅ Logo for **{team['name']}** set from URL — will appear on scorecards.")
         # Resolve :name: shortcode → full <:name:id> using guild emoji list
         if not _re.match(r'<a?:\w+:\d+>', raw):
             name = raw.strip(':')
             ge = discord.utils.get(ctx.guild.emojis, name=name)
             if ge:
-                raw = str(ge)   # becomes <:england:1234567890>
+                raw = str(ge)
         team["logo_emoji"] = raw
+        team.pop("logo_url", None)
         save_tournament(tourney)
         await ctx.send(f"✅ Logo for **{team['name']}** set to {raw} — will appear on future scorecards.")
 
@@ -7104,7 +7123,44 @@ class PrefixCog(commands.Cog):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney: return await ctx.send("❌ No tournament exists.")
-        
+
+        # T20 World Cup: image table during group stage, text embed after
+        if tourney.get("tournament_type") == "t20_world_cup":
+            super8_matches = [m for m in tourney.get("schedule", []) if m.get("stage") == "super8"]
+            in_group_stage = not super8_matches
+            if in_group_stage:
+                try:
+                    buf = generate_t20wc_points_table(tourney)
+                    return await ctx.send(file=discord.File(fp=buf, filename="points_table.png"))
+                except Exception as e:
+                    print(f"⚠️ Points table image failed: {e}")
+            # Super 8 / knockout — text fallback
+            embed = discord.Embed(title=f"🌍 {tourney['name']} — Standings", color=discord.Color.gold())
+            if super8_matches:
+                from tournament_manager import get_group_standings
+                for sg in ["A", "B"]:
+                    st = get_group_standings(tourney, "super8", sg)
+                    if st:
+                        rows = ["```", f"{'':2}{'Team':<20}{'P':>2}{'W':>2}{'L':>2}{'Pts':>4}{'NRR':>8}", "─"*42]
+                        for i, (nm, d) in enumerate(st, 1):
+                            arrow = "→ " if i <= 2 else "  "
+                            rows.append(f"{arrow}{i:<3}{nm[:18]:<20}{d['P']:>2}{d['W']:>2}{d['L']:>2}{d['Pts']:>4}{d['NRR']:>+8.2f}")
+                        rows.append("```")
+                        embed.add_field(name=f"Super 8 — Group {sg}", value="\n".join(rows), inline=True)
+            else:
+                from tournament_manager import get_group_standings
+                for grp in ["A", "B", "C", "D"]:
+                    st = get_group_standings(tourney, "group", grp)
+                    if st:
+                        rows = ["```", f"{'':2}{'Team':<20}{'P':>2}{'W':>2}{'L':>2}{'Pts':>4}{'NRR':>8}", "─"*42]
+                        for i, (nm, d) in enumerate(st, 1):
+                            arrow = "→ " if i <= 2 else "  "
+                            rows.append(f"{arrow}{i:<3}{nm[:18]:<20}{d['P']:>2}{d['W']:>2}{d['L']:>2}{d['Pts']:>4}{d['NRR']:>+8.2f}")
+                        rows.append("```")
+                        embed.add_field(name=f"Group {grp}", value="\n".join(rows), inline=True)
+            embed.set_footer(text="→ marks teams that advance to the next stage")
+            return await ctx.send(embed=embed)
+
         standings = get_tournament_standings(tourney)
         theme = tourney.get("theme", "Default")
         
