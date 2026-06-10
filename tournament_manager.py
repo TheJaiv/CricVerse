@@ -1095,11 +1095,11 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         grp_txt = f" · Group **{team['group']}**" if team.get("group") else ""
         embed = discord.Embed(title=f"📋 Squad: {team['name']}{grp_txt}", description=f"👤 **Owner:** <@{team['owner_id']}> | **Total Players:** {len(team['squad'])}", color=discord.Color.blue())
         def format_player(p, cat):
-            arch = p["archetype"]
             style = p["role"].split("_", 1)[1].replace("_", " ") if "_" in p["role"] else ""
-            if cat in ["bat", "wk"]: return f"**{p['name']}** *(Type: {arch})*"
-            elif cat == "ar": return f"**{p['name']}** *({style} | {arch})*"
-            else: return f"**{p['name']}** *({style})*"
+            if cat == "bat":  return f"**{p['name']}** *(Batter)*"
+            elif cat == "wk": return f"**{p['name']}** *(WK Batter)*"
+            elif cat == "ar": return f"**{p['name']}** *({style} All-Rounder)*" if style else f"**{p['name']}** *(All-Rounder)*"
+            else:             return f"**{p['name']}** *({style} Bowler)*" if style else f"**{p['name']}** *(Bowler)*"
         if batters: embed.add_field(name="🏏 Batters", value="\n".join([format_player(p, "bat") for p in batters]), inline=False)
         if wks: embed.add_field(name="🧤 Wicket-Keepers", value="\n".join([format_player(p, "wk") for p in wks]), inline=False)
         if all_rounders: embed.add_field(name="⚔️ All-Rounders", value="\n".join([format_player(p, "ar") for p in all_rounders]), inline=False)

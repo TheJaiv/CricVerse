@@ -901,9 +901,15 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
 def extract_scoreboard_data(match: CricketMatch) -> dict:
     """Serialize all match display data needed to regenerate the scorecard image later."""
     theme = "Default"
+    tourney = None
     if getattr(match, "tournament_server_id", None):
         tourney = next((t for t in DB_CACHE.get("tournaments", []) if t.get("server_id") == match.tournament_server_id), None)
         if tourney: theme = tourney.get("theme", "Default")
+
+    def _team_logo(team_name):
+        if not tourney: return None
+        t = next((x for x in tourney.get("teams", []) if x["name"] == team_name), None)
+        return t.get("logo_emoji") if t else None
 
     potm = get_player_of_the_match(match)
     inn1 = match.innings1
@@ -952,6 +958,7 @@ def extract_scoreboard_data(match: CricketMatch) -> dict:
         "t1": {
             "name": inn1.batting_team["name"].upper(),
             "color": bat_first_team.get("color", "#6B7280"),
+            "logo_emoji": _team_logo(inn1.batting_team["name"]),
             "runs": inn1.total_runs,
             "wickets": inn1.wickets,
             "balls": inn1.total_balls,
@@ -963,6 +970,7 @@ def extract_scoreboard_data(match: CricketMatch) -> dict:
         "t2": {
             "name": bat_second_team["name"].upper(),
             "color": bat_second_team.get("color", "#6B7280"),
+            "logo_emoji": _team_logo(bat_second_team["name"]),
             "runs": inn2.total_runs if inn2 else 0,
             "wickets": inn2.wickets if inn2 else 0,
             "balls": inn2.total_balls if inn2 else 0,
@@ -1163,7 +1171,7 @@ def generate_t20wc_scorecard(data: dict) -> io.BytesIO:
     _frg = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
     try:
         fTeam   = ImageFont.truetype(_fbd, int(H * 0.048))
-        fScore  = ImageFont.truetype(_fbd, int(H * 0.072))
+        fScore  = ImageFont.truetype(_fbd, int(H * 0.058))
         fOvers  = ImageFont.truetype(_frg, int(H * 0.020))
         fName   = ImageFont.truetype(_fbd, int(H * 0.026))
         fRuns   = ImageFont.truetype(_fbd, int(H * 0.030))
@@ -4989,7 +4997,7 @@ def _help_home_embed():
         name="⚡ Shortcut aliases",
         value=(
             "`cv m` · `cv em` · `cv sp` · `cv ap` · `cv up` · `cv dp` · `cv cd`\n"
-            "`cv fs` · `cv fl` · `cv dc` · `cv sc` · `cv sut` · `cv sst`\n"
+            "`cv fs` · `cv fl` · `cv dc` · `cv scsv` · `cv sc` · `cv sut` · `cv sst`\n"
             "`cv tcl` · `cv slc` · `cv trc` · `cv aa` · `cvt` · `cv sq`\n"
             "-# All shortcuts use the same `cv` prefix"
         ),
@@ -5028,13 +5036,26 @@ def _help_tournament_embed():
     e = discord.Embed(title="🏆 Tournament", color=discord.Color.gold())
     e.description = "All commands: **`cv tournament <cmd>`** · shortcut **`cvt <cmd>`** · group alias **`cv t <cmd>`**"
     e.add_field(name="👁️ View",
-        value=("`status` · `standings` · `leaderboard <category>`\n"
+        value=("`status` · `standings` · `groups` · `leaderboard <category>`\n"
                "`squad [team]`  ·  shortcut: **`cv squad`** / **`cv sq`**\n"
                "`player_stats <team> <player>` · `match_scorecard <id>`"),
         inline=False)
-    e.add_field(name="🏏 Play",     value="`submit_squad` · `next_match` · `play <id>` · `play_next`", inline=False)
-    e.add_field(name="⚙️ Manage",  value="`create <name> <format>` · `add_team <name> @owner` · `start`\n`set_theme` · `set_team_color` · `generate_knockouts` · `force_delete`", inline=False)
-    e.add_field(name="📊 Leaderboard categories", value="`runs` · `wickets` · `sr` · `bat_avg` · `fours` · `sixes` · `fifties` · `hundreds` · `econ` · `bowl_avg`", inline=False)
+    e.add_field(name="🏏 Play",
+        value=("`submit_squad` · `next_match` · `play <id>` · `play_next`\n"
+               "`simulate_all`  ·  alias: **`simall`** — [Owner] instantly sim all pending matches"),
+        inline=False)
+    e.add_field(name="⚙️ Manage",
+        value=("`create <name> <format>` · `add_team <name> @owner` · `start`\n"
+               "`set_theme` · `set_team_color` · `set_team_logo` · `set_schedule`\n"
+               "`generate_knockouts` · `force_delete`"),
+        inline=False)
+    e.add_field(name="🔧 Schedule / Dev",
+        value=("`admin_restore_schedule` · `admin_force_restore_schedule`\n"
+               "`dev_setup` — [Owner] fill squads & auto-start for testing"),
+        inline=False)
+    e.add_field(name="📊 Leaderboard categories",
+        value="`runs` · `wickets` · `sr` · `bat_avg` · `fours` · `sixes` · `fifties` · `hundreds` · `econ` · `bowl_avg` · `mvp`",
+        inline=False)
     e.set_footer(text="cvt help  for full argument details on any tournament subcommand")
     return e
 
@@ -5047,7 +5068,9 @@ def _help_admin_embed():
         inline=False)
     e.add_field(name="Tournament Admin",
         value=("`cvt add_manager @user` · `cvt remove_team` · `cvt replace_player`\n"
-               "`cvt force_result <id> ...` · `cvt admin_record_result` · `cvt force_delete`"),
+               "`cvt force_result <id> ...` · `cvt admin_record_result` · `cvt force_delete`\n"
+               "`cvt admin_restore_schedule` · `cvt admin_force_restore_schedule`\n"
+               "`cvt set_team_color` · `cvt set_team_logo`"),
         inline=False)
     e.set_footer(text="Player DB commands are in the 🔍 Players section")
     return e
@@ -5058,12 +5081,21 @@ def _help_owner_embed():
         value=("`cv force_sync`  ·  `cv fs` — save cache to MongoDB\n"
                "`cv force_load`  ·  `cv fl` — reload cache from MongoDB\n"
                "`cv dump_cache`  ·  `cv dc` — export tournament cache as JSON\n"
-               "`cv sync_csv`  ·  `cv sc` — import players from CSV"),
+               "`cv sync_csv`  ·  `cv scsv` — import players from CSV"),
+        inline=False)
+    e.add_field(name="Match Counters",
+        value=("`cv counts`  ·  `cv matchcounts` — show total matches played per format\n"
+               "`cv setcount <format> <n>`  ·  `cv sc` — manually set a format's match counter"),
         inline=False)
     e.add_field(name="Subscriptions",
         value=("`/set_user_tier @user <tier>`  ·  `cv sut @user <tier>`\n"
                "`/set_server_tier <server_id> <tier>`  ·  `cv sst <id> <tier>`\n"
                "`cv authadmin @user`  ·  `cv aa` — toggle admin access"),
+        inline=False)
+    e.add_field(name="Tournament Owner",
+        value=("`cvt simulate_all`  ·  `cvt simall` — instantly sim all pending matches\n"
+               "`cvt dev_setup` — fill squads with random players & auto-start (testing)\n"
+               "`cvt set_schedule` — set a custom fixture order"),
         inline=False)
     e.add_field(name="User Tiers",   value="`Basic` · `Standard` · `Single` · `Server Pro` · `None`", inline=True)
     e.add_field(name="Server Tiers", value="`Bronze` · `Silver` · `Gold` · `Diamond` · `None`",       inline=True)
@@ -6014,11 +6046,11 @@ class PrefixCog(commands.Cog):
         embed = discord.Embed(title=f"📋 Squad: {team['name']}", description=f"👤 **Owner:** <@{team['owner_id']}> | **Total Players:** {len(team['squad'])}", color=discord.Color.blue())
 
         def _fmt(p, cat):
-            arch = p["archetype"]
             style = p["role"].split("_", 1)[1].replace("_", " ") if "_" in p["role"] else ""
-            if cat in ["bat", "wk"]: return f"`{p['bat']:>2} BAT` • **{p['name']}** *(Type: {arch})*"
-            elif cat == "ar": return f"`{p['bat']:>2} BAT | {p['bowl']:>2} BWL` • **{p['name']}** *({style} | {arch})*"
-            else: return f"`{p['bowl']:>2} BWL` • **{p['name']}** *({style})*"
+            if cat == "bat":  return f"**{p['name']}** *(Batter)*"
+            elif cat == "wk": return f"**{p['name']}** *(WK Batter)*"
+            elif cat == "ar": return f"**{p['name']}** *({style} All-Rounder)*" if style else f"**{p['name']}** *(All-Rounder)*"
+            else:             return f"**{p['name']}** *({style} Bowler)*" if style else f"**{p['name']}** *(Bowler)*"
 
         if batters: embed.add_field(name="🏏 Batters", value="\n".join([_fmt(p, "bat") for p in batters]), inline=False)
         if wks: embed.add_field(name="🧤 Wicket-Keepers", value="\n".join([_fmt(p, "wk") for p in wks]), inline=False)
