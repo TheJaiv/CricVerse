@@ -129,6 +129,20 @@ def _build_status_pages(tourney):
     return pages
 
 
+_FLAT_PAGE_SIZE = 10
+
+def _build_flat_pages(tourney):
+    """Flat pages sorted by match_id — used by cvt status for T20 WC."""
+    schedule = sorted(tourney.get("schedule", []), key=lambda m: m["match_id"])
+    pages = []
+    for i in range(0, len(schedule), _FLAT_PAGE_SIZE):
+        chunk = schedule[i:i + _FLAT_PAGE_SIZE]
+        first_id = chunk[0]["match_id"]
+        last_id = chunk[-1]["match_id"]
+        pages.append((f"Fixtures #{first_id}–#{last_id}", "flat", None, chunk))
+    return pages
+
+
 def _build_status_embed(tourney, page_info):
     """Build the embed for one status page."""
     title, stage_type, group_key, matches = page_info
@@ -139,14 +153,29 @@ def _build_status_embed(tourney, page_info):
 
     lines = []
     for m in matches:
+        # Stage tag for flat view
+        if stage_type == "flat":
+            ms, mg = m.get("stage", ""), m.get("group", "")
+            if ms == "group" and mg:
+                tag = f"[G{mg}] "
+            elif ms == "super8" and mg:
+                tag = f"[S8{mg}] "
+            elif ms == "knockout":
+                rn = str(m.get("round", ""))
+                tag = "[SF] " if "Semi" in rn else "[F] " if "Final" in rn else "[KO] "
+            else:
+                tag = ""
+        else:
+            tag = ""
+
         if m["status"] == "completed" and m.get("result"):
             r = m["result"]
             w = r["winner"]
             t1b = f"**{m['team1']}**" if w == m["team1"] else m["team1"]
             t2b = f"**{m['team2']}**" if w == m["team2"] else m["team2"]
-            lines.append(f"`#{m['match_id']}` {t1b} {r['t1_runs']}/{r['t1_wickets']} vs {t2b} {r['t2_runs']}/{r['t2_wickets']} ✅")
+            lines.append(f"`#{m['match_id']}` {tag}{t1b} {r['t1_runs']}/{r['t1_wickets']} vs {t2b} {r['t2_runs']}/{r['t2_wickets']} ✅")
         else:
-            lines.append(f"`#{m['match_id']}` {m['team1']} vs {m['team2']} ⏳")
+            lines.append(f"`#{m['match_id']}` {tag}{m['team1']} vs {m['team2']} ⏳")
     embed.add_field(name="Matches", value="\n".join(lines) or "No matches", inline=False)
 
     if stage_type in ("group", "super8") and group_key:
@@ -575,6 +604,22 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         save_tournament(tourney)
         preview = discord.Embed(description=f"✅ **{team['name']}** color set to `{color.upper()}`.", color=int(color.lstrip('#'), 16))
         await interaction.response.send_message(embed=preview)
+
+    @app_commands.command(name="set_team_logo", description="[MANAGER/OWNER] Set a team's emoji logo for scorecards.")
+    async def set_team_logo(self, interaction: discord.Interaction, team_name: str, emoji: str):
+        server_id = str(interaction.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney:
+            return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
+        team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.lower()), None)
+        if not team:
+            return await interaction.response.send_message(f"❌ Team **{team_name}** not found.", ephemeral=True)
+        is_mgr = self.is_manager(interaction, tourney)
+        if not is_mgr and team.get("owner_id") != str(interaction.user.id):
+            return await interaction.response.send_message("❌ Only Managers or the Team Owner can set the logo.", ephemeral=True)
+        team["logo_emoji"] = emoji.strip()
+        save_tournament(tourney)
+        await interaction.response.send_message(f"✅ Logo for **{team['name']}** set to {emoji.strip()} — will appear on scorecards.")
 
     @app_commands.command(name="match_scorecard", description="View the scorecard image for a completed tournament match.")
     async def match_scorecard(self, interaction: discord.Interaction, match_id: int):

@@ -30,7 +30,7 @@ from test_simulation import (
     _format_scorecard as _test_format_scorecard,
     _player_of_match as _test_player_of_match,
 )
-from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_status_embed, TournamentStatusView
+from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_status_embed, TournamentStatusView
 from subscription_manager import (
     load_data_from_bin, load_tournament_data_from_bin,
     save_data_to_bin, save_tournament_data_to_bin,
@@ -1030,15 +1030,18 @@ def reconstruct_scorecard_data(tourney: dict, m: dict) -> dict:
         bot_name, bot_team, bot_r, bot_w, bot_b = t2_name, t2_team, r.get("t2_runs", 0), r.get("t2_wickets", 0), r.get("t2_balls", 0)
 
     return {
-        "theme":        tourney.get("theme", "Default"),
-        "match_id":     str(m["match_id"]),
-        "tourn_name":   tourney["name"].upper(),
-        "format_overs": r.get("format_overs", 20),
-        "result_str":   p.get("rs", ""),
-        "potm":         p.get("p"),
+        "theme":           tourney.get("theme", "Default"),
+        "tournament_type": tourney.get("tournament_type", "round_robin"),
+        "match_id":        str(m["match_id"]),
+        "round_label":     str(m.get("round", "")),
+        "tourn_name":      tourney["name"].upper(),
+        "format_overs":    r.get("format_overs", 20),
+        "result_str":      p.get("rs", ""),
+        "potm":            p.get("p"),
         "t1": {
             "name":       top_name.upper(),
             "color":      top_team.get("color", "#6B7280"),
+            "logo_emoji": top_team.get("logo_emoji"),
             "runs":       top_r,
             "wickets":    top_w,
             "balls":      top_b,
@@ -1050,6 +1053,7 @@ def reconstruct_scorecard_data(tourney: dict, m: dict) -> dict:
         "t2": {
             "name":       bot_name.upper(),
             "color":      bot_team.get("color", "#6B7280"),
+            "logo_emoji": bot_team.get("logo_emoji"),
             "runs":       bot_r,
             "wickets":    bot_w,
             "balls":      bot_b,
@@ -1061,8 +1065,253 @@ def reconstruct_scorecard_data(tourney: dict, m: dict) -> dict:
     }
 
 
+def _fetch_emoji_img(emoji_str: str, size: int = 72):
+    """Download a Discord custom emoji or Unicode emoji as PIL RGBA Image. Returns None on failure."""
+    if not emoji_str:
+        return None
+    import re as _re, requests as _req, io as _io2
+    emoji_str = emoji_str.strip()
+    try:
+        # Custom Discord emoji  <:name:id>  or  <a:name:id>
+        m = _re.match(r'<(a?):(\w+):(\d+)>', emoji_str)
+        if m:
+            ext = "gif" if m.group(1) == "a" else "png"
+            url = f"https://cdn.discordapp.com/emojis/{m.group(3)}.{ext}"
+            resp = _req.get(url, timeout=5)
+            if resp.status_code == 200:
+                pil_img = Image.open(_io2.BytesIO(resp.content))
+                if hasattr(pil_img, "seek"):
+                    try: pil_img.seek(0)
+                    except EOFError: pass
+                return pil_img.convert("RGBA").resize((size, size), Image.LANCZOS)
+
+        # Unicode emoji → Twemoji CDN
+        codepoints = "-".join(
+            f"{ord(c):x}" for c in emoji_str
+            if ord(c) not in (0xFE0F, 0xFE0E, 0x200D) and ord(c) >= 0x23
+        )
+        if not codepoints:
+            return None
+        for twurl in [
+            f"https://cdn.jsdelivr.net/gh/twitter/twemoji@v14.0.2/assets/72x72/{codepoints}.png",
+            f"https://twemoji.maxcdn.com/v/14.0.2/72x72/{codepoints}.png",
+        ]:
+            try:
+                resp = _req.get(twurl, timeout=5)
+                if resp.status_code == 200:
+                    return Image.open(_io2.BytesIO(resp.content)).convert("RGBA").resize((size, size), Image.LANCZOS)
+            except Exception:
+                continue
+    except Exception as _e:
+        print(f"⚠️ Emoji fetch failed ({emoji_str}): {_e}")
+    return None
+
+
+def generate_t20wc_scorecard(data: dict) -> io.BytesIO:
+    """Generate an ICC T20 WC themed match summary image using t20_scoreboard.png template."""
+    t1 = data["t1"]
+    t2 = data["t2"]
+    result_str  = data.get("result_str", "")
+    potm        = data.get("potm", "")
+    match_id    = str(data.get("match_id", "?"))
+    round_label = data.get("round_label", "")
+    fmt_overs   = data.get("format_overs", 20)
+
+    # ── Background ──────────────────────────────────────────────
+    try:
+        bg = Image.open("t20_scoreboard.png").convert("RGBA")
+    except FileNotFoundError:
+        bg = Image.new("RGBA", (975, 634), (15, 15, 40, 255))
+    W, H = bg.size
+    img = bg.copy()
+    d   = ImageDraw.Draw(img)
+
+    # ── Fonts ────────────────────────────────────────────────────
+    _fbd = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+    _frg = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    try:
+        fTeam   = ImageFont.truetype(_fbd, int(H * 0.047))
+        fScore  = ImageFont.truetype(_fbd, int(H * 0.073))
+        fOvers  = ImageFont.truetype(_frg, int(H * 0.024))
+        fHdr    = ImageFont.truetype(_fbd, int(H * 0.020))
+        fName   = ImageFont.truetype(_fbd, int(H * 0.028))
+        fRuns   = ImageFont.truetype(_fbd, int(H * 0.036))
+        fBalls  = ImageFont.truetype(_frg,  int(H * 0.025))
+        fMatch  = ImageFont.truetype(_fbd, int(H * 0.033))
+        fResult = ImageFont.truetype(_fbd, int(H * 0.031))
+        fPotm   = ImageFont.truetype(_fbd, int(H * 0.022))
+    except Exception:
+        fTeam = fScore = fOvers = fHdr = fName = fRuns = fBalls = fMatch = fResult = fPotm = ImageFont.load_default()
+
+    def _tw(t, f):
+        return f.getbbox(t)[2] if hasattr(f, "getbbox") else len(t) * 9
+    def _th(f):
+        bb = f.getbbox("Ag") if hasattr(f, "getbbox") else None
+        return (bb[3] - bb[1]) if bb else 12
+
+    # ── Layout (proportional to template dimensions) ──────────────
+    T1B_Y1 = int(H * 0.142)   # team 1 band top    (~90)
+    T1B_Y2 = int(H * 0.253)   # team 1 band bottom (~160)
+    T1S_Y2 = int(H * 0.538)   # team 1 stats bot   (~341)
+    T2B_Y1 = int(H * 0.597)   # team 2 band top    (~378)
+    T2B_Y2 = int(H * 0.708)   # team 2 band bottom (~449)
+    T2S_Y2 = int(H * 0.908)   # team 2 stats bot   (~576)
+    RES_Y1 = T2S_Y2
+    RES_Y2 = int(H * 0.970)   # result bar bottom  (~615)
+
+    COL_MID   = W // 2         # vertical divider between bat/bowl columns
+
+    BAT_NAME_X = 8             # batter name X (inside left col)
+    BAT_R_X    = int(W * 0.412)
+    BAT_B_X    = int(W * 0.463)
+    BWL_NAME_X = COL_MID + 50
+    BWL_WR_X   = int(W * 0.874)
+    BWL_OVR_X  = int(W * 0.948)
+
+    WHITE = (255, 255, 255, 255)
+    LGRAY = (170, 170, 170, 255)
+    DGRAY = (100, 100, 100, 255)
+    DKBLK = (28,  28,  28,  255)
+    GOLD  = (255, 210,   0, 255)
+
+    # ── Helpers ───────────────────────────────────────────────────
+    def _overs(balls):
+        if not balls: return str(fmt_overs)
+        return str(balls // 6) if balls % 6 == 0 else f"{balls // 6}.{balls % 6}"
+
+    def _score(td):
+        w = td.get("wickets", 0)
+        return str(td["runs"]) if w >= 10 else f"{td['runs']}-{w}"
+
+    def _paste_logo(emoji_str, bx, by, size):
+        """Fetch and paste emoji; return x after the logo (or bx if nothing pasted)."""
+        logo = _fetch_emoji_img(emoji_str, size) if emoji_str else None
+        if logo:
+            img.paste(logo, (bx, by), logo)
+            return bx + size + 12
+        return bx
+
+    # ── Match number on top bar ────────────────────────────────────
+    ctx_line = f"MATCH {match_id}"
+    if round_label:
+        ctx_line += f"  •  {round_label.upper()}"
+    d.text(((W - _tw(ctx_line, fMatch)) // 2, int(H * 0.040)),
+           ctx_line, fill=WHITE, font=fMatch)
+
+    # ── Team band ──────────────────────────────────────────────────
+    def _hex_rgba(h, alpha=255):
+        h = (h or "#6B7280").lstrip("#")
+        try:
+            return tuple(int(h[i:i+2], 16) for i in (0, 2, 4)) + (alpha,)
+        except Exception:
+            return (107, 114, 128, alpha)
+
+    def draw_band(td, y1, y2):
+        # Paint team color over the template's pre-rendered band
+        d.rectangle([(0, y1), (W, y2)], fill=_hex_rgba(td.get("color", "#6B7280")))
+
+        band_h = y2 - y1
+        logo_sz = int(band_h * 0.82)
+        logo_y  = y1 + (band_h - logo_sz) // 2
+        name_x  = _paste_logo(td.get("logo_emoji"), 14, logo_y, logo_sz)
+        if name_x == 14:                # no logo pasted — use a slim separator
+            d.line([(80, y1 + 8), (80, y2 - 8)], fill=(255, 255, 255, 70), width=2)
+            name_x = 92
+
+        # Team name
+        name_y = y1 + int(band_h * 0.12)
+        d.text((name_x, name_y), td["name"][:18], fill=WHITE, font=fTeam)
+        # Overs below name
+        ovr_y = name_y + _th(fTeam) + 3
+        d.text((name_x, ovr_y), f"OVERS {_overs(td.get('balls', 0))}", fill=LGRAY, font=fOvers)
+        # Score right-aligned
+        sc = _score(td)
+        sc_x = W - _tw(sc, fScore) - 18
+        sc_y = y1 + (band_h - _th(fScore)) // 2
+        d.text((sc_x, sc_y), sc, fill=WHITE, font=fScore)
+
+    # ── Stats table ───────────────────────────────────────────────
+    def draw_stats(td, y1, y2):
+        HDR_Y = y1 + 8
+        d.text((BAT_NAME_X, HDR_Y),                            "BATTER", fill=LGRAY, font=fHdr)
+        d.text((BAT_R_X - _tw("R",   fHdr)//2, HDR_Y),        "R",      fill=LGRAY, font=fHdr)
+        d.text((BAT_B_X - _tw("B",   fHdr)//2, HDR_Y),        "B",      fill=LGRAY, font=fHdr)
+        d.text((BWL_NAME_X, HDR_Y),                            "BOWLER", fill=LGRAY, font=fHdr)
+        d.text((BWL_WR_X  - _tw("W-R", fHdr)//2, HDR_Y),      "W-R",    fill=LGRAY, font=fHdr)
+        d.text((BWL_OVR_X - _tw("O",   fHdr)//2, HDR_Y),      "O",      fill=LGRAY, font=fHdr)
+
+        d.line([(COL_MID, y1), (COL_MID, y2)], fill=(205, 205, 205, 255), width=1)
+
+        rows_y = HDR_Y + _th(fHdr) + 6
+        d.line([(0, rows_y), (W, rows_y)], fill=(215, 215, 215, 255), width=1)
+        row_h = (y2 - rows_y) // 4
+
+        for i in range(4):
+            ry   = rows_y + i * row_h
+            mid  = ry + row_h // 2
+            if i % 2 == 1:
+                d.rectangle([(0, ry), (W, ry + row_h)], fill=(244, 244, 244, 255))
+            d.line([(0, ry + row_h), (W, ry + row_h)], fill=(215, 215, 215, 255), width=1)
+
+            ny  = mid - _th(fName)  // 2
+            ry2 = mid - _th(fRuns)  // 2
+            by2 = mid - _th(fBalls) // 2
+
+            if i < len(td.get("batters", [])):
+                b  = td["batters"][i]
+                nm = b["name"][:16].upper()
+                d.text((BAT_NAME_X, ny), nm, fill=DKBLK, font=fName)
+                if potm and b["name"].upper() == potm.upper():
+                    d.text((BAT_NAME_X + _tw(nm, fName) + 4, ny - 1), "★", fill=GOLD, font=fHdr)
+                rs = f"{b['runs']}{'*' if b.get('not_out') else ''}"
+                d.text((BAT_R_X - _tw(rs, fRuns)//2, ry2),          rs,           fill=DKBLK, font=fRuns)
+                d.text((BAT_B_X - _tw(str(b["balls"]), fBalls)//2, by2), str(b["balls"]), fill=DGRAY, font=fBalls)
+
+            if i < len(td.get("bowlers", [])):
+                bw = td["bowlers"][i]
+                nm = bw["name"][:16].upper()
+                d.text((BWL_NAME_X, ny), nm, fill=DKBLK, font=fName)
+                if potm and bw["name"].upper() == potm.upper():
+                    d.text((BWL_NAME_X + _tw(nm, fName) + 4, ny - 1), "★", fill=GOLD, font=fHdr)
+                wr = f"{bw['wickets']}-{bw['runs']}"
+                d.text((BWL_WR_X  - _tw(wr, fRuns)//2, ry2),           wr,            fill=DKBLK, font=fRuns)
+                d.text((BWL_OVR_X - _tw(bw["overs"], fBalls)//2, by2), bw["overs"],   fill=DGRAY, font=fBalls)
+
+    # ── Render both teams ─────────────────────────────────────────
+    draw_band(t1,  T1B_Y1, T1B_Y2)
+    draw_stats(t1, T1B_Y2, T1S_Y2)
+    draw_band(t2,  T2B_Y1, T2B_Y2)
+    draw_stats(t2, T2B_Y2, T2S_Y2)
+
+    # ── Result bar ────────────────────────────────────────────────
+    res_cy = (RES_Y1 + RES_Y2) // 2
+    if potm:
+        total_h = _th(fResult) + 3 + _th(fPotm)
+        res_y   = res_cy - total_h // 2
+        d.text(((W - _tw(result_str, fResult)) // 2, res_y), result_str, fill=WHITE, font=fResult)
+        potm_txt = f"PLAYER OF THE MATCH: {potm.upper()}"
+        d.text(((W - _tw(potm_txt, fPotm)) // 2, res_y + _th(fResult) + 3), potm_txt, fill=GOLD, font=fPotm)
+    else:
+        d.text(((W - _tw(result_str, fResult)) // 2, res_cy - _th(fResult) // 2),
+               result_str, fill=WHITE, font=fResult)
+
+    # ── Flatten RGBA → RGB ────────────────────────────────────────
+    final = Image.new("RGB", img.size, (255, 255, 255))
+    final.paste(img, mask=img.split()[3])
+    buf = io.BytesIO()
+    final.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
 def generate_scorecard_from_data(data: dict) -> io.BytesIO:
     """Generate a scorecard image from pre-serialized match display data."""
+    if data.get("tournament_type") == "t20_world_cup" or data.get("theme") == "T20 World Cup":
+        try:
+            return generate_t20wc_scorecard(data)
+        except Exception as _e:
+            print(f"⚠️ T20 WC scorecard error: {_e}. Falling back to default.")
+
     theme      = data.get("theme", "Default")
     t1_data    = data["t1"]
     t2_data    = data["t2"]
@@ -5952,32 +6201,68 @@ class PrefixCog(commands.Cog):
         
         await ctx.send(embed=embed)
 
-    @tournament.command(name="start", help="[MANAGER] Lock registration and generate Round Robin schedule.\nUsage: tournament start")
+    @tournament.command(name="start", help="[MANAGER] Lock registration and generate schedule.\nUsage: tournament start")
     async def t_start(self, ctx):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
-        
+
         is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (tourney and str(ctx.author.id) in tourney.get("managers", []))
         if not tourney: return await ctx.send("❌ No tournament exists.")
         if not is_mgr: return await ctx.send("❌ Managers only.")
         if tourney["status"] != "registration": return await ctx.send("❌ Tournament already started.")
-        
+
+        min_s = tourney.get("min_squad", 11)
+        t_type = tourney.get("tournament_type", "round_robin")
+
+        if t_type == "t20_world_cup":
+            for grp in ["A", "B", "C", "D"]:
+                grp_teams = [t for t in tourney["teams"] if t.get("group") == grp]
+                if len(grp_teams) != 4:
+                    return await ctx.send(f"❌ Group **{grp}** needs exactly 4 teams (currently has {len(grp_teams)}).")
+            for t in tourney["teams"]:
+                if len(t.get("squad", [])) < min_s:
+                    return await ctx.send(f"❌ Team **{t['name']}** does not have a valid squad yet.")
+
+            teams_by_group = {"A": [], "B": [], "C": [], "D": []}
+            for t in tourney["teams"]:
+                teams_by_group[t["group"]].append(t["name"])
+            all_matches = []
+            for group, group_teams in teams_by_group.items():
+                teams = list(group_teams)
+                random.shuffle(teams)
+                n = len(teams)
+                for r in range(n - 1):
+                    for i in range(n // 2):
+                        t1, t2 = teams[i], teams[n - 1 - i]
+                        all_matches.append({
+                            "round": f"Group {group}", "stage": "group", "group": group,
+                            "group_round": r + 1,
+                            "team1": t1 if r % 2 == 0 else t2,
+                            "team2": t2 if r % 2 == 0 else t1,
+                            "status": "pending", "result": None,
+                        })
+                    teams.insert(1, teams.pop())
+            random.shuffle(all_matches)
+            schedule = [dict(m, match_id=i + 1) for i, m in enumerate(all_matches)]
+            tourney["schedule"] = schedule
+            tourney["status"] = "active"
+            tourney["current_match_idx"] = 0
+            save_tournament(tourney)
+            groups_txt = "\n".join(f"**Group {g}:** {' · '.join(teams_by_group[g])}" for g in "ABCD")
+            return await ctx.send(f"🏆 **TOURNAMENT STARTED: {tourney['name']}!** — T20 World Cup\n{groups_txt}\nGenerated **{len(schedule)} group stage matches** (interleaved). Use `cv tournament status` to view fixtures!")
+
+        # Round Robin
         if len(tourney["teams"]) < 2:
             return await ctx.send("❌ Need at least 2 teams.")
-            
-        min_s = tourney.get("min_squad", 11)
         for t in tourney["teams"]:
             if len(t.get("squad", [])) < min_s:
                 return await ctx.send(f"❌ Team **{t['name']}** does not have a valid squad yet.")
-                
+
         teams = [t["name"] for t in tourney["teams"]]
         if len(teams) % 2 != 0:
             teams.append("BYE")
-            
-        import random
         n = len(teams)
         matchups = []
-        
         for r in range(n - 1):
             round_matches = []
             for i in range(n // 2):
@@ -5986,20 +6271,13 @@ class PrefixCog(commands.Cog):
                     round_matches.append((t1, t2) if r % 2 == 0 else (t2, t1))
             random.shuffle(round_matches)
             for m in round_matches:
-                matchups.append({
-                    "round": r + 1,
-                    "team1": m[0],
-                    "team2": m[1]
-                })
+                matchups.append({"round": r + 1, "team1": m[0], "team2": m[1]})
             teams.insert(1, teams.pop())
-            
         schedule = [{"match_id": i + 1, "round": m["round"], "team1": m["team1"], "team2": m["team2"], "status": "pending", "result": None} for i, m in enumerate(matchups)]
-            
         tourney["schedule"] = schedule
         tourney["status"] = "active"
         tourney["current_match_idx"] = 0
         save_tournament(tourney)
-        
         await ctx.send(f"🏆 **TOURNAMENT STARTED: {tourney['name']}!**\nGenerated **{len(schedule)} matches** in the Round Robin stage.\nUse `cv tournament status` to view it!")
 
     @tournament.command(name="status", help="View the current tournament schedule and standings.\nUsage: tournament status")
@@ -6022,6 +6300,40 @@ class PrefixCog(commands.Cog):
             embed.set_footer(text=f"Format: {tourney.get('format_overs', 20)} overs · Squad: {tourney.get('min_squad', 11)}–{tourney.get('max_squad', 15)} players")
             return await ctx.send(embed=embed)
 
+        t_type = tourney.get("tournament_type", "round_robin")
+        if t_type == "t20_world_cup":
+            pages = _build_flat_pages(tourney)
+            hint = "Use `cvt groups` to view fixtures by group."
+        else:
+            pages = _build_status_pages(tourney)
+            hint = None
+
+        if not pages:
+            return await ctx.send("❌ No schedule generated yet. Run `cv tournament start` first.")
+
+        view = TournamentStatusView(tourney, pages)
+        embed = _build_status_embed(tourney, pages[view.idx])
+
+        if tourney["status"] == "completed":
+            final = next((m for m in tourney.get("schedule", []) if m.get("round") == "Final"), None)
+            winner = final["result"]["winner"] if final and final.get("result") else "TBD"
+            embed.description = f"👑 **Champions: {winner}**"
+        elif hint:
+            embed.set_footer(text=hint)
+
+        await ctx.send(embed=embed, view=view)
+
+    @tournament.command(name="groups", help="[T20 WC] View schedule grouped by stage/group.\nUsage: tournament groups")
+    async def t_groups(self, ctx):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney:
+            return await ctx.send("❌ No tournament exists in this server.")
+        if tourney.get("tournament_type") != "t20_world_cup":
+            return await ctx.send("❌ This command is only available for T20 World Cup tournaments.")
+        if tourney["status"] == "registration":
+            return await ctx.send("❌ Tournament hasn't started yet. Use `cv tournament status` to see registration info.")
+
         pages = _build_status_pages(tourney)
         if not pages:
             return await ctx.send("❌ No schedule generated yet. Run `cv tournament start` first.")
@@ -6035,6 +6347,111 @@ class PrefixCog(commands.Cog):
             embed.description = f"👑 **Champions: {winner}**"
 
         await ctx.send(embed=embed, view=view)
+
+    @tournament.command(name="set_schedule", help="[OWNER] Set a custom fixture order for the tournament.\nUsage: tournament set_schedule")
+    async def t_set_schedule(self, ctx):
+        if ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("❌ Owner only.")
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney:
+            return await ctx.send("❌ No tournament found.")
+        if tourney["status"] == "registration":
+            return await ctx.send("❌ Generate the schedule first (`cv tournament start`).")
+        schedule = tourney.get("schedule", [])
+        if not schedule:
+            return await ctx.send("❌ No schedule exists yet.")
+
+        # Show current fixture list for reference
+        ref_lines = []
+        for m in sorted(schedule, key=lambda x: x["match_id"]):
+            ms, mg = m.get("stage", ""), m.get("group", "")
+            if ms == "group" and mg:       tag = f"[G{mg}]"
+            elif ms == "super8" and mg:    tag = f"[S8{mg}]"
+            else:                          tag = "[KO]"
+            icon = "✅" if m["status"] == "completed" else "⏳"
+            ref_lines.append(f"`#{m['match_id']}` {tag} {m['team1']} vs {m['team2']} {icon}")
+
+        # Send in chunks of 20 to avoid 2000-char limit
+        for i in range(0, len(ref_lines), 20):
+            await ctx.send("\n".join(ref_lines[i:i + 20]))
+
+        await ctx.send(
+            "📋 **Reply with the desired fixture order** — one match per line:\n"
+            "`Team1 vs Team2`\n"
+            "Matches not listed will be appended at the end in their current order. You have **5 minutes**."
+        )
+
+        def check(m):
+            return m.author.id == ctx.author.id and m.channel.id == ctx.channel.id
+
+        try:
+            msg = await self.bot.wait_for("message", timeout=300.0, check=check)
+        except asyncio.TimeoutError:
+            return await ctx.send("⏳ Timed out. Schedule unchanged.")
+
+        import re as _re
+        lines = [l.strip() for l in msg.content.split("\n") if l.strip()]
+
+        # Build lookup: frozenset of lowercased names → match entry
+        schedule_map = {}
+        for m in schedule:
+            schedule_map[frozenset([m["team1"].lower(), m["team2"].lower()])] = m
+
+        all_team_names = list({name.lower() for m in schedule for name in [m["team1"], m["team2"]]})
+
+        ordered, used_ids, errors = [], set(), []
+        for line in lines:
+            parts = _re.split(r'\s+vs\s+', line, maxsplit=1, flags=_re.IGNORECASE)
+            if len(parts) != 2:
+                errors.append(f"⚠️ Couldn't parse: `{line}`")
+                continue
+            t1_raw, t2_raw = parts[0].strip().lower(), parts[1].strip().lower()
+            key = frozenset([t1_raw, t2_raw])
+            match = schedule_map.get(key)
+            if not match:
+                t1c = difflib.get_close_matches(t1_raw, all_team_names, n=1, cutoff=0.6)
+                t2c = difflib.get_close_matches(t2_raw, all_team_names, n=1, cutoff=0.6)
+                if t1c and t2c:
+                    match = schedule_map.get(frozenset([t1c[0], t2c[0]]))
+            if not match:
+                errors.append(f"❌ Not found: `{line}`")
+                continue
+            mid = match["match_id"]
+            if mid in used_ids:
+                errors.append(f"⚠️ Duplicate (skipped): `{line}`")
+                continue
+            ordered.append(match)
+            used_ids.add(mid)
+
+        if errors:
+            await ctx.send("\n".join(errors[:10]) + (f"\n_…{len(errors) - 10} more errors_" if len(errors) > 10 else ""))
+
+        if not ordered:
+            return await ctx.send("❌ No valid matches found. Schedule unchanged.")
+
+        # Append unspecified matches in their current order
+        remainder = [m for m in sorted(schedule, key=lambda x: x["match_id"]) if m["match_id"] not in used_ids]
+        new_schedule = ordered + remainder
+
+        # Reassign match_ids so array index == match_id - 1 (invariant required by match engine)
+        for i, m in enumerate(new_schedule):
+            m["match_id"] = i + 1
+
+        tourney["schedule"] = new_schedule
+        save_tournament(tourney)
+
+        conf = []
+        for m in new_schedule[:15]:
+            ms, mg = m.get("stage", ""), m.get("group", "")
+            if ms == "group" and mg:    tag = f"[G{mg}]"
+            elif ms == "super8" and mg: tag = f"[S8{mg}]"
+            else:                       tag = "[KO]"
+            icon = "✅" if m["status"] == "completed" else "⏳"
+            conf.append(f"`#{m['match_id']}` {tag} {m['team1']} vs {m['team2']} {icon}")
+        if len(new_schedule) > 15:
+            conf.append(f"_…and {len(new_schedule) - 15} more_")
+        await ctx.send(f"✅ **Schedule updated!** ({len(ordered)} reordered · {len(remainder)} appended)\n" + "\n".join(conf))
 
     @tournament.command(name="play_next", help="[MANAGER] Launch the next pending tournament match.\nUsage: tournament play_next")
     async def t_play_next(self, ctx):
@@ -6202,6 +6619,22 @@ class PrefixCog(commands.Cog):
         save_tournament(tourney)
         await ctx.send(embed=discord.Embed(description=f"✅ **{team['name']}** color set to `{color.upper()}`.", color=int(color.lstrip('#'), 16)))
 
+    @tournament.command(name="set_team_logo", help="[MANAGER/OWNER] Set a team's emoji logo for scorecards.\nUsage: tournament set_team_logo \"<team_name>\" <emoji>")
+    async def t_set_team_logo(self, ctx, team_name: str, *, emoji: str):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney:
+            return await ctx.send("❌ No tournament exists.")
+        team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.lower()), None)
+        if not team:
+            return await ctx.send(f"❌ Team **{team_name}** not found.")
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
+        if not is_mgr and team.get("owner_id") != str(ctx.author.id):
+            return await ctx.send("❌ Only Managers or the Team Owner can set the logo.")
+        team["logo_emoji"] = emoji.strip()
+        save_tournament(tourney)
+        await ctx.send(f"✅ Logo for **{team['name']}** set to {emoji.strip()} — will appear on future scorecards.")
+
     @tournament.command(name="match_scorecard", help="View the scorecard image for a completed match.\nUsage: tournament match_scorecard <match_id>")
     async def t_match_scorecard(self, ctx, match_id: int):
         server_id = str(ctx.guild.id)
@@ -6283,8 +6716,7 @@ class PrefixCog(commands.Cog):
             teams_by_group = {"A": [], "B": [], "C": [], "D": []}
             for t in tourney["teams"]:
                 teams_by_group[t["group"]].append(t["name"])
-            schedule = []
-            match_id = 1
+            all_matches = []
             for group, group_teams in teams_by_group.items():
                 teams = list(group_teams)
                 random.shuffle(teams)
@@ -6292,15 +6724,16 @@ class PrefixCog(commands.Cog):
                 for r in range(n - 1):
                     for i in range(n // 2):
                         t1, t2 = teams[i], teams[n - 1 - i]
-                        schedule.append({
-                            "match_id": match_id, "round": f"Group {group}",
-                            "stage": "group", "group": group, "group_round": r + 1,
+                        all_matches.append({
+                            "round": f"Group {group}", "stage": "group", "group": group,
+                            "group_round": r + 1,
                             "team1": t1 if r % 2 == 0 else t2,
                             "team2": t2 if r % 2 == 0 else t1,
                             "status": "pending", "result": None,
                         })
-                        match_id += 1
                     teams.insert(1, teams.pop())
+            random.shuffle(all_matches)
+            schedule = [dict(m, match_id=i + 1) for i, m in enumerate(all_matches)]
             tourney["schedule"] = schedule
             tourney["status"] = "active"
             tourney["current_match_idx"] = 0
