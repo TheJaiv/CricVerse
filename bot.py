@@ -396,6 +396,36 @@ def execute_ball_math(match: CricketMatch):
         return execute_ball_math_odi(match)
     return execute_ball_math_t20(match)
 
+def _run_full_match_sync(match: CricketMatch):
+    """Simulate a complete T20/ODI match synchronously (no Discord messages)."""
+    def _sim_innings(innings):
+        while True:
+            if innings.wickets >= 10 or innings.total_balls >= match.max_balls:
+                break
+            if match.current_innings_num == 2 and innings.total_runs >= getattr(match, "target", innings.total_runs + 1):
+                break
+            if innings.total_balls % 6 == 0 and not innings.over_log:
+                bowler = get_smart_ai_bowler(innings, match.pitch, match.weather, match.format_overs)
+                if not bowler:
+                    break
+                innings.current_bowler = bowler
+            execute_ball_math(match)
+            if innings.total_balls % 6 == 0 and innings.total_balls > 0:
+                innings.over_log.clear()
+                innings.bouncers_in_over = 0
+                innings.cutters_in_over = 0
+                innings.mystery_bowled_this_over = False
+
+    match.current_innings = match.innings1
+    match.current_innings_num = 1
+    _sim_innings(match.innings1)
+
+    match.target = match.innings1.total_runs + 1
+    match.innings2 = InningsState(match.innings1.bowling_team, match.innings1.batting_team)
+    match.current_innings = match.innings2
+    match.current_innings_num = 2
+    _sim_innings(match.innings2)
+
 # ==========================================
 # 🖼️ 4. EMBED SCOREBOARDS & PIL GRAPHICS
 # ==========================================
@@ -1085,16 +1115,18 @@ def _fetch_emoji_img(emoji_str: str, size: int = 72):
                     except EOFError: pass
                 return pil_img.convert("RGBA").resize((size, size), Image.LANCZOS)
 
-        # Unicode emoji → Twemoji CDN
+        # Plain text / :shortcode: with no ID — can't resolve without guild context
+        if all(ord(c) < 128 for c in emoji_str):
+            return None
+        # Unicode emoji → Twemoji CDN (skip variation selectors and ZWJ)
         codepoints = "-".join(
             f"{ord(c):x}" for c in emoji_str
-            if ord(c) not in (0xFE0F, 0xFE0E, 0x200D) and ord(c) >= 0x23
+            if ord(c) not in (0xFE0F, 0xFE0E, 0x200D) and ord(c) > 0x7F
         )
         if not codepoints:
             return None
         for twurl in [
             f"https://cdn.jsdelivr.net/gh/twitter/twemoji@v14.0.2/assets/72x72/{codepoints}.png",
-            f"https://twemoji.maxcdn.com/v/14.0.2/72x72/{codepoints}.png",
         ]:
             try:
                 resp = _req.get(twurl, timeout=5)
@@ -1133,8 +1165,8 @@ def generate_t20wc_scorecard(data: dict) -> io.BytesIO:
         fTeam   = ImageFont.truetype(_fbd, int(H * 0.048))
         fScore  = ImageFont.truetype(_fbd, int(H * 0.072))
         fOvers  = ImageFont.truetype(_frg, int(H * 0.020))
-        fName   = ImageFont.truetype(_fbd, int(H * 0.022))
-        fRuns   = ImageFont.truetype(_fbd, int(H * 0.036))
+        fName   = ImageFont.truetype(_fbd, int(H * 0.026))
+        fRuns   = ImageFont.truetype(_fbd, int(H * 0.030))
         fBalls  = ImageFont.truetype(_frg, int(H * 0.020))
         fMatch  = ImageFont.truetype(_fbd, int(H * 0.022))
         fResult = ImageFont.truetype(_fbd, int(H * 0.028))
@@ -1148,14 +1180,15 @@ def generate_t20wc_scorecard(data: dict) -> io.BytesIO:
         bb = f.getbbox("Ag") if hasattr(f, "getbbox") else None
         return (bb[3] - bb[1]) if bb else 12
 
-    # Layout calibrated from actual template pixel zones (1507x1044):
-    # header 0-144, T1 band 144-282, T1 stats 282-530,
-    # T2 band 534-660, T2 stats 664-878, result bar 882-938, sponsor 942+
+    # Band height: content-fitted (team name + overs + small padding)
+    _band_pad = int(H * 0.030)            # padding around text block
+    band_h    = _th(fTeam) + 4 + _th(fOvers) + _band_pad
+
     T1B_Y1 = int(H * 0.138)               # 144
-    T1B_Y2 = int(H * 0.270)               # 282
+    T1B_Y2 = T1B_Y1 + band_h
     T1S_Y2 = int(H * 0.508)               # 530
     T2B_Y1 = T1S_Y2
-    T2B_Y2 = T2B_Y1 + (T1B_Y2 - T1B_Y1)  # 668
+    T2B_Y2 = T2B_Y1 + band_h
     T2S_Y2 = int(H * 0.841)               # 878
     RES_Y1 = T2S_Y2
     RES_Y2 = int(H * 0.901)               # 940 — covers template transition pixels at y=939-940
@@ -1222,8 +1255,10 @@ def generate_t20wc_scorecard(data: dict) -> io.BytesIO:
         name_h  = _th(fTeam) + 4 + _th(fOvers)
         block_y = y1 + (band_h - name_h) // 2
         d.text((name_x, block_y), td["name"][:18], fill=WHITE, font=fTeam)
-        d.text((name_x, block_y + _th(fTeam) + 4),
-               f"OVERS {_overs(td.get('balls', 0))}", fill=LGRAY, font=fOvers)
+        ovr_y   = block_y + _th(fTeam) + 4
+        ovr_val = _overs(td.get('balls', 0))
+        d.text((name_x,                          ovr_y), "OVERS ",  fill=(150, 150, 150, 255), font=fOvers)
+        d.text((name_x + _tw("OVERS ", fOvers),  ovr_y), ovr_val,   fill=WHITE,                font=fOvers)
         sc   = _score(td)
         sc_x = W - _tw(sc, fScore) - 24
         sc_y = y1 + (band_h - _th(fScore)) // 2
@@ -1273,8 +1308,10 @@ def generate_t20wc_scorecard(data: dict) -> io.BytesIO:
     draw_band(t2,  T2B_Y1, T2B_Y2)
     draw_stats(t2, T2B_Y2, T2S_Y2)
 
-    # ── Result bar — paint blue explicitly to close any gap from stats white ──
-    d.rectangle([(0, RES_Y1), (W, RES_Y2)], fill=(0, 30, 138, 255))
+    # Result bar: flat top (flush with stats), rounded bottom corners only
+    RES_R = int(W * 0.025)
+    d.rounded_rectangle([(0, RES_Y1), (W, RES_Y2)], radius=RES_R, fill=(0, 30, 138, 255))
+    d.rectangle([(0, RES_Y1), (W, RES_Y1 + RES_R)], fill=(0, 30, 138, 255))
     res_cy = (RES_Y1 + RES_Y2) // 2
     if potm:
         total_h = _th(fResult) + 3 + _th(fPotm)
@@ -6540,6 +6577,95 @@ class PrefixCog(commands.Cog):
         save_tournament(tourney)
         
         await ctx.send(f"🔥 **Knockout Stage Set!**\n**Semi-Final 1:** {top4[0]} vs {top4[3]}\n**Semi-Final 2:** {top4[1]} vs {top4[2]}\n\nUse `cv tournament play_next` to begin!")
+
+    @tournament.command(name="simulate_all", aliases=["simall"], help="[OWNER] Instantly simulate all pending tournament matches.\nUsage: tournament simulate_all")
+    async def t_simulate_all(self, ctx):
+        if ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("❌ Owner only.")
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney:
+            return await ctx.send("❌ No tournament exists.")
+        if tourney["status"] != "active":
+            return await ctx.send("❌ Tournament is not active.")
+
+        pending = [m for m in tourney.get("schedule", []) if m["status"] == "pending"]
+        if not pending:
+            return await ctx.send("✅ No pending matches — tournament is fully simulated!")
+
+        _PITCHES = ["Flat", "Green Seamer", "Dry", "Dusty", "Spin-Friendly", "Bouncy", "Hard"]
+        status_msg = await ctx.send(f"⚡ **Simulating {len(pending)} pending match(es)...**")
+        results = []
+
+        for m_data in pending:
+            t1_data = next((t for t in tourney["teams"] if t["name"] == m_data["team1"]), None)
+            t2_data = next((t for t in tourney["teams"] if t["name"] == m_data["team2"]), None)
+            r_label = f"R{m_data['round']}" if isinstance(m_data['round'], int) else m_data['round']
+
+            if not t1_data or not t2_data:
+                results.append(f"M{m_data['match_id']} ({r_label}): ❌ Team not found")
+                continue
+            s1 = t1_data.get("squad", [])
+            s2 = t2_data.get("squad", [])
+            if len(s1) < 2 or len(s2) < 2:
+                results.append(f"M{m_data['match_id']} ({r_label}): ❌ Squad not set")
+                continue
+
+            roster1 = s1[:11]
+            roster2 = s2[:11]
+            pitch = random.choice(_PITCHES)
+            t1 = {"name": m_data["team1"], "players": roster1, "color": t1_data.get("color", "#6B7280")}
+            t2 = {"name": m_data["team2"], "players": roster2, "color": t2_data.get("color", "#6B7280")}
+
+            match = CricketMatch(None, None, 0, 0, t1, t2, tourney.get("format_overs", 20), pitch, "Clear")
+            match.tournament_server_id = tourney["server_id"]
+            match.tournament_match_id = m_data["match_id"]
+            match.manager_id = ctx.author.id
+            match.tournament_name = tourney["name"]
+            match.sim_only = True
+            match._scorecard_players = None
+
+            t_bat, t_bowl = (t1, t2) if random.random() < 0.5 else (t2, t1)
+            match.innings1 = InningsState(t_bat, t_bowl)
+
+            try:
+                await asyncio.to_thread(_run_full_match_sync, match)
+            except Exception as e:
+                results.append(f"M{m_data['match_id']} ({r_label}): ❌ Error: {e}")
+                continue
+
+            # Trigger the existing stats + progression listener directly (sequential, no race)
+            from tournament_manager import TournamentCog as _TC
+            tc = self.bot.cogs.get("TournamentCog")
+            if tc:
+                await tc.on_tournament_match_complete(match)
+            else:
+                self.bot.dispatch("tournament_match_complete", match)
+                await asyncio.sleep(0.5)
+
+            # tourney dict has been updated in-place by the listener; re-fetch for fresh ref
+            tourney = get_server_tournament(server_id)
+
+            inn1, inn2 = match.innings1, match.innings2
+            if inn2.total_runs >= match.target:
+                win_str = f"{inn2.batting_team['name']} won by {10 - inn2.wickets}W"
+            else:
+                diff = inn1.total_runs - inn2.total_runs
+                win_str = f"{inn1.batting_team['name']} won by {diff}R"
+
+            i1o = f"{inn1.total_balls // 6}.{inn1.total_balls % 6}"
+            i2o = f"{inn2.total_balls // 6}.{inn2.total_balls % 6}"
+            results.append(
+                f"**M{m_data['match_id']}** ({r_label}): "
+                f"{t1['name']} {inn1.total_runs if match.innings1.batting_team['name'] == t1['name'] else inn2.total_runs}"
+                f"/{inn1.wickets if match.innings1.batting_team['name'] == t1['name'] else inn2.wickets} "
+                f"vs {t2['name']} {inn2.total_runs if match.innings2.batting_team['name'] == t2['name'] else inn1.total_runs}"
+                f"/{inn2.wickets if match.innings2.batting_team['name'] == t2['name'] else inn1.wickets} "
+                f"— **{win_str}**"
+            )
+
+        lines = "\n".join(results)
+        await status_msg.edit(content=f"✅ **Simulation Complete! ({len(results)} matches)**\n{lines}")
 
     @tournament.command(name="add_manager", help="[MANAGER] Assign a tournament manager.\nUsage: tournament add_manager <@user>")
     async def t_add_manager(self, ctx, user: discord.Member):

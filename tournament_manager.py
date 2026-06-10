@@ -965,7 +965,8 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         app_commands.Choice(name="Most 50s", value="fifties"),
         app_commands.Choice(name="Most 100s", value="hundreds"),
         app_commands.Choice(name="Best Economy (Min 5 Overs)", value="econ"),
-        app_commands.Choice(name="Best Bowling Avg (Min 3 Wickets)", value="bowl_avg")
+        app_commands.Choice(name="Best Bowling Avg (Min 3 Wickets)", value="bowl_avg"),
+        app_commands.Choice(name="MVP Score", value="mvp"),
     ])
     async def leaderboard(self, interaction: discord.Interaction, category: app_commands.Choice[str]):
         server_id = str(interaction.guild.id)
@@ -978,6 +979,22 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         if not all_players:
             return await interaction.response.send_message("❌ No stats available yet. Complete a match first!", ephemeral=True)
         c_val = category.value
+
+        def _mvp_score(s):
+            sr = (s["runs"] / s["balls_faced"] * 100) if s["balls_faced"] > 0 else 0
+            bat = float(s["runs"])
+            if sr >= 150:   bat *= 1.30
+            elif sr >= 130: bat *= 1.20
+            elif sr >= 110: bat *= 1.10
+            elif sr < 80 and s["balls_faced"] >= 20: bat *= 0.85
+            bat += s["fifties"] * 15 + s["hundreds"] * 40
+            bat += s["sixes"] * 2 + s["fours"] * 0.5
+            econ = (s["runs_conceded"] / s["balls_bowled"] * 6) if s["balls_bowled"] > 0 else 9.0
+            bowl = float(s["wickets"] * 25)
+            if s["balls_bowled"] >= 12:
+                bowl += max(-20.0, min(20.0, (8.0 - econ) * 4))
+            return bat + bowl
+
         if c_val == "runs": sorted_players = sorted(all_players, key=lambda x: x["stats"]["runs"], reverse=True)
         elif c_val == "wickets": sorted_players = sorted(all_players, key=lambda x: x["stats"]["wickets"], reverse=True)
         elif c_val == "sr":
@@ -994,19 +1011,33 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         elif c_val == "bowl_avg":
             qualifiers = [p for p in all_players if p["stats"]["wickets"] >= 3]
             sorted_players = sorted(qualifiers, key=lambda x: x["stats"]["runs_conceded"] / x["stats"]["wickets"] if x["stats"]["wickets"]>0 else 999)
+        elif c_val == "mvp":
+            sorted_players = sorted(all_players, key=lambda x: _mvp_score(x["stats"]), reverse=True)
+
         embed = discord.Embed(title=f"🏆 Tournament Leaderboard: {category.name}", color=discord.Color.gold())
+        if c_val == "mvp":
+            embed.description = (
+                "-# *MVP = Runs (×SR multiplier) + Boundaries bonus + Milestone bonus + Wickets×25 + Economy bonus*\n"
+            )
         lines = []
         for i, p in enumerate(sorted_players[:10], 1):
             s = p["stats"]
             if c_val == "runs": val = f"**{s['runs']}** runs"
-            elif c_val == "wickets": val = f"**{s['wickets']}** wickets"
+            elif c_val == "wickets": val = f"**{s['wickets']}** wkts"
             elif c_val == "sr": val = f"**{(s['runs']/s['balls_faced']*100) if s['balls_faced']>0 else 0:.1f}** SR"
             elif c_val == "bat_avg": val = f"**{s['runs']/max(1, s['outs']):.1f}** Avg"
             elif c_val in ["fours", "sixes", "fifties", "hundreds"]: val = f"**{s[c_val]}**"
             elif c_val == "econ": val = f"**{(s['runs_conceded']/s['balls_bowled']*6) if s['balls_bowled']>0 else 0:.1f}** Econ"
             elif c_val == "bowl_avg": val = f"**{s['runs_conceded']/s['wickets'] if s['wickets']>0 else 0:.1f}** Avg"
+            elif c_val == "mvp":
+                score = _mvp_score(s)
+                sr = (s["runs"]/s["balls_faced"]*100) if s["balls_faced"]>0 else 0
+                val = f"**{score:.0f}** pts — {s['runs']}R @{sr:.0f}SR · {s['wickets']}W"
             lines.append(f"`{i:>2}.` **{p['name']}** ({p['team']}) — {val}")
-        embed.description = "\n".join(lines) if lines else "No players qualify for this leaderboard yet."
+        if c_val == "mvp":
+            embed.description += "\n".join(lines) if lines else "No stats yet."
+        else:
+            embed.description = "\n".join(lines) if lines else "No players qualify for this leaderboard yet."
         await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="player_stats", description="View a specific player's tournament stats.")
