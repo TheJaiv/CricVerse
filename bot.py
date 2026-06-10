@@ -1130,18 +1130,17 @@ def generate_t20wc_scorecard(data: dict) -> io.BytesIO:
     _fbd = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
     _frg = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
     try:
-        fTeam   = ImageFont.truetype(_fbd, int(H * 0.047))
-        fScore  = ImageFont.truetype(_fbd, int(H * 0.073))
-        fOvers  = ImageFont.truetype(_frg, int(H * 0.024))
-        fHdr    = ImageFont.truetype(_fbd, int(H * 0.020))
-        fName   = ImageFont.truetype(_fbd, int(H * 0.028))
+        fTeam   = ImageFont.truetype(_fbd, int(H * 0.048))
+        fScore  = ImageFont.truetype(_fbd, int(H * 0.072))
+        fOvers  = ImageFont.truetype(_frg, int(H * 0.020))
+        fName   = ImageFont.truetype(_fbd, int(H * 0.022))
         fRuns   = ImageFont.truetype(_fbd, int(H * 0.036))
-        fBalls  = ImageFont.truetype(_frg,  int(H * 0.025))
-        fMatch  = ImageFont.truetype(_fbd, int(H * 0.033))
-        fResult = ImageFont.truetype(_fbd, int(H * 0.031))
-        fPotm   = ImageFont.truetype(_fbd, int(H * 0.022))
+        fBalls  = ImageFont.truetype(_frg, int(H * 0.020))
+        fMatch  = ImageFont.truetype(_fbd, int(H * 0.022))
+        fResult = ImageFont.truetype(_fbd, int(H * 0.028))
+        fPotm   = ImageFont.truetype(_fbd, int(H * 0.020))
     except Exception:
-        fTeam = fScore = fOvers = fHdr = fName = fRuns = fBalls = fMatch = fResult = fPotm = ImageFont.load_default()
+        fTeam = fScore = fOvers = fName = fRuns = fBalls = fMatch = fResult = fPotm = ImageFont.load_default()
 
     def _tw(t, f):
         return f.getbbox(t)[2] if hasattr(f, "getbbox") else len(t) * 9
@@ -1149,22 +1148,24 @@ def generate_t20wc_scorecard(data: dict) -> io.BytesIO:
         bb = f.getbbox("Ag") if hasattr(f, "getbbox") else None
         return (bb[3] - bb[1]) if bb else 12
 
-    # ── Layout (proportional to template dimensions) ──────────────
-    T1B_Y1 = int(H * 0.142)   # team 1 band top    (~90)
-    T1B_Y2 = int(H * 0.253)   # team 1 band bottom (~160)
-    T1S_Y2 = int(H * 0.538)   # team 1 stats bot   (~341)
-    T2B_Y1 = int(H * 0.597)   # team 2 band top    (~378)
-    T2B_Y2 = int(H * 0.708)   # team 2 band bottom (~449)
-    T2S_Y2 = int(H * 0.908)   # team 2 stats bot   (~576)
+    # Layout calibrated from actual template pixel zones (1507x1044):
+    # header 0-144, T1 band 144-282, T1 stats 282-530,
+    # T2 band 534-660, T2 stats 664-878, result bar 882-938, sponsor 942+
+    T1B_Y1 = int(H * 0.138)               # 144
+    T1B_Y2 = int(H * 0.270)               # 282
+    T1S_Y2 = int(H * 0.508)               # 530
+    T2B_Y1 = T1S_Y2
+    T2B_Y2 = T2B_Y1 + (T1B_Y2 - T1B_Y1)  # 668
+    T2S_Y2 = int(H * 0.841)               # 878
     RES_Y1 = T2S_Y2
-    RES_Y2 = int(H * 0.970)   # result bar bottom  (~615)
+    RES_Y2 = int(H * 0.901)               # 940 — covers template transition pixels at y=939-940
 
-    COL_MID   = W // 2         # vertical divider between bat/bowl columns
+    COL_MID   = W // 2
 
-    BAT_NAME_X = 8             # batter name X (inside left col)
+    BAT_NAME_X = 18
     BAT_R_X    = int(W * 0.412)
     BAT_B_X    = int(W * 0.463)
-    BWL_NAME_X = COL_MID + 50
+    BWL_NAME_X = COL_MID + 20
     BWL_WR_X   = int(W * 0.874)
     BWL_OVR_X  = int(W * 0.948)
 
@@ -1191,12 +1192,12 @@ def generate_t20wc_scorecard(data: dict) -> io.BytesIO:
             return bx + size + 12
         return bx
 
-    # ── Match number on top bar ────────────────────────────────────
+    # ── Match number — above template's green "MATCH SUMMARY" (y=64-98) ──
     ctx_line = f"MATCH {match_id}"
     if round_label:
         ctx_line += f"  •  {round_label.upper()}"
-    d.text(((W - _tw(ctx_line, fMatch)) // 2, int(H * 0.040)),
-           ctx_line, fill=WHITE, font=fMatch)
+    d.text(((W - _tw(ctx_line, fMatch)) // 2, int(H * 0.022)),
+           ctx_line, fill=(200, 200, 200, 255), font=fMatch)
 
     # ── Team band ──────────────────────────────────────────────────
     def _hex_rgba(h, alpha=255):
@@ -1206,76 +1207,65 @@ def generate_t20wc_scorecard(data: dict) -> io.BytesIO:
         except Exception:
             return (107, 114, 128, alpha)
 
+    BALL_COLOR = (140, 20, 30, 255)
+
     def draw_band(td, y1, y2):
-        # Paint team color over the template's pre-rendered band
         d.rectangle([(0, y1), (W, y2)], fill=_hex_rgba(td.get("color", "#6B7280")))
-
-        band_h = y2 - y1
-        logo_sz = int(band_h * 0.82)
+        band_h  = y2 - y1
+        logo_sz = int(band_h * 0.80)
         logo_y  = y1 + (band_h - logo_sz) // 2
-        name_x  = _paste_logo(td.get("logo_emoji"), 14, logo_y, logo_sz)
-        if name_x == 14:                # no logo pasted — use a slim separator
-            d.line([(80, y1 + 8), (80, y2 - 8)], fill=(255, 255, 255, 70), width=2)
-            name_x = 92
-
-        # Team name
-        name_y = y1 + int(band_h * 0.12)
-        d.text((name_x, name_y), td["name"][:18], fill=WHITE, font=fTeam)
-        # Overs below name
-        ovr_y = name_y + _th(fTeam) + 3
-        d.text((name_x, ovr_y), f"OVERS {_overs(td.get('balls', 0))}", fill=LGRAY, font=fOvers)
-        # Score right-aligned
-        sc = _score(td)
-        sc_x = W - _tw(sc, fScore) - 18
+        name_x  = _paste_logo(td.get("logo_emoji"), 16, logo_y, logo_sz)
+        sep_x   = 16 + logo_sz + 8
+        if name_x == 16:
+            d.line([(sep_x, y1 + 4), (sep_x, y2 - 4)], fill=(255, 255, 255, 230), width=5)
+            name_x = sep_x + 22
+        name_h  = _th(fTeam) + 4 + _th(fOvers)
+        block_y = y1 + (band_h - name_h) // 2
+        d.text((name_x, block_y), td["name"][:18], fill=WHITE, font=fTeam)
+        d.text((name_x, block_y + _th(fTeam) + 4),
+               f"OVERS {_overs(td.get('balls', 0))}", fill=LGRAY, font=fOvers)
+        sc   = _score(td)
+        sc_x = W - _tw(sc, fScore) - 24
         sc_y = y1 + (band_h - _th(fScore)) // 2
         d.text((sc_x, sc_y), sc, fill=WHITE, font=fScore)
 
-    # ── Stats table ───────────────────────────────────────────────
+    # ── Stats table (no header row — matches ICC reference style) ──
     def draw_stats(td, y1, y2):
-        HDR_Y = y1 + 8
-        d.text((BAT_NAME_X, HDR_Y),                            "BATTER", fill=LGRAY, font=fHdr)
-        d.text((BAT_R_X - _tw("R",   fHdr)//2, HDR_Y),        "R",      fill=LGRAY, font=fHdr)
-        d.text((BAT_B_X - _tw("B",   fHdr)//2, HDR_Y),        "B",      fill=LGRAY, font=fHdr)
-        d.text((BWL_NAME_X, HDR_Y),                            "BOWLER", fill=LGRAY, font=fHdr)
-        d.text((BWL_WR_X  - _tw("W-R", fHdr)//2, HDR_Y),      "W-R",    fill=LGRAY, font=fHdr)
-        d.text((BWL_OVR_X - _tw("O",   fHdr)//2, HDR_Y),      "O",      fill=LGRAY, font=fHdr)
-
-        d.line([(COL_MID, y1), (COL_MID, y2)], fill=(205, 205, 205, 255), width=1)
-
-        rows_y = HDR_Y + _th(fHdr) + 6
-        d.line([(0, rows_y), (W, rows_y)], fill=(215, 215, 215, 255), width=1)
-        row_h = (y2 - rows_y) // 4
-
+        d.rectangle([(0, y1), (W, y2)], fill=(255, 255, 255, 255))
+        row_h = (y2 - y1) // 4
+        # Pass 1: row backgrounds + horizontal dividers
         for i in range(4):
-            ry   = rows_y + i * row_h
-            mid  = ry + row_h // 2
+            ry = y1 + i * row_h
             if i % 2 == 1:
-                d.rectangle([(0, ry), (W, ry + row_h)], fill=(244, 244, 244, 255))
-            d.line([(0, ry + row_h), (W, ry + row_h)], fill=(215, 215, 215, 255), width=1)
-
+                d.rectangle([(0, ry), (W, ry + row_h)], fill=(246, 246, 246, 255))
+            d.line([(0, ry + row_h), (W, ry + row_h)], fill=(220, 220, 220, 255), width=1)
+        # Column separator drawn AFTER row backgrounds so it shows in all rows
+        d.line([(COL_MID, y1), (COL_MID, y2)], fill=(200, 200, 200, 255), width=2)
+        # Pass 2: text
+        for i in range(4):
+            ry  = y1 + i * row_h
+            mid = ry + row_h // 2
             ny  = mid - _th(fName)  // 2
             ry2 = mid - _th(fRuns)  // 2
             by2 = mid - _th(fBalls) // 2
-
             if i < len(td.get("batters", [])):
                 b  = td["batters"][i]
-                nm = b["name"][:16].upper()
+                nm = b["name"][:18].upper()
                 d.text((BAT_NAME_X, ny), nm, fill=DKBLK, font=fName)
                 if potm and b["name"].upper() == potm.upper():
-                    d.text((BAT_NAME_X + _tw(nm, fName) + 4, ny - 1), "★", fill=GOLD, font=fHdr)
+                    d.text((BAT_NAME_X + _tw(nm, fName) + 5, ny), "★", fill=GOLD, font=fName)
                 rs = f"{b['runs']}{'*' if b.get('not_out') else ''}"
-                d.text((BAT_R_X - _tw(rs, fRuns)//2, ry2),          rs,           fill=DKBLK, font=fRuns)
+                d.text((BAT_R_X - _tw(rs,              fRuns )//2, ry2), rs,              fill=DKBLK, font=fRuns)
                 d.text((BAT_B_X - _tw(str(b["balls"]), fBalls)//2, by2), str(b["balls"]), fill=DGRAY, font=fBalls)
-
             if i < len(td.get("bowlers", [])):
                 bw = td["bowlers"][i]
-                nm = bw["name"][:16].upper()
+                nm = bw["name"][:18].upper()
                 d.text((BWL_NAME_X, ny), nm, fill=DKBLK, font=fName)
                 if potm and bw["name"].upper() == potm.upper():
-                    d.text((BWL_NAME_X + _tw(nm, fName) + 4, ny - 1), "★", fill=GOLD, font=fHdr)
+                    d.text((BWL_NAME_X + _tw(nm, fName) + 5, ny), "★", fill=GOLD, font=fName)
                 wr = f"{bw['wickets']}-{bw['runs']}"
-                d.text((BWL_WR_X  - _tw(wr, fRuns)//2, ry2),           wr,            fill=DKBLK, font=fRuns)
-                d.text((BWL_OVR_X - _tw(bw["overs"], fBalls)//2, by2), bw["overs"],   fill=DGRAY, font=fBalls)
+                d.text((BWL_WR_X  - _tw(wr,           fRuns )//2, ry2), wr,           fill=DKBLK, font=fRuns)
+                d.text((BWL_OVR_X - _tw(bw["overs"],  fBalls)//2, by2), bw["overs"],  fill=DGRAY, font=fBalls)
 
     # ── Render both teams ─────────────────────────────────────────
     draw_band(t1,  T1B_Y1, T1B_Y2)
@@ -1283,7 +1273,8 @@ def generate_t20wc_scorecard(data: dict) -> io.BytesIO:
     draw_band(t2,  T2B_Y1, T2B_Y2)
     draw_stats(t2, T2B_Y2, T2S_Y2)
 
-    # ── Result bar ────────────────────────────────────────────────
+    # ── Result bar — paint blue explicitly to close any gap from stats white ──
+    d.rectangle([(0, RES_Y1), (W, RES_Y2)], fill=(0, 30, 138, 255))
     res_cy = (RES_Y1 + RES_Y2) // 2
     if potm:
         total_h = _th(fResult) + 3 + _th(fPotm)
