@@ -1347,9 +1347,9 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             bat += s["fifties"] * 15 + s["hundreds"] * 40
             bat += s["sixes"] * 2 + s["fours"] * 0.5
             econ = (s["runs_conceded"] / s["balls_bowled"] * 6) if s["balls_bowled"] > 0 else 9.0
-            bowl = float(s["wickets"] * 25)
+            bowl = float(s["wickets"] * 35)
             if s["balls_bowled"] >= 12:
-                bowl += max(-20.0, min(20.0, (8.0 - econ) * 4))
+                bowl += max(-25.0, min(25.0, (8.0 - econ) * 5))
             return bat + bowl
 
         if c_val == "runs": sorted_players = sorted(all_players, key=lambda x: x["stats"]["runs"], reverse=True)

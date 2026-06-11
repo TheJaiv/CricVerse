@@ -468,20 +468,22 @@ def get_player_of_the_match(match: CricketMatch) -> str:
             bowl = match.innings1.bowling_stats[p_name]
             if bowl.balls_bowled > 0:
                 eco = (bowl.runs_conceded / bowl.balls_bowled) * 6
-                impact += (bowl.wickets_taken * 30) + ((10 - eco) * (bowl.balls_bowled / 6) * 2)
-                
+                eco_pts = max(-30.0, (10 - eco) * (bowl.balls_bowled / 6) * 3)
+                impact += (bowl.wickets_taken * 40) + eco_pts
+
         # Analyze innings 2 impact
         if match.current_innings_num == 2 and match.innings2:
             if p_name in match.innings2.batting_stats:
                 bat = match.innings2.batting_stats[p_name]
                 sr = (bat.runs_scored / bat.balls_faced * 100) if bat.balls_faced > 0 else 0
                 impact += bat.runs_scored + (bat.runs_scored * (sr / 120))
-                
+
             if p_name in match.innings2.bowling_stats:
                 bowl = match.innings2.bowling_stats[p_name]
                 if bowl.balls_bowled > 0:
                     eco = (bowl.runs_conceded / bowl.balls_bowled) * 6
-                    impact += (bowl.wickets_taken * 30) + ((10 - eco) * (bowl.balls_bowled / 6) * 2)
+                    eco_pts = max(-30.0, (10 - eco) * (bowl.balls_bowled / 6) * 3)
+                    impact += (bowl.wickets_taken * 40) + eco_pts
         
         # Determine team for multiplier
         if p in match.team1["players"]:
