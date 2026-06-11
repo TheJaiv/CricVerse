@@ -30,7 +30,7 @@ from test_simulation import (
     _format_scorecard as _test_format_scorecard,
     _player_of_match as _test_player_of_match,
 )
-from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table
+from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView
 from subscription_manager import (
     load_data_from_bin, load_tournament_data_from_bin,
     save_data_to_bin, save_tournament_data_to_bin,
@@ -949,9 +949,18 @@ def extract_scoreboard_data(match: CricketMatch) -> dict:
     else:
         result_str = f"TARGET SET: {inn1.total_runs + 1} RUNS"
 
+    # Build round label from schedule entry
+    _mid = getattr(match, "tournament_match_id", None)
+    _round_label = ""
+    if tourney and _mid:
+        _m_sched = next((x for x in tourney.get("schedule", []) if x["match_id"] == _mid), None)
+        if _m_sched:
+            _round_label = _match_round_label(_m_sched)
+
     return {
         "theme": theme,
         "match_id": str(getattr(match, "tournament_match_id", "?")),
+        "round_label": _round_label,
         "tourn_name": getattr(match, "tournament_name", "TOURNAMENT").upper(),
         "format_overs": getattr(match, "format_overs", 20),
         "result_str": result_str,
@@ -1039,6 +1048,18 @@ def extract_scorecard_players(match: CricketMatch) -> dict:
     }
 
 
+def _match_round_label(m: dict) -> str:
+    """Build a human-readable round label from a schedule match entry."""
+    stage     = m.get("stage", "")
+    group     = m.get("group", "")
+    round_val = m.get("round", "")
+    if stage == "group" and group:
+        return f"Group {group}"
+    if isinstance(round_val, int):
+        return f"Round {round_val}"
+    return str(round_val) if round_val else ""
+
+
 def reconstruct_scorecard_data(tourney: dict, m: dict) -> dict:
     """Rebuild the full display dict from minimal stored data + existing tournament JSON.
     Returns None if no scorecard_players entry exists (old match or data missing).
@@ -1072,7 +1093,7 @@ def reconstruct_scorecard_data(tourney: dict, m: dict) -> dict:
         "theme":           tourney.get("theme", "Default"),
         "tournament_type": tourney.get("tournament_type", "round_robin"),
         "match_id":        str(m["match_id"]),
-        "round_label":     str(m.get("round", "")),
+        "round_label":     _match_round_label(m),
         "tourn_name":      tourney["name"].upper(),
         "format_overs":    r.get("format_overs", 20),
         "result_str":      p.get("rs", ""),
@@ -6300,9 +6321,15 @@ class PrefixCog(commands.Cog):
         def format_player(p, cat):
             arch = p["archetype"]
             style = p["role"].split("_", 1)[1].replace("_", " ") if "_" in p["role"] else ""
-            if cat in ["bat", "wk"]: return f"`{p['bat']:>2} BAT` • **{p['name']}** *(Type: {arch})*"
-            elif cat == "ar": return f"`{p['bat']:>2} BAT | {p['bowl']:>2} BWL` • **{p['name']}** *({style} | {arch})*"
-            else: return f"`{p['bowl']:>2} BWL` • **{p['name']}** *({style})*"
+            if p.get("injured"):
+                sev = p.get("injury_severity", 1)
+                inj = f" 🚑 *(misses next {sev} team match{'es' if sev > 1 else ''})*"
+            else:
+                inj = ""
+            if cat == "bat":  return f"**{p['name']}** *(Batter)*{inj}"
+            elif cat == "wk": return f"**{p['name']}** *(WK Batter)*{inj}"
+            elif cat == "ar": return f"**{p['name']}** *({style} All-Rounder)*{inj}" if style else f"**{p['name']}** *(All-Rounder)*{inj}"
+            else:             return f"**{p['name']}** *({style} Bowler)*{inj}" if style else f"**{p['name']}** *(Bowler)*{inj}"
 
         if batters: embed.add_field(name="🏏 Batters", value="\n".join([format_player(p, "bat") for p in batters]), inline=False)
         if wks: embed.add_field(name="🧤 Wicket-Keepers", value="\n".join([format_player(p, "wk") for p in wks]), inline=False)
@@ -7172,41 +7199,52 @@ class PrefixCog(commands.Cog):
         tourney = get_server_tournament(server_id)
         if not tourney: return await ctx.send("❌ No tournament exists.")
 
-        # T20 World Cup: image table during group stage, text embed after
+        # T20 World Cup standings
         if tourney.get("tournament_type") == "t20_world_cup":
             super8_matches = [m for m in tourney.get("schedule", []) if m.get("stage") == "super8"]
-            in_group_stage = not super8_matches
-            if in_group_stage:
+
+            if not super8_matches:
+                # Group stage only — single super16 image
                 try:
                     buf = generate_t20wc_points_table(tourney)
                     return await ctx.send(file=discord.File(fp=buf, filename="points_table.png"))
                 except Exception as e:
                     print(f"⚠️ Points table image failed: {e}")
-            # Super 8 / knockout — text fallback
-            embed = discord.Embed(title=f"🌍 {tourney['name']} — Standings", color=discord.Color.gold())
+
+            # Super 8 active — generate both images with navigation buttons
+            s16_buf = s8_buf = None
+            try:
+                s16_buf = generate_t20wc_points_table(tourney)
+            except Exception as e:
+                print(f"⚠️ Super16 table failed: {e}")
             if super8_matches:
-                from tournament_manager import get_group_standings
-                for sg in ["A", "B"]:
-                    st = get_group_standings(tourney, "super8", sg)
-                    if st:
-                        rows = ["```", f"{'':2}{'Team':<20}{'P':>2}{'W':>2}{'L':>2}{'Pts':>4}{'NRR':>8}", "─"*42]
-                        for i, (nm, d) in enumerate(st, 1):
-                            arrow = "→ " if i <= 2 else "  "
-                            rows.append(f"{arrow}{i:<3}{nm[:18]:<20}{d['P']:>2}{d['W']:>2}{d['L']:>2}{d['Pts']:>4}{d['NRR']:>+8.2f}")
-                        rows.append("```")
-                        embed.add_field(name=f"Super 8 — Group {sg}", value="\n".join(rows), inline=True)
-            else:
-                from tournament_manager import get_group_standings
-                for grp in ["A", "B", "C", "D"]:
-                    st = get_group_standings(tourney, "group", grp)
-                    if st:
-                        rows = ["```", f"{'':2}{'Team':<20}{'P':>2}{'W':>2}{'L':>2}{'Pts':>4}{'NRR':>8}", "─"*42]
-                        for i, (nm, d) in enumerate(st, 1):
-                            arrow = "→ " if i <= 2 else "  "
-                            rows.append(f"{arrow}{i:<3}{nm[:18]:<20}{d['P']:>2}{d['W']:>2}{d['L']:>2}{d['Pts']:>4}{d['NRR']:>+8.2f}")
-                        rows.append("```")
-                        embed.add_field(name=f"Group {grp}", value="\n".join(rows), inline=True)
-            embed.set_footer(text="→ marks teams that advance to the next stage")
+                try:
+                    s8_buf = generate_t20wc_super8_table(tourney)
+                except Exception as e:
+                    print(f"⚠️ Super8 table failed: {e}")
+
+            if s8_buf:
+                view = T20StandingsView(s16_buf, s8_buf, start_on_super8=True)
+                s8_buf.seek(0)
+                if not s16_buf:
+                    view.s16_btn.disabled = True
+                return await ctx.send(file=discord.File(fp=s8_buf, filename="super8_table.png"), view=view)
+            elif s16_buf:
+                s16_buf.seek(0)
+                return await ctx.send(file=discord.File(fp=s16_buf, filename="points_table.png"))
+
+            # Both images failed — text embed fallback
+            from tournament_manager import get_group_standings
+            embed = discord.Embed(title=f"🌍 {tourney['name']} — Standings", color=discord.Color.gold())
+            for sg in ["A", "B"]:
+                st = get_group_standings(tourney, "super8", sg)
+                if st:
+                    rows = ["```", f"{'':2}{'Team':<20}{'P':>2}{'W':>2}{'L':>2}{'Pts':>4}{'NRR':>8}", "-"*42]
+                    for i, (nm, d) in enumerate(st, 1):
+                        rows.append(f"{'-> ' if i<=2 else '   '}{nm[:18]:<20}{d['P']:>2}{d['W']:>2}{d['L']:>2}{d['Pts']:>4}{d['NRR']:>+8.2f}")
+                    rows.append("```")
+                    embed.add_field(name=f"Super 8 - Group {sg}", value="\n".join(rows), inline=True)
+            embed.set_footer(text="-> marks teams that advance to the next stage")
             return await ctx.send(embed=embed)
 
         standings = get_tournament_standings(tourney)

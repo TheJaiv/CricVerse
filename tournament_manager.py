@@ -145,19 +145,23 @@ def generate_t20wc_points_table(tourney) -> io.BytesIO:
 
     team_logos = {t["name"]: t.get("logo_url") or t.get("logo_emoji") for t in tourney.get("teams", [])}
 
+    _sz = int(H * 0.018)
+    _sz_name = int(H * 0.021)
     try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", int(H * 0.018))
+        font      = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", _sz)
+        font_name = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", _sz_name)
     except Exception:
         try:
-            font = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", int(H * 0.018))
+            font      = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", _sz)
+            font_name = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", _sz_name)
         except Exception:
-            font = ImageFont.load_default()
+            font = font_name = ImageFont.load_default()
 
     DARK = (4, 18, 58)
 
-    def tw(t): return font.getbbox(t)[2] if hasattr(font, "getbbox") else len(t) * 9
-    def th():
-        bb = font.getbbox("Ag") if hasattr(font, "getbbox") else None
+    def tw(t, f=font): return f.getbbox(t)[2] if hasattr(f, "getbbox") else len(t) * 9
+    def th(f=font):
+        bb = f.getbbox("Ag") if hasattr(f, "getbbox") else None
         return (bb[3] - bb[1]) if bb else 14
 
     # Column X centres — aligned to template header labels; right group adds R_OFF
@@ -180,22 +184,23 @@ def generate_t20wc_points_table(tourney) -> io.BytesIO:
     def draw_group(rows, row_ys, right):
         off = R_OFF if right else 0
         txt_h = th()
+        name_h = th(font_name)
         for i, (nm, st) in enumerate(rows):
             if i >= len(row_ys):
                 break
             cy  = row_ys[i]
             ty  = cy - txt_h // 2
+            ty_name = cy - name_h // 2
             nrr_str = f"{st['NRR']:+.2f}"
-            # Emoji before team name
             logo = _fetch_emoji_img(team_logos.get(nm), EMOJI_SZ)
             team_x = L_TEAM_X + off
             if logo:
                 ey = cy - EMOJI_SZ // 2
                 img.paste(logo, (team_x, ey), logo)
                 team_x += EMOJI_SZ + 6
-            cols = [
+            # stat columns (smaller font)
+            stats = [
                 (str(i + 1),            L_POS_X + off, True ),
-                (nm[:14].upper(),       team_x,        False),
                 (str(st["P"]),          L_P_X  + off,  True ),
                 (str(st["W"]),          L_W_X  + off,  True ),
                 (str(st["L"]),          L_L_X  + off,  True ),
@@ -203,15 +208,113 @@ def generate_t20wc_points_table(tourney) -> io.BytesIO:
                 (str(st["Pts"]),        L_PTS_X + off, True ),
                 (nrr_str,               L_NRR_X + off, True ),
             ]
-            for text, cx, centered in cols:
+            for text, cx, centered in stats:
                 x = (cx - tw(text) // 2) if centered else cx
                 d.text((x, ty), text, fill=DARK, font=font)
+            # team name — larger font
+            d.text((team_x, ty_name), nm[:14].upper(), fill=DARK, font=font_name)
 
     for grp, right, row_ys in [("A", False, TOP_ROWS), ("B", True, TOP_ROWS),
                                 ("C", False, BOT_ROWS), ("D", True, BOT_ROWS)]:
         st = get_group_standings(tourney, "group", grp)
         if st:
             draw_group(st, row_ys, right)
+
+    out_w = 1024
+    out_h = int(H * out_w / W)
+    final = Image.new("RGB", img.size, (255, 255, 255))
+    final.paste(img, mask=img.split()[3])
+    final = final.resize((out_w, out_h), Image.LANCZOS)
+    buf = io.BytesIO()
+    final.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
+def generate_t20wc_super8_table(tourney) -> io.BytesIO:
+    """Fill super8_table.png template with live Super 8 group standings."""
+    img = Image.open("super8_table.png").convert("RGBA")
+    d   = ImageDraw.Draw(img)
+    W, H = img.size  # 1484 × 1060
+
+    team_logos = {t["name"]: t.get("logo_url") or t.get("logo_emoji") for t in tourney.get("teams", [])}
+
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", int(H * 0.018))
+    except Exception:
+        try:
+            font = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", int(H * 0.018))
+        except Exception:
+            font = ImageFont.load_default()
+
+    _sz_name8 = int(H * 0.021)
+    try:
+        font_name = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", _sz_name8)
+    except Exception:
+        try:
+            font_name = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", _sz_name8)
+        except Exception:
+            font_name = font
+
+    DARK = (4, 18, 58)
+
+    def tw(t, f=font): return f.getbbox(t)[2] if hasattr(f, "getbbox") else len(t) * 9
+    def th(f=font):
+        bb = f.getbbox("Ag") if hasattr(f, "getbbox") else None
+        return (bb[3] - bb[1]) if bb else 14
+
+    # Column X centres — pixel-scanned from super8_table.png (1484px wide, two groups)
+    # POS numbers are pre-printed in the template; L_TEAM_X is where logo/name rendering begins
+    L_TEAM_X = 105
+    L_P_X    = 365
+    L_W_X    = 423
+    L_L_X    = 480
+    L_NR_X   = 539
+    L_PTS_X  = 605
+    L_NRR_X  = 682
+    R_OFF    = 710
+
+    # 4 team rows per group — sub-header at y=425..492, data rows below it
+    ROW_YS = [532, 613, 697, 778]
+
+    EMOJI_SZ = int(H * 0.038)
+
+    def draw_group(rows, right):
+        off = R_OFF if right else 0
+        txt_h = th()
+        name_h = th(font_name)
+        for i, (nm, st) in enumerate(rows):
+            if i >= len(ROW_YS):
+                break
+            cy  = ROW_YS[i]
+            ty  = cy - txt_h // 2
+            ty_name = cy - name_h // 2
+            nrr_str = f"{st['NRR']:+.2f}"
+            logo = _fetch_emoji_img(team_logos.get(nm), EMOJI_SZ)
+            team_x = L_TEAM_X + off
+            if logo:
+                ey = cy - EMOJI_SZ // 2
+                img.paste(logo, (team_x, ey), logo)
+                team_x += EMOJI_SZ + 6
+            # stat columns — POS numbers are pre-printed in template, skip them
+            stats = [
+                (str(st["P"]),        L_P_X  + off,  True ),
+                (str(st["W"]),        L_W_X  + off,  True ),
+                (str(st["L"]),        L_L_X  + off,  True ),
+                (str(st.get("T", 0)), L_NR_X + off,  True ),
+                (str(st["Pts"]),      L_PTS_X + off, True ),
+                (nrr_str,             L_NRR_X + off, True ),
+            ]
+            for text, cx, centered in stats:
+                x = (cx - tw(text) // 2) if centered else cx
+                d.text((x, ty), text, fill=DARK, font=font)
+            # team name — larger font
+            d.text((team_x, ty_name), nm[:14].upper(), fill=DARK, font=font_name)
+
+    for sg, right in [("A", False), ("B", True)]:
+        st = get_group_standings(tourney, "super8", sg)
+        if st:
+            draw_group(st, right)
 
     out_w = 1024
     out_h = int(H * out_w / W)
@@ -358,6 +461,51 @@ class TournamentStatusView(discord.ui.View):
         self.idx += 1
         self._update_nav()
         await interaction.response.edit_message(embed=_build_status_embed(self.tourney, self.pages[self.idx]), view=self)
+
+
+class T20StandingsView(discord.ui.View):
+    """Navigation buttons to switch between Group Stage and Super 8 standings images."""
+
+    def __init__(self, super16_buf: io.BytesIO, super8_buf: io.BytesIO, *, start_on_super8: bool = True):
+        super().__init__(timeout=120)
+        self.super16_buf = super16_buf
+        self.super8_buf = super8_buf
+        self._current = "super8" if start_on_super8 else "super16"
+        self._refresh_styles()
+
+    def _refresh_styles(self):
+        self.s16_btn.style = (discord.ButtonStyle.secondary
+                              if self._current == "super8" else discord.ButtonStyle.primary)
+        self.s8_btn.style = (discord.ButtonStyle.primary
+                             if self._current == "super8" else discord.ButtonStyle.secondary)
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+    @discord.ui.button(label="◀ Group Stage", custom_id="t20_s16", style=discord.ButtonStyle.secondary)
+    async def s16_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self._current == "super16":
+            return await interaction.response.defer()
+        self._current = "super16"
+        self._refresh_styles()
+        self.super16_buf.seek(0)
+        await interaction.response.edit_message(
+            attachments=[discord.File(fp=self.super16_buf, filename="points_table.png")],
+            view=self,
+        )
+
+    @discord.ui.button(label="Super 8 ▶", custom_id="t20_s8", style=discord.ButtonStyle.primary)
+    async def s8_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self._current == "super8":
+            return await interaction.response.defer()
+        self._current = "super8"
+        self._refresh_styles()
+        self.super8_buf.seek(0)
+        await interaction.response.edit_message(
+            attachments=[discord.File(fp=self.super8_buf, filename="super8_table.png")],
+            view=self,
+        )
 
 
 class TournamentCog(commands.GroupCog, group_name="tournament"):
@@ -1026,46 +1174,55 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         # T20 World Cup standings
         if t_type == "t20_world_cup":
             super8_matches = [m for m in tourney.get("schedule", []) if m.get("stage") == "super8"]
-            in_group_stage = not super8_matches  # image table only while groups are running
 
-            if in_group_stage:
-                # Generate the super16 points table image
+            if not super8_matches:
+                # Group stage only — single super16 image, no navigation needed
                 try:
                     buf = generate_t20wc_points_table(tourney)
                     return await interaction.followup.send(file=discord.File(fp=buf, filename="points_table.png"))
                 except Exception as e:
                     print(f"⚠️ Points table image failed: {e}")
-                    # fall through to embed on error
+                    # fall through to text embed on error
 
-            # Super 8 / knockout stage — text embed
+            # Super 8 active — try to generate both images with navigation buttons
+            s16_buf = s8_buf = None
+            try:
+                s16_buf = generate_t20wc_points_table(tourney)
+            except Exception as e:
+                print(f"⚠️ Super16 table failed: {e}")
+            if super8_matches:
+                try:
+                    s8_buf = generate_t20wc_super8_table(tourney)
+                except Exception as e:
+                    print(f"⚠️ Super8 table failed: {e}")
+
+            if s8_buf:
+                view = T20StandingsView(s16_buf, s8_buf, start_on_super8=True)
+                s8_buf.seek(0)
+                kwargs = dict(file=discord.File(fp=s8_buf, filename="super8_table.png"), view=view)
+                if not s16_buf:
+                    view.s16_btn.disabled = True
+                return await interaction.followup.send(**kwargs)
+            elif s16_buf:
+                s16_buf.seek(0)
+                return await interaction.followup.send(file=discord.File(fp=s16_buf, filename="points_table.png"))
+
+            # Both images failed — text embed fallback
             embed = discord.Embed(title=f"🌍 {tourney['name']} — Standings", color=discord.Color.gold())
             has_data = False
-            if super8_matches:
-                for sg in ["A", "B"]:
-                    st = get_group_standings(tourney, "super8", sg)
-                    if st:
-                        has_data = True
-                        rows = ["```", f"{'':2}{'Team':<20}{'P':>2}{'W':>2}{'L':>2}{'Pts':>4}{'NRR':>8}", "─"*42]
-                        for i, (nm, d) in enumerate(st, 1):
-                            arrow = "→ " if i <= 2 else "  "
-                            rows.append(f"{arrow}{nm[:18]:<20}{d['P']:>2}{d['W']:>2}{d['L']:>2}{d['Pts']:>4}{d['NRR']:>+8.2f}")
-                        rows.append("```")
-                        embed.add_field(name=f"Super 8 — Group {sg}", value="\n".join(rows), inline=True)
-            else:
-                # group stage but image failed — fallback text
-                for grp in ["A", "B", "C", "D"]:
-                    st = get_group_standings(tourney, "group", grp)
-                    if st:
-                        has_data = True
-                        rows = ["```", f"{'':2}{'Team':<20}{'P':>2}{'W':>2}{'L':>2}{'Pts':>4}{'NRR':>8}", "─"*42]
-                        for i, (nm, d) in enumerate(st, 1):
-                            arrow = "→ " if i <= 2 else "  "
-                            rows.append(f"{arrow}{nm[:18]:<20}{d['P']:>2}{d['W']:>2}{d['L']:>2}{d['Pts']:>4}{d['NRR']:>+8.2f}")
-                        rows.append("```")
-                        embed.add_field(name=f"Group {grp}", value="\n".join(rows), inline=True)
+            for sg in ["A", "B"]:
+                st = get_group_standings(tourney, "super8", sg)
+                if st:
+                    has_data = True
+                    rows = ["```", f"{'':2}{'Team':<20}{'P':>2}{'W':>2}{'L':>2}{'Pts':>4}{'NRR':>8}", "─"*42]
+                    for i, (nm, d) in enumerate(st, 1):
+                        arrow = "-> " if i <= 2 else "   "
+                        rows.append(f"{arrow}{nm[:18]:<20}{d['P']:>2}{d['W']:>2}{d['L']:>2}{d['Pts']:>4}{d['NRR']:>+8.2f}")
+                    rows.append("```")
+                    embed.add_field(name=f"Super 8 - Group {sg}", value="\n".join(rows), inline=True)
             if not has_data:
                 embed.description = "No matches completed yet."
-            embed.set_footer(text="→ marks teams that advance to the next stage")
+            embed.set_footer(text="-> marks teams that advance to the next stage")
             return await interaction.followup.send(embed=embed)
 
         # Round Robin: existing image-based standings
@@ -1296,10 +1453,15 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         embed = discord.Embed(title=f"📋 Squad: {team['name']}{grp_txt}", description=f"👤 **Owner:** <@{team['owner_id']}> | **Total Players:** {len(team['squad'])}", color=discord.Color.blue())
         def format_player(p, cat):
             style = p["role"].split("_", 1)[1].replace("_", " ") if "_" in p["role"] else ""
-            if cat == "bat":  return f"**{p['name']}** *(Batter)*"
-            elif cat == "wk": return f"**{p['name']}** *(WK Batter)*"
-            elif cat == "ar": return f"**{p['name']}** *({style} All-Rounder)*" if style else f"**{p['name']}** *(All-Rounder)*"
-            else:             return f"**{p['name']}** *({style} Bowler)*" if style else f"**{p['name']}** *(Bowler)*"
+            if p.get("injured"):
+                sev = p.get("injury_severity", 1)
+                inj = f" 🚑 *(misses next {sev} team match{'es' if sev > 1 else ''})*"
+            else:
+                inj = ""
+            if cat == "bat":  return f"**{p['name']}** *(Batter)*{inj}"
+            elif cat == "wk": return f"**{p['name']}** *(WK Batter)*{inj}"
+            elif cat == "ar": return f"**{p['name']}** *({style} All-Rounder)*{inj}" if style else f"**{p['name']}** *(All-Rounder)*{inj}"
+            else:             return f"**{p['name']}** *({style} Bowler)*{inj}" if style else f"**{p['name']}** *(Bowler)*{inj}"
         if batters: embed.add_field(name="🏏 Batters", value="\n".join([format_player(p, "bat") for p in batters]), inline=False)
         if wks: embed.add_field(name="🧤 Wicket-Keepers", value="\n".join([format_player(p, "wk") for p in wks]), inline=False)
         if all_rounders: embed.add_field(name="⚔️ All-Rounders", value="\n".join([format_player(p, "ar") for p in all_rounders]), inline=False)
