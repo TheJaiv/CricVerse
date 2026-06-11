@@ -417,6 +417,61 @@ def generate_t20wc_knockouts_image(tourney: dict):
     return buf
 
 
+def generate_t20wc_match_banner(tourney: dict, match_data: dict) -> io.BytesIO:
+    """Generate pre-match banner using t20_match.png template."""
+    t1 = match_data.get("team1", "TBD")
+    t2 = match_data.get("team2", "TBD")
+    team_logos = {t["name"]: t.get("logo_url") or t.get("logo_emoji") for t in tourney.get("teams", [])}
+
+    img = Image.open("t20_match.png").convert("RGBA")
+    d   = ImageDraw.Draw(img)
+    W, H = img.size  # 1536 × 1024
+
+    _sz = 52
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", _sz)
+    except Exception:
+        try:
+            font = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", _sz)
+        except Exception:
+            font = ImageFont.load_default()
+
+    def _tw(t):
+        if hasattr(font, "getbbox"):
+            bb = font.getbbox(t); return bb[2] - bb[0]
+        return len(t) * 22
+
+    def _th():
+        bb = font.getbbox("Ag") if hasattr(font, "getbbox") else None
+        return (bb[3] - bb[1]) if bb else 30
+
+    EMOJI_SZ = 200
+    WHITE    = (255, 255, 255)
+
+    def draw_team(name, cx, logo_cy, name_cy):
+        logo = _fetch_emoji_img(team_logos.get(name), EMOJI_SZ)
+        if logo:
+            img.paste(logo, (cx - EMOJI_SZ // 2, logo_cy - EMOJI_SZ // 2), logo)
+        label = name[:14].upper()
+        d.text((cx - _tw(label) // 2, name_cy - _th() // 2), label, fill=WHITE, font=font)
+
+    # Template layout: VS starburst center (773, 531)
+    # Left team safe zone center (478, 531), right team (1070, 531)
+    # Name zone below logos at y=700
+    draw_team(t1, cx=478,  logo_cy=531, name_cy=700)
+    draw_team(t2, cx=1070, logo_cy=531, name_cy=700)
+
+    out_w   = 1024
+    out_h   = int(H * out_w / W)
+    out_img = Image.new("RGB", img.size, (0, 3, 24))
+    out_img.paste(img, mask=img.split()[3])
+    out_img = out_img.resize((out_w, out_h), Image.LANCZOS)
+    buf = io.BytesIO()
+    out_img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
 def _build_status_pages(tourney):
     """Returns list of (title, stage_type, group_key, matches) tuples."""
     schedule = tourney.get("schedule", [])
@@ -518,6 +573,7 @@ class TournamentStatusView(discord.ui.View):
         super().__init__(timeout=120)
         self.tourney = tourney
         self.pages = pages
+        self.show_banner = (tourney.get("tournament_type") == "t20_world_cup")
         self.idx = 0
         for i, (_, _, _, matches) in enumerate(pages):
             if any(m["status"] == "pending" for m in matches):
@@ -532,6 +588,12 @@ class TournamentStatusView(discord.ui.View):
         self.next_btn.disabled = (self.idx >= len(self.pages) - 1)
         self.page_btn.label = f"{self.idx + 1} / {len(self.pages)}"
 
+    def _make_embed(self):
+        embed = _build_status_embed(self.tourney, self.pages[self.idx])
+        if self.show_banner:
+            embed.set_image(url="attachment://t20_banner.png")
+        return embed
+
     async def on_timeout(self):
         for item in self.children:
             item.disabled = True
@@ -540,7 +602,13 @@ class TournamentStatusView(discord.ui.View):
     async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.idx -= 1
         self._update_nav()
-        await interaction.response.edit_message(embed=_build_status_embed(self.tourney, self.pages[self.idx]), view=self)
+        if self.show_banner:
+            await interaction.response.edit_message(
+                embed=self._make_embed(),
+                attachments=[discord.File("t20_banner.png")],
+                view=self)
+        else:
+            await interaction.response.edit_message(embed=self._make_embed(), view=self)
 
     @discord.ui.button(label="1 / 1", style=discord.ButtonStyle.secondary, disabled=True, row=0)
     async def page_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -550,7 +618,13 @@ class TournamentStatusView(discord.ui.View):
     async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.idx += 1
         self._update_nav()
-        await interaction.response.edit_message(embed=_build_status_embed(self.tourney, self.pages[self.idx]), view=self)
+        if self.show_banner:
+            await interaction.response.edit_message(
+                embed=self._make_embed(),
+                attachments=[discord.File("t20_banner.png")],
+                view=self)
+        else:
+            await interaction.response.edit_message(embed=self._make_embed(), view=self)
 
 
 class T20StandingsView(discord.ui.View):

@@ -30,7 +30,7 @@ from test_simulation import (
     _format_scorecard as _test_format_scorecard,
     _player_of_match as _test_player_of_match,
 )
-from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image
+from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner
 from subscription_manager import (
     load_data_from_bin, load_tournament_data_from_bin,
     save_data_to_bin, save_tournament_data_to_bin,
@@ -5033,8 +5033,21 @@ async def on_start_tournament_match(channel, manager_id, tourney, match_data):
     state.impact_player = tourney.get("impact_player", False)
     
     active_setups[channel.id] = ("tournament_setup", state)
-    
-    await channel.send(f"🏆 **Tournament Match {match_data['match_id']}**\n**{team1_name}** (<@{p1_id}>) vs **{team2_name}** (<@{p2_id}>)\n\nFormat: **{state.format_overs} Overs**")
+
+    if tourney.get("tournament_type") == "t20_world_cup":
+        r_label = match_data.get("round", f"Match {match_data['match_id']}")
+        try:
+            banner_buf = generate_t20wc_match_banner(tourney, match_data)
+            await channel.send(
+                f"🏆 **{tourney['name']}** — **{r_label}**\n<@{p1_id}> vs <@{p2_id}>",
+                file=discord.File(banner_buf, filename="match_banner.png")
+            )
+        except Exception as e:
+            print(f"⚠️ Match banner failed: {e}")
+            await channel.send(f"🏆 **Tournament Match {match_data['match_id']}**\n**{team1_name}** (<@{p1_id}>) vs **{team2_name}** (<@{p2_id}>)\n\nFormat: **{state.format_overs} Overs**")
+    else:
+        await channel.send(f"🏆 **Tournament Match {match_data['match_id']}**\n**{team1_name}** (<@{p1_id}>) vs **{team2_name}** (<@{p2_id}>)\n\nFormat: **{state.format_overs} Overs**")
+
     await prompt_tournament_xi(channel, state, 1)
 
 @bot.tree.command(name="endmatch", description="Force cancel the current match or setup in this channel.")
