@@ -143,7 +143,7 @@ def generate_t20wc_points_table(tourney) -> io.BytesIO:
     d   = ImageDraw.Draw(img)
     W, H = img.size  # 1508 × 1043
 
-    team_logos = {t["name"]: t.get("logo_url") or t.get("logo_emoji") for t in tourney.get("teams", [])}
+    team_logos = {t["name"]: t.get("logo_emoji") or t.get("logo_url") for t in tourney.get("teams", [])}
 
     _sz = int(H * 0.018)
     _sz_name = int(H * 0.021)
@@ -237,7 +237,7 @@ def generate_t20wc_super8_table(tourney) -> io.BytesIO:
     d   = ImageDraw.Draw(img)
     W, H = img.size  # 1484 × 1060
 
-    team_logos = {t["name"]: t.get("logo_url") or t.get("logo_emoji") for t in tourney.get("teams", [])}
+    team_logos = {t["name"]: t.get("logo_emoji") or t.get("logo_url") for t in tourney.get("teams", [])}
 
     try:
         font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", int(H * 0.018))
@@ -342,7 +342,7 @@ def generate_t20wc_knockouts_image(tourney: dict):
     d   = ImageDraw.Draw(img)
     W, H = img.size  # 1535 × 1024
 
-    team_logos = {t["name"]: t.get("logo_url") or t.get("logo_emoji") for t in tourney.get("teams", [])}
+    team_logos = {t["name"]: t.get("logo_emoji") or t.get("logo_url") for t in tourney.get("teams", [])}
 
     DARK      = (30, 30, 30)
     WIN_CLR   = (0, 110, 0)
@@ -1040,8 +1040,19 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         preview = discord.Embed(description=f"✅ **{team['name']}** color set to `{color.upper()}`.", color=int(color.lstrip('#'), 16))
         await interaction.response.send_message(embed=preview)
 
-    @app_commands.command(name="set_team_logo", description="[MANAGER/OWNER] Set a team's logo for scorecards (emoji, image URL, or PNG upload).")
-    async def set_team_logo(self, interaction: discord.Interaction, team_name: str, emoji: str = None, logo_url: str = None, logo_image: discord.Attachment = None):
+    @app_commands.command(name="set_team_logo", description="[MANAGER/OWNER] Set a team's standings logo (emoji/flag) or match logo (image URL/upload).")
+    @app_commands.describe(
+        logo_type="'standings' = emoji/flag for tables & bracket | 'match' = image for scorecards & match banner",
+        team_name="Team name",
+        emoji="Emoji or :shortcode: (standings only)",
+        logo_url="Direct image URL (match only)",
+        logo_image="Upload a PNG/JPG (match only)",
+    )
+    @app_commands.choices(logo_type=[
+        app_commands.Choice(name="standings", value="standings"),
+        app_commands.Choice(name="match",     value="match"),
+    ])
+    async def set_team_logo(self, interaction: discord.Interaction, logo_type: str, team_name: str, emoji: str = None, logo_url: str = None, logo_image: discord.Attachment = None):
         server_id = str(interaction.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney:
@@ -1052,32 +1063,31 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         is_mgr = self.is_manager(interaction, tourney)
         if not is_mgr and team.get("owner_id") != str(interaction.user.id):
             return await interaction.response.send_message("❌ Only Managers or the Team Owner can set the logo.", ephemeral=True)
-        if not emoji and not logo_url and not logo_image:
-            return await interaction.response.send_message("❌ Provide an emoji, a logo_url, or upload a PNG image.", ephemeral=True)
-        # PNG attachment takes priority, then URL, then emoji
-        if logo_image:
-            if not logo_image.content_type or not logo_image.content_type.startswith("image/"):
-                return await interaction.response.send_message("❌ Attachment must be an image file.", ephemeral=True)
-            team["logo_url"] = logo_image.url
-            team.pop("logo_emoji", None)
+
+        if logo_type == "standings":
+            if not emoji:
+                return await interaction.response.send_message("❌ Provide an emoji or :shortcode: for the standings logo.", ephemeral=True)
+            import re as _re
+            raw = emoji.strip()
+            if not _re.match(r'<a?:\w+:\d+>', raw):
+                ge = discord.utils.get(interaction.guild.emojis, name=raw.strip(':'))
+                if ge:
+                    raw = str(ge)
+            team["logo_emoji"] = raw
             save_tournament(tourney)
-            return await interaction.response.send_message(f"✅ Logo for **{team['name']}** set from uploaded image — will appear on scorecards.")
-        if logo_url:
-            team["logo_url"] = logo_url.strip()
-            team.pop("logo_emoji", None)
-            save_tournament(tourney)
-            return await interaction.response.send_message(f"✅ Logo for **{team['name']}** set from URL — will appear on scorecards.")
-        import re as _re
-        raw = emoji.strip()
-        if not _re.match(r'<a?:\w+:\d+>', raw):
-            name = raw.strip(':')
-            ge = discord.utils.get(interaction.guild.emojis, name=name)
-            if ge:
-                raw = str(ge)
-        team["logo_emoji"] = raw
-        team.pop("logo_url", None)
-        save_tournament(tourney)
-        await interaction.response.send_message(f"✅ Logo for **{team['name']}** set to {raw} — will appear on scorecards.")
+            await interaction.response.send_message(f"✅ Standings logo for **{team['name']}** set to {raw} — used in points table & bracket.")
+        else:  # match
+            if logo_image:
+                if not logo_image.content_type or not logo_image.content_type.startswith("image/"):
+                    return await interaction.response.send_message("❌ Attachment must be an image file.", ephemeral=True)
+                team["logo_url"] = logo_image.url
+                save_tournament(tourney)
+                return await interaction.response.send_message(f"✅ Match logo for **{team['name']}** set from uploaded image — used in scorecards & match banner.")
+            if logo_url:
+                team["logo_url"] = logo_url.strip()
+                save_tournament(tourney)
+                return await interaction.response.send_message(f"✅ Match logo for **{team['name']}** set from URL — used in scorecards & match banner.")
+            await interaction.response.send_message("❌ Provide a logo_url or upload an image for the match logo.", ephemeral=True)
 
     @app_commands.command(name="set_injury_channel", description="[MANAGER] Set the channel where injury reports are posted. Run this inside the target channel.")
     async def set_injury_channel(self, interaction: discord.Interaction):

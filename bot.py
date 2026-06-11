@@ -6888,47 +6888,46 @@ class PrefixCog(commands.Cog):
         save_tournament(tourney)
         await ctx.send(embed=discord.Embed(description=f"✅ **{team['name']}** color set to `{color.upper()}`.", color=int(color.lstrip('#'), 16)))
 
-    @tournament.command(name="set_team_logo", help="[MANAGER/OWNER] Set a team's logo (emoji, URL, or attach a PNG).\nUsage: tournament set_team_logo \"<team_name>\" <emoji_or_url>  OR attach a PNG")
-    async def t_set_team_logo(self, ctx, team_name: str, *, emoji: str = None):
+    @tournament.command(name="set_team_logo", help="[MANAGER/OWNER] Set a team's logo.\nUsage: cvt set_team_logo <standings|match> \"<team_name>\" <emoji_or_url>  (or attach PNG for match)")
+    async def t_set_team_logo(self, ctx, logo_type: str, team_name: str, *, value: str = None):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney:
             return await ctx.send("❌ No tournament exists.")
+        if logo_type not in ("standings", "match"):
+            return await ctx.send("❌ First argument must be `standings` or `match`.\nUsage: `cvt set_team_logo <standings|match> \"<team_name>\" <emoji_or_url>`")
         team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.lower()), None)
         if not team:
             return await ctx.send(f"❌ Team **{team_name}** not found.")
         is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
         if not is_mgr and team.get("owner_id") != str(ctx.author.id):
             return await ctx.send("❌ Only Managers or the Team Owner can set the logo.")
-        # PNG attachment
-        if ctx.message.attachments:
-            att = ctx.message.attachments[0]
-            if not (att.content_type and att.content_type.startswith("image/")):
-                return await ctx.send("❌ Attachment must be an image file.")
-            team["logo_url"] = att.url
-            team.pop("logo_emoji", None)
+
+        if logo_type == "standings":
+            if not value:
+                return await ctx.send("❌ Provide an emoji or :shortcode: for the standings logo.")
+            import re as _re
+            raw = value.strip()
+            if not _re.match(r'<a?:\w+:\d+>', raw):
+                ge = discord.utils.get(ctx.guild.emojis, name=raw.strip(':'))
+                if ge:
+                    raw = str(ge)
+            team["logo_emoji"] = raw
             save_tournament(tourney)
-            return await ctx.send(f"✅ Logo for **{team['name']}** set from uploaded image — will appear on scorecards.")
-        if not emoji:
-            return await ctx.send("❌ Provide an emoji, a URL, or attach a PNG image.")
-        import re as _re
-        raw = emoji.strip()
-        # Direct URL
-        if raw.startswith("http://") or raw.startswith("https://"):
-            team["logo_url"] = raw
-            team.pop("logo_emoji", None)
-            save_tournament(tourney)
-            return await ctx.send(f"✅ Logo for **{team['name']}** set from URL — will appear on scorecards.")
-        # Resolve :name: shortcode → full <:name:id> using guild emoji list
-        if not _re.match(r'<a?:\w+:\d+>', raw):
-            name = raw.strip(':')
-            ge = discord.utils.get(ctx.guild.emojis, name=name)
-            if ge:
-                raw = str(ge)
-        team["logo_emoji"] = raw
-        team.pop("logo_url", None)
-        save_tournament(tourney)
-        await ctx.send(f"✅ Logo for **{team['name']}** set to {raw} — will appear on future scorecards.")
+            await ctx.send(f"✅ Standings logo for **{team['name']}** set to {raw} — used in points table & bracket.")
+        else:  # match
+            if ctx.message.attachments:
+                att = ctx.message.attachments[0]
+                if not (att.content_type and att.content_type.startswith("image/")):
+                    return await ctx.send("❌ Attachment must be an image file.")
+                team["logo_url"] = att.url
+                save_tournament(tourney)
+                return await ctx.send(f"✅ Match logo for **{team['name']}** set from uploaded image — used in scorecards & match banner.")
+            if value and (value.startswith("http://") or value.startswith("https://")):
+                team["logo_url"] = value.strip()
+                save_tournament(tourney)
+                return await ctx.send(f"✅ Match logo for **{team['name']}** set from URL — used in scorecards & match banner.")
+            await ctx.send("❌ Provide a URL or attach an image for the match logo.")
 
     @tournament.command(name="set_injury_channel", help="[MANAGER] Set this channel as the injury report channel.\nUsage: tournament set_injury_channel")
     async def t_set_injury_channel(self, ctx):
