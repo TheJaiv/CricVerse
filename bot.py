@@ -4948,17 +4948,47 @@ async def simulatematch_cmd(interaction: discord.Interaction):
 async def on_start_tournament_match(channel, manager_id, tourney, match_data):
     team1_name = match_data["team1"]
     team2_name = match_data["team2"]
+    # Reload fresh tourney so injury data from the last match is current
+    tourney = get_server_tournament(str(tourney["server_id"])) or tourney
     t1_data = next(t for t in tourney["teams"] if t["name"] == team1_name)
     t2_data = next(t for t in tourney["teams"] if t["name"] == team2_name)
-    
+
+    current_mid = match_data["match_id"]
+
+    # Clear injuries that have expired before this match
+    for team_data in [t1_data, t2_data]:
+        for p in team_data["squad"]:
+            if p.get("injured") and p.get("injury_until_match", 0) < current_mid:
+                p.pop("injured", None)
+                p.pop("injury_until_match", None)
+                p.pop("injury_severity", None)
+
+    # Announce any injury news queued from the last match
+    injury_news = tourney.pop("pending_injury_news", [])
+    if injury_news:
+        lines = ["🚑 **Injury Report:**"]
+        for item in injury_news:
+            m_word = "team match" if item["severity"] == 1 else "team matches"
+            lines.append(f"• **{item['player']}** ({item['team']}) — ruled out for their next **{item['severity']}** {m_word}")
+        inj_ch_id = tourney.get("injury_channel_id")
+        announce_ch = (bot.get_channel(int(inj_ch_id)) if inj_ch_id else None) or channel
+        await announce_ch.send("\n".join(lines))
+
+    save_tournament(tourney)
+
+    # Filter injured players from XI selection (fallback to full squad if < 11 fit)
+    def available_squad(squad):
+        fit = [p for p in squad if not p.get("injured")]
+        return fit if len(fit) >= 11 else squad
+
     p1_id = int(t1_data["owner_id"])
     p2_id = int(t2_data["owner_id"])
-    
+
     state = MatchSetupState(None, None, p1_id, p2_id)
     state.t1_name = team1_name
     state.t2_name = team2_name
-    state.t1_squad = t1_data["squad"]
-    state.t2_squad = t2_data["squad"]
+    state.t1_squad = available_squad(t1_data["squad"])
+    state.t2_squad = available_squad(t2_data["squad"])
     state.t1_color = t1_data.get("color", "#6B7280")
     state.t2_color = t2_data.get("color", "#6B7280")
     state.tournament_server_id = tourney["server_id"]
@@ -6060,10 +6090,15 @@ class PrefixCog(commands.Cog):
 
         def _fmt(p, cat):
             style = p["role"].split("_", 1)[1].replace("_", " ") if "_" in p["role"] else ""
-            if cat == "bat":  return f"**{p['name']}** *(Batter)*"
-            elif cat == "wk": return f"**{p['name']}** *(WK Batter)*"
-            elif cat == "ar": return f"**{p['name']}** *({style} All-Rounder)*" if style else f"**{p['name']}** *(All-Rounder)*"
-            else:             return f"**{p['name']}** *({style} Bowler)*" if style else f"**{p['name']}** *(Bowler)*"
+            if p.get("injured"):
+                sev = p.get("injury_severity", 1)
+                inj = f" 🚑 *(misses next {sev} team match{'es' if sev > 1 else ''})*"
+            else:
+                inj = ""
+            if cat == "bat":  return f"**{p['name']}** *(Batter)*{inj}"
+            elif cat == "wk": return f"**{p['name']}** *(WK Batter)*{inj}"
+            elif cat == "ar": return f"**{p['name']}** *({style} All-Rounder)*{inj}" if style else f"**{p['name']}** *(All-Rounder)*{inj}"
+            else:             return f"**{p['name']}** *({style} Bowler)*{inj}" if style else f"**{p['name']}** *(Bowler)*{inj}"
 
         if batters: embed.add_field(name="🏏 Batters", value="\n".join([_fmt(p, "bat") for p in batters]), inline=False)
         if wks: embed.add_field(name="🧤 Wicket-Keepers", value="\n".join([_fmt(p, "wk") for p in wks]), inline=False)
@@ -6076,13 +6111,14 @@ class PrefixCog(commands.Cog):
     async def tournament(self, ctx):
         await ctx.send_help(ctx.command)
 
-    @tournament.command(name="create", help="[ADMIN] Create a new tournament.\nUsage: tournament create \"<name>\" <format> [impact_player=true/false]")
+    @tournament.command(name="create", help="[ADMIN] Create a new tournament.\nUsage: tournament create \"<name>\" <format> [impact_player=true/false] [injuries=true/false]")
     async def t_create(self, ctx, name: str, format_str: str, *options: str):
-        kwargs = { 'impact_player': False }
+        kwargs = { 'impact_player': False, 'injuries': False }
         for opt in options:
             try:
                 key, value = opt.split('=', 1)
                 if key == 'impact_player': kwargs['impact_player'] = to_bool(value)
+                elif key == 'injuries': kwargs['injuries'] = to_bool(value)
             except ValueError:
                 return await ctx.send(f"❌ Invalid option format: `{opt}`. Must be `key=value`.")
 
@@ -6105,7 +6141,8 @@ class PrefixCog(commands.Cog):
         t_data = {
             "server_id": server_id, "name": name, "managers": [str(ctx.author.id)], "teams": [],
             "status": "registration", "schedule": [], "current_match_idx": 0, "stats": {},
-            "format_overs": format_overs, "min_squad": 11, "max_squad": 15, "impact_player": kwargs['impact_player']
+            "format_overs": format_overs, "min_squad": 11, "max_squad": 15,
+            "impact_player": kwargs['impact_player'], "injuries_enabled": kwargs['injuries'],
         }
         save_tournament(t_data)
         await ctx.send(f"🏆 **Tournament Created:** `{name}`\nUse `cv tournament add_team` to get started!")
@@ -6822,6 +6859,17 @@ class PrefixCog(commands.Cog):
         team.pop("logo_url", None)
         save_tournament(tourney)
         await ctx.send(f"✅ Logo for **{team['name']}** set to {raw} — will appear on future scorecards.")
+
+    @tournament.command(name="set_injury_channel", help="[MANAGER] Set this channel as the injury report channel.\nUsage: tournament set_injury_channel")
+    async def t_set_injury_channel(self, ctx):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        tourney["injury_channel_id"] = str(ctx.channel.id)
+        save_tournament(tourney)
+        await ctx.send(f"✅ Injury reports will now be posted in {ctx.channel.mention}.")
 
     @tournament.command(name="match_scorecard", help="View the scorecard image for a completed match.\nUsage: tournament match_scorecard <match_id>")
     async def t_match_scorecard(self, ctx, match_id: int):
