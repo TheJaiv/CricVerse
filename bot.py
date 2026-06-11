@@ -30,7 +30,7 @@ from test_simulation import (
     _format_scorecard as _test_format_scorecard,
     _player_of_match as _test_player_of_match,
 )
-from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView
+from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image
 from subscription_manager import (
     load_data_from_bin, load_tournament_data_from_bin,
     save_data_to_bin, save_tournament_data_to_bin,
@@ -6462,6 +6462,11 @@ class PrefixCog(commands.Cog):
 
         await ctx.send(embed=embed, view=view)
 
+        if t_type == "t20_world_cup":
+            ko_buf = generate_t20wc_knockouts_image(tourney)
+            if ko_buf:
+                await ctx.send(file=discord.File(ko_buf, filename="knockouts.png"))
+
     @tournament.command(name="groups", help="[T20 WC] View schedule grouped by stage/group.\nUsage: tournament groups")
     async def t_groups(self, ctx):
         server_id = str(ctx.guild.id)
@@ -6681,8 +6686,8 @@ class PrefixCog(commands.Cog):
             
         top4 = real_teams[:4]
         
-        sf1 = {"match_id": len(tourney["schedule"]) + 1, "round": "Semi-Final 1", "team1": top4[0], "team2": top4[3], "status": "pending", "result": None}
-        sf2 = {"match_id": len(tourney["schedule"]) + 2, "round": "Semi-Final 2", "team1": top4[1], "team2": top4[2], "status": "pending", "result": None}
+        sf1 = {"match_id": len(tourney["schedule"]) + 1, "round": "Semi-Final 1", "stage": "knockout", "team1": top4[0], "team2": top4[3], "status": "pending", "result": None}
+        sf2 = {"match_id": len(tourney["schedule"]) + 2, "round": "Semi-Final 2", "stage": "knockout", "team1": top4[1], "team2": top4[2], "status": "pending", "result": None}
         
         tourney["schedule"].extend([sf1, sf2])
         save_tournament(tourney)
@@ -7079,7 +7084,7 @@ class PrefixCog(commands.Cog):
         sf2 = next((m for m in tourney["schedule"] if m["round"] == "Semi-Final 2"), None)
         if sf1 and sf2 and sf1["status"] == "completed" and sf2["status"] == "completed":
             if not any(m["round"] == "Final" for m in tourney["schedule"]):
-                tourney["schedule"].append({"match_id": len(tourney["schedule"]) + 1, "round": "Final", "team1": sf1["result"]["winner"], "team2": sf2["result"]["winner"], "status": "pending", "result": None})
+                tourney["schedule"].append({"match_id": len(tourney["schedule"]) + 1, "round": "Final", "stage": "knockout", "team1": sf1["result"]["winner"], "team2": sf2["result"]["winner"], "status": "pending", "result": None})
         final_m = next((m for m in tourney["schedule"] if m["round"] == "Final"), None)
         if final_m and final_m["status"] == "completed":
             tourney["status"] = "completed"

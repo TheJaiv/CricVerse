@@ -327,6 +327,96 @@ def generate_t20wc_super8_table(tourney) -> io.BytesIO:
     return buf
 
 
+def generate_t20wc_knockouts_image(tourney: dict):
+    """Fill t20_knockouts.png template with knockout bracket info (T20 WC)."""
+    schedule = tourney.get("schedule", [])
+    ko_matches = [m for m in schedule if m.get("stage") == "knockout"]
+    if not ko_matches:
+        return None
+
+    sf1   = next((m for m in ko_matches if m.get("round") == "Semi-Final 1"), None)
+    sf2   = next((m for m in ko_matches if m.get("round") == "Semi-Final 2"), None)
+    final_m = next((m for m in ko_matches if m.get("round") == "Final"), None)
+
+    img = Image.open("t20_knockouts.png").convert("RGBA")
+    d   = ImageDraw.Draw(img)
+    W, H = img.size  # 1535 × 1024
+
+    team_logos = {t["name"]: t.get("logo_url") or t.get("logo_emoji") for t in tourney.get("teams", [])}
+
+    DARK      = (30, 30, 30)
+    WIN_CLR   = (0, 110, 0)
+    LOSE_CLR  = (155, 155, 155)
+
+    _sz = 21
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", _sz)
+    except Exception:
+        try:
+            font = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", _sz)
+        except Exception:
+            font = ImageFont.load_default()
+
+    def _tw(t):
+        if hasattr(font, "getbbox"):
+            bb = font.getbbox(t)
+            return bb[2] - bb[0]
+        return len(t) * 9
+
+    def _th():
+        bb = font.getbbox("Ag") if hasattr(font, "getbbox") else None
+        return (bb[3] - bb[1]) if bb else 14
+
+    def draw_team(team_name, logo_cx, logo_cy, name_cx, name_cy, color, emoji_sz):
+        logo = _fetch_emoji_img(team_logos.get(team_name), emoji_sz)
+        if logo:
+            img.paste(logo, (logo_cx - emoji_sz // 2, logo_cy - emoji_sz // 2), logo)
+        label = (team_name[:12].upper() if team_name and team_name != "TBD" else "TBD")
+        tx = name_cx - _tw(label) // 2
+        ty = name_cy - _th() // 2
+        d.text((tx, ty), label, fill=color, font=font)
+
+    def draw_match(match, t1_logo_cx, t2_logo_cx, logo_cy, t1_name_cx, t2_name_cx, name_cy, emoji_sz):
+        if not match:
+            return
+        t1   = match.get("team1") or "TBD"
+        t2   = match.get("team2") or "TBD"
+        res  = match.get("result")
+        w    = res.get("winner") if res else None
+        c1   = (WIN_CLR if t1 == w else LOSE_CLR) if w else DARK
+        c2   = (WIN_CLR if t2 == w else LOSE_CLR) if w else DARK
+        draw_team(t1, t1_logo_cx, logo_cy, t1_name_cx, name_cy, c1, emoji_sz)
+        draw_team(t2, t2_logo_cx, logo_cy, t2_name_cx, name_cy, c2, emoji_sz)
+
+    # New template layout (1535×1024):
+    # SF1 box x=64-479: T1 left-half cx=155, T2 right-half cx=387, VS at x≈271
+    # Final box x=566-968: T1 cx=655, T2 cx=879, VS at x≈767
+    # SF2 box x=1053-1466: T1 cx=1145, T2 cx=1375, VS at x≈1261
+    # All boxes: white interior starts y≈468, VS center y≈583
+    # → name above logo: name_cy=490, logo_cy=583 (aligned with VS row)
+    draw_match(sf1,
+               t1_logo_cx=155,  t2_logo_cx=387,  logo_cy=583,
+               t1_name_cx=155,  t2_name_cx=387,  name_cy=490, emoji_sz=100)
+
+    draw_match(final_m,
+               t1_logo_cx=655,  t2_logo_cx=879,  logo_cy=583,
+               t1_name_cx=655,  t2_name_cx=879,  name_cy=490, emoji_sz=90)
+
+    draw_match(sf2,
+               t1_logo_cx=1145, t2_logo_cx=1375, logo_cy=583,
+               t1_name_cx=1145, t2_name_cx=1375, name_cy=490, emoji_sz=100)
+
+    out_w  = 1024
+    out_h  = int(H * out_w / W)
+    out_img = Image.new("RGB", img.size, (255, 255, 255))
+    out_img.paste(img, mask=img.split()[3])
+    out_img = out_img.resize((out_w, out_h), Image.LANCZOS)
+    buf = io.BytesIO()
+    out_img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
 def _build_status_pages(tourney):
     """Returns list of (title, stage_type, group_key, matches) tuples."""
     schedule = tourney.get("schedule", [])
