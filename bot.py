@@ -2204,7 +2204,18 @@ async def prompt_over_pacing_hub(interaction, match: CricketMatch):
     if getattr(match, "impact_player", False):
         msg += "\n💡 **TIP:** Any player can use the `🔄 Impact Player` button below to make a sub!"
 
-    await channel.send(msg, embed=embed, view=view)
+    _t20wc_hub = False
+    _tid = getattr(match, "tournament_server_id", None)
+    if _tid:
+        _tv = get_server_tournament(_tid)
+        if _tv and _tv.get("tournament_type") == "t20_world_cup":
+            _t20wc_hub = True
+
+    if _t20wc_hub:
+        embed.set_thumbnail(url="attachment://t20_logo.png")
+        await channel.send(msg, embed=embed, view=view, file=discord.File("t20_logo.png"))
+    else:
+        await channel.send(msg, embed=embed, view=view)
 
 class OverControlHubView(discord.ui.View):
     def __init__(self, match: CricketMatch):
@@ -6337,8 +6348,12 @@ class PrefixCog(commands.Cog):
         if wks: embed.add_field(name="🧤 Wicket-Keepers", value="\n".join([format_player(p, "wk") for p in wks]), inline=False)
         if all_rounders: embed.add_field(name="⚔️ All-Rounders", value="\n".join([format_player(p, "ar") for p in all_rounders]), inline=False)
         if bowlers: embed.add_field(name="🎯 Bowlers", value="\n".join([format_player(p, "bowl") for p in bowlers]), inline=False)
-        
-        await ctx.send(embed=embed)
+
+        if tourney.get("tournament_type") == "t20_world_cup":
+            embed.set_image(url="attachment://t20_banner.png")
+            await ctx.send(embed=embed, file=discord.File("t20_banner.png"))
+        else:
+            await ctx.send(embed=embed)
 
     @tournament.command(name="start", help="[MANAGER] Lock registration and generate schedule.\nUsage: tournament start")
     async def t_start(self, ctx):
@@ -6437,6 +6452,9 @@ class PrefixCog(commands.Cog):
                 teams_str += f"• **{t['name']}**{grp} (<@{t['owner_id']}>) — {len(t.get('squad', []))}/{tourney.get('max_squad', 15)} players\n"
             embed.add_field(name="Registered Teams", value=teams_str or "No teams yet.", inline=False)
             embed.set_footer(text=f"Format: {tourney.get('format_overs', 20)} overs · Squad: {tourney.get('min_squad', 11)}–{tourney.get('max_squad', 15)} players")
+            if t_type == "t20_world_cup":
+                embed.set_image(url="attachment://t20_banner.png")
+                return await ctx.send(embed=embed, file=discord.File("t20_banner.png"))
             return await ctx.send(embed=embed)
 
         t_type = tourney.get("tournament_type", "round_robin")
@@ -6460,7 +6478,11 @@ class PrefixCog(commands.Cog):
         elif hint:
             embed.set_footer(text=hint)
 
-        await ctx.send(embed=embed, view=view)
+        if t_type == "t20_world_cup":
+            embed.set_image(url="attachment://t20_banner.png")
+            await ctx.send(embed=embed, view=view, file=discord.File("t20_banner.png"))
+        else:
+            await ctx.send(embed=embed, view=view)
 
         if t_type == "t20_world_cup":
             ko_buf = generate_t20wc_knockouts_image(tourney)
@@ -6490,7 +6512,8 @@ class PrefixCog(commands.Cog):
             winner = final["result"]["winner"] if final and final.get("result") else "TBD"
             embed.description = f"👑 **Champions: {winner}**"
 
-        await ctx.send(embed=embed, view=view)
+        embed.set_image(url="attachment://t20_banner.png")
+        await ctx.send(embed=embed, view=view, file=discord.File("t20_banner.png"))
 
     @tournament.command(name="set_schedule", help="[OWNER] Set a custom fixture order for the tournament.\nUsage: tournament set_schedule")
     async def t_set_schedule(self, ctx):
@@ -7208,37 +7231,49 @@ class PrefixCog(commands.Cog):
 
         # T20 World Cup standings
         if tourney.get("tournament_type") == "t20_world_cup":
-            super8_matches = [m for m in tourney.get("schedule", []) if m.get("stage") == "super8"]
+            schedule       = tourney.get("schedule", [])
+            super8_matches = [m for m in schedule if m.get("stage") == "super8"]
+            ko_matches     = [m for m in schedule if m.get("stage") == "knockout"]
 
-            if not super8_matches:
-                # Group stage only — single super16 image
+            if not super8_matches and not ko_matches:
+                # Group stage only — single image, no navigation needed
                 try:
                     buf = generate_t20wc_points_table(tourney)
                     return await ctx.send(file=discord.File(fp=buf, filename="points_table.png"))
                 except Exception as e:
                     print(f"⚠️ Points table image failed: {e}")
 
-            # Super 8 active — generate both images with navigation buttons
-            s16_buf = s8_buf = None
+            # Build available pages
+            pages = []
             try:
                 s16_buf = generate_t20wc_points_table(tourney)
+                pages.append(("Group Stage", "points_table.png", s16_buf))
             except Exception as e:
                 print(f"⚠️ Super16 table failed: {e}")
             if super8_matches:
                 try:
                     s8_buf = generate_t20wc_super8_table(tourney)
+                    pages.append(("Super 8", "super8_table.png", s8_buf))
                 except Exception as e:
                     print(f"⚠️ Super8 table failed: {e}")
+            if ko_matches:
+                try:
+                    ko_buf = generate_t20wc_knockouts_image(tourney)
+                    if ko_buf:
+                        pages.append(("Knockouts", "knockouts.png", ko_buf))
+                except Exception as e:
+                    print(f"⚠️ Knockouts image failed: {e}")
 
-            if s8_buf:
-                view = T20StandingsView(s16_buf, s8_buf, start_on_super8=True)
-                s8_buf.seek(0)
-                if not s16_buf:
-                    view.s16_btn.disabled = True
-                return await ctx.send(file=discord.File(fp=s8_buf, filename="super8_table.png"), view=view)
-            elif s16_buf:
-                s16_buf.seek(0)
-                return await ctx.send(file=discord.File(fp=s16_buf, filename="points_table.png"))
+            if len(pages) >= 2:
+                start_idx = len(pages) - 1
+                view = T20StandingsView(pages, start_idx=start_idx)
+                _, fname, buf = pages[start_idx]
+                buf.seek(0)
+                return await ctx.send(file=discord.File(fp=buf, filename=fname), view=view)
+            elif pages:
+                _, fname, buf = pages[0]
+                buf.seek(0)
+                return await ctx.send(file=discord.File(fp=buf, filename=fname))
 
             # Both images failed — text embed fallback
             from tournament_manager import get_group_standings

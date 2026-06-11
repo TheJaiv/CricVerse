@@ -554,48 +554,45 @@ class TournamentStatusView(discord.ui.View):
 
 
 class T20StandingsView(discord.ui.View):
-    """Navigation buttons to switch between Group Stage and Super 8 standings images."""
+    """◀ / ▶ navigation through Group Stage → Super 8 → Knockouts standings images."""
 
-    def __init__(self, super16_buf: io.BytesIO, super8_buf: io.BytesIO, *, start_on_super8: bool = True):
+    def __init__(self, pages: list, *, start_idx: int = 0):
         super().__init__(timeout=120)
-        self.super16_buf = super16_buf
-        self.super8_buf = super8_buf
-        self._current = "super8" if start_on_super8 else "super16"
-        self._refresh_styles()
+        # pages: list of (label, filename, buf)
+        self.pages = pages
+        self.idx   = start_idx
+        self._update_nav()
 
-    def _refresh_styles(self):
-        self.s16_btn.style = (discord.ButtonStyle.secondary
-                              if self._current == "super8" else discord.ButtonStyle.primary)
-        self.s8_btn.style = (discord.ButtonStyle.primary
-                             if self._current == "super8" else discord.ButtonStyle.secondary)
+    def _update_nav(self):
+        self.prev_btn.disabled = (self.idx == 0)
+        self.next_btn.disabled = (self.idx >= len(self.pages) - 1)
+        self.page_btn.label    = self.pages[self.idx][0]
 
     async def on_timeout(self):
         for item in self.children:
             item.disabled = True
 
-    @discord.ui.button(label="◀ Group Stage", custom_id="t20_s16", style=discord.ButtonStyle.secondary)
-    async def s16_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self._current == "super16":
-            return await interaction.response.defer()
-        self._current = "super16"
-        self._refresh_styles()
-        self.super16_buf.seek(0)
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
+    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.idx -= 1
+        self._update_nav()
+        label, fname, buf = self.pages[self.idx]
+        buf.seek(0)
         await interaction.response.edit_message(
-            attachments=[discord.File(fp=self.super16_buf, filename="points_table.png")],
-            view=self,
-        )
+            attachments=[discord.File(fp=buf, filename=fname)], view=self)
 
-    @discord.ui.button(label="Super 8 ▶", custom_id="t20_s8", style=discord.ButtonStyle.primary)
-    async def s8_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self._current == "super8":
-            return await interaction.response.defer()
-        self._current = "super8"
-        self._refresh_styles()
-        self.super8_buf.seek(0)
+    @discord.ui.button(label="...", style=discord.ButtonStyle.secondary, disabled=True)
+    async def page_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary)
+    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.idx += 1
+        self._update_nav()
+        label, fname, buf = self.pages[self.idx]
+        buf.seek(0)
         await interaction.response.edit_message(
-            attachments=[discord.File(fp=self.super8_buf, filename="super8_table.png")],
-            view=self,
-        )
+            attachments=[discord.File(fp=buf, filename=fname)], view=self)
 
 
 class TournamentCog(commands.GroupCog, group_name="tournament"):
@@ -1263,39 +1260,49 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
 
         # T20 World Cup standings
         if t_type == "t20_world_cup":
-            super8_matches = [m for m in tourney.get("schedule", []) if m.get("stage") == "super8"]
+            schedule      = tourney.get("schedule", [])
+            super8_matches = [m for m in schedule if m.get("stage") == "super8"]
+            ko_matches     = [m for m in schedule if m.get("stage") == "knockout"]
 
-            if not super8_matches:
-                # Group stage only — single super16 image, no navigation needed
+            if not super8_matches and not ko_matches:
+                # Group stage only — single image, no navigation needed
                 try:
                     buf = generate_t20wc_points_table(tourney)
                     return await interaction.followup.send(file=discord.File(fp=buf, filename="points_table.png"))
                 except Exception as e:
                     print(f"⚠️ Points table image failed: {e}")
-                    # fall through to text embed on error
 
-            # Super 8 active — try to generate both images with navigation buttons
-            s16_buf = s8_buf = None
+            # Build available pages
+            pages = []
             try:
                 s16_buf = generate_t20wc_points_table(tourney)
+                pages.append(("Group Stage", "points_table.png", s16_buf))
             except Exception as e:
                 print(f"⚠️ Super16 table failed: {e}")
             if super8_matches:
                 try:
                     s8_buf = generate_t20wc_super8_table(tourney)
+                    pages.append(("Super 8", "super8_table.png", s8_buf))
                 except Exception as e:
                     print(f"⚠️ Super8 table failed: {e}")
+            if ko_matches:
+                try:
+                    ko_buf = generate_t20wc_knockouts_image(tourney)
+                    if ko_buf:
+                        pages.append(("Knockouts", "knockouts.png", ko_buf))
+                except Exception as e:
+                    print(f"⚠️ Knockouts image failed: {e}")
 
-            if s8_buf:
-                view = T20StandingsView(s16_buf, s8_buf, start_on_super8=True)
-                s8_buf.seek(0)
-                kwargs = dict(file=discord.File(fp=s8_buf, filename="super8_table.png"), view=view)
-                if not s16_buf:
-                    view.s16_btn.disabled = True
-                return await interaction.followup.send(**kwargs)
-            elif s16_buf:
-                s16_buf.seek(0)
-                return await interaction.followup.send(file=discord.File(fp=s16_buf, filename="points_table.png"))
+            if len(pages) >= 2:
+                start_idx = len(pages) - 1
+                view = T20StandingsView(pages, start_idx=start_idx)
+                _, fname, buf = pages[start_idx]
+                buf.seek(0)
+                return await interaction.followup.send(file=discord.File(fp=buf, filename=fname), view=view)
+            elif pages:
+                _, fname, buf = pages[0]
+                buf.seek(0)
+                return await interaction.followup.send(file=discord.File(fp=buf, filename=fname))
 
             # Both images failed — text embed fallback
             embed = discord.Embed(title=f"🌍 {tourney['name']} — Standings", color=discord.Color.gold())
