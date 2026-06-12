@@ -549,7 +549,21 @@ def _build_status_embed(tourney, page_info):
             lines.append(f"`#{m['match_id']}` {tag}{t1b} {r['t1_runs']}/{r['t1_wickets']} vs {t2b} {r['t2_runs']}/{r['t2_wickets']} ✅")
         else:
             lines.append(f"`#{m['match_id']}` {tag}{m['team1']} vs {m['team2']} ⏳")
-    embed.add_field(name="Matches", value="\n".join(lines) or "No matches", inline=False)
+    # Split into multiple fields if content exceeds Discord's 1024-char limit
+    chunks, current = [], []
+    current_len = 0
+    for line in lines:
+        if current_len + len(line) + 1 > 1020 and current:
+            chunks.append("\n".join(current))
+            current, current_len = [], 0
+        current.append(line)
+        current_len += len(line) + 1
+    if current:
+        chunks.append("\n".join(current))
+    if not chunks:
+        chunks = ["No matches"]
+    for i, chunk in enumerate(chunks):
+        embed.add_field(name="Matches" if i == 0 else "​", value=chunk, inline=False)
 
     if stage_type in ("group", "super8") and group_key:
         st = get_group_standings(tourney, stage_type, group_key)
@@ -910,11 +924,21 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             type_label = "T20 World Cup" if t_type == "t20_world_cup" else "Round Robin"
             embed = discord.Embed(title=f"🏆 {tourney['name']}", color=discord.Color.gold())
             embed.description = f"📝 **Registration Phase** · {type_label}"
-            teams_str = ""
+            team_lines = []
             for t in tourney["teams"]:
                 grp = f" · Group **{t['group']}**" if t.get("group") else ""
-                teams_str += f"• **{t['name']}**{grp} (<@{t['owner_id']}>) — {len(t.get('squad', []))}/{tourney.get('max_squad', 15)} players\n"
-            embed.add_field(name="Registered Teams", value=teams_str or "No teams yet.", inline=False)
+                team_lines.append(f"• **{t['name']}**{grp} (<@{t['owner_id']}>) — {len(t.get('squad', []))}/{tourney.get('max_squad', 15)} players")
+            if not team_lines:
+                embed.add_field(name="Registered Teams", value="No teams yet.", inline=False)
+            else:
+                chunks, cur, cur_len = [], [], 0
+                for line in team_lines:
+                    if cur_len + len(line) + 1 > 1020 and cur:
+                        chunks.append("\n".join(cur)); cur, cur_len = [], 0
+                    cur.append(line); cur_len += len(line) + 1
+                if cur: chunks.append("\n".join(cur))
+                for i, chunk in enumerate(chunks):
+                    embed.add_field(name="Registered Teams" if i == 0 else "​", value=chunk, inline=False)
             embed.set_footer(text=f"Format: {tourney.get('format_overs', 20)} overs · Squad: {tourney.get('min_squad', 11)}–{tourney.get('max_squad', 15)} players")
             return await interaction.response.send_message(embed=embed)
 

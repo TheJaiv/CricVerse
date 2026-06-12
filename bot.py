@@ -6466,11 +6466,21 @@ class PrefixCog(commands.Cog):
             type_label = "T20 World Cup" if t_type == "t20_world_cup" else "Round Robin"
             embed = discord.Embed(title=f"🏆 {tourney['name']}", color=discord.Color.gold())
             embed.description = f"📝 **Registration Phase** · {type_label}"
-            teams_str = ""
+            team_lines = []
             for t in tourney["teams"]:
                 grp = f" · Group **{t['group']}**" if t.get("group") else ""
-                teams_str += f"• **{t['name']}**{grp} (<@{t['owner_id']}>) — {len(t.get('squad', []))}/{tourney.get('max_squad', 15)} players\n"
-            embed.add_field(name="Registered Teams", value=teams_str or "No teams yet.", inline=False)
+                team_lines.append(f"• **{t['name']}**{grp} (<@{t['owner_id']}>) — {len(t.get('squad', []))}/{tourney.get('max_squad', 15)} players")
+            if not team_lines:
+                embed.add_field(name="Registered Teams", value="No teams yet.", inline=False)
+            else:
+                chunks, cur, cur_len = [], [], 0
+                for line in team_lines:
+                    if cur_len + len(line) + 1 > 1020 and cur:
+                        chunks.append("\n".join(cur)); cur, cur_len = [], 0
+                    cur.append(line); cur_len += len(line) + 1
+                if cur: chunks.append("\n".join(cur))
+                for i, chunk in enumerate(chunks):
+                    embed.add_field(name="Registered Teams" if i == 0 else "​", value=chunk, inline=False)
             embed.set_footer(text=f"Format: {tourney.get('format_overs', 20)} overs · Squad: {tourney.get('min_squad', 11)}–{tourney.get('max_squad', 15)} players")
             if t_type == "t20_world_cup":
                 embed.set_image(url="attachment://t20_banner.png")
