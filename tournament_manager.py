@@ -421,32 +421,38 @@ def generate_t20wc_match_banner(tourney: dict, match_data: dict) -> io.BytesIO:
     """Generate pre-match banner using t20_match.png template."""
     t1 = match_data.get("team1", "TBD")
     t2 = match_data.get("team2", "TBD")
-    team_logos = {t["name"]: t.get("logo_match") or t.get("logo_standings") for t in tourney.get("teams", [])}
+    team_logos = {t["name"]: t.get("logo_standings") or t.get("logo_match") for t in tourney.get("teams", [])}
 
     img = Image.open("t20_match.png").convert("RGBA")
     d   = ImageDraw.Draw(img)
     W, H = img.size  # 1536 × 1024
 
-    _sz = 52
+    _sz      = 52
+    _sz_lbl  = 38
     try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", _sz)
+        font     = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", _sz)
+        font_lbl = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", _sz_lbl)
     except Exception:
         try:
-            font = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", _sz)
+            font     = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", _sz)
+            font_lbl = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", _sz_lbl)
         except Exception:
-            font = ImageFont.load_default()
+            font = font_lbl = ImageFont.load_default()
 
-    def _tw(t):
-        if hasattr(font, "getbbox"):
-            bb = font.getbbox(t); return bb[2] - bb[0]
+    def _tw(t, f=None):
+        f = f or font
+        if hasattr(f, "getbbox"):
+            bb = f.getbbox(t); return bb[2] - bb[0]
         return len(t) * 22
 
-    def _th():
-        bb = font.getbbox("Ag") if hasattr(font, "getbbox") else None
+    def _th(f=None):
+        f = f or font
+        bb = f.getbbox("Ag") if hasattr(f, "getbbox") else None
         return (bb[3] - bb[1]) if bb else 30
 
     EMOJI_SZ = 200
     WHITE    = (255, 255, 255)
+    CYAN     = (0, 200, 232)
 
     def draw_team(name, cx, logo_cy, name_cy):
         logo = _fetch_emoji_img(team_logos.get(name), EMOJI_SZ)
@@ -460,6 +466,25 @@ def generate_t20wc_match_banner(tourney: dict, match_data: dict) -> io.BytesIO:
     # Name zone below logos at y=700
     draw_team(t1, cx=478,  logo_cy=531, name_cy=700)
     draw_team(t2, cx=1070, logo_cy=531, name_cy=700)
+
+    # Match number + group/round label at y≈810
+    stage   = match_data.get("stage", "")
+    group   = match_data.get("group", "")
+    round_l = match_data.get("round", "")
+    mid     = match_data.get("match_id", "")
+    if stage == "group" and group:
+        label = f"MATCH {mid}  •  GROUP {group}"
+    elif stage == "super8" and group:
+        label = f"MATCH {mid}  •  SUPER 8 — GROUP {group}"
+    elif stage == "knockout" and round_l:
+        label = f"MATCH {mid}  •  {round_l.upper()}"
+    elif round_l:
+        label = f"MATCH {mid}  •  {round_l.upper()}"
+    else:
+        label = f"MATCH {mid}" if mid else ""
+    if label:
+        lx = W // 2 - _tw(label, font_lbl) // 2
+        d.text((lx, 820), label, fill=CYAN, font=font_lbl)
 
     out_w   = 1024
     out_h   = int(H * out_w / W)
