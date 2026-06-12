@@ -912,7 +912,7 @@ def extract_scoreboard_data(match: CricketMatch) -> dict:
         if not tourney: return None
         t = next((x for x in tourney.get("teams", []) if x["name"] == team_name), None)
         if not t: return None
-        return t.get("logo_url") or t.get("logo_emoji")
+        return t.get("logo_match") or t.get("logo_standings")
 
     potm = get_player_of_the_match(match)
     inn1 = match.innings1
@@ -1103,7 +1103,7 @@ def reconstruct_scorecard_data(tourney: dict, m: dict) -> dict:
         "t1": {
             "name":       top_name.upper(),
             "color":      top_team.get("color", "#6B7280"),
-            "logo_emoji": top_team.get("logo_url") or top_team.get("logo_emoji"),
+            "logo_emoji": top_team.get("logo_match") or top_team.get("logo_standings"),
             "runs":       top_r,
             "wickets":    top_w,
             "balls":      top_b,
@@ -1115,7 +1115,7 @@ def reconstruct_scorecard_data(tourney: dict, m: dict) -> dict:
         "t2": {
             "name":       bot_name.upper(),
             "color":      bot_team.get("color", "#6B7280"),
-            "logo_emoji": bot_team.get("logo_url") or bot_team.get("logo_emoji"),
+            "logo_emoji": bot_team.get("logo_match") or bot_team.get("logo_standings"),
             "runs":       bot_r,
             "wickets":    bot_w,
             "balls":      bot_b,
@@ -5000,10 +5000,17 @@ async def on_start_tournament_match(channel, manager_id, tourney, match_data):
     # Announce any injury news queued from the last match
     injury_news = tourney.pop("pending_injury_news", [])
     if injury_news:
+        team_owners = {t["name"]: t.get("owner_id") for t in tourney.get("teams", [])}
         lines = ["🚑 **Injury Report:**"]
+        pings = []
         for item in injury_news:
             m_word = "team match" if item["severity"] == 1 else "team matches"
             lines.append(f"• **{item['player']}** ({item['team']}) — ruled out for their next **{item['severity']}** {m_word}")
+            owner_id = team_owners.get(item["team"])
+            if owner_id and owner_id not in pings:
+                pings.append(owner_id)
+        if pings:
+            lines.append(" ".join(f"<@{uid}>" for uid in pings))
         inj_ch_id = tourney.get("injury_channel_id")
         announce_ch = (bot.get_channel(int(inj_ch_id)) if inj_ch_id else None) or channel
         await announce_ch.send("\n".join(lines))
@@ -6888,7 +6895,7 @@ class PrefixCog(commands.Cog):
         save_tournament(tourney)
         await ctx.send(embed=discord.Embed(description=f"✅ **{team['name']}** color set to `{color.upper()}`.", color=int(color.lstrip('#'), 16)))
 
-    @tournament.command(name="set_team_logo", help="[MANAGER/OWNER] Set a team's logo.\nUsage: cvt set_team_logo <standings|match> \"<team_name>\" <emoji_or_url>  (or attach PNG for match)")
+    @tournament.command(name="set_team_logo", help="[MANAGER/OWNER] Set a team's logo.\nUsage: cvt set_team_logo <standings|match> \"<team_name>\" <emoji_or_url>  (or attach an image)")
     async def t_set_team_logo(self, ctx, logo_type: str, team_name: str, *, value: str = None):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
@@ -6903,31 +6910,32 @@ class PrefixCog(commands.Cog):
         if not is_mgr and team.get("owner_id") != str(ctx.author.id):
             return await ctx.send("❌ Only Managers or the Team Owner can set the logo.")
 
-        if logo_type == "standings":
-            if not value:
-                return await ctx.send("❌ Provide an emoji or :shortcode: for the standings logo.")
-            import re as _re
-            raw = value.strip()
-            if not _re.match(r'<a?:\w+:\d+>', raw):
-                ge = discord.utils.get(ctx.guild.emojis, name=raw.strip(':'))
-                if ge:
-                    raw = str(ge)
-            team["logo_emoji"] = raw
+        field = "logo_standings" if logo_type == "standings" else "logo_match"
+        label = "Standings" if logo_type == "standings" else "Match"
+        where = "points table & bracket" if logo_type == "standings" else "scorecards & match start banner"
+
+        if ctx.message.attachments:
+            att = ctx.message.attachments[0]
+            if not (att.content_type and att.content_type.startswith("image/")):
+                return await ctx.send("❌ Attachment must be an image file.")
+            team[field] = att.url
             save_tournament(tourney)
-            await ctx.send(f"✅ Standings logo for **{team['name']}** set to {raw} — used in points table & bracket.")
-        else:  # match
-            if ctx.message.attachments:
-                att = ctx.message.attachments[0]
-                if not (att.content_type and att.content_type.startswith("image/")):
-                    return await ctx.send("❌ Attachment must be an image file.")
-                team["logo_url"] = att.url
-                save_tournament(tourney)
-                return await ctx.send(f"✅ Match logo for **{team['name']}** set from uploaded image — used in scorecards & match banner.")
-            if value and (value.startswith("http://") or value.startswith("https://")):
-                team["logo_url"] = value.strip()
-                save_tournament(tourney)
-                return await ctx.send(f"✅ Match logo for **{team['name']}** set from URL — used in scorecards & match banner.")
-            await ctx.send("❌ Provide a URL or attach an image for the match logo.")
+            return await ctx.send(f"✅ {label} logo for **{team['name']}** set from uploaded image — used in {where}.")
+        if not value:
+            return await ctx.send("❌ Provide an emoji, a URL, or attach an image.")
+        import re as _re
+        raw = value.strip()
+        if raw.startswith("http://") or raw.startswith("https://"):
+            team[field] = raw
+            save_tournament(tourney)
+            return await ctx.send(f"✅ {label} logo for **{team['name']}** set from URL — used in {where}.")
+        if not _re.match(r'<a?:\w+:\d+>', raw):
+            ge = discord.utils.get(ctx.guild.emojis, name=raw.strip(':'))
+            if ge:
+                raw = str(ge)
+        team[field] = raw
+        save_tournament(tourney)
+        await ctx.send(f"✅ {label} logo for **{team['name']}** set to {raw} — used in {where}.")
 
     @tournament.command(name="set_injury_channel", help="[MANAGER] Set this channel as the injury report channel.\nUsage: tournament set_injury_channel")
     async def t_set_injury_channel(self, ctx):
