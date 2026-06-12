@@ -771,8 +771,6 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         for t in tourney["teams"]:
             if t["name"].lower() == team_name.lower():
                 return await interaction.response.send_message("❌ Team name already exists.", ephemeral=True)
-            if t["owner_id"] == str(owner.id):
-                return await interaction.response.send_message(f"❌ {owner.mention} already owns a team.", ephemeral=True)
 
         tourney["teams"].append({
             "name": team_name,
