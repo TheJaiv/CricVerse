@@ -6996,6 +6996,28 @@ class PrefixCog(commands.Cog):
         save_tournament(tourney)
         await ctx.send(f"✅ Injury reports will now be posted in {ctx.channel.mention}.")
 
+    @tournament.command(name="remove_injury", help="[MANAGER] Manually clear a player's injury.\nUsage: cvt remove_injury \"<team_name>\" \"<player_name>\"")
+    async def t_remove_injury(self, ctx, team_name: str, player_name: str):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.lower()), None)
+        if not team: return await ctx.send(f"❌ Team **{team_name}** not found.")
+        player = next((p for p in team.get("squad", []) if p["name"].lower() == player_name.lower()), None)
+        if not player: return await ctx.send(f"❌ Player **{player_name}** not found in **{team['name']}**.")
+        if not player.get("injured"): return await ctx.send(f"ℹ️ **{player['name']}** is not currently injured.")
+        player.pop("injured", None)
+        player.pop("injury_until_match", None)
+        player.pop("injury_severity", None)
+        tourney["pending_injury_news"] = [
+            n for n in tourney.get("pending_injury_news", [])
+            if not (n["team"] == team["name"] and n["player"] == player["name"])
+        ]
+        save_tournament(tourney)
+        await ctx.send(f"✅ Injury cleared for **{player['name']}** ({team['name']}).")
+
     @tournament.command(name="match_scorecard", help="View the scorecard image for a completed match.\nUsage: tournament match_scorecard <match_id>")
     async def t_match_scorecard(self, ctx, match_id: int):
         server_id = str(ctx.guild.id)

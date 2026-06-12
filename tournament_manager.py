@@ -1185,6 +1185,34 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         save_tournament(tourney)
         await interaction.response.send_message(f"✅ Injury reports will now be posted in {interaction.channel.mention}.")
 
+    @app_commands.command(name="remove_injury", description="[MANAGER] Manually clear a player's injury status.")
+    @app_commands.describe(team_name="Team the player belongs to", player_name="Player's name")
+    async def remove_injury(self, interaction: discord.Interaction, team_name: str, player_name: str):
+        server_id = str(interaction.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney:
+            return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
+        if not self.is_manager(interaction, tourney):
+            return await interaction.response.send_message("❌ Managers only.", ephemeral=True)
+        team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.lower()), None)
+        if not team:
+            return await interaction.response.send_message(f"❌ Team **{team_name}** not found.", ephemeral=True)
+        player = next((p for p in team.get("squad", []) if p["name"].lower() == player_name.lower()), None)
+        if not player:
+            return await interaction.response.send_message(f"❌ Player **{player_name}** not found in **{team['name']}**.", ephemeral=True)
+        if not player.get("injured"):
+            return await interaction.response.send_message(f"ℹ️ **{player['name']}** is not currently injured.", ephemeral=True)
+        player.pop("injured", None)
+        player.pop("injury_until_match", None)
+        player.pop("injury_severity", None)
+        # also clear any pending news for this player
+        tourney["pending_injury_news"] = [
+            n for n in tourney.get("pending_injury_news", [])
+            if not (n["team"] == team["name"] and n["player"] == player["name"])
+        ]
+        save_tournament(tourney)
+        await interaction.response.send_message(f"✅ Injury cleared for **{player['name']}** ({team['name']}).")
+
     @app_commands.command(name="match_scorecard", description="View the scorecard image for a completed tournament match.")
     async def match_scorecard(self, interaction: discord.Interaction, match_id: int):
         server_id = str(interaction.guild.id)
@@ -1364,10 +1392,13 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         # --- INJURY ROLL (group/super8 only, not knockouts; requires injuries_enabled) ---
         if tourney.get("injuries_enabled", False) and m_data.get("stage") in ("group", "super8"):
             import random as _rng
+            _injury_done = False
             for team_name, bat_inn, bowl_inn in [(t1_name, t1_inn, t2_inn), (t2_name, t2_inn, t1_inn)]:
+                if _injury_done: break
                 team_obj = next((t for t in tourney["teams"] if t["name"] == team_name), None)
                 if not team_obj: continue
                 for player in team_obj["squad"]:
+                    if _injury_done: break
                     p_name = player["name"]
                     if player.get("injured"): continue
                     bat_stat  = bat_inn.batting_stats.get(p_name)
@@ -1377,7 +1408,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                     if not played: continue
                     heavy = (bat_stat and bat_stat.balls_faced >= 20) or \
                             (bowl_stat and bowl_stat.balls_bowled >= 12)
-                    if _rng.random() >= (0.05 if heavy else 0.02): continue
+                    if _rng.random() >= (0.03 if heavy else 0.01): continue
                     severity = _rng.choices([1, 2, 3], weights=[60, 30, 10])[0]
                     team_pending = [m for m in tourney["schedule"]
                                     if m["status"] == "pending" and
@@ -1392,6 +1423,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                         "team": team_name, "player": p_name,
                         "severity": severity, "until": until_id,
                     })
+                    _injury_done = True
 
         # --- KNOCKOUTS AUTO-PROGRESSION ---
         t_type = tourney.get("tournament_type", "round_robin")
