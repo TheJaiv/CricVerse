@@ -6867,9 +6867,6 @@ class PrefixCog(commands.Cog):
             return await ctx.send(f"❌ Team **{team_name}** not found.")
         if str(new_owner.id) == team.get("owner_id"):
             return await ctx.send(f"❌ {new_owner.mention} already owns **{team['name']}**.")
-        existing = next((t for t in tourney["teams"] if t.get("owner_id") == str(new_owner.id)), None)
-        if existing:
-            return await ctx.send(f"❌ {new_owner.mention} already owns **{existing['name']}**. A player can only own one team.")
         old_owner_id = team.get("owner_id")
         team["owner_id"] = str(new_owner.id)
         save_tournament(tourney)

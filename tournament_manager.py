@@ -811,9 +811,6 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             return await interaction.response.send_message(f"❌ Team **{team_name}** not found.", ephemeral=True)
         if str(new_owner.id) == team.get("owner_id"):
             return await interaction.response.send_message(f"❌ {new_owner.mention} already owns **{team['name']}**.", ephemeral=True)
-        existing = next((t for t in tourney["teams"] if t.get("owner_id") == str(new_owner.id)), None)
-        if existing:
-            return await interaction.response.send_message(f"❌ {new_owner.mention} already owns **{existing['name']}**. A player can only own one team.", ephemeral=True)
         old_owner_id = team.get("owner_id")
         team["owner_id"] = str(new_owner.id)
         save_tournament(tourney)
