@@ -1134,6 +1134,11 @@ def _fetch_emoji_img(emoji_str: str, size: int = 72):
     import re as _re, requests as _req, io as _io2
     emoji_str = emoji_str.strip()
     try:
+        # Base64 data URI (stored from attachment upload — never expires)
+        if emoji_str.startswith("data:image/"):
+            import base64 as _b64
+            _data = emoji_str.split(",", 1)[1]
+            return Image.open(_io2.BytesIO(_b64.b64decode(_data))).convert("RGBA").resize((size, size), Image.LANCZOS)
         # Custom Discord emoji  <:name:id>  or  <a:name:id>
         m = _re.match(r'<(a?):(\w+):(\d+)>', emoji_str)
         if m:
@@ -1146,6 +1151,13 @@ def _fetch_emoji_img(emoji_str: str, size: int = 72):
                     try: pil_img.seek(0)
                     except EOFError: pass
                 return pil_img.convert("RGBA").resize((size, size), Image.LANCZOS)
+
+        # Direct image URL
+        if emoji_str.startswith("http://") or emoji_str.startswith("https://"):
+            resp = _req.get(emoji_str, timeout=5)
+            if resp.status_code == 200:
+                return Image.open(_io2.BytesIO(resp.content)).convert("RGBA").resize((size, size), Image.LANCZOS)
+            return None
 
         # Plain text / :shortcode: with no ID — can't resolve without guild context
         if all(ord(c) < 128 for c in emoji_str):
@@ -6948,7 +6960,13 @@ class PrefixCog(commands.Cog):
             att = ctx.message.attachments[0]
             if not (att.content_type and att.content_type.startswith("image/")):
                 return await ctx.send("❌ Attachment must be an image file.")
-            team[field] = att.url
+            try:
+                img_bytes = await att.read()
+                import base64 as _b64
+                mime = att.content_type.split(";")[0]
+                team[field] = f"data:{mime};base64,{_b64.b64encode(img_bytes).decode()}"
+            except Exception:
+                team[field] = att.url
             save_tournament(tourney)
             return await ctx.send(f"✅ {label} logo for **{team['name']}** set from uploaded image — used in {where}.")
         if not value:

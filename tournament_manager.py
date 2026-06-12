@@ -14,6 +14,15 @@ def _fetch_emoji_img(emoji_str: str, size: int = 40):
     if not emoji_str:
         return None
     s = emoji_str.strip()
+    # Base64 data URI (stored from attachment upload)
+    if s.startswith("data:image/"):
+        try:
+            import base64 as _b64
+            _data = s.split(",", 1)[1]
+            img = Image.open(io.BytesIO(_b64.b64decode(_data))).convert("RGBA")
+            return img.resize((size, size), Image.LANCZOS)
+        except Exception:
+            return None
     # Direct image URL (PNG/JPG logo upload)
     if s.startswith("http://") or s.startswith("https://"):
         try:
@@ -1139,7 +1148,13 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         if logo_image:
             if not logo_image.content_type or not logo_image.content_type.startswith("image/"):
                 return await interaction.response.send_message("❌ Attachment must be an image file.", ephemeral=True)
-            team[field] = logo_image.url
+            try:
+                img_bytes = await logo_image.read()
+                import base64 as _b64
+                mime = logo_image.content_type.split(";")[0]
+                team[field] = f"data:{mime};base64,{_b64.b64encode(img_bytes).decode()}"
+            except Exception:
+                team[field] = logo_image.url
             save_tournament(tourney)
             return await interaction.response.send_message(f"✅ {label} logo for **{team['name']}** set from uploaded image — used in {where}.")
         if logo_url:
