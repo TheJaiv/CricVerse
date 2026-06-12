@@ -6853,6 +6853,29 @@ class PrefixCog(commands.Cog):
         save_tournament(tourney)
         await ctx.send(f"✅ Team **{team_name}** removed.")
 
+    @tournament.command(name="transfer_team", help="[MANAGER] Transfer team ownership to a new user.\nUsage: tournament transfer_team \"<team_name>\" @new_owner")
+    async def t_transfer_team(self, ctx, team_name: str, new_owner: discord.Member):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney:
+            return await ctx.send("❌ No tournament exists.")
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
+        if not is_mgr:
+            return await ctx.send("❌ Managers only.")
+        team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.lower()), None)
+        if not team:
+            return await ctx.send(f"❌ Team **{team_name}** not found.")
+        if str(new_owner.id) == team.get("owner_id"):
+            return await ctx.send(f"❌ {new_owner.mention} already owns **{team['name']}**.")
+        existing = next((t for t in tourney["teams"] if t.get("owner_id") == str(new_owner.id)), None)
+        if existing:
+            return await ctx.send(f"❌ {new_owner.mention} already owns **{existing['name']}**. A player can only own one team.")
+        old_owner_id = team.get("owner_id")
+        team["owner_id"] = str(new_owner.id)
+        save_tournament(tourney)
+        old_mention = f"<@{old_owner_id}>" if old_owner_id else "*(no previous owner)*"
+        await ctx.send(f"✅ **{team['name']}** ownership transferred from {old_mention} → {new_owner.mention}.")
+
     @tournament.command(name="force_delete", help="[ADMIN] Forcefully delete this server's tournament.\nUsage: tournament force_delete")
     async def t_force_delete(self, ctx):
         if not ctx.author.guild_permissions.administrator and ctx.author.id != ADMIN_DISCORD_ID:

@@ -798,6 +798,30 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         save_tournament(tourney)
         await interaction.response.send_message(f"✅ Team **{team_name}** has been successfully removed from the tournament.")
 
+    @app_commands.command(name="transfer_team", description="[MANAGER] Transfer ownership of a team to a new Discord user.")
+    async def transfer_team(self, interaction: discord.Interaction, team_name: str, new_owner: discord.Member):
+        server_id = str(interaction.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney:
+            return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
+        if not self.is_manager(interaction, tourney):
+            return await interaction.response.send_message("❌ Managers only.", ephemeral=True)
+        team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.lower()), None)
+        if not team:
+            return await interaction.response.send_message(f"❌ Team **{team_name}** not found.", ephemeral=True)
+        if str(new_owner.id) == team.get("owner_id"):
+            return await interaction.response.send_message(f"❌ {new_owner.mention} already owns **{team['name']}**.", ephemeral=True)
+        existing = next((t for t in tourney["teams"] if t.get("owner_id") == str(new_owner.id)), None)
+        if existing:
+            return await interaction.response.send_message(f"❌ {new_owner.mention} already owns **{existing['name']}**. A player can only own one team.", ephemeral=True)
+        old_owner_id = team.get("owner_id")
+        team["owner_id"] = str(new_owner.id)
+        save_tournament(tourney)
+        old_mention = f"<@{old_owner_id}>" if old_owner_id else "*(no previous owner)*"
+        await interaction.response.send_message(
+            f"✅ **{team['name']}** ownership transferred from {old_mention} → {new_owner.mention}."
+        )
+
     @app_commands.command(name="replace_player", description="[MANAGER] Replace a player in a team's squad.")
     async def replace_player(self, interaction: discord.Interaction, team_name: str, out_player: str, in_player: str):
         server_id = str(interaction.guild.id)
