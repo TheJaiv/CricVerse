@@ -107,39 +107,40 @@ async def on_ready():
 # ==========================================
 
 # Hardcoded fallback database to prevent crashes if the CSV is empty
+# ── Default teams: two COMPLETELY EQUAL sides (stat-for-stat mirror images). ──
+# Identical bat/bowl/role/archetype at every position, only the names differ, so
+# a default-vs-default match is a true 50/50 contest. Balanced XI: 5 batters
+# (incl. WK), 2 all-rounders, 4 bowlers, with a pace + spin mix for all pitches.
+_EQUAL_TEMPLATE = [
+    # (bat, bowl, archetype, role)
+    (85, 12, "Anchor",    "Batter"),
+    (86, 12, "Aggressor", "Batter"),
+    (87, 18, "Anchor",    "Batter"),
+    (86, 22, "Aggressor", "Batter"),
+    (85, 10, "Finisher",  "Batter_WK"),
+    (80, 80, "Finisher",  "All-Rounder_Pace"),
+    (78, 84, "Anchor",    "All-Rounder_Spin_Off"),
+    (48, 85, "Aggressor", "Bowler_Pace"),
+    (38, 87, "Finisher",  "Bowler_Pace"),
+    (32, 85, "Standard",  "Bowler_Pace"),
+    (30, 85, "Standard",  "Bowler_Spin_Leg"),
+]
+_PROTAGONIST_NAMES = [
+    "Adam Frost", "Ben Carter", "Cole Hayes", "Dean Walsh", "Eli Brooks",
+    "Finn Doyle", "Gabe Mercer", "Hugo Blake", "Ira Nash", "Jude Pike", "Kit Rowe",
+]
+_RIVAL_NAMES = [
+    "Axel Stone", "Boyd Lane", "Cyrus Vale", "Dane Webb", "Enzo Hart",
+    "Flynn Cole", "Gray Olsen", "Hank Ross", "Ike Sterns", "Joss Kerr", "Lev Pryor",
+]
+def _build_equal_xi(names):
+    return [
+        {"name": n, "bat": b, "bowl": bo, "archetype": a, "role": r}
+        for n, (b, bo, a, r) in zip(names, _EQUAL_TEMPLATE)
+    ]
 TEAMS_DATA = {
-    "Team 1": {
-        "name": "The Protagonists",
-        "players": [
-            {"name": "Ruturaj Gaikwad", "bat": 83, "bowl": 10, "archetype": "Anchor", "role": "Batter"},
-            {"name": "Sanju Samson", "bat": 86, "bowl": 10, "archetype": "Aggressor", "role": "Batter"},
-            {"name": "Daryl Mitchell", "bat": 87, "bowl": 56, "archetype": "Anchor", "role": "All-Rounder_Pace"},
-            {"name": "Shivam Dube", "bat": 86, "bowl": 65, "archetype": "Finisher", "role": "All-Rounder_Pace"},
-            {"name": "MS Dhoni", "bat": 95, "bowl": 10, "archetype": "Finisher", "role": "Batter_WK"},
-            {"name": "Ravindra Jadeja", "bat": 86, "bowl": 90, "archetype": "Anchor", "role": "All-Rounder_Spin_Off"},
-            {"name": "Mitchell Santner", "bat": 82, "bowl": 87, "archetype": "Finisher", "role": "All-Rounder_Spin_Off"},
-            {"name": "Deepak Chahar", "bat": 55, "bowl": 83, "archetype": "Anchor", "role": "Bowler_Pace"},
-            {"name": "Shardul Thakur", "bat": 78, "bowl": 83, "archetype": "Aggressor", "role": "Bowler_Pace"},
-            {"name": "Matheesha Pathirana", "bat": 35, "bowl": 83, "archetype": "Finisher", "role": "Bowler_Pace"},
-            {"name": "Maheesh Theekshana", "bat": 32, "bowl": 85, "archetype": "Anchor", "role": "Bowler_Spin_Off"}
-        ]
-    },
-    "Team 2": {
-        "name": "The Rivals",
-        "players": [
-            {"name": "Rohit Sharma", "bat": 93, "bowl": 48, "archetype": "Aggressor", "role": "Batter"},
-            {"name": "Ishan Kishan", "bat": 85, "bowl": 25, "archetype": "Aggressor", "role": "Batter_WK"},
-            {"name": "Suryakumar Yadav", "bat": 86, "bowl": 33, "archetype": "Aggressor", "role": "Batter"},
-            {"name": "Hardik Pandya", "bat": 89, "bowl": 85, "archetype": "Finisher", "role": "All-Rounder_Pace"},
-            {"name": "Tim David", "bat": 85, "bowl": 39, "archetype": "Finisher", "role": "Batter"},
-            {"name": "Romario Shepherd", "bat": 80, "bowl": 80, "archetype": "Finisher", "role": "Bowler_Pace"},
-            {"name": "Mohammad Nabi", "bat": 82, "bowl": 83, "archetype": "Finisher", "role": "All-Rounder_Spin_Off"},
-            {"name": "Gerald Coetzee", "bat": 40, "bowl": 81, "archetype": "Aggressor", "role": "Bowler_Pace"},
-            {"name": "Jasprit Bumrah", "bat": 35, "bowl": 96, "archetype": "Finisher", "role": "Bowler_Pace"},
-            {"name": "Akash Madhwal", "bat": 38, "bowl": 78, "archetype": "Anchor", "role": "Bowler_Pace"},
-            {"name": "Allah Ghazanfar", "bat": 40, "bowl": 80, "archetype": "Anchor", "role": "Bowler_Spin_Off"}
-        ]
-    }
+    "Team 1": {"name": "The Protagonists", "players": _build_equal_xi(_PROTAGONIST_NAMES)},
+    "Team 2": {"name": "The Rivals",       "players": _build_equal_xi(_RIVAL_NAMES)},
 }
 
 class BatterStats:
@@ -3369,7 +3370,7 @@ async def on_message(message: discord.Message):
         if state.p2_id is None and not getattr(state, 'sim_only', False):
             state.t2_roster = TEAMS_DATA["Team 2"]["players"]
             if getattr(state, "impact_player", False):
-                state.t2_subs = [{"name": "Extra Batter 2", "bat": 86, "bowl": 10, "archetype": "Aggressor", "role": "Batter"}, {"name": "Extra Bowler 2", "bat": 10, "bowl": 86, "archetype": "Standard", "role": "Bowler_Pace"}]
+                state.t2_subs = [{"name": "Extra Batter 2", "bat": 85, "bowl": 10, "archetype": "Aggressor", "role": "Batter"}, {"name": "Extra Bowler 2", "bat": 10, "bowl": 85, "archetype": "Standard", "role": "Bowler_Pace"}]
             else:
                 state.t2_subs = []
             await message.channel.send(f"🤖 AI team **{state.t2_name}** will use the built-in roster.")
@@ -3385,7 +3386,7 @@ async def on_message(message: discord.Message):
         if message.content.strip().lower() == "default":
             players = list(TEAMS_DATA["Team 2"]["players"])
             if state.impact_player:
-                state.t2_subs = [{"name": "Extra Batter 2", "bat": 86, "bowl": 10, "archetype": "Aggressor", "role": "Batter"}, {"name": "Extra Bowler 2", "bat": 10, "bowl": 86, "archetype": "Standard", "role": "Bowler_Pace"}]
+                state.t2_subs = [{"name": "Extra Batter 2", "bat": 85, "bowl": 10, "archetype": "Aggressor", "role": "Batter"}, {"name": "Extra Bowler 2", "bat": 10, "bowl": 85, "archetype": "Standard", "role": "Bowler_Pace"}]
             else:
                 state.t2_subs = []
             missing = []
