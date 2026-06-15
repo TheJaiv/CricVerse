@@ -1,4 +1,38 @@
 import random
+import math
+
+# ──────────────────────────────────────────────────────────────────────────
+# CALIBRATION CONSTANTS (tuned via Monte Carlo — see sim_harness.py)
+# Neutral 85v85 target: par ~165, ~6-7 wkts, ~50/50. Big rating gaps separate
+# teams decisively (≤1% upset at 14pt gap, ~0.1% at 24pt gap).
+# ──────────────────────────────────────────────────────────────────────────
+# Exponential skill scale: a 90→95 jump is worth far more than 75→80, so
+# legends dominate and rating gaps translate into a real per-ball edge.
+T20_SKILL_SCALE = 15.0
+# Base outcome weights at a neutral (edge=0) contest, and how strongly the
+# skill edge pushes them. Tuned low so the downstream phase/pitch multipliers
+# land scores in a realistic band instead of inflating to 200+.
+T20_BASE_DOT   = 37.0; T20_DOT_SENS = 46.0
+T20_BASE_SINGLE = 35.0
+T20_BASE_BND   = 6.4;  T20_BND_SENS = 26.0
+T20_BASE_WKT   = 5.0;  T20_WKT_SENS = 11.0
+# Batting-paradise floor: on a true road / dead deck there's a ceiling on how
+# cheaply a side can be bowled out — even swing only does so much on a featherbed.
+# Capping wicket_weight here lifts the low tail (no 49 all-out on a road) without
+# touching the mean, which is driven by boundaries.
+T20_BAT_PITCH_WKT_CAP = 8.5
+
+# ── 2.0: PITCH DETERIORATION ──
+# How fast each surface wears over the match. Dust bowls / worn / cracked decks
+# roughen fast (spin becomes lethal late); roads & dead decks barely change, so a
+# flat track stays a flat track and keeps its 200 ceiling.
+WEAR_SUSCEPT = {
+    "Dusty": 1.5, "Worn": 1.5, "Turning": 1.4, "Cracked": 1.4, "Dry": 1.3,
+    "Slow": 1.2, "Two-Paced": 1.1, "Sticky": 0.9, "Soft": 0.8, "Hard": 0.7,
+    "Green": 0.6, "Damp": 0.7, "Bouncy": 0.7, "Flat": 0.4, "Dead": 0.3,
+}
+# Run-out share of all dismissals (not credited to the bowler).
+T20_RUNOUT_SHARE = 0.07
 
 SPIN_SHOT_MATRIX = {
     "Off spin": ["Sweep", "Drive", "Flick"],
@@ -167,10 +201,20 @@ def execute_ball_math_t20(match):
 
     bat_rating = striker["bat"] * b_stats.form_factor
     bowl_rating = bowler["bowl"] * bow_stats.form_factor
-    
+
+    # ── 2.0 PITCH DETERIORATION ──
+    # Surface roughens across the match: 0 at the first ball → ~1 by the last,
+    # with innings 2 inheriting innings 1's wear. Scaled by the pitch's wear
+    # susceptibility so roads stay roads. Worn surfaces give spin extra turn
+    # (fed into the rating contest) and make timing slightly harder for everyone.
+    _balls_in = innings.total_balls + (match.max_balls if match.current_innings_num == 2 else 0)
+    wear = (_balls_in / (2 * match.max_balls)) * WEAR_SUSCEPT.get(match.pitch, 1.0)
+    if "Spin" in bowler["role"]:
+        bowl_rating += wear * 5.0
+
     # Pitch Mechanics
     if match.pitch == "Flat":
-        bat_rating += 3
+        bat_rating += 5
     elif match.pitch == "Green" and "Pace" in bowler["role"]:
         bowl_rating += 3
     elif match.pitch == "Dry" and "Spin" in bowler["role"] and innings.total_balls > 60:
@@ -274,7 +318,11 @@ def execute_ball_math_t20(match):
             if rrr > threshold:
                 pressure_multiplier = min(max_p, 1.0 + ((rrr - threshold) * scale))
 
-    is_collapse = innings.over_log[-18:].count("<a:wickett:1510369641959264429>") >= 2 and innings.partnership_runs < 25
+    # Collapse = 2+ wickets in the last 18 balls with a small current stand. We
+    # track wicket ball-numbers on a persistent list because over_log is wiped
+    # every over, so over_log[-18:] could only ever see the current over.
+    _recent_wkts = sum(1 for _b in getattr(innings, "wkt_balls", []) if _b >= total_balls - 18)
+    is_collapse = _recent_wkts >= 2 and innings.partnership_runs < 25
     is_set_partnership = innings.partnership_runs >= 30
     has_wickets_in_hand = total_balls >= (match.max_balls - 42) and innings.wickets <= 3
 
@@ -304,8 +352,17 @@ def execute_ball_math_t20(match):
     match.current_shot_selection = None
     match.temp_variation = None
 
-    diff = bat_rating - bowl_rating
-    
+    # ── Non-linear skill contest (replaces the old linear bat-bowl diff) ──
+    # Each rating is mapped onto an exponential curve, then the batter's
+    # "share of control" is bat_eff / (bat_eff + bowl_eff). This is a logistic
+    # response: equal ratings → 0.5, and the gap between elite ratings matters
+    # disproportionately more than the gap between poor ones.
+    bat_eff  = math.exp((bat_rating  - 80.0) / T20_SKILL_SCALE)
+    bowl_eff = math.exp((bowl_rating - 80.0) / T20_SKILL_SCALE)
+    dominance = bat_eff / (bat_eff + bowl_eff)   # 0..1
+    edge = dominance - 0.5                          # ~[-0.45, +0.45]
+    diff = edge * 100.0  # legacy scale, kept for any downstream heuristics
+
     free_hit_active = getattr(match, "free_hit", False)
     is_wide = False
     is_no_ball = False
@@ -371,10 +428,10 @@ def execute_ball_math_t20(match):
         bow_stats.runs_conceded += 1
         match.free_hit = True
 
-    dot_weight = max(12.0, 35.0 - diff * 0.45)
-    single_weight = 40.0
-    boundary_weight = max(2.0, 10.0 + diff * 0.45) # Toned down to prevent AI from inflating scores
-    wicket_weight = max(1.2, 5.0 - diff * 0.18) # Balanced to prevent 100% guaranteed routs
+    dot_weight      = max(8.0,  T20_BASE_DOT  - edge * T20_DOT_SENS)
+    single_weight   = T20_BASE_SINGLE
+    boundary_weight = max(1.0,  T20_BASE_BND  + edge * T20_BND_SENS)
+    wicket_weight   = max(0.6,  T20_BASE_WKT  - edge * T20_WKT_SENS)
     
     if b_stats.balls_faced > 45:
         wicket_weight *= 1.5
@@ -384,8 +441,9 @@ def execute_ball_math_t20(match):
     
     # Advanced Pitch Base Probability Modifiers
     if match.pitch == "Flat":
-        boundary_weight *= 1.05
-        wicket_weight *= 0.95
+        boundary_weight *= 1.14
+        wicket_weight *= 0.90
+        dot_weight *= 0.95
     elif match.pitch == "Green" and "Pace" in bowler["role"]:
         wicket_weight *= 1.10
         boundary_weight *= 0.95
@@ -465,7 +523,51 @@ def execute_ball_math_t20(match):
     elif match.weather in ["Heavy Rain", "Thunderstorm"]:
         wicket_weight *= 0.80
         boundary_weight *= 1.15
-            
+
+    # ── BALL AGE / HARDNESS ──────────────────────────────────────────────
+    # The ball is a third actor alongside bat & bowl. A hard new ball seams,
+    # swings and flies off the edge (pace threat + flush boundaries); it goes
+    # soft through the middle (harder to time, spin grips); and in the back
+    # third it gets old enough to reverse for pace. 20 overs isn't long enough
+    # for heavy reverse, so the late effect is mild compared to ODIs.
+    _ball_frac = total_balls / max(1, match.max_balls)
+    _is_pace_b = "Pace" in bowler["role"]
+    _is_spin_b = "Spin" in bowler["role"]
+    if _ball_frac < 0.30:            # brand new, hard ball
+        if _is_pace_b:
+            wicket_weight *= 1.10
+            boundary_weight *= 1.05    # edges fly, but it also comes onto the bat
+        elif _is_spin_b:
+            boundary_weight *= 1.06    # spin on a hard ball gets hit
+            wicket_weight *= 0.95
+    elif _ball_frac < 0.70:          # ball has gone soft
+        boundary_weight *= 0.94
+        dot_weight *= 1.05
+        if _is_spin_b:
+            wicket_weight *= 1.06      # grip & turn
+    else:                            # back third — mild reverse for pace
+        if _is_pace_b:
+            wicket_weight *= 1.08
+        boundary_weight *= 1.03
+
+    # ── 2.0 PITCH DETERIORATION (weight effects) ──
+    # A worn surface helps spin take wickets and makes timing fractionally harder.
+    if _is_spin_b:
+        wicket_weight *= (1.0 + wear * 0.35)
+    boundary_weight *= (1.0 - wear * 0.07)
+    dot_weight *= (1.0 + wear * 0.06)
+
+    # ── 2.0 BATTING MOMENTUM ──
+    # A new batsman is vulnerable until set; a well-set batsman is dangerous.
+    # This layers on top of the balls-faced rating curve to sharpen the "playing
+    # yourself in vs seeing it like a beachball" texture of an innings.
+    _bf = b_stats.balls_faced
+    if _bf < 6:
+        wicket_weight *= (1.32 - _bf * 0.045)   # ~1.32 first ball → ~1.05 at 6
+        boundary_weight *= (0.78 + _bf * 0.035)
+    elif _bf >= 15:
+        boundary_weight *= 1.10                  # set — cashing in
+
     # 🚨 TACTICAL USER BALANCING & SPIN LOGIC
     if "Yorker" in deliv:
         if shot in ["Pull", "Cut"]: bad_shot_selection = True
@@ -554,6 +656,8 @@ def execute_ball_math_t20(match):
     # 🚨 ANTI-OVERCOOK SAFETIES (Prevents stacked conditions from breaking the game)
     four_weight = max(0.5, min(four_weight, 35.0)) # Hard cap to prevent 300+ scores
     six_weight = max(0.1, min(six_weight, 25.0))
+    if match.pitch in ("Flat", "Dead"):
+        wicket_weight = min(wicket_weight, T20_BAT_PITCH_WKT_CAP)  # batting-paradise floor
     wicket_weight = max(1.0, min(wicket_weight, 30.0)) # Hard cap to prevent 10/10 scenarios
     dot_weight = max(5.0, min(dot_weight, 120.0))
 
@@ -574,29 +678,46 @@ def execute_ball_math_t20(match):
     if outcome == "wicket":
         innings.wickets += 1
         innings.partnership_runs = 0
+        if not hasattr(innings, "wkt_balls"): innings.wkt_balls = []
+        innings.wkt_balls.append(innings.total_balls)  # for the rolling collapse window
         d_types = ["Bowled", "Caught", "LBW"]
-        
-        if "Outswing" in deliv and shot in ["Drive", "Cut"]: dismissal_type = "Caught Behind"
-        elif "Inswing" in deliv and shot in ["Drive", "Flick"]: dismissal_type = random.choice(["Bowled", "LBW"])
-        elif "Slow" in deliv and shot in ["Loft", "Pull", "Scoop"]: dismissal_type = "Caught"
-        elif is_cutter and shot in ["Loft", "Scoop"]:  dismissal_type = "Caught"
-        elif is_cutter and shot in ["Drive", "Cut"]:   dismissal_type = random.choice(["Caught", "Bowled"])
-        elif bad_shot_selection and "Yorker" in deliv: dismissal_type = "Bowled"
-        elif bad_shot_selection and "Bouncer" in deliv: dismissal_type = "Caught"
-        elif shot in ["Loft", "Scoop"]: dismissal_type = "Caught"
-        else: dismissal_type = random.choice(d_types)
-            
-        if dismissal_type == "Bowled": b_stats.dismissal = f"b. {bowler['name']}"
-        elif dismissal_type == "LBW": b_stats.dismissal = f"lbw b. {bowler['name']}"
-        elif dismissal_type == "Caught Behind":
-            wk = next((p["name"] for p in innings.bowling_team["players"] if "WK" in p["role"]), "Keeper")
-            b_stats.dismissal = f"c. {wk} b. {bowler['name']}"
-        else:
+
+        # ── 2.0 DISMISSAL VARIETY ──
+        # Run-out first: a fielding mix-up, NOT credited to the bowler. Then
+        # stumping (charging a spinner and missing) and hit-wicket (treading on
+        # the stumps to a short ball) join the bowler-credited dismissals.
+        if random.random() < T20_RUNOUT_SHARE:
+            dismissal_type = "Run Out"
             fielders = [p["name"] for p in innings.bowling_team["players"] if p["name"] != bowler["name"]]
-            fielder = random.choice(fielders) if fielders else "Fielder"
-            b_stats.dismissal = f"c. {fielder} b. {bowler['name']}"
-            
-        bow_stats.wickets_taken += 1
+            b_stats.dismissal = f"run out ({random.choice(fielders) if fielders else 'Fielder'})"
+        else:
+            if deliv in SPIN_SHOT_MATRIX and shot in ["Loft", "Sweep", "Drive"] and random.random() < 0.20:
+                dismissal_type = "Stumped"
+            elif ("Bouncer" in deliv or "Fast" in deliv) and shot == "Pull" and random.random() < 0.05:
+                dismissal_type = "Hit Wicket"
+            elif "Outswing" in deliv and shot in ["Drive", "Cut"]: dismissal_type = "Caught Behind"
+            elif "Inswing" in deliv and shot in ["Drive", "Flick"]: dismissal_type = random.choice(["Bowled", "LBW"])
+            elif "Slow" in deliv and shot in ["Loft", "Pull", "Scoop"]: dismissal_type = "Caught"
+            elif is_cutter and shot in ["Loft", "Scoop"]:  dismissal_type = "Caught"
+            elif is_cutter and shot in ["Drive", "Cut"]:   dismissal_type = random.choice(["Caught", "Bowled"])
+            elif bad_shot_selection and "Yorker" in deliv: dismissal_type = "Bowled"
+            elif bad_shot_selection and "Bouncer" in deliv: dismissal_type = "Caught"
+            elif shot in ["Loft", "Scoop"]: dismissal_type = "Caught"
+            else: dismissal_type = random.choice(d_types)
+
+            if dismissal_type == "Bowled": b_stats.dismissal = f"b. {bowler['name']}"
+            elif dismissal_type == "LBW": b_stats.dismissal = f"lbw b. {bowler['name']}"
+            elif dismissal_type == "Hit Wicket": b_stats.dismissal = f"hit wkt b. {bowler['name']}"
+            elif dismissal_type in ("Stumped", "Caught Behind"):
+                wk = next((p["name"] for p in innings.bowling_team["players"] if "WK" in p["role"]), "Keeper")
+                pre = "st." if dismissal_type == "Stumped" else "c."
+                b_stats.dismissal = f"{pre} {wk} b. {bowler['name']}"
+            else:
+                fielders = [p["name"] for p in innings.bowling_team["players"] if p["name"] != bowler["name"]]
+                fielder = random.choice(fielders) if fielders else "Fielder"
+                b_stats.dismissal = f"c. {fielder} b. {bowler['name']}"
+
+            bow_stats.wickets_taken += 1
         innings.over_log.append("<a:wickett:1510369641959264429>")
         outcome_text = f"WICKET! ({dismissal_type.upper()})"
         

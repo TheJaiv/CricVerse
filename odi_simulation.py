@@ -1,4 +1,37 @@
 import random
+import math
+
+# ──────────────────────────────────────────────────────────────────────────
+# CALIBRATION CONSTANTS (tuned via Monte Carlo — see sim_harness.py)
+# Neutral 85v85 target: par ~285, ~7 wkts, ~50/50. Big rating gaps separate
+# teams decisively (≤1% upset at 14pt gap, ~0.1% at 24pt gap).
+# ──────────────────────────────────────────────────────────────────────────
+ODI_SKILL_SCALE = 12.8
+# Tuned low vs the old (dot=50, wkt=3) baseline, which never bowled teams out
+# and produced 370-run innings. Higher wicket base lets innings actually end.
+ODI_BASE_DOT   = 48.5; ODI_DOT_SENS = 52.0
+ODI_BASE_SINGLE = 40.0
+ODI_BASE_BND   = 4.0;  ODI_BND_SENS = 19.0
+ODI_BASE_WKT   = 4.3;  ODI_WKT_SENS = 8.5
+# Pitch, weather, ball-age and phase each scale the wicket rate. Over 300 balls
+# their PRODUCT bowls sides out ~100% of the time on bowling-friendly decks.
+# After those environmental multipliers we pull the combined inflation partway
+# back toward baseline so even green/overcast/cracked tracks let teams bat deep.
+ODI_WKT_COMPRESS = 0.34
+# Batting-paradise floor (see T20 note): a road/dead deck caps how cheaply a side
+# folds, lifting the low tail without changing the boundary-driven mean.
+ODI_BAT_PITCH_WKT_CAP = 6.0
+
+# ── 2.0: PITCH DETERIORATION ──
+# How fast each surface wears over 100 overs. Dust bowls / worn / cracked decks
+# roughen fast (spin lethal by the back half); roads & dead decks barely change.
+WEAR_SUSCEPT = {
+    "Dusty": 1.5, "Worn": 1.5, "Turning": 1.4, "Cracked": 1.4, "Dry": 1.3,
+    "Slow": 1.2, "Two-Paced": 1.1, "Sticky": 0.9, "Soft": 0.8, "Hard": 0.7,
+    "Green": 0.6, "Damp": 0.7, "Bouncy": 0.7, "Flat": 0.4, "Dead": 0.3,
+}
+# Run-out share of all dismissals (slightly higher than T20 — more running).
+ODI_RUNOUT_SHARE = 0.075
 
 SPIN_SHOT_MATRIX = {
     "Off spin": ["Sweep", "Drive", "Flick"],
@@ -167,7 +200,16 @@ def execute_ball_math_odi(match):
 
     bat_rating = striker["bat"] * b_stats.form_factor
     bowl_rating = bowler["bowl"] * bow_stats.form_factor
-    
+
+    # ── 2.0 PITCH DETERIORATION ──
+    # Surface roughens across the match (innings 2 inherits innings 1's wear),
+    # scaled by the pitch's susceptibility so roads stay roads. Worn decks give
+    # spin extra turn — a defining feature of a 50-over surface by the back half.
+    _balls_in = innings.total_balls + (match.max_balls if match.current_innings_num == 2 else 0)
+    wear = (_balls_in / (2 * match.max_balls)) * WEAR_SUSCEPT.get(match.pitch, 1.0)
+    if "Spin" in bowler["role"]:
+        bowl_rating += wear * 5.0
+
     if match.pitch == "Flat":
         bat_rating += 5
     elif match.pitch == "Green" and "Pace" in bowler["role"]:
@@ -312,8 +354,16 @@ def execute_ball_math_odi(match):
     match.current_shot_selection = None
     match.temp_variation = None
 
-    diff = bat_rating - bowl_rating
-    
+    # ── Non-linear skill contest (replaces the old linear bat-bowl diff) ──
+    # Logistic response: each rating mapped to an exponential curve, then the
+    # batter's share of control = bat_eff / (bat_eff + bowl_eff). Equal ratings
+    # → 0.5; gaps between elite ratings matter far more than between poor ones.
+    bat_eff  = math.exp((bat_rating  - 80.0) / ODI_SKILL_SCALE)
+    bowl_eff = math.exp((bowl_rating - 80.0) / ODI_SKILL_SCALE)
+    dominance = bat_eff / (bat_eff + bowl_eff)   # 0..1
+    edge = dominance - 0.5                          # ~[-0.45, +0.45]
+    diff = edge * 100.0  # legacy scale, kept for any downstream heuristics
+
     free_hit_active = getattr(match, "free_hit", False)
     is_wide = False
     is_no_ball = False
@@ -384,10 +434,10 @@ def execute_ball_math_odi(match):
             match.free_hit = True
 
     # Baseline ODI Weights - High discipline, lower boundary frequency
-    dot_weight = max(22.0, 50.0 - diff * 0.45)
-    single_weight = 40.0
-    boundary_weight = max(1.5, 7.0 + diff * 0.35) # Balanced to allow underdog resistance
-    wicket_weight = max(1.0, 3.0 - diff * 0.15) # Balanced to allow upsets
+    dot_weight      = max(14.0, ODI_BASE_DOT  - edge * ODI_DOT_SENS)
+    single_weight   = ODI_BASE_SINGLE
+    boundary_weight = max(1.0,  ODI_BASE_BND  + edge * ODI_BND_SENS)
+    wicket_weight   = max(0.6,  ODI_BASE_WKT  - edge * ODI_WKT_SENS)
     
     # Pitch Extreme Modifiers (Balanced)
     if match.pitch == "Green" and "Pace" in bowler["role"]:
@@ -445,8 +495,9 @@ def execute_ball_math_odi(match):
         boundary_weight *= 0.65
         dot_weight *= 1.35
     elif match.pitch == "Flat":
-        boundary_weight *= 1.10
-        wicket_weight *= 0.95
+        boundary_weight *= 1.16
+        wicket_weight *= 0.92
+        dot_weight *= 0.96
         
     # Weather Advanced Modifiers — innings.total_balls used so both innings
     # get the new-ball swing boost, not just innings 1.
@@ -475,18 +526,73 @@ def execute_ball_math_odi(match):
         wicket_weight *= 0.85
         boundary_weight *= 1.10
     elif match.weather in ["Heavy Rain", "Thunderstorm"]:
-        wicket_weight *= 0.70
-        boundary_weight *= 1.25
+        wicket_weight *= 0.75
+        boundary_weight *= 1.13
+
+    # ── BALL AGE / HARDNESS ──────────────────────────────────────────────
+    # Over 50 overs the ball ages enough for all three classic phases to show:
+    # a hard new ball that seams & swings (pace threat + flush boundaries), a
+    # soft middle where the old ball stops coming on (accumulation, spin grips),
+    # and genuine reverse swing in the back 10-15 overs that makes pace lethal
+    # again — yorkers and full balls reversing late is the defining ODI weapon.
+    _ball_frac = total_balls / max(1, match.max_balls)
+    _is_pace_b = "Pace" in bowler["role"]
+    _is_spin_b = "Spin" in bowler["role"]
+    if _ball_frac < 0.20:            # brand new, hard ball (first ~10 overs)
+        if _is_pace_b:
+            wicket_weight *= 1.08
+            boundary_weight *= 1.04
+        elif _is_spin_b:
+            boundary_weight *= 1.05
+            wicket_weight *= 0.94
+    elif _ball_frac < 0.66:          # old, soft ball through the middle
+        boundary_weight *= 0.92
+        dot_weight *= 1.07
+        if _is_spin_b:
+            wicket_weight *= 1.08
+    else:                            # back third — reverse swing for pace
+        if _is_pace_b:
+            wicket_weight *= 1.10
+            if "Yorker" in deliv or "Full" in deliv:
+                wicket_weight *= 1.06   # reversing yorkers are deadly
+        boundary_weight *= 1.04
+
+    # ── 2.0 PITCH DETERIORATION (weight effects) — environmental, so it sits
+    # before the compressor and gets dampened alongside pitch/weather. ──
+    if _is_spin_b:
+        wicket_weight *= (1.0 + wear * 0.40)
+    boundary_weight *= (1.0 - wear * 0.07)
+    dot_weight *= (1.0 + wear * 0.06)
 
     if is_powerplay:
         if "Pace" in bowler["role"]:
-            wicket_weight *= 1.20 
-        boundary_weight *= 1.15 
+            wicket_weight *= 1.12
+        boundary_weight *= 1.15
         dot_weight *= 1.10
     elif is_middle:
         single_weight *= 1.35 # Strike rotation
         dot_weight *= 0.85
-        boundary_weight *= 0.80 
+        boundary_weight *= 0.80
+
+    # ── ENVIRONMENTAL WICKET COMPRESSOR ──────────────────────────────────
+    # Everything above (pitch + weather + ball-age + phase) has scaled the
+    # wicket rate. Compress that *combined* inflation back toward baseline so
+    # bowling decks don't fold sides 100% of the time over 50 overs. Per-ball
+    # tactical wicket logic (shot choice, archetypes, collapse) comes AFTER
+    # this line and keeps its full effect.
+    if wicket_weight > ODI_BASE_WKT:
+        wicket_weight = ODI_BASE_WKT + (wicket_weight - ODI_BASE_WKT) * ODI_WKT_COMPRESS
+
+    # ── 2.0 BATTING MOMENTUM ──
+    # New batsman vulnerable until set, set batsman dangerous. Post-compressor
+    # because it's about the player, not the conditions. ODI batsmen take longer
+    # to "get in" than in T20, so the vulnerable window runs ~10 balls.
+    _bf = b_stats.balls_faced
+    if _bf < 10:
+        wicket_weight *= (1.20 - _bf * 0.018)   # ~1.20 first ball → ~1.04 at 10
+        boundary_weight *= (0.80 + _bf * 0.020)
+    elif _bf >= 25:
+        boundary_weight *= 1.10                  # well set — cashing in
 
     bad_shot_selection = False
     perfect_shot_selection = False
@@ -534,7 +640,7 @@ def execute_ball_math_odi(match):
 
         if is_collapse: boundary_weight *= 0.7; wicket_weight *= 0.75; single_weight *= 1.2
         if is_set_partnership: wicket_weight *= 0.85
-        if has_wickets_in_hand: boundary_weight *= 1.3; wicket_weight *= 1.2; dot_weight *= 0.7
+        if has_wickets_in_hand: boundary_weight *= 1.2; wicket_weight *= 1.15; dot_weight *= 0.75
             
         active_multiplier = pressure_multiplier
         if is_death_overs:
@@ -591,6 +697,8 @@ def execute_ball_math_odi(match):
     # 🚨 ANTI-OVERCOOK SAFETIES (Prevents stacked conditions from breaking the game)
     four_weight = max(0.5, min(four_weight, 25.0)) # Hard cap to prevent 450+ scores
     six_weight = max(0.1, min(six_weight, 15.0))
+    if match.pitch in ("Flat", "Dead"):
+        wicket_weight = min(wicket_weight, ODI_BAT_PITCH_WKT_CAP)  # batting-paradise floor
     wicket_weight = max(1.0, min(wicket_weight, 25.0)) # Hard cap to prevent 10/10 scenarios
     dot_weight = max(15.0, min(dot_weight, 120.0))
 
@@ -611,30 +719,44 @@ def execute_ball_math_odi(match):
         innings.wickets += 1
         innings.partnership_runs = 0
         d_types = ["Bowled", "Caught", "LBW"]
-        
-        if "Outswing" in deliv and shot in ["Drive", "Cut"]: dismissal_type = "Caught Behind"
-        elif "Inswing" in deliv and shot in ["Drive", "Flick"]: dismissal_type = random.choice(["Bowled", "LBW"])
-        elif "Slow" in deliv and shot in ["Loft", "Pull", "Scoop"]: dismissal_type = "Caught"
-        elif bad_shot_selection and "Yorker" in deliv: dismissal_type = "Bowled"
-        elif bad_shot_selection and "Bouncer" in deliv: dismissal_type = "Caught"
-        elif is_cutter and shot in ["Loft", "Scoop"]:  dismissal_type = "Caught"
-        elif is_cutter and shot in ["Drive", "Cut"]:   dismissal_type = random.choice(["Caught", "Bowled"])
-        elif shot in ["Loft", "Scoop"]: dismissal_type = "Caught"
-        else: dismissal_type = random.choice(d_types)
-            
-        if dismissal_type == "Bowled":
-            b_stats.dismissal = f"b. {bowler['name']}"
-        elif dismissal_type == "LBW":
-            b_stats.dismissal = f"lbw b. {bowler['name']}"
-        elif dismissal_type == "Caught Behind":
-            wk = next((p["name"] for p in innings.bowling_team["players"] if "WK" in p["role"]), "Keeper")
-            b_stats.dismissal = f"c. {wk} b. {bowler['name']}"
-        else:
+
+        # ── 2.0 DISMISSAL VARIETY ──
+        # Run-out (no bowler credit) first; then stumping vs spin and hit-wicket.
+        if random.random() < ODI_RUNOUT_SHARE:
+            dismissal_type = "Run Out"
             fielders = [p["name"] for p in innings.bowling_team["players"] if p["name"] != bowler["name"]]
-            fielder = random.choice(fielders) if fielders else "Fielder"
-            b_stats.dismissal = f"c. {fielder} b. {bowler['name']}"
-            
-        bow_stats.wickets_taken += 1
+            b_stats.dismissal = f"run out ({random.choice(fielders) if fielders else 'Fielder'})"
+        else:
+            if deliv in SPIN_SHOT_MATRIX and shot in ["Loft", "Sweep", "Drive"] and random.random() < 0.20:
+                dismissal_type = "Stumped"
+            elif ("Bouncer" in deliv or "Fast" in deliv) and shot == "Pull" and random.random() < 0.05:
+                dismissal_type = "Hit Wicket"
+            elif "Outswing" in deliv and shot in ["Drive", "Cut"]: dismissal_type = "Caught Behind"
+            elif "Inswing" in deliv and shot in ["Drive", "Flick"]: dismissal_type = random.choice(["Bowled", "LBW"])
+            elif "Slow" in deliv and shot in ["Loft", "Pull", "Scoop"]: dismissal_type = "Caught"
+            elif bad_shot_selection and "Yorker" in deliv: dismissal_type = "Bowled"
+            elif bad_shot_selection and "Bouncer" in deliv: dismissal_type = "Caught"
+            elif is_cutter and shot in ["Loft", "Scoop"]:  dismissal_type = "Caught"
+            elif is_cutter and shot in ["Drive", "Cut"]:   dismissal_type = random.choice(["Caught", "Bowled"])
+            elif shot in ["Loft", "Scoop"]: dismissal_type = "Caught"
+            else: dismissal_type = random.choice(d_types)
+
+            if dismissal_type == "Bowled":
+                b_stats.dismissal = f"b. {bowler['name']}"
+            elif dismissal_type == "LBW":
+                b_stats.dismissal = f"lbw b. {bowler['name']}"
+            elif dismissal_type == "Hit Wicket":
+                b_stats.dismissal = f"hit wkt b. {bowler['name']}"
+            elif dismissal_type in ("Stumped", "Caught Behind"):
+                wk = next((p["name"] for p in innings.bowling_team["players"] if "WK" in p["role"]), "Keeper")
+                pre = "st." if dismissal_type == "Stumped" else "c."
+                b_stats.dismissal = f"{pre} {wk} b. {bowler['name']}"
+            else:
+                fielders = [p["name"] for p in innings.bowling_team["players"] if p["name"] != bowler["name"]]
+                fielder = random.choice(fielders) if fielders else "Fielder"
+                b_stats.dismissal = f"c. {fielder} b. {bowler['name']}"
+
+            bow_stats.wickets_taken += 1
         innings.over_log.append("<a:wickett:1510369641959264429>")
         match.prev_striker_idx = innings.current_striker_idx
         if dismissal_type in ["LBW", "Caught Behind"] and match.simulation_mode == "interactive":
