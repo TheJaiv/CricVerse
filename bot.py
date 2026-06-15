@@ -111,27 +111,32 @@ async def on_ready():
 # Identical bat/bowl/role/archetype at every position, only the names differ, so
 # a default-vs-default match is a true 50/50 contest. Balanced XI: 5 batters
 # (incl. WK), 2 all-rounders, 4 bowlers, with a pace + spin mix for all pitches.
+# Primary skill ratings span 80-92 (solid pros up to a marquee 92 star). Bowlers
+# keep a realistic lower-order bat, batters a token bowl — the 80-92 range is the
+# headline (primary) skill of each player. Both XIs share these exact stats.
 _EQUAL_TEMPLATE = [
     # (bat, bowl, archetype, role)
-    (85, 12, "Anchor",    "Batter"),
-    (86, 12, "Aggressor", "Batter"),
-    (87, 18, "Anchor",    "Batter"),
-    (86, 22, "Aggressor", "Batter"),
-    (85, 10, "Finisher",  "Batter_WK"),
-    (80, 80, "Finisher",  "All-Rounder_Pace"),
-    (78, 84, "Anchor",    "All-Rounder_Spin_Off"),
-    (48, 85, "Aggressor", "Bowler_Pace"),
-    (38, 87, "Finisher",  "Bowler_Pace"),
-    (32, 85, "Standard",  "Bowler_Pace"),
-    (30, 85, "Standard",  "Bowler_Spin_Leg"),
+    (88, 12, "Aggressor", "Batter"),               # opener
+    (84, 12, "Anchor",    "Batter"),               # opener
+    (92, 15, "Anchor",    "Batter"),               # marquee No.3
+    (86, 18, "Aggressor", "Batter"),               # No.4
+    (85, 10, "Finisher",  "Batter_WK"),            # keeper
+    (82, 85, "Finisher",  "All-Rounder_Pace"),     # pace all-rounder
+    (80, 86, "Anchor",    "All-Rounder_Spin_Off"), # spin all-rounder
+    (42, 88, "Aggressor", "Bowler_Pace"),          # frontline pace
+    (35, 90, "Finisher",  "Bowler_Pace"),          # spearhead pace
+    (38, 80, "Standard",  "Bowler_Pace"),          # third seamer (range floor)
+    (30, 86, "Standard",  "Bowler_Spin_Leg"),      # leg-spinner
 ]
 _PROTAGONIST_NAMES = [
-    "Adam Frost", "Ben Carter", "Cole Hayes", "Dean Walsh", "Eli Brooks",
-    "Finn Doyle", "Gabe Mercer", "Hugo Blake", "Ira Nash", "Jude Pike", "Kit Rowe",
+    "David Warner", "Usman Khawaja", "Virat Kohli", "Travis Head", "Jos Buttler",
+    "Ben Stokes", "Ravichandran Ashwin", "Mitchell Starc", "Jasprit Bumrah",
+    "Josh Hazlewood", "Rashid Khan",
 ]
 _RIVAL_NAMES = [
-    "Axel Stone", "Boyd Lane", "Cyrus Vale", "Dane Webb", "Enzo Hart",
-    "Flynn Cole", "Gray Olsen", "Hank Ross", "Ike Sterns", "Joss Kerr", "Lev Pryor",
+    "Rohit Sharma", "Dimuth Karunaratne", "Joe Root", "Suryakumar Yadav", "Quinton de Kock",
+    "Hardik Pandya", "Mohammad Nabi", "Kagiso Rabada", "Trent Boult",
+    "Mohammed Shami", "Yuzvendra Chahal",
 ]
 def _build_equal_xi(names):
     return [
@@ -3337,7 +3342,7 @@ async def on_message(message: discord.Message):
         if message.content.strip().lower() == "default":
             players = list(TEAMS_DATA["Team 1"]["players"])
             if state.impact_player:
-                state.t1_subs = [{"name": "Extra Batter", "bat": 85, "bowl": 10, "archetype": "Aggressor", "role": "Batter"}, {"name": "Extra Bowler", "bat": 10, "bowl": 85, "archetype": "Standard", "role": "Bowler_Pace"}]
+                state.t1_subs = [{"name": "Faf du Plessis", "bat": 85, "bowl": 10, "archetype": "Aggressor", "role": "Batter"}, {"name": "Lockie Ferguson", "bat": 10, "bowl": 85, "archetype": "Standard", "role": "Bowler_Pace"}]
             else:
                 state.t1_subs = []
             missing = []
@@ -3370,7 +3375,7 @@ async def on_message(message: discord.Message):
         if state.p2_id is None and not getattr(state, 'sim_only', False):
             state.t2_roster = TEAMS_DATA["Team 2"]["players"]
             if getattr(state, "impact_player", False):
-                state.t2_subs = [{"name": "Extra Batter 2", "bat": 85, "bowl": 10, "archetype": "Aggressor", "role": "Batter"}, {"name": "Extra Bowler 2", "bat": 10, "bowl": 85, "archetype": "Standard", "role": "Bowler_Pace"}]
+                state.t2_subs = [{"name": "Devon Conway", "bat": 85, "bowl": 10, "archetype": "Aggressor", "role": "Batter"}, {"name": "Anrich Nortje", "bat": 10, "bowl": 85, "archetype": "Standard", "role": "Bowler_Pace"}]
             else:
                 state.t2_subs = []
             await message.channel.send(f"🤖 AI team **{state.t2_name}** will use the built-in roster.")
@@ -3386,7 +3391,7 @@ async def on_message(message: discord.Message):
         if message.content.strip().lower() == "default":
             players = list(TEAMS_DATA["Team 2"]["players"])
             if state.impact_player:
-                state.t2_subs = [{"name": "Extra Batter 2", "bat": 85, "bowl": 10, "archetype": "Aggressor", "role": "Batter"}, {"name": "Extra Bowler 2", "bat": 10, "bowl": 85, "archetype": "Standard", "role": "Bowler_Pace"}]
+                state.t2_subs = [{"name": "Devon Conway", "bat": 85, "bowl": 10, "archetype": "Aggressor", "role": "Batter"}, {"name": "Anrich Nortje", "bat": 10, "bowl": 85, "archetype": "Standard", "role": "Bowler_Pace"}]
             else:
                 state.t2_subs = []
             missing = []
