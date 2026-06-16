@@ -5840,8 +5840,21 @@ class PrefixCog(commands.Cog):
             usage = ctx.command.help.split("Usage: ")[1] if ctx.command.help and "Usage: " in ctx.command.help else f"{ctx.command.name} [arguments...]"
             await ctx.send(f"❌ **Invalid Usage!** {ctx.author.mention}, the correct format is:\n`{ctx.prefix}{usage}`")
         else:
-            print(f"An error occurred in a prefix command '{ctx.command}': {error}")
-            await ctx.send(f"An unexpected error occurred while running that command.")
+            import traceback as _tb
+            orig = getattr(error, "original", error)
+            print(f"An error occurred in a prefix command '{ctx.command}': {orig!r}")
+            _tb.print_exception(type(orig), orig, orig.__traceback__)
+            # Surface the real error to the owner/admins to speed up debugging.
+            try:
+                _is_admin = (ctx.author.id == ADMIN_DISCORD_ID
+                             or (ctx.guild and ctx.author.guild_permissions.administrator)
+                             or str(ctx.author.id) in get_auth_admins())
+            except Exception:
+                _is_admin = False
+            if _is_admin:
+                await ctx.send(f"⚠️ `{type(orig).__name__}`: {str(orig)[:1800]}")
+            else:
+                await ctx.send("An unexpected error occurred while running that command.")
 
     @commands.command(name="match", aliases=["m"], help="Start a new Cricket Match simulation.\nUsage: match [@opponent]")
     async def match(self, ctx, opponent: discord.Member = None):

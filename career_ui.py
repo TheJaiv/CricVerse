@@ -119,9 +119,9 @@ def run_debut_trial(career: dict):
 class _BowlingSelect(discord.ui.Select):
     def __init__(self, parent):
         self.parent = parent
-        opts = [discord.SelectOption(label=v["label"], value=k, emoji=v["emoji"],
+        opts = [discord.SelectOption(label=f"{v['emoji']} {v['label']}", value=k,
                                      description="How you bowl") for k, v in CM.BOWLING_TYPES.items()]
-        super().__init__(placeholder="① Choose your bowling type…", options=opts, row=0)
+        super().__init__(placeholder="1) Choose your bowling type", options=opts, row=0)
 
     async def callback(self, interaction):
         if interaction.user.id != self.parent.uid:
@@ -134,9 +134,9 @@ class _BowlingSelect(discord.ui.Select):
 class _MindsetSelect(discord.ui.Select):
     def __init__(self, parent):
         self.parent = parent
-        opts = [discord.SelectOption(label=v["label"], value=k, emoji=v["emoji"],
+        opts = [discord.SelectOption(label=f"{v['emoji']} {v['label']}", value=k,
                                      description=v["desc"][:90]) for k, v in CM.MINDSETS.items()]
-        super().__init__(placeholder="② Choose your batting mindset…", options=opts, row=1)
+        super().__init__(placeholder="2) Choose your batting mindset", options=opts, row=1)
 
     async def callback(self, interaction):
         if interaction.user.id != self.parent.uid:
