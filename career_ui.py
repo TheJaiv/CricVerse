@@ -117,42 +117,42 @@ def run_debut_trial(career: dict):
 
 # ── Creation picker: bowling type + batting mindset ─────────────────────────
 class _BowlingSelect(discord.ui.Select):
-    def __init__(self, parent):
-        self.parent = parent
+    def __init__(self, picker):
         opts = [discord.SelectOption(label=f"{v['emoji']} {v['label']}", value=k,
                                      description="How you bowl") for k, v in CM.BOWLING_TYPES.items()]
         super().__init__(placeholder="1) Choose your bowling type", options=opts, row=0)
+        self.picker = picker
 
     async def callback(self, interaction):
-        if interaction.user.id != self.parent.uid:
+        if interaction.user.id != self.picker.uid:
             return await interaction.response.send_message("This isn't your setup.", ephemeral=True)
-        self.parent.bowling = self.values[0]
-        self.parent.sync()
-        await interaction.response.edit_message(view=self.parent)
+        self.picker.bowling = self.values[0]
+        self.picker.sync()
+        await interaction.response.edit_message(view=self.picker)
 
 
 class _MindsetSelect(discord.ui.Select):
-    def __init__(self, parent):
-        self.parent = parent
+    def __init__(self, picker):
         opts = [discord.SelectOption(label=f"{v['emoji']} {v['label']}", value=k,
                                      description=v["desc"][:90]) for k, v in CM.MINDSETS.items()]
         super().__init__(placeholder="2) Choose your batting mindset", options=opts, row=1)
+        self.picker = picker
 
     async def callback(self, interaction):
-        if interaction.user.id != self.parent.uid:
+        if interaction.user.id != self.picker.uid:
             return await interaction.response.send_message("This isn't your setup.", ephemeral=True)
-        self.parent.mindset = self.values[0]
-        self.parent.sync()
-        await interaction.response.edit_message(view=self.parent)
+        self.picker.mindset = self.values[0]
+        self.picker.sync()
+        await interaction.response.edit_message(view=self.picker)
 
 
 class _CreateButton(discord.ui.Button):
-    def __init__(self, parent):
+    def __init__(self, picker):
         super().__init__(label="Create Career", style=discord.ButtonStyle.success, row=2, disabled=True)
-        self.parent = parent
+        self.picker = picker
 
     async def callback(self, interaction):
-        p = self.parent
+        p = self.picker
         if interaction.user.id != p.uid:
             return await interaction.response.send_message("This isn't your setup.", ephemeral=True)
         career, err = CM.create_career(p.uid, p.username, p.bowling, p.mindset)
