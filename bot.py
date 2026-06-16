@@ -105,14 +105,18 @@ async def auto_sync_db():
     """Refresh in-memory cache from MongoDB every hour (picks up manual edits)"""
     load_data_from_bin()
     load_tournament_data_from_bin()
-    load_careers()
+    if CAREER_MODE_ENABLED:
+        try: load_careers()
+        except Exception as e: print(f"⚠️ load_careers failed (ignored): {e}")
 
 @bot.event
 async def on_ready():
     print(f"🏏 Logged in successfully as {bot.user.name}")
     load_data_from_bin()
     load_tournament_data_from_bin()
-    load_careers()
+    if CAREER_MODE_ENABLED:
+        try: load_careers()
+        except Exception as e: print(f"⚠️ load_careers failed (ignored): {e}")
     if not auto_sync_db.is_running():
         auto_sync_db.start()
     print("✅ Memory Cache Loaded and Ready.")

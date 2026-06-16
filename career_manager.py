@@ -1,120 +1,107 @@
 """
-Career Mode data layer for CricVerse.
+Career Mode data layer for CricVerse  (v2 — all-rounder model, synced to the sim DB).
 
 Stores one document per user in a dedicated `careers` Mongo collection (NOT the
 single cricket_bot_data blob) to avoid the 16MB limit and concurrent-save races.
-Reuses subscription_manager._get_db() so the Mongo connection / URI-encoding is
-identical to the rest of the bot.
+Reuses subscription_manager._get_db() so the connection is identical to the bot.
 
+Design (v2):
+  • EVERY player is an all-rounder (bats AND bowls).
+  • At creation you choose a BOWLING TYPE (pace / off-spin / leg-spin) and a
+    BATTING MINDSET (aggressor / standard / anchor).
+  • Ratings are SYNCED to the main sim: rookies start at OVR 68 (the DB floor —
+    nobody in the sim is rated below ~68), max 99. Progression is deliberately
+    expensive so reaching the 90s is a long grind.
 A career is GLOBAL (one identity per Discord user across every server).
 """
 import time
+import random
 import datetime
 from threading import Thread
 
 from subscription_manager import _get_db
 
-# In-memory cache: user_id(str) -> career dict
-CAREER_CACHE = {}
+CAREER_CACHE = {}   # user_id(str) -> career dict
 
-# ────────────────────────────────────────────────────────────────────────────
-# ARCHETYPES
-# Each defines: a label, starting attributes (tuned so OVR ≈ 50 at creation),
-# the OVR weighting across the 5 attributes (weights sum to 1.0), and how the
-# career maps onto the sim engine's role/archetype.
-# Attributes: power, control, pace, spin, stamina  (0–99)
-# ────────────────────────────────────────────────────────────────────────────
-ATTRS = ("power", "control", "pace", "spin", "stamina")
+# Four upgradeable attributes (pace/spin merged into one "bowling" stat — your
+# chosen bowling type decides HOW you bowl, this is HOW WELL).
+ATTRS = ("power", "control", "bowling", "stamina")
 
-ARCHETYPES = {
-    "anchor": {
-        "label": "Top-Order Anchor", "emoji": "🧱",
-        "desc": "High control, low risk. Builds long, steady partnerships.",
-        "start": {"power": 48, "control": 58, "pace": 30, "spin": 30, "stamina": 52},
-        "weights": {"power": 0.20, "control": 0.42, "pace": 0.09, "spin": 0.09, "stamina": 0.20},
-        "engine_role": "Batter", "engine_arch": "Anchor",
-    },
-    "power": {
-        "label": "Power-Hitter", "emoji": "💥",
-        "desc": "Massive boundary potential, huge strike rate, clears the ropes.",
-        "start": {"power": 60, "control": 46, "pace": 28, "spin": 28, "stamina": 50},
-        "weights": {"power": 0.45, "control": 0.20, "pace": 0.075, "spin": 0.075, "stamina": 0.20},
-        "engine_role": "Batter", "engine_arch": "Aggressor",
-    },
-    "pacer": {
-        "label": "Express Pacer", "emoji": "🔥",
-        "desc": "Pure raw speed. High chance to dismantle stumps & force edges.",
-        "start": {"power": 28, "control": 46, "pace": 60, "spin": 28, "stamina": 52},
-        "weights": {"power": 0.05, "control": 0.15, "pace": 0.50, "spin": 0.05, "stamina": 0.25},
-        "engine_role": "Bowler_Pace", "engine_arch": "Aggressor",
-    },
-    "spinner": {
-        "label": "Mystery Spinner", "emoji": "🌀",
-        "desc": "Hard to read. Restricts runs heavily and forces mistimed shots.",
-        "start": {"power": 28, "control": 50, "pace": 28, "spin": 60, "stamina": 48},
-        "weights": {"power": 0.05, "control": 0.25, "pace": 0.05, "spin": 0.50, "stamina": 0.15},
-        "engine_role": "Bowler_Spin_Off", "engine_arch": "Standard",
-    },
-    "death": {
-        "label": "Slingy Death Specialist", "emoji": "🎯",
-        "desc": "Master of yorkers & slower balls at the back end of an innings.",
-        "start": {"power": 28, "control": 54, "pace": 56, "spin": 30, "stamina": 50},
-        "weights": {"power": 0.05, "control": 0.30, "pace": 0.40, "spin": 0.05, "stamina": 0.20},
-        "engine_role": "Bowler_Pace", "engine_arch": "Finisher",
-    },
-    "keeper": {
-        "label": "Wicketkeeper-Batter", "emoji": "🧤",
-        "desc": "Crucial behind the stumps; a solid middle-order bat.",
-        "start": {"power": 50, "control": 54, "pace": 28, "spin": 30, "stamina": 52},
-        "weights": {"power": 0.27, "control": 0.35, "pace": 0.08, "spin": 0.10, "stamina": 0.20},
-        "engine_role": "Batter_WK", "engine_arch": "Finisher",
-    },
-    "allrounder": {
-        "label": "Genuine All-Rounder", "emoji": "⚔️",
-        "desc": "Decent at both; slower to upgrade but highly versatile.",
-        "start": {"power": 46, "control": 48, "pace": 46, "spin": 40, "stamina": 50},
-        "weights": {"power": 0.20, "control": 0.20, "pace": 0.20, "spin": 0.20, "stamina": 0.20},
-        "engine_role": "All-Rounder_Pace", "engine_arch": "Standard",
-    },
+# Bowling type → sim engine role (all All-Rounder_* since everyone bats+bowls)
+BOWLING_TYPES = {
+    "pace":    {"label": "Express Pace", "emoji": "🔥", "engine_role": "All-Rounder_Pace"},
+    "offspin": {"label": "Off-Spin",     "emoji": "🌀", "engine_role": "All-Rounder_Spin_Off"},
+    "legspin": {"label": "Leg-Spin",     "emoji": "🪀", "engine_role": "All-Rounder_Spin_Leg"},
 }
 
-TIERS = [  # (min_ovr, max_ovr, name)
-    (90, 99, "Diamond"), (80, 89, "Platinum"), (70, 79, "Gold"),
-    (60, 69, "Silver"), (0, 59, "Bronze"),
+# Batting mindset → sim engine archetype
+MINDSETS = {
+    "aggressor": {"label": "Aggressor", "emoji": "💥", "engine_arch": "Aggressor",
+                  "desc": "Attacking intent, high strike rate, clears the ropes."},
+    "standard":  {"label": "Standard",  "emoji": "⚖️", "engine_arch": "Standard",
+                  "desc": "Balanced — rotates strike, punishes the bad ball."},
+    "anchor":    {"label": "Anchor",    "emoji": "🧱", "engine_arch": "Anchor",
+                  "desc": "Low-risk accumulator who builds long innings."},
+}
+
+# Rookie starts at a clean OVR 70 (normalised exactly at creation). Synced to the
+# sim — the player DB floor is ~68, so a rookie is the weakest pro, with a long
+# climb to the 90s legends.
+BASE_ATTRS = {"power": 70, "control": 72, "bowling": 68, "stamina": 70}
+BASE_OVR = 70
+
+# Tiers mapped onto the sim's real rating spread (good players 78-88, legends 92+).
+TIERS = [  # (min, max, name, blurb)
+    (92, 99, "Diamond",  "The Legend"),
+    (86, 91, "Platinum", "The Elite"),
+    (80, 85, "Gold",     "The Star"),
+    (74, 79, "Silver",   "The Pro"),
+    (0,  73, "Bronze",   "The Rookie"),
 ]
 
 
 def tier_for_ovr(ovr: int) -> str:
-    for lo, hi, name in TIERS:
+    for lo, hi, name, _ in TIERS:
         if lo <= ovr <= hi:
             return name
     return "Bronze"
-
-
-def compute_ovr(career: dict) -> int:
-    w = ARCHETYPES[career["archetype"]]["weights"]
-    a = career["attributes"]
-    return round(sum(a[k] * w[k] for k in ATTRS))
 
 
 def _clamp(v, lo=0, hi=99):
     return max(lo, min(hi, int(round(v))))
 
 
+def bat_skill(a):
+    return _clamp(0.45 * a["control"] + 0.35 * a["power"] + 0.20 * a["stamina"])
+
+
+def bowl_skill(a):
+    return _clamp(0.55 * a["bowling"] + 0.25 * a["control"] + 0.20 * a["stamina"])
+
+
+def compute_ovr(career: dict) -> int:
+    a = career["attributes"]
+    return round(0.55 * bat_skill(a) + 0.45 * bowl_skill(a))
+
+
 def career_to_engine(career: dict) -> dict:
     """Convert a career into the sim engine's {name,bat,bowl,role,archetype} shape."""
     a = career["attributes"]
-    arch = ARCHETYPES[career["archetype"]]
-    bat = _clamp(0.45 * a["control"] + 0.35 * a["power"] + 0.20 * a["stamina"])
-    hi_bowl, lo_bowl = max(a["pace"], a["spin"]), min(a["pace"], a["spin"])
-    bowl = _clamp(0.50 * hi_bowl + 0.25 * a["control"] + 0.15 * a["stamina"] + 0.10 * lo_bowl)
-    role = arch["engine_role"]
-    # spinners: choose off/leg flavour (default off; leg if spin-leaning naming later)
     return {
         "name": career.get("username", "Rookie"),
-        "bat": bat, "bowl": bowl,
-        "role": role, "archetype": arch["engine_arch"],
+        "bat": bat_skill(a),
+        "bowl": bowl_skill(a),
+        "role": BOWLING_TYPES[career["bowling_type"]]["engine_role"],
+        "archetype": MINDSETS[career["mindset"]]["engine_arch"],
     }
+
+
+# ── Progression economics (deliberately HARD — tiers must be earned) ─────────
+# Cost ramps steeply so Gold is a multi-week goal, Platinum months, and Diamond
+# a long-term grind that even premium players can't rush.
+def upgrade_cost(v: int) -> int:
+    """Coin cost to raise an attribute from v to v+1."""
+    return int(round(40 + (v - 65) * 10 + max(0, v - 80) * 22 + max(0, v - 90) * 45))
 
 
 def _blank_stats():
@@ -126,31 +113,28 @@ def _blank_stats():
     }
 
 
-def _normalize_to_ovr(career: dict, target: int = 50):
-    """Scale attributes proportionally so OVR == target, preserving archetype shape."""
+def _normalize_to_ovr(career: dict, target: int = BASE_OVR):
+    """Scale attributes proportionally so OVR == target."""
     raw = compute_ovr(career)
     if raw > 0 and raw != target:
         f = target / raw
         for k in ATTRS:
             career["attributes"][k] = _clamp(career["attributes"][k] * f, 1, 99)
-    # fix rounding drift via the heaviest-weighted attribute
-    w = ARCHETYPES[career["archetype"]]["weights"]
-    heavy = max(w, key=w.get)
     guard = 0
     while compute_ovr(career) != target and guard < 30:
         a = career["attributes"]
-        a[heavy] = _clamp(a[heavy] + (1 if compute_ovr(career) < target else -1), 1, 99)
+        a["control"] = _clamp(a["control"] + (1 if compute_ovr(career) < target else -1), 1, 99)
         guard += 1
     career["ovr"] = compute_ovr(career)
 
 
-def new_career(user_id: str, username: str, archetype: str) -> dict:
-    arch = ARCHETYPES[archetype]
+def new_career(user_id, username, bowling_type, mindset) -> dict:
     c = {
         "_id": str(user_id),
         "username": username,
-        "archetype": archetype,
-        "attributes": dict(arch["start"]),
+        "bowling_type": bowling_type,
+        "mindset": mindset,
+        "attributes": dict(BASE_ATTRS),
         "coins": 0,
         "xp": 0,
         "debut_done": False,
@@ -160,15 +144,20 @@ def new_career(user_id: str, username: str, archetype: str) -> dict:
         "cosmetic_title": "",
         "stats": _blank_stats(),
     }
-    _normalize_to_ovr(c, 50)
+    _normalize_to_ovr(c, BASE_OVR)
     c["tier"] = tier_for_ovr(c["ovr"])
     return c
 
 
-# ── Persistence ─────────────────────────────────────────────────────────────
+def refresh_ovr(career: dict):
+    old = career.get("tier")
+    career["ovr"] = compute_ovr(career)
+    career["tier"] = tier_for_ovr(career["ovr"])
+    return old, career["tier"]
 
+
+# ── Persistence ─────────────────────────────────────────────────────────────
 def load_careers():
-    """Load all careers into CAREER_CACHE at startup."""
     try:
         col = _get_db()["careers"]
         CAREER_CACHE.clear()
@@ -179,8 +168,7 @@ def load_careers():
         print(f"❌ Career load error: {e}")
 
 
-def get_career(user_id: str):
-    """Return a career from cache, lazily fetching from Mongo if not cached."""
+def get_career(user_id):
     uid = str(user_id)
     if uid in CAREER_CACHE:
         return CAREER_CACHE[uid]
@@ -195,7 +183,6 @@ def get_career(user_id: str):
 
 
 def save_career(career: dict):
-    """Upsert a single career document (synchronous)."""
     try:
         _get_db()["careers"].replace_one({"_id": career["_id"]}, career, upsert=True)
         return True
@@ -205,29 +192,138 @@ def save_career(career: dict):
 
 
 def async_save_career(career: dict):
-    """Persist a career in a background thread; update cache immediately."""
     CAREER_CACHE[career["_id"]] = career
     Thread(target=save_career, args=(career,)).start()
 
 
-def create_career(user_id: str, username: str, archetype: str):
-    """Create + persist a new career. Returns (career, error_msg)."""
+def delete_career(user_id):
+    """Completely remove a user's career (cache + Mongo). Returns True if one existed."""
     uid = str(user_id)
-    if archetype not in ARCHETYPES:
-        return None, f"Unknown archetype '{archetype}'."
+    existed = CAREER_CACHE.pop(uid, None) is not None
+    try:
+        res = _get_db()["careers"].delete_one({"_id": uid})
+        return existed or res.deleted_count > 0
+    except Exception as e:
+        print(f"❌ delete_career error: {e}")
+        return existed
+
+
+def create_career(user_id, username, bowling_type, mindset):
+    """Create + persist a new career. Returns (career, error)."""
+    uid = str(user_id)
+    if bowling_type not in BOWLING_TYPES:
+        return None, "Invalid bowling type."
+    if mindset not in MINDSETS:
+        return None, "Invalid batting mindset."
     if get_career(uid):
         return None, "You already have a career! Use `cv profile` to view it."
-    c = new_career(uid, username, archetype)
+    c = new_career(uid, username, bowling_type, mindset)
     async_save_career(c)
     return c, None
 
 
-def refresh_ovr(career: dict):
-    """Recompute OVR + tier after an attribute change. Returns (old_tier, new_tier)."""
-    old_tier = career.get("tier")
-    career["ovr"] = compute_ovr(career)
-    career["tier"] = tier_for_ovr(career["ovr"])
-    return old_tier, career["tier"]
+# ── Economy / progression actions ───────────────────────────────────────────
+def upgrade_attribute(career: dict, attr: str, want: int = 1):
+    """Spend coins to raise `attr` by up to `want` points (as many as affordable).
+    Returns (bought:int, spent:int, msg:str)."""
+    if attr not in ATTRS:
+        return 0, 0, f"Unknown attribute. Choose: {', '.join(ATTRS)}."
+    bought = spent = 0
+    while bought < want:
+        v = career["attributes"][attr]
+        if v >= 99:
+            if bought == 0:
+                return 0, 0, f"Your **{attr}** is already maxed at 99."
+            break
+        cost = upgrade_cost(v)
+        if career["coins"] < cost:
+            if bought == 0:
+                return 0, 0, f"Not enough coins — next **{attr}** point costs **{cost}** 🪙 (you have {career['coins']:,})."
+            break
+        career["coins"] -= cost
+        career["attributes"][attr] = v + 1
+        spent += cost
+        bought += 1
+    refresh_ovr(career)
+    async_save_career(career)
+    return bought, spent, "ok"
+
+
+DAILY_MIN, DAILY_MAX = 80, 180     # lowered: dailies alone shouldn't fast-track tiers
+WEEKLY_AMOUNT  = 1200
+MONTHLY_AMOUNT = 5000
+WEEK_BOOST = 1.05                  # 5% coin boost for the week (premium weekly perk)
+
+
+def _boost_mult(career: dict) -> float:
+    return WEEK_BOOST if career.get("week_boost_until", 0) > int(time.time()) else 1.0
+
+
+def _fmt_remaining(secs):
+    h, m = secs // 3600, (secs % 3600) // 60
+    if h >= 24:
+        return f"{h // 24}d {h % 24}h"
+    return f"{h}h {m}m"
+
+
+def _claim(career, key, cooldown, base):
+    now = int(time.time())
+    last = career.get("claims", {}).get(key, 0)
+    if now - last < cooldown:
+        return None, f"⏳ Already claimed. Come back in **{_fmt_remaining(cooldown - (now - last))}**."
+    career.setdefault("claims", {})[key] = now
+    return now, None
+
+
+def claim_daily(career: dict):
+    """Returns (amount, error). 24h cooldown."""
+    now, err = _claim(career, "daily", 86400, 0)
+    if err:
+        return 0, err
+    amount = int(round(random.randint(DAILY_MIN, DAILY_MAX) * _boost_mult(career)))
+    career["coins"] += amount
+    async_save_career(career)
+    return amount, None
+
+
+def claim_weekly(career: dict):
+    """Premium/booster weekly: coins + a 5% week-long coin boost. 7d cooldown."""
+    now, err = _claim(career, "weekly", 7 * 86400, 0)
+    if err:
+        return 0, err
+    career["coins"] += WEEKLY_AMOUNT
+    career["week_boost_until"] = now + 7 * 86400
+    async_save_career(career)
+    return WEEKLY_AMOUNT, None
+
+
+def claim_monthly(career: dict):
+    """Premium/booster monthly: coins + a cosmetic profile title. 30d cooldown."""
+    now, err = _claim(career, "monthly", 30 * 86400, 0)
+    if err:
+        return 0, err
+    career["coins"] += MONTHLY_AMOUNT
+    career["cosmetic_title"] = "[Patron]"
+    async_save_career(career)
+    return MONTHLY_AMOUNT, None
+
+
+def award_match_earnings(career, *, runs=0, fifties=0, hundreds=0, wickets=0,
+                         maidens=0, catches=0, stumpings=0, won=False, is_real_match=True):
+    """Match payout — PvP/club matches ONLY. AI matches earn ZERO coins (they exist
+    purely for quests/practice). Returns coins awarded."""
+    if not is_real_match:
+        return 0
+    coins = 100                                   # base pay
+    if won:
+        coins += 50                               # victory bonus
+    coins += (runs // 10) * 5 + fifties * 20 + hundreds * 40   # batting
+    coins += wickets * 15 + maidens * 20          # bowling
+    coins += (catches + stumpings) * 10           # fielding
+    coins = int(round(coins * _boost_mult(career)))
+    career["coins"] += coins
+    async_save_career(career)
+    return coins
 
 
 def get_today_str():
