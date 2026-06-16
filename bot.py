@@ -48,10 +48,14 @@ from subscription_manager import (
 # var CAREER_MODE=1 only when Career Mode is finished and tested.
 CAREER_MODE_ENABLED = os.environ.get("CAREER_MODE", "0") == "1"
 try:
+    import career_manager as CM
+    import career_ui
     from career_manager import load_careers
+    _CAREER_OK = True
 except Exception as _career_err:
     print(f"⚠️ Career module not loaded ({_career_err}); Career Mode disabled.")
     CAREER_MODE_ENABLED = False
+    _CAREER_OK = False
     def load_careers():  # no-op fallback
         pass
 
@@ -61,6 +65,41 @@ except Exception as _career_err:
 ADMIN_DISCORD_ID = 1087369198801526836 # Your ID
 _log_env = os.environ.get("LOG_CHANNEL_ID")
 LOG_CHANNEL_ID = int(_log_env) if _log_env and _log_env.isdigit() else 0
+
+# ── Career Mode gating helpers ────────────────────────────────────────────────
+_CAREER_SOON = "🚧 **Career Mode is coming soon!** It's still in development."
+
+def _can_use_career(ctx):
+    """During development Career Mode is owner/admin-only; everyone else sees
+    'coming soon'. When CAREER_MODE_ENABLED is flipped on, it opens to all."""
+    if not _CAREER_OK:
+        return False
+    if CAREER_MODE_ENABLED:
+        return True
+    try:
+        if ctx.author.id == ADMIN_DISCORD_ID:
+            return True
+        if ctx.guild and ctx.author.guild_permissions.administrator:
+            return True
+        if str(ctx.author.id) in get_auth_admins():
+            return True
+    except Exception:
+        pass
+    return False
+
+def _is_premium(ctx):
+    """Weekly/monthly perks: Nitro boosters, paid sub tiers, or owner (testing)."""
+    try:
+        if ctx.author.id == ADMIN_DISCORD_ID:
+            return True
+        if getattr(ctx.author, "premium_since", None):
+            return True
+        u_tier, _, _, _, _ = get_tier_status(str(ctx.author.id), str(ctx.guild.id) if ctx.guild else "")
+        if u_tier and u_tier != "Free":
+            return True
+    except Exception:
+        pass
+    return False
 
 # ── Match counters (backed by MongoDB via subscription_manager) ───────────────
 
@@ -6258,6 +6297,162 @@ class PrefixCog(commands.Cog):
         if bowlers: embed.add_field(name="🎯 Bowlers", value="\n".join([_fmt(p, "bowl") for p in bowlers]), inline=False)
 
         await ctx.send(embed=embed)
+
+    # ============================= CAREER MODE =============================
+    @commands.command(name="career", aliases=["careerhelp"], help="Career Mode help menu.\nUsage: career")
+    async def career_help(self, ctx):
+        if not _can_use_career(ctx):
+            return await ctx.send(_CAREER_SOON)
+        e = discord.Embed(
+            title="🏏 Career Mode — Help",
+            description="Build **one** global all-rounder, earn coins, upgrade attributes and climb the tiers from **Bronze → Diamond**.",
+            color=discord.Color.blurple())
+        e.add_field(name="🚀 Getting Started", value=(
+            "`cv start_career` — create your all-rounder (choose bowling type + batting mindset)\n"
+            "`cv debut` — pass the Academy Trial to unlock your official card"), inline=False)
+        e.add_field(name="💰 Economy", value=(
+            "`cv daily` — daily coins (24h)\n"
+            "`cv weekly` — *Premium/Booster:* coins + 5% week boost\n"
+            "`cv monthly` — *Premium/Booster:* coins + cosmetic title\n"
+            "`cv balance` — check your coins\n"
+            "🪙 *Coins come from dailies and **real club matches only** — matches vs AI pay nothing.*"), inline=False)
+        e.add_field(name="📈 Progress", value=(
+            "`cv upgrade <power|control|bowling|stamina> [amount]` — spend coins to raise an attribute & OVR\n"
+            "`cv profile [@user]` — view a player card"), inline=False)
+        e.add_field(name="🏅 Tiers", value="Bronze 70–73 · Silver 74–79 · Gold 80–85 · Platinum 86–91 · Diamond 92–99", inline=False)
+        if ctx.author.id == ADMIN_DISCORD_ID or (ctx.guild and ctx.author.guild_permissions.administrator):
+            e.add_field(name="🛠️ Dev", value="`cv delete_career [@user]` — wipe a career", inline=False)
+        e.set_footer(text="Career Mode is in development — currently admin/owner only.")
+        await ctx.send(embed=e)
+
+    @commands.command(name="start_career", aliases=["startcareer"], help="Create your career all-rounder.\nUsage: start_career")
+    async def start_career(self, ctx):
+        if not _can_use_career(ctx):
+            return await ctx.send(_CAREER_SOON)
+        if CM.get_career(ctx.author.id):
+            return await ctx.send("❌ You already have a career! Use `cv profile` to view it.")
+        await ctx.send(
+            f"🏏 **Start your Career, {ctx.author.display_name}!**\nEvery player is an **all-rounder** — "
+            f"pick how you bowl and how you bat:",
+            view=career_ui.CareerCreateView(ctx.author.id, ctx.author.display_name))
+
+    @commands.command(name="profile", aliases=["card", "me"], help="View a player card.\nUsage: profile [@user]")
+    async def profile(self, ctx, member: discord.Member = None):
+        if not _can_use_career(ctx):
+            return await ctx.send(_CAREER_SOON)
+        target = member or ctx.author
+        career = CM.get_career(target.id)
+        if not career:
+            who = "You don't" if target.id == ctx.author.id else f"{target.display_name} doesn't"
+            return await ctx.send(f"❌ {who} have a career yet. Use `cv start_career` to begin.")
+        await ctx.send(file=discord.File(career_ui.render_career_card(career), "career_card.png"))
+
+    @commands.command(name="debut", help="Play your Academy Trial to unlock your card.\nUsage: debut")
+    async def debut(self, ctx):
+        if not _can_use_career(ctx):
+            return await ctx.send(_CAREER_SOON)
+        career = CM.get_career(ctx.author.id)
+        if not career:
+            return await ctx.send("❌ Start a career first: `cv start_career`.")
+        if career.get("debut_done"):
+            return await ctx.send("✅ You've already made your debut! Use `cv profile`.")
+        passed, lines, headline = career_ui.run_debut_trial(career)
+        embed = discord.Embed(title=f"🎓 ACADEMY TRIAL — {headline}", description="\n".join(lines),
+                              color=discord.Color.green() if passed else discord.Color.red())
+        if passed:
+            career["debut_done"] = True
+            CM.async_save_career(career)
+            embed.set_footer(text="Official card unlocked! 🎉  Earn coins with cv daily, then cv upgrade.")
+        else:
+            embed.set_footer(text="Unlucky — run cv debut again to retry.")
+        await ctx.send(embed=embed)
+
+    @commands.command(name="daily", help="Claim your daily coins (24h).\nUsage: daily")
+    async def daily(self, ctx):
+        if not _can_use_career(ctx):
+            return await ctx.send(_CAREER_SOON)
+        career = CM.get_career(ctx.author.id)
+        if not career:
+            return await ctx.send("❌ Start a career first: `cv start_career`.")
+        amount, err = CM.claim_daily(career)
+        if err:
+            return await ctx.send(err)
+        await ctx.send(f"🪙 **+{amount} coins!** Daily claimed. Balance: **{career['coins']:,}**.")
+
+    @commands.command(name="weekly", help="[Premium/Booster] Weekly coins + 5% boost.\nUsage: weekly")
+    async def weekly(self, ctx):
+        if not _can_use_career(ctx):
+            return await ctx.send(_CAREER_SOON)
+        career = CM.get_career(ctx.author.id)
+        if not career:
+            return await ctx.send("❌ Start a career first: `cv start_career`.")
+        if not _is_premium(ctx):
+            return await ctx.send("🔒 **Weekly** is a perk for **Premium members / server boosters**.")
+        amt, err = CM.claim_weekly(career)
+        if err:
+            return await ctx.send(err)
+        await ctx.send(f"🪙 **+{amt:,} coins** + a **5% coin boost for 7 days**! Balance: **{career['coins']:,}**.")
+
+    @commands.command(name="monthly", help="[Premium/Booster] Monthly coins + title.\nUsage: monthly")
+    async def monthly(self, ctx):
+        if not _can_use_career(ctx):
+            return await ctx.send(_CAREER_SOON)
+        career = CM.get_career(ctx.author.id)
+        if not career:
+            return await ctx.send("❌ Start a career first: `cv start_career`.")
+        if not _is_premium(ctx):
+            return await ctx.send("🔒 **Monthly** is a perk for **Premium members / server boosters**.")
+        amt, err = CM.claim_monthly(career)
+        if err:
+            return await ctx.send(err)
+        await ctx.send(f"🪙 **+{amt:,} coins** and the **[Patron]** profile title unlocked! Balance: **{career['coins']:,}**.")
+
+    @commands.command(name="balance", aliases=["bal", "coins"], help="Check your coin balance.\nUsage: balance")
+    async def balance(self, ctx):
+        if not _can_use_career(ctx):
+            return await ctx.send(_CAREER_SOON)
+        career = CM.get_career(ctx.author.id)
+        if not career:
+            return await ctx.send("❌ Start a career first: `cv start_career`.")
+        await ctx.send(f"🪙 **{ctx.author.display_name}** — **{career['coins']:,} coins**  ·  OVR {career['ovr']} ({career['tier']})")
+
+    @commands.command(name="upgrade", aliases=["ug", "train"], help="Spend coins to raise an attribute.\nUsage: upgrade <power|control|bowling|stamina> [amount]")
+    async def upgrade(self, ctx, attribute: str = None, amount: int = 1):
+        if not _can_use_career(ctx):
+            return await ctx.send(_CAREER_SOON)
+        career = CM.get_career(ctx.author.id)
+        if not career:
+            return await ctx.send("❌ Start a career first: `cv start_career`.")
+        if not attribute or attribute.lower() not in CM.ATTRS:
+            a = career["attributes"]
+            costs = " · ".join(f"**{k}** {a[k]} (next {CM.upgrade_cost(a[k])}🪙)" for k in CM.ATTRS)
+            return await ctx.send(
+                f"🏋️ **Upgrade an attribute** — `cv upgrade <attribute> [amount]`\n{costs}\n"
+                f"Balance: **{career['coins']:,}** 🪙  ·  OVR {career['ovr']} ({career['tier']})")
+        attribute = attribute.lower()
+        amount = max(1, min(amount, 30))
+        old_ovr, old_tier = career["ovr"], career["tier"]
+        bought, spent, msg = CM.upgrade_attribute(career, attribute, amount)
+        if bought == 0:
+            return await ctx.send(f"❌ {msg}")
+        line = (f"💪 **+{bought} {attribute}** for **{spent:,}** 🪙 → now **{career['attributes'][attribute]}**.\n"
+                f"OVR **{old_ovr} → {career['ovr']}**  ·  Balance **{career['coins']:,}** 🪙")
+        if career["tier"] != old_tier:
+            line += f"\n🏅 **TIER UP! {old_tier} → {career['tier']}!**"
+        await ctx.send(line)
+
+    @commands.command(name="delete_career", aliases=["delcareer", "resetcareer"], help="[DEV] Wipe a user's career.\nUsage: delete_career [@user]")
+    async def delete_career(self, ctx, member: discord.Member = None):
+        if not _can_use_career(ctx):
+            return await ctx.send(_CAREER_SOON)
+        target = member or ctx.author
+        if not CM.get_career(target.id):
+            return await ctx.send(f"❌ {target.display_name} has no career to delete.")
+        ok = CM.delete_career(target.id)
+        await ctx.send(f"🗑️ Wiped **{target.display_name}**'s career — they can `cv start_career` fresh."
+                       if ok else "❌ Delete failed (see logs).")
+
+    # ======================================================================
 
     @commands.group(name="tournament", aliases=["t"], invoke_without_command=True, help="Main command for tournaments.\nUsage: tournament")
     async def tournament(self, ctx):
