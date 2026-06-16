@@ -9,10 +9,13 @@ import math
 ODI_SKILL_SCALE = 12.8
 # Tuned low vs the old (dot=50, wkt=3) baseline, which never bowled teams out
 # and produced 370-run innings. Higher wicket base lets innings actually end.
-ODI_BASE_DOT   = 48.5; ODI_DOT_SENS = 52.0
-ODI_BASE_SINGLE = 40.0
-ODI_BASE_BND   = 4.0;  ODI_BND_SENS = 19.0
-ODI_BASE_WKT   = 4.3;  ODI_WKT_SENS = 8.5
+# ODI is a singles/strike-rotation game: ~46% dot, ~37% single, only ~10-11%
+# boundary (far less than T20). Boundaries still bring ~55% of runs, but the
+# innings is built on rotation, not the rope.
+ODI_BASE_DOT   = 55.0; ODI_DOT_SENS = 52.0
+ODI_BASE_SINGLE = 47.0
+ODI_BASE_BND   = 9.5;  ODI_BND_SENS = 18.0
+ODI_BASE_WKT   = 4.0;  ODI_WKT_SENS = 8.5
 # Pitch, weather, ball-age and phase each scale the wicket rate. Over 300 balls
 # their PRODUCT bowls sides out ~100% of the time on bowling-friendly decks.
 # After those environmental multipliers we pull the combined inflation partway
@@ -20,7 +23,7 @@ ODI_BASE_WKT   = 4.3;  ODI_WKT_SENS = 8.5
 ODI_WKT_COMPRESS = 0.34
 # Batting-paradise floor (see T20 note): a road/dead deck caps how cheaply a side
 # folds, lifting the low tail without changing the boundary-driven mean.
-ODI_BAT_PITCH_WKT_CAP = 6.0
+ODI_BAT_PITCH_WKT_CAP = 7.0
 
 # ── 2.0: PITCH DETERIORATION ──
 # How fast each surface wears over 100 overs. Dust bowls / worn / cracked decks
@@ -231,7 +234,7 @@ def execute_ball_math_odi(match):
         if "Pace" in bowler["role"] and innings.total_balls < 90: bowl_rating += 4
         if innings.total_balls < 90: bat_rating -= 3
     elif match.pitch == "Dead":
-        bat_rating += 4
+        bat_rating += 3
         bowl_rating -= 3
     elif match.pitch == "Worn":
         if "Spin" in bowler["role"] and innings.total_balls > 150: bowl_rating += 5
@@ -270,11 +273,11 @@ def execute_ball_math_odi(match):
     elif match.weather == "Windy":
         if "Pace" in bowler["role"]: bowl_rating += (5 if _new_ball else 3 if _mid_ball else 1)
     elif match.weather in ["Light Rain", "Drizzle"]:
-        bowl_rating -= 4
-        bat_rating += 2
-    elif match.weather in ["Heavy Rain", "Thunderstorm"]:
         bowl_rating -= 3
-        bat_rating += 2
+        bat_rating += 1
+    elif match.weather in ["Heavy Rain", "Thunderstorm"]:
+        bowl_rating -= 2
+        bat_rating += 1
 
     # ODI Batter form progression (Realistic pacing & late fatigue prevents 180+ spam)
     if b_stats.balls_faced < 10:
@@ -466,8 +469,8 @@ def execute_ball_math_odi(match):
             wicket_weight *= 1.25
             boundary_weight *= 0.80
     elif match.pitch == "Dead":
-        boundary_weight *= 1.20
-        wicket_weight *= 0.85
+        boundary_weight *= 1.12
+        wicket_weight *= 0.88
     elif match.pitch == "Worn":
         if "Spin" in bowler["role"] and total_balls > 150:
             wicket_weight *= 1.20
@@ -523,11 +526,11 @@ def execute_ball_math_odi(match):
         wicket_weight *= (1.20 if _new_ball else 1.10 if _mid_ball else 1.05)
         boundary_weight *= (0.87 if _new_ball else 0.92 if _mid_ball else 0.97)
     elif match.weather in ["Light Rain", "Drizzle"]:
-        wicket_weight *= 0.85
-        boundary_weight *= 1.10
+        wicket_weight *= 0.88
+        boundary_weight *= 1.04
     elif match.weather in ["Heavy Rain", "Thunderstorm"]:
-        wicket_weight *= 0.75
-        boundary_weight *= 1.13
+        wicket_weight *= 0.80
+        boundary_weight *= 1.05
 
     # ── BALL AGE / HARDNESS ──────────────────────────────────────────────
     # Over 50 overs the ball ages enough for all three classic phases to show:
@@ -546,8 +549,8 @@ def execute_ball_math_odi(match):
             boundary_weight *= 1.05
             wicket_weight *= 0.94
     elif _ball_frac < 0.66:          # old, soft ball through the middle
-        boundary_weight *= 0.92
-        dot_weight *= 1.07
+        boundary_weight *= 0.96
+        dot_weight *= 1.05
         if _is_spin_b:
             wicket_weight *= 1.08
     else:                            # back third — reverse swing for pace
@@ -570,9 +573,8 @@ def execute_ball_math_odi(match):
         boundary_weight *= 1.15
         dot_weight *= 1.10
     elif is_middle:
-        single_weight *= 1.35 # Strike rotation
-        dot_weight *= 0.85
-        boundary_weight *= 0.80
+        single_weight *= 1.15 # Strike rotation (but batters still find the rope)
+        dot_weight *= 0.90
 
     # ── ENVIRONMENTAL WICKET COMPRESSOR ──────────────────────────────────
     # Everything above (pitch + weather + ball-age + phase) has scaled the
@@ -612,10 +614,10 @@ def execute_ball_math_odi(match):
         elif shot in ["Loft", "Drive"]: perfect_shot_selection = True
     elif deliv in SPIN_SHOT_MATRIX:
         if shot in SPIN_SHOT_MATRIX[deliv]: perfect_shot_selection = True
-        elif shot == "Leave": bad_shot_selection = True 
+        elif shot == "Leave": bad_shot_selection = True
         else:
-            boundary_weight *= 0.25
-            dot_weight *= 1.3
+            boundary_weight *= 0.50   # spin is most of the ODI middle — batters still pierce the field
+            dot_weight *= 1.2
             single_weight *= 1.1
 
     if shot in ["Block", "Defensive"]:
@@ -628,14 +630,29 @@ def execute_ball_math_odi(match):
         elif perfect_shot_selection:
             boundary_weight *= 1.3; single_weight *= 1.1; wicket_weight *= 0.8
             
-        if striker["archetype"] == "Aggressor": 
+        # Required run rate (chase only) tells set batters when to lift the tempo.
+        _rrr_now = (runs_needed / balls_left * 6) if (match.current_innings_num == 2 and balls_left > 0) else 0.0
+        _set = b_stats.balls_faced >= 35
+        _lift = is_death_overs or _rrr_now >= 7.0   # death overs OR the ask has climbed above par
+
+        if striker["archetype"] == "Aggressor":
             boundary_weight *= 1.15; wicket_weight *= 1.15
-        elif striker["archetype"] == "Anchor": 
-            if b_stats.balls_faced >= 40 and (is_death_overs or pressure_multiplier > 1.15):
-                boundary_weight *= 1.15; wicket_weight *= 1.05 # Set Anchors slog effectively!
+        elif striker["archetype"] == "Anchor":
+            if _set and _lift:
+                boundary_weight *= 1.25; wicket_weight *= 1.05   # set anchor cuts loose as the RRR rises
+            elif _set:
+                boundary_weight *= 1.10                            # set anchor keeps the score ticking, not blocking
             else:
-                dot_weight *= 1.1; wicket_weight *= 0.8
-        elif striker["archetype"] == "Finisher" and is_death_overs: 
+                dot_weight *= 1.10; wicket_weight *= 0.80          # still playing himself in
+        elif striker["archetype"] == "Standard":
+            # The common middle-ground: more positive than an Anchor, safer than an Aggressor.
+            if _set and _lift:
+                boundary_weight *= 1.15; wicket_weight *= 1.08
+            elif _set:
+                boundary_weight *= 1.05
+            else:
+                dot_weight *= 1.05; wicket_weight *= 0.90
+        elif striker["archetype"] == "Finisher" and is_death_overs:
             boundary_weight *= 1.25
 
         if is_collapse: boundary_weight *= 0.7; wicket_weight *= 0.75; single_weight *= 1.2
@@ -670,7 +687,7 @@ def execute_ball_math_odi(match):
         if deliv == "Knuckle": dot_weight *= 1.10; boundary_weight *= 0.85
 
     four_weight = boundary_weight
-    six_weight = boundary_weight * 0.25
+    six_weight = boundary_weight * 0.33
     
     # ODI Exploit fixes
     if shot in ["Loft", "Scoop"]:
@@ -702,7 +719,7 @@ def execute_ball_math_odi(match):
     wicket_weight = max(1.0, min(wicket_weight, 25.0)) # Hard cap to prevent 10/10 scenarios
     dot_weight = max(15.0, min(dot_weight, 120.0))
 
-    weights = [dot_weight, single_weight, single_weight * 0.4, single_weight * 0.05, four_weight, six_weight, wicket_weight]
+    weights = [dot_weight, single_weight, single_weight * 0.18, single_weight * 0.04, four_weight, six_weight, wicket_weight]
     outcome = random.choices(["dot", "single", "two", "three", "four", "six", "wicket"], weights=weights)[0]
     
     if is_no_ball and outcome == "wicket":
@@ -739,7 +756,7 @@ def execute_ball_math_odi(match):
             elif is_cutter and shot in ["Loft", "Scoop"]:  dismissal_type = "Caught"
             elif is_cutter and shot in ["Drive", "Cut"]:   dismissal_type = random.choice(["Caught", "Bowled"])
             elif shot in ["Loft", "Scoop"]: dismissal_type = "Caught"
-            else: dismissal_type = random.choice(d_types)
+            else: dismissal_type = random.choices(["Caught", "Bowled", "LBW"], weights=[52, 27, 21])[0]  # caught-heavy like real cricket
 
             if dismissal_type == "Bowled":
                 b_stats.dismissal = f"b. {bowler['name']}"

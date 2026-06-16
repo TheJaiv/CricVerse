@@ -12,15 +12,22 @@ T20_SKILL_SCALE = 15.0
 # Base outcome weights at a neutral (edge=0) contest, and how strongly the
 # skill edge pushes them. Tuned low so the downstream phase/pitch multipliers
 # land scores in a realistic band instead of inflating to 200+.
-T20_BASE_DOT   = 37.0; T20_DOT_SENS = 46.0
-T20_BASE_SINGLE = 35.0
-T20_BASE_BND   = 6.4;  T20_BND_SENS = 26.0
-T20_BASE_WKT   = 5.0;  T20_WKT_SENS = 11.0
+# Modern T20: aggressive intent, boundary-driven (~18% of balls), big six-hitting,
+# little running for twos. Par ~175 on a neutral deck, 200+ on a road.
+T20_BASE_DOT   = 34.5; T20_DOT_SENS = 46.0
+T20_BASE_SINGLE = 35.5
+T20_BASE_BND   = 9.2;  T20_BND_SENS = 26.0
+T20_BASE_WKT   = 5.2;  T20_WKT_SENS = 11.0
 # Batting-paradise floor: on a true road / dead deck there's a ceiling on how
 # cheaply a side can be bowled out — even swing only does so much on a featherbed.
 # Capping wicket_weight here lifts the low tail (no 49 all-out on a road) without
 # touching the mean, which is driven by boundaries.
 T20_BAT_PITCH_WKT_CAP = 8.5
+# Bowling-deck floor: even the nastiest minefield bottoms out — real T20 on a
+# raging turner / cracked deck is ~120-140 all out ~35%, NOT 88 all out 58%.
+# Caps how lethal a green/dusty/cracked surface can get so scores stay cricketing.
+T20_BOWL_PITCH_WKT_CAP = 12.0
+T20_BOWL_DECKS = ("Cracked", "Sticky", "Turning", "Worn", "Dusty", "Dry", "Green", "Damp", "Bouncy")
 
 # ── 2.0: PITCH DETERIORATION ──
 # How fast each surface wears over the match. Dust bowls / worn / cracked decks
@@ -597,14 +604,29 @@ def execute_ball_math_t20(match):
         if bad_shot_selection: wicket_weight *= 1.8; boundary_weight *= 0.3; dot_weight *= 1.5
         elif perfect_shot_selection: boundary_weight *= 1.4; wicket_weight *= 0.7
         
-        if striker["archetype"] == "Aggressor": 
+        # Required run rate (chase only) tells set batters when to lift the tempo.
+        _rrr_now = (runs_needed / balls_left * 6) if (match.current_innings_num == 2 and balls_left > 0) else 0.0
+        _set = b_stats.balls_faced >= 18
+        _lift = is_death_overs or _rrr_now >= 9.0   # death overs OR the ask has climbed above par
+
+        if striker["archetype"] == "Aggressor":
             boundary_weight *= 1.2; wicket_weight *= 1.15
-        elif striker["archetype"] == "Anchor": 
-            if b_stats.balls_faced >= 20 and (is_death_overs or pressure_multiplier > 1.15):
-                boundary_weight *= 1.2; wicket_weight *= 1.05 # Set Anchors slog effectively!
+        elif striker["archetype"] == "Anchor":
+            if _set and _lift:
+                boundary_weight *= 1.30; wicket_weight *= 0.90   # set anchor cuts loose as the RRR rises — finds gaps, stays secure
+            elif _set:
+                boundary_weight *= 1.12; wicket_weight *= 0.85    # set anchor keeps the score ticking, not blocking
             else:
-                dot_weight *= 1.1; wicket_weight *= 0.75
-        elif striker["archetype"] == "Finisher" and is_death_overs: 
+                dot_weight *= 1.10; wicket_weight *= 0.72          # still playing himself in
+        elif striker["archetype"] == "Standard":
+            # The common middle-ground: more positive than an Anchor, safer than an Aggressor.
+            if _set and _lift:
+                boundary_weight *= 1.20; wicket_weight *= 1.08
+            elif _set:
+                boundary_weight *= 1.06
+            else:
+                dot_weight *= 1.05; wicket_weight *= 0.88
+        elif striker["archetype"] == "Finisher" and is_death_overs:
             boundary_weight *= 1.3
 
         if is_collapse: boundary_weight *= 0.7; wicket_weight *= 0.65; single_weight *= 1.15
@@ -641,7 +663,7 @@ def execute_ball_math_t20(match):
         if deliv == "Knuckle": dot_weight *= 1.10; boundary_weight *= 0.85
 
     four_weight = boundary_weight
-    six_weight = boundary_weight * 0.35
+    six_weight = boundary_weight * 0.40   # modern T20 six-hitting
 
     if shot in ["Loft", "Scoop"]: four_weight *= 0.6; six_weight *= 3.0; wicket_weight *= 1.8; dot_weight *= 0.8
     elif shot in ["Block", "Defensive"]: four_weight *= 0.1; six_weight = 0.0
@@ -658,10 +680,12 @@ def execute_ball_math_t20(match):
     six_weight = max(0.1, min(six_weight, 25.0))
     if match.pitch in ("Flat", "Dead"):
         wicket_weight = min(wicket_weight, T20_BAT_PITCH_WKT_CAP)  # batting-paradise floor
+    elif match.pitch in T20_BOWL_DECKS:
+        wicket_weight = min(wicket_weight, T20_BOWL_PITCH_WKT_CAP)  # minefield floor: ~120-140 not sub-100
     wicket_weight = max(1.0, min(wicket_weight, 30.0)) # Hard cap to prevent 10/10 scenarios
     dot_weight = max(5.0, min(dot_weight, 120.0))
 
-    weights = [dot_weight, single_weight, single_weight * 0.3, single_weight * 0.05, four_weight, six_weight, wicket_weight]
+    weights = [dot_weight, single_weight, single_weight * 0.20, single_weight * 0.05, four_weight, six_weight, wicket_weight]
     outcome = random.choices(["dot", "single", "two", "three", "four", "six", "wicket"], weights=weights)[0]
     
     if is_no_ball and outcome == "wicket":
@@ -703,7 +727,7 @@ def execute_ball_math_t20(match):
             elif bad_shot_selection and "Yorker" in deliv: dismissal_type = "Bowled"
             elif bad_shot_selection and "Bouncer" in deliv: dismissal_type = "Caught"
             elif shot in ["Loft", "Scoop"]: dismissal_type = "Caught"
-            else: dismissal_type = random.choice(d_types)
+            else: dismissal_type = random.choices(["Caught", "Bowled", "LBW"], weights=[51, 28, 21])[0]  # caught-heavy like real cricket
 
             if dismissal_type == "Bowled": b_stats.dismissal = f"b. {bowler['name']}"
             elif dismissal_type == "LBW": b_stats.dismissal = f"lbw b. {bowler['name']}"
