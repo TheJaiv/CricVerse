@@ -14,6 +14,8 @@ from tournament_manager import (
     get_server_tournament, save_tournament, get_tournament_standings
 )
 from subscription_manager import get_all_players, get_tier_status
+import career_manager as CM
+import career_ui
 
 # Helper to convert "true"/"false" strings to bool
 def to_bool(value: str) -> bool:
@@ -151,6 +153,48 @@ class PrefixCog(commands.Cog):
         best_name = fuzz[0] if fuzz else subs[0]["name"]
         msg = f"🔍 **Not found exactly.**\n💡 **Best Match:** `{best_name}`\n👉 Rerun: `cv searchplayer \"{best_name}\"`"
         await ctx.send(msg)
+
+    # --- CAREER MODE ---
+
+    @commands.command(name="start_career", aliases=["startcareer"], help="Create your career player.\nUsage: cv start_career")
+    async def start_career(self, ctx):
+        if CM.get_career(ctx.author.id):
+            return await ctx.send("❌ You already have a career! Use `cv profile` to view it.")
+        await ctx.send(
+            f"🏏 **Start your Career, {ctx.author.display_name}!**\nPick your specialty — it shapes your starting attributes:",
+            view=career_ui.ArchetypeSelectView(ctx.author.id, ctx.author.display_name),
+        )
+
+    @commands.command(name="profile", aliases=["card", "me"], help="View a player card.\nUsage: cv profile [@user]")
+    async def profile(self, ctx, member: discord.Member = None):
+        target = member or ctx.author
+        career = CM.get_career(target.id)
+        if not career:
+            who = "You don't" if target.id == ctx.author.id else f"{target.display_name} doesn't"
+            return await ctx.send(f"❌ {who} have a career yet. Use `cv start_career` to begin.")
+        buf = career_ui.render_career_card(career)
+        await ctx.send(file=discord.File(buf, "career_card.png"))
+
+    @commands.command(name="debut", help="Play your Academy Trial to unlock your card.\nUsage: cv debut")
+    async def debut(self, ctx):
+        career = CM.get_career(ctx.author.id)
+        if not career:
+            return await ctx.send("❌ Start a career first: `cv start_career`.")
+        if career.get("debut_done"):
+            return await ctx.send("✅ You've already made your debut! Use `cv profile`.")
+        passed, lines, headline = career_ui.run_debut_trial(career)
+        embed = discord.Embed(
+            title=f"🎓 ACADEMY TRIAL — {headline}",
+            description="\n".join(lines),
+            color=discord.Color.green() if passed else discord.Color.red(),
+        )
+        if passed:
+            career["debut_done"] = True
+            CM.async_save_career(career)
+            embed.set_footer(text="Your official player card is unlocked! 🎉  Earn coins with cv daily & matches.")
+        else:
+            embed.set_footer(text="Unlucky — run cv debut again to retry.")
+        await ctx.send(embed=embed)
 
     # --- TOURNAMENT COMMANDS ---
 

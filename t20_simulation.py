@@ -14,10 +14,15 @@ T20_SKILL_SCALE = 15.0
 # land scores in a realistic band instead of inflating to 200+.
 # Modern T20: aggressive intent, boundary-driven (~18% of balls), big six-hitting,
 # little running for twos. Par ~175 on a neutral deck, 200+ on a road.
-T20_BASE_DOT   = 34.5; T20_DOT_SENS = 46.0
-T20_BASE_SINGLE = 35.5
-T20_BASE_BND   = 9.2;  T20_BND_SENS = 26.0
+T20_BASE_DOT   = 30.5; T20_DOT_SENS = 46.0
+T20_BASE_SINGLE = 38.0
+T20_BASE_BND   = 11.2; T20_BND_SENS = 26.0
+T20_BND_COMPRESS = 0.72   # tame boundary clustering (freak 250s); 1.0 = off
 T20_BASE_WKT   = 5.2;  T20_WKT_SENS = 11.0
+# Variance compressor: pulls per-ball wicket spikes back toward the rating-driven
+# baseline so wickets don't CLUSTER into cascades (30-all-out) between equal sides.
+# Lower = more consistent / skill-dominant. 1.0 = off.
+T20_WKT_COMPRESS = 0.45
 # Batting-paradise floor: on a true road / dead deck there's a ceiling on how
 # cheaply a side can be bowled out — even swing only does so much on a featherbed.
 # Capping wicket_weight here lifts the low tail (no 49 all-out on a road) without
@@ -285,13 +290,14 @@ def execute_ball_math_t20(match):
         bowl_rating -= 3
         bat_rating += 2
 
-    # Batter form progression
+    # Batter form progression. Asymmetric: keep the set-batsman scoring (par) but
+    # soften the new-batsman penalty so early wickets don't cascade into blowouts.
     if b_stats.balls_faced < 4:
-        bat_rating -= 5
+        bat_rating -= 3
     elif 4 <= b_stats.balls_faced <= 35:
         bat_rating += 5
     elif b_stats.balls_faced > 35:
-        bat_rating -= (b_stats.balls_faced - 35) * 0.5 
+        bat_rating -= (b_stats.balls_faced - 35) * 0.5
         
     # Bowler fatigue
     if bow_stats.balls_bowled >= 12 and "Pace" in bowler["role"]:
@@ -631,7 +637,7 @@ def execute_ball_math_t20(match):
 
         if is_collapse: boundary_weight *= 0.7; wicket_weight *= 0.65; single_weight *= 1.15
         if is_set_partnership: wicket_weight *= 0.8
-        if has_wickets_in_hand: boundary_weight *= 1.4; wicket_weight *= 1.3; dot_weight *= 0.6
+        if has_wickets_in_hand: boundary_weight *= 1.22; wicket_weight *= 1.15; dot_weight *= 0.75
         
         active_multiplier = pressure_multiplier
         if is_death_overs:
@@ -662,6 +668,11 @@ def execute_ball_math_t20(match):
         dot_weight *= 1.35; boundary_weight *= 0.65; wicket_weight *= 1.15
         if deliv == "Knuckle": dot_weight *= 1.10; boundary_weight *= 0.85
 
+    # Boundary variance compressor: tame stacked boundary spikes (freak 250s) so
+    # scoring is skill-driven, not a boundary lottery. Shot/delivery four-six
+    # adjustments still apply on top of the compressed base.
+    if boundary_weight > T20_BASE_BND:
+        boundary_weight = T20_BASE_BND + (boundary_weight - T20_BASE_BND) * T20_BND_COMPRESS
     four_weight = boundary_weight
     six_weight = boundary_weight * 0.40   # modern T20 six-hitting
 
@@ -675,9 +686,18 @@ def execute_ball_math_t20(match):
     elif "Inswing" in deliv and shot in ["Drive", "Flick", "Sweep"]: wicket_weight *= 1.4
     elif is_cutter and shot in ["Drive", "Cut"]: wicket_weight *= 1.25; four_weight *= 0.85
 
+    # ── VARIANCE COMPRESSORS ──────────────────────────────────────────────
+    # Skill should decide matches, not luck. Per-ball weight spikes (from stacked
+    # delivery×shot×situation multipliers) cause wickets/boundaries to CLUSTER →
+    # cascades to 30-all-out or freak 250s between equal teams. Pull the upward
+    # spikes back toward the rating-driven baseline so good sides score
+    # consistently. (Mirrors the ODI engine's ODI_WKT_COMPRESS.)
+    if wicket_weight > T20_BASE_WKT:
+        wicket_weight = T20_BASE_WKT + (wicket_weight - T20_BASE_WKT) * T20_WKT_COMPRESS
+
     # 🚨 ANTI-OVERCOOK SAFETIES (Prevents stacked conditions from breaking the game)
-    four_weight = max(0.5, min(four_weight, 35.0)) # Hard cap to prevent 300+ scores
-    six_weight = max(0.1, min(six_weight, 25.0))
+    four_weight = max(0.5, min(four_weight, 23.0)) # Hard cap — clips road-deck freak 250s
+    six_weight = max(0.1, min(six_weight, 12.5))
     if match.pitch in ("Flat", "Dead"):
         wicket_weight = min(wicket_weight, T20_BAT_PITCH_WKT_CAP)  # batting-paradise floor
     elif match.pitch in T20_BOWL_DECKS:

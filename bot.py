@@ -42,6 +42,18 @@ from subscription_manager import (
     get_match_log_channel, set_match_log_channel, clear_match_log_channel, DB_CACHE,
     get_match_counts, increment_match_count, set_match_count,
 )
+# ── Career Mode (WORK IN PROGRESS) ────────────────────────────────────────────
+# Kept OFF by default so the live simulation engine runs undisturbed. Career code
+# loads defensively: any failure here can NEVER crash bot startup. Flip the env
+# var CAREER_MODE=1 only when Career Mode is finished and tested.
+CAREER_MODE_ENABLED = os.environ.get("CAREER_MODE", "0") == "1"
+try:
+    from career_manager import load_careers
+except Exception as _career_err:
+    print(f"⚠️ Career module not loaded ({_career_err}); Career Mode disabled.")
+    CAREER_MODE_ENABLED = False
+    def load_careers():  # no-op fallback
+        pass
 
 # ==========================================
 # ⚙️ 1. SETUP & CONFIGURATION
@@ -93,12 +105,14 @@ async def auto_sync_db():
     """Refresh in-memory cache from MongoDB every hour (picks up manual edits)"""
     load_data_from_bin()
     load_tournament_data_from_bin()
+    load_careers()
 
 @bot.event
 async def on_ready():
     print(f"🏏 Logged in successfully as {bot.user.name}")
     load_data_from_bin()
     load_tournament_data_from_bin()
+    load_careers()
     if not auto_sync_db.is_running():
         auto_sync_db.start()
     print("✅ Memory Cache Loaded and Ready.")
