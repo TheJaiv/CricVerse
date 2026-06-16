@@ -1,22 +1,45 @@
 """Restore the recalibrated CCPL S1 tournament into MongoDB.
-Run on the host where MONGO_URI is set:  python restore_tournament.py
-Then in Discord:  cv force_load"""
-import os, json
-from pymongo import MongoClient
 
-MONGO_URI = os.environ["MONGO_URI"]
-MONGO_DB  = os.environ.get("MONGO_DB", "cricket_bot")
+Reuses subscription_manager's EXACT connection + save path (same code the bot uses),
+so it works even when MONGO_URI contains special characters in the password.
+
+Run on the host (where MONGO_URI is set):
+    python restore_tournament.py
+Then in Discord IMMEDIATELY:
+    cv force_load
+"""
+import json
+import subscription_manager as sm
 
 ccpl = json.load(open("ccpl_backup.json"))["tournaments"][0]
-db = MongoClient(MONGO_URI, tlsAllowInvalidCertificates=True, tlsAllowInvalidHostnames=True,
-                 serverSelectionTimeoutMS=30000)[MONGO_DB]
-
-doc  = db["tournaments"].find_one({"_id": "tournament_data"}) or {"tournaments": []}
-tours = doc.get("tournaments", [])
 sid, name = ccpl["server_id"], ccpl["name"]
-tours = [x for x in tours if not (x.get("server_id") == sid and x.get("name") == name)]  # drop stale copy
+
+# 1. Pull whatever tournaments currently exist (using the bot's own connection)
+sm.load_tournament_data_from_bin()
+tours = sm.DB_CACHE.get("tournaments", []) or []
+print(f"Existing tournaments in DB before restore: {len(tours)}")
+
+# 2. Drop any stale copy of this tournament, then add the recalibrated one
+tours = [x for x in tours if not (x.get("server_id") == sid and x.get("name") == name)]
 tours.append(ccpl)
-db["tournaments"].replace_one({"_id": "tournament_data"},
-                              {"_id": "tournament_data", "tournaments": tours}, upsert=True)
-done = sum(1 for m in ccpl["schedule"] if m["status"] == "completed")
-print(f"✅ Restored '{name}' — {done}/45 matches completed. Now run `cv force_load` in Discord.")
+sm.DB_CACHE["tournaments"] = tours
+
+# 3. Save using the bot's exact write path
+ok = sm.save_tournament_data_to_bin()
+if not ok:
+    print("❌ Save returned falsy — check MONGO_URI / connection (see error above).")
+    raise SystemExit(1)
+
+# 4. Read it straight back to PROVE it persisted
+sm.DB_CACHE["tournaments"] = []
+sm.load_tournament_data_from_bin()
+got = next((t for t in sm.DB_CACHE["tournaments"]
+            if t.get("server_id") == sid and t.get("name") == name), None)
+if not got:
+    print("❌ Wrote but could not read back. server_ids now in DB:",
+          [t.get("server_id") for t in sm.DB_CACHE["tournaments"]])
+    raise SystemExit(1)
+
+done = sum(1 for m in got["schedule"] if m["status"] == "completed")
+print(f"✅ VERIFIED in MongoDB: '{name}'  server_id={sid}  — {done}/45 matches completed.")
+print("   Now run `cv force_load` in Discord, then `cv tournament status`.")

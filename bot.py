@@ -6021,6 +6021,45 @@ class PrefixCog(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ Dump failed: {e}")
 
+    @commands.command(name="restore_tournament", aliases=["restore_tourney", "rt"], help="[OWNER] Restore tournament(s) from an attached JSON backup.\nUsage: attach the backup JSON + restore_tournament")
+    async def restore_tournament(self, ctx):
+        if ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("❌ Owner only.")
+        if not ctx.message.attachments:
+            return await ctx.send("❌ Attach the tournament backup JSON to this message, then run `cv restore_tournament`.")
+        try:
+            raw = await ctx.message.attachments[0].read()
+            data = json.loads(raw.decode("utf-8"))
+        except Exception as e:
+            return await ctx.send(f"❌ Could not read/parse the attachment: {e}")
+        # accept {"tournaments":[...]} OR a single tournament object
+        if isinstance(data, dict) and "tournaments" in data:
+            incoming = data["tournaments"]
+        elif isinstance(data, dict) and "server_id" in data and "schedule" in data:
+            incoming = [data]
+        else:
+            return await ctx.send("❌ Not a valid tournament backup (expected a `tournaments` list or a tournament object).")
+        if not incoming:
+            return await ctx.send("❌ Backup contained no tournaments.")
+        try:
+            load_tournament_data_from_bin()  # pull current state first (don't clobber other servers)
+            tours = DB_CACHE.get("tournaments", []) or []
+            lines = []
+            for td in incoming:
+                sid, name = td.get("server_id"), td.get("name")
+                tours = [x for x in tours if not (x.get("server_id") == sid and x.get("name") == name)]
+                tours.append(td)
+                done = sum(1 for m in td.get("schedule", []) if m.get("status") == "completed")
+                lines.append(f"• **{name}** (server `{sid}`) — {done}/{len(td.get('schedule', []))} matches")
+            DB_CACHE["tournaments"] = tours
+            ok = save_tournament_data_to_bin()
+            if not ok:
+                return await ctx.send("❌ Wrote to memory but **MongoDB save failed** — check MONGO_URI / logs.")
+            await ctx.send("✅ Restored & saved to MongoDB (also live in memory now):\n" + "\n".join(lines) +
+                           "\n\nCheck with your tournament status command. `cv force_load` re-reads from Mongo to double-confirm.")
+        except Exception as e:
+            await ctx.send(f"❌ Restore failed: {e}")
+
     @commands.command(name="sync_csv", aliases=["scsv"], help="[OWNER] Sync players from players_master.csv to DB.\nUsage: sync_csv")
     async def sync_csv(self, ctx):
         if ctx.author.id != ADMIN_DISCORD_ID:
