@@ -50,6 +50,7 @@ CAREER_MODE_ENABLED = os.environ.get("CAREER_MODE", "0") == "1"
 try:
     import career_manager as CM
     import career_ui
+    import career_match
     from career_manager import load_careers
     _CAREER_OK = True
 except Exception as _career_err:
@@ -100,6 +101,79 @@ def _is_premium(ctx):
     except Exception:
         pass
     return False
+
+# ── Career Mode: tier Discord roles ───────────────────────────────────────────
+_TIER_ROLE_PREFIX = "CricVerse"
+_TIER_ROLE_COLORS = {
+    "Bronze": 0xCD7F32, "Silver": 0xB0BAC7, "Gold": 0xE0B838,
+    "Platinum": 0x68D6E2, "Diamond": 0x82AAFF,
+}
+
+def _tier_embed_color(tier):
+    return discord.Color(_TIER_ROLE_COLORS.get(tier, 0x99AAB5))
+
+def _attr_bar(v, width=12):
+    filled = max(0, min(width, int(round(width * v / 99))))
+    return "█" * filled + "░" * (width - filled)
+
+async def _sync_tier_role(guild, member, career):
+    """Create (if needed) and assign the Discord role for the member's tier, removing
+    any other CricVerse tier roles. Returns (role_or_None, note_or_None)."""
+    if guild is None or member is None or not _CAREER_OK:
+        return None, None
+    try:
+        me = guild.me
+        if me is None or not me.guild_permissions.manage_roles:
+            return None, "I don't have the **Manage Roles** permission here."
+        tier = career.get("tier", "Bronze")
+        want = f"{_TIER_ROLE_PREFIX} {tier}"
+        all_names = {f"{_TIER_ROLE_PREFIX} {t[2]}" for t in CM.TIERS}
+        role = discord.utils.get(guild.roles, name=want)
+        if role is None:
+            role = await guild.create_role(
+                name=want, colour=discord.Colour(_TIER_ROLE_COLORS.get(tier, 0x99AAB5)),
+                hoist=True, mentionable=False, reason="CricVerse career tier role")
+        if role >= me.top_role:
+            return role, f"Move the **{want}** role below my role so I can assign it."
+        to_remove = [r for r in member.roles if r.name in all_names and r.id != role.id]
+        if to_remove:
+            await member.remove_roles(*to_remove, reason="CricVerse tier change")
+        if role not in member.roles:
+            await member.add_roles(role, reason="CricVerse tier change")
+        return role, None
+    except discord.Forbidden:
+        return None, "I lack permission (check role hierarchy)."
+    except Exception as e:
+        print(f"tier role sync error: {e}")
+        return None, None
+
+# ── Career Mode: club-match lobby (Phase 4.1) ─────────────────────────────────
+def _lobby_embed(lobby, title):
+    a, b = lobby.make_teams()
+    n = lobby.count()
+    e = discord.Embed(
+        title=title,
+        description=(f"👑 Host: <@{lobby.host_id}>  ·  ⏱️ **{lobby.overs} overs**  ·  "
+                     f"👥 **{n}** joined ({lobby.per_side()}-a-side)"),
+        color=discord.Color.green() if lobby.is_ready() else discord.Color.orange())
+
+    def fmt(team):
+        if not team:
+            return "*(empty)*"
+        return "\n".join(f"`{p['ovr']}` {p['name']}" for p in team)
+
+    if n >= 2:
+        e.add_field(name=f"🟢 Team A  ({lobby.team_strength(a)} OVR)", value=fmt(a), inline=True)
+        e.add_field(name=f"🔴 Team B  ({lobby.team_strength(b)} OVR)", value=fmt(b), inline=True)
+    else:
+        e.add_field(name="Players", value="\n".join(f"<@{p['id']}>" for p in lobby.players), inline=False)
+
+    if lobby.is_ready():
+        e.set_footer(text="Teams are even — host can run `cv startmatch`.")
+    else:
+        need = "one more player (need an even number, min 2)" if n % 2 else "at least 2 players"
+        e.set_footer(text=f"Waiting for {need}. Join with `cv joinmatch`.")
+    return e
 
 # ── Match counters (backed by MongoDB via subscription_manager) ───────────────
 
@@ -1927,8 +2001,11 @@ async def trigger_super_over(channel, match: CricketMatch):
     else: await prompt_bowler_then_hub(channel, so_match)
 
 async def handle_innings_end(interaction_context, match: CricketMatch):
+    if getattr(match, "is_debut", False):   # Career debut: never start innings 2 — score the trial.
+        await handle_debut_end(interaction_context, match)
+        return
     channel = interaction_context if isinstance(interaction_context, discord.TextChannel) else interaction_context.channel
-    
+
     if match.current_innings_num == 1:
         img_buf = generate_final_score_image(match)
         if getattr(match, "tournament_server_id", None):
@@ -2066,6 +2143,11 @@ async def prompt_next_batter(interaction, match: CricketMatch):
     channel = interaction.channel if hasattr(interaction, 'channel') else interaction
     uid = match.get_striker_user_id()
     innings = match.current_innings
+    if getattr(match, "is_debut", False):   # Career debut: the trial ends the moment YOU are out.
+        bs = innings.batting_stats.get(match.debut_player_name)
+        if bs and bs.dismissal != "not out":
+            await handle_debut_end(interaction, match)
+            return
     available = innings.batting_team["players"][innings.next_batter_idx:]
     
     if not available:
@@ -2782,6 +2864,125 @@ async def prompt_batter_shot(channel, match: CricketMatch, prev=None):
         sn = match.current_innings.batting_team["players"][match.current_innings.current_striker_idx]["name"]
         free_hit_notice = "\n🛡️ **FREE HIT!** You cannot be dismissed (except run out)!" if getattr(match, "free_hit", False) else ""
         await channel.send(f"⚔️ <@{match.get_striker_user_id()}> (**{sn}**)\n🚨 The bowler bowled a **{match.current_delivery_selection}**!{free_hit_notice}\nSelect your shot:", view=BattingView(match))
+
+
+# ==========================================
+# 🎓 CAREER MODE — INTERACTIVE DEBUT (reuses the real engine + BattingView)
+# ==========================================
+# A 2-over batting trial: you open vs an AI academy attack and play it ball-by-ball
+# exactly like a real match. Two guarded hooks (`is_debut`) reroute match-end to
+# handle_debut_end — they no-op for every normal match (attr defaults to False).
+_DEBUT_OVERS = 2
+_DEBUT_TARGET = 16   # runs needed in the trial to pass
+
+
+def _academy_player(name, bat, bowl, role, arch):
+    return {"name": name, "bat": bat, "bowl": bowl, "role": role, "archetype": arch}
+
+
+def _build_debut_teams(career, author_name):
+    eng = CM.career_to_engine(career)
+    you = _academy_player(author_name, eng["bat"], eng["bowl"], eng["role"], eng["archetype"])
+    # You open; modest academy partners fill the order so the line-up is valid and a
+    # single non-striker run-out doesn't abort the innings.
+    partners = [_academy_player(f"Academy Partner {i+1}", 58 - i, 50, "Batter", "Standard")
+                for i in range(10)]
+    bat_team = {"name": f"{author_name}'s XI", "players": [you] + partners, "subs": [], "color": "#3BA55D"}
+    # A fair-but-real academy attack (weakest-pro range, ~68-71).
+    attack = [
+        _academy_player("Academy Quick A",  30, 70, "Bowler_Pace",     "Standard"),
+        _academy_player("Academy Quick B",  30, 69, "Bowler_Pace",     "Standard"),
+        _academy_player("Academy Off-Spin", 30, 70, "Bowler_Spin_Off", "Standard"),
+        _academy_player("Academy Leg-Spin", 30, 69, "Bowler_Spin_Leg", "Standard"),
+        _academy_player("Academy Seamer",   38, 67, "All-Rounder_Pace", "Standard"),
+        _academy_player("Academy Keeper",   55, 20, "Batter_WK",       "Standard"),
+    ]
+    while len(attack) < 11:
+        attack.append(_academy_player(f"Academy Fielder {len(attack)}", 45, 25, "Batter", "Standard"))
+    bowl_team = {"name": "Academy XI", "players": attack, "subs": [], "color": "#ED4245"}
+    return bat_team, bowl_team
+
+
+async def start_debut_match(channel, author, career):
+    if channel.id in active_games or channel.id in active_setups:
+        await channel.send("❌ A match or setup is already running in this channel. Finish it (or `cv endmatch`) first.")
+        return
+    bat_team, bowl_team = _build_debut_teams(career, author.display_name)
+    pitch = random.choice(["Flat", "Hard", "Green", "Dry"])
+    match = CricketMatch(author.display_name, "Academy XI", author.id, None,
+                         bat_team, bowl_team, format_overs=_DEBUT_OVERS, pitch=pitch, weather="Clear")
+    match.is_debut = True
+    match.debut_user_id = author.id
+    match.debut_player_name = author.display_name
+    match.batting_first_id = author.id   # you bat first
+    match.bowling_first_id = None        # AI bowls (p2_id is None -> is_ai_game)
+    match.innings1 = InningsState(bat_team, bowl_team)
+    match.current_innings = match.innings1
+    match.current_innings_num = 1
+    active_games[channel.id] = match
+    await channel.send(
+        f"🎓 **ACADEMY TRIAL — {author.display_name}**\n"
+        f"🏟️ Pitch: **{pitch}**  ·  ⏱️ **{_DEBUT_OVERS} overs**  ·  🎯 Pass mark: **{_DEBUT_TARGET}+ runs**\n"
+        f"You're opening vs the academy attack — pick your shots ball-by-ball. Survive and score!"
+    )
+    await prompt_bowler_then_hub(channel, match)
+
+
+async def handle_debut_end(interaction_context, match: CricketMatch):
+    channel = interaction_context.channel if hasattr(interaction_context, "channel") else interaction_context
+    active_games.pop(getattr(channel, "id", None), None)
+
+    innings = match.current_innings
+    bs = innings.batting_stats.get(match.debut_player_name)
+    runs  = bs.runs_scored if bs else 0
+    balls = bs.balls_faced if bs else 0
+    fours = bs.fours if bs else 0
+    sixes = bs.sixes if bs else 0
+    out   = bool(bs and bs.dismissal != "not out")
+    sr    = (runs / balls * 100) if balls else 0.0
+    dism  = bs.dismissal if (bs and out) else "not out"
+
+    career = CM.get_career(match.debut_user_id)
+    if not career:
+        await channel.send("⚠️ Couldn't find your career to finalize the debut.")
+        return
+
+    passed = runs >= _DEBUT_TARGET
+    line = f"You scored **{runs}** ({balls}b · {fours}×4 · {sixes}×6 · SR {sr:.0f}) — *{dism}*."
+
+    if passed:
+        # Record the official debut innings into lifetime stats (once).
+        try:
+            st = career.setdefault("stats", CM._blank_stats())["bat"]
+            st["matches"] += 1; st["innings"] += 1; st["runs"] += runs; st["balls"] += balls
+            st["fours"] += fours; st["sixes"] += sixes; st["hs"] = max(st["hs"], runs)
+            st["not_outs" if not out else "outs"] += 1
+            if runs >= 50:  st["fifties"]  += 1
+            if runs >= 100: st["hundreds"] += 1
+        except Exception:
+            pass
+        career["debut_done"] = True
+        CM.async_save_career(career)
+        e = discord.Embed(
+            title="✅ TRIAL PASSED — Welcome to the pros!",
+            description=f"{line}\n\nYour official card is **unlocked**. Earn coins with `cv daily`, then `cv upgrade` to climb the tiers.",
+            color=discord.Color.green())
+        await channel.send(embed=e)
+        await channel.send(file=discord.File(career_ui.render_career_card(career), "career_card.png"))
+        # Grant the starting tier role (Bronze) on debut so everyone has a role from day one.
+        try:
+            guild = getattr(channel, "guild", None)
+            member = guild.get_member(match.debut_user_id) if guild else None
+            if member:
+                await _sync_tier_role(guild, member, career)
+        except Exception:
+            pass
+    else:
+        e = discord.Embed(
+            title="❌ TRIAL FAILED",
+            description=f"{line}\n\nYou needed **{_DEBUT_TARGET}+** runs. Run `cv debut` to try again.",
+            color=discord.Color.red())
+        await channel.send(embed=e)
 
 
 # ==========================================
@@ -6328,11 +6529,19 @@ class PrefixCog(commands.Cog):
             "`cv weekly` — *Premium/Booster:* coins + 5% week boost\n"
             "`cv monthly` — *Premium/Booster:* coins + cosmetic title\n"
             "`cv balance` — check your coins\n"
-            "🪙 *Coins come from dailies and **real club matches only** — matches vs AI pay nothing.*"), inline=False)
+            "🪙 *Right now coins come from `cv daily` (+ Premium weekly/monthly). **Club matches** that pay coins are coming soon — matches vs AI will never pay.*"), inline=False)
         e.add_field(name="📈 Progress", value=(
             "`cv upgrade <power|control|bowling|stamina> [amount]` — spend coins to raise an attribute & OVR\n"
-            "`cv profile [@user]` — view a player card"), inline=False)
-        e.add_field(name="🏅 Tiers", value="Bronze 70–73 · Silver 74–79 · Gold 80–85 · Platinum 86–91 · Diamond 92–99", inline=False)
+            "`cv profile [@user]` — view your player card\n"
+            "`cv stats [@user]` — lifetime batting / bowling / fielding stats"), inline=False)
+        e.add_field(name="🏅 Tiers & Roles", value=(
+            "Bronze 70–73 · Silver 74–79 · Gold 80–85 · Platinum 86–91 · Diamond 92–99\n"
+            "Climbing a tier auto-grants the matching **CricVerse <Tier>** Discord role. "
+            "`cv synctier` — re-apply your role here (e.g. in a new server)."), inline=False)
+        e.add_field(name="⚔️ Club Matches (PvP) — *beta*", value=(
+            "`cv create_match [overs]` — open a lobby   ·   `cv joinmatch` — join\n"
+            "`cv lobby` — view teams   ·   `cv leavematch` / `cv cancelmatch`\n"
+            "`cv startmatch` — host locks the teams and begins"), inline=False)
         if ctx.author.id == ADMIN_DISCORD_ID or (ctx.guild and ctx.author.guild_permissions.administrator):
             e.add_field(name="🛠️ Dev", value="`cv delete_career [@user]` — wipe a career", inline=False)
         e.set_footer(text="Career Mode is in development — currently admin/owner only.")
@@ -6360,6 +6569,82 @@ class PrefixCog(commands.Cog):
             return await ctx.send(f"❌ {who} have a career yet. Use `cv start_career` to begin.")
         await ctx.send(file=discord.File(career_ui.render_career_card(career), "career_card.png"))
 
+    @commands.command(name="stats", aliases=["careerstats", "cstats"], help="View lifetime career statistics.\nUsage: stats [@user]")
+    async def stats(self, ctx, member: discord.Member = None):
+        if not _can_use_career(ctx):
+            return await ctx.send(_CAREER_SOON)
+        target = member or ctx.author
+        career = CM.get_career(target.id)
+        if not career:
+            who = "You don't" if target.id == ctx.author.id else f"{target.display_name} doesn't"
+            return await ctx.send(f"❌ {who} have a career yet. Use `cv start_career` to begin.")
+
+        s = career.get("stats", CM._blank_stats())
+        b, bw, fd = s["bat"], s["bowl"], s["field"]
+        bt = CM.BOWLING_TYPES[career["bowling_type"]]["label"]
+        ms = CM.MINDSETS[career["mindset"]]["label"]
+
+        # Batting derived
+        avg = f"{b['runs'] / b['outs']:.1f}" if b["outs"] else ("—" if not b["runs"] else f"{b['runs']:.1f}")
+        sr  = f"{b['runs'] / b['balls'] * 100:.1f}" if b["balls"] else "—"
+        hs  = f"{b['hs']}" + ("" if b["outs"] >= b["innings"] else "")  # plain HS
+        # Bowling derived
+        overs = f"{bw['balls'] // 6}.{bw['balls'] % 6}"
+        b_avg = f"{bw['runs'] / bw['wickets']:.1f}" if bw["wickets"] else "—"
+        econ  = f"{bw['runs'] / (bw['balls'] / 6):.2f}" if bw["balls"] else "—"
+        best  = f"{bw['best_w']}/{bw['best_r']}" if bw.get("best_w") else "—"
+
+        def line(k, v): return f"{k:<13}{v}"
+        bat_block = "```\n" + "\n".join([
+            line("Matches", b["matches"]),
+            line("Innings", f"{b['innings']}  (NO {b['not_outs']})"),
+            line("Runs", b["runs"]),
+            line("High Score", hs),
+            line("Average", avg),
+            line("Strike Rate", sr),
+            line("4s / 6s", f"{b['fours']} / {b['sixes']}"),
+            line("50s / 100s", f"{b['fifties']} / {b['hundreds']}"),
+        ]) + "\n```"
+        bowl_block = "```\n" + "\n".join([
+            line("Overs", overs),
+            line("Wickets", bw["wickets"]),
+            line("Best", best),
+            line("Average", b_avg),
+            line("Economy", econ),
+            line("Maidens", bw["maidens"]),
+        ]) + "\n```"
+        field_block = f"🧤 **Catches:** {fd['catches']}   ·   **Stumpings:** {fd['stumpings']}"
+
+        e = discord.Embed(
+            title=f"📊 {career.get('username', target.display_name)} — Career Statistics",
+            description=f"**OVR {career['ovr']}** · {career['tier']}  ·  {ms} batter / {bt} bowler",
+            color=_tier_embed_color(career["tier"]))
+        e.add_field(name="🏏 Batting", value=bat_block, inline=True)
+        e.add_field(name="🎳 Bowling", value=bowl_block, inline=True)
+        e.add_field(name="🧤 Fielding", value=field_block, inline=False)
+        if b["matches"] == 0:
+            e.set_footer(text="No matches yet — stats fill up as you play. Start with cv debut.")
+        else:
+            e.set_footer(text="Career Mode · lifetime totals")
+        await ctx.send(embed=e)
+
+    @commands.command(name="synctier", aliases=["tierrole"], help="Re-apply your tier role in this server.\nUsage: synctier")
+    async def synctier(self, ctx):
+        if not _can_use_career(ctx):
+            return await ctx.send(_CAREER_SOON)
+        career = CM.get_career(ctx.author.id)
+        if not career:
+            return await ctx.send("❌ Start a career first: `cv start_career`.")
+        if ctx.guild is None:
+            return await ctx.send("❌ Run this in a server, not DMs.")
+        role, note = await _sync_tier_role(ctx.guild, ctx.author, career)
+        if role and not note:
+            await ctx.send(f"🎖️ You're set as **{career['tier']}** — {role.mention} applied.")
+        elif role and note:
+            await ctx.send(f"⚠️ {note}")
+        else:
+            await ctx.send(f"⚠️ Couldn't assign your tier role. {note or ''}")
+
     @commands.command(name="debut", help="Play your Academy Trial to unlock your card.\nUsage: debut")
     async def debut(self, ctx):
         if not _can_use_career(ctx):
@@ -6369,16 +6654,9 @@ class PrefixCog(commands.Cog):
             return await ctx.send("❌ Start a career first: `cv start_career`.")
         if career.get("debut_done"):
             return await ctx.send("✅ You've already made your debut! Use `cv profile`.")
-        passed, lines, headline = career_ui.run_debut_trial(career)
-        embed = discord.Embed(title=f"🎓 ACADEMY TRIAL — {headline}", description="\n".join(lines),
-                              color=discord.Color.green() if passed else discord.Color.red())
-        if passed:
-            career["debut_done"] = True
-            CM.async_save_career(career)
-            embed.set_footer(text="Official card unlocked! 🎉  Earn coins with cv daily, then cv upgrade.")
-        else:
-            embed.set_footer(text="Unlucky — run cv debut again to retry.")
-        await ctx.send(embed=embed)
+        if is_channel_restricted(str(ctx.channel.id)):
+            return await ctx.send("❌ Matches are **disabled** in this channel.")
+        await start_debut_match(ctx.channel, ctx.author, career)
 
     @commands.command(name="daily", help="Claim your daily coins (24h).\nUsage: daily")
     async def daily(self, ctx):
@@ -6436,23 +6714,58 @@ class PrefixCog(commands.Cog):
         career = CM.get_career(ctx.author.id)
         if not career:
             return await ctx.send("❌ Start a career first: `cv start_career`.")
+        ICON = {"power": "🏏 POWER", "control": "🎯 CONTROL", "bowling": "🎳 BOWLING", "stamina": "🫀 STAMINA"}
+        # ── Menu (no/invalid attribute) ──
         if not attribute or attribute.lower() not in CM.ATTRS:
             a = career["attributes"]
-            costs = " · ".join(f"**{k}** {a[k]} (next {CM.upgrade_cost(a[k])}🪙)" for k in CM.ATTRS)
-            return await ctx.send(
-                f"🏋️ **Upgrade an attribute** — `cv upgrade <attribute> [amount]`\n{costs}\n"
-                f"Balance: **{career['coins']:,}** 🪙  ·  OVR {career['ovr']} ({career['tier']})")
+            coins = career["coins"]
+            e = discord.Embed(
+                title=f"🏋️ Training Ground — {ctx.author.display_name}",
+                description=(f"**OVR {career['ovr']}**  ·  {career['tier']}  ·  🪙 **{coins:,}** coins\n"
+                             f"Raise an attribute with `cv upgrade <attribute> [amount]`."),
+                color=_tier_embed_color(career["tier"]))
+            for k in CM.ATTRS:
+                v = a[k]
+                if v >= 99:
+                    val = "**MAXED** (99)"
+                else:
+                    cost = CM.upgrade_cost(v)
+                    tick = "✅ affordable" if coins >= cost else f"❌ need {cost - coins:,} more"
+                    val = f"next +1 → **{cost:,}** 🪙  ·  {tick}"
+                e.add_field(name=f"{ICON[k]} — {v}", value=f"`{_attr_bar(v)}`\n{val}", inline=False)
+            nt_name, nt_min = CM.next_tier_info(career["ovr"])
+            if nt_name:
+                e.set_footer(text=f"Next tier: {nt_name} at OVR {nt_min}  (+{nt_min - career['ovr']} to go)")
+            else:
+                e.set_footer(text="💎 Diamond — the summit. Keep pushing toward a 99 OVR.")
+            return await ctx.send(embed=e)
+
+        # ── Buy ──
         attribute = attribute.lower()
         amount = max(1, min(amount, 30))
         old_ovr, old_tier = career["ovr"], career["tier"]
         bought, spent, msg = CM.upgrade_attribute(career, attribute, amount)
         if bought == 0:
             return await ctx.send(f"❌ {msg}")
-        line = (f"💪 **+{bought} {attribute}** for **{spent:,}** 🪙 → now **{career['attributes'][attribute]}**.\n"
-                f"OVR **{old_ovr} → {career['ovr']}**  ·  Balance **{career['coins']:,}** 🪙")
+        v = career["attributes"][attribute]
+        e = discord.Embed(
+            title=f"💪 {ICON.get(attribute, attribute.upper())}  +{bought}",
+            description=(f"`{_attr_bar(v)}`  **{v}**\n\n"
+                         f"Spent **{spent:,}** 🪙  ·  OVR **{old_ovr} → {career['ovr']}**\n"
+                         f"Balance: **{career['coins']:,}** 🪙"),
+            color=_tier_embed_color(career["tier"]))
         if career["tier"] != old_tier:
-            line += f"\n🏅 **TIER UP! {old_tier} → {career['tier']}!**"
-        await ctx.send(line)
+            e.add_field(name="🏅 TIER UP!", value=f"**{old_tier} → {career['tier']}!**", inline=False)
+            role, note = await _sync_tier_role(ctx.guild, ctx.author, career)
+            if role:
+                e.add_field(name="🎖️ Role Awarded", value=f"You've been given the {role.mention} role!", inline=False)
+            elif note:
+                e.add_field(name="⚠️ Role not assigned", value=note, inline=False)
+        else:
+            nt_name, nt_min = CM.next_tier_info(career["ovr"])
+            if nt_name:
+                e.set_footer(text=f"Next tier: {nt_name} at OVR {nt_min}  (+{nt_min - career['ovr']} to go)")
+        await ctx.send(embed=e)
 
     @commands.command(name="delete_career", aliases=["delcareer", "resetcareer"], help="[DEV] Wipe a user's career.\nUsage: delete_career [@user]")
     async def delete_career(self, ctx, member: discord.Member = None):
@@ -6464,6 +6777,113 @@ class PrefixCog(commands.Cog):
         ok = CM.delete_career(target.id)
         await ctx.send(f"🗑️ Wiped **{target.display_name}**'s career — they can `cv start_career` fresh."
                        if ok else "❌ Delete failed (see logs).")
+
+    # ===================== CAREER CLUB MATCHES (Phase 4) =====================
+    @commands.command(name="create_match", aliases=["creatematch", "cmatch", "hostmatch"],
+                      help="Create a club-match lobby (PvP).\nUsage: create_match [overs]")
+    async def create_match(self, ctx, overs: int = career_match.DEFAULT_OVERS if _CAREER_OK else 5):
+        if not _can_use_career(ctx):
+            return await ctx.send(_CAREER_SOON)
+        career = CM.get_career(ctx.author.id)
+        if not career:
+            return await ctx.send("❌ Start a career first: `cv start_career`.")
+        if not career.get("debut_done"):
+            return await ctx.send("❌ Make your debut first: `cv debut`.")
+        if ctx.channel.id in active_games or ctx.channel.id in active_setups:
+            return await ctx.send("❌ A match or setup is already running in this channel.")
+        if ctx.channel.id in career_match.LOBBIES:
+            return await ctx.send("❌ A club-match lobby already exists here. Use `cv lobby` or `cv cancelmatch`.")
+        lobby = career_match.ClubLobby(ctx.channel.id, ctx.author.id, ctx.author.display_name, overs)
+        career_match.LOBBIES[ctx.channel.id] = lobby
+        await ctx.send(embed=_lobby_embed(lobby, "🏟️ Club Match — Lobby Open!"))
+
+    @commands.command(name="joinmatch", aliases=["jm", "joinclub"],
+                      help="Join the club-match lobby in this channel.\nUsage: joinmatch")
+    async def joinmatch(self, ctx):
+        if not _can_use_career(ctx):
+            return await ctx.send(_CAREER_SOON)
+        lobby = career_match.LOBBIES.get(ctx.channel.id)
+        if not lobby:
+            return await ctx.send("❌ No lobby here. Create one with `cv create_match`.")
+        if lobby.started:
+            return await ctx.send("❌ This match has already started.")
+        career = CM.get_career(ctx.author.id)
+        if not career or not career.get("debut_done"):
+            return await ctx.send("❌ You need a **debuted** career to join. `cv start_career` → `cv debut`.")
+        ok, reason = lobby.add(ctx.author.id, ctx.author.display_name)
+        if not ok:
+            return await ctx.send("❌ You're already in the lobby." if reason == "already_in"
+                                  else "❌ The lobby is full (22 players max).")
+        await ctx.send(embed=_lobby_embed(lobby, f"✅ {ctx.author.display_name} joined the lobby!"))
+
+    @commands.command(name="leavematch", aliases=["leaveclub"],
+                      help="Leave the club-match lobby.\nUsage: leavematch")
+    async def leavematch(self, ctx):
+        if not _can_use_career(ctx):
+            return await ctx.send(_CAREER_SOON)
+        lobby = career_match.LOBBIES.get(ctx.channel.id)
+        if not lobby:
+            return await ctx.send("❌ No lobby here.")
+        if lobby.started:
+            return await ctx.send("❌ The match has already started.")
+        if ctx.author.id == lobby.host_id:
+            # Host leaving cancels the lobby.
+            career_match.LOBBIES.pop(ctx.channel.id, None)
+            return await ctx.send("🛑 Host left — lobby cancelled.")
+        if not lobby.remove(ctx.author.id):
+            return await ctx.send("❌ You're not in this lobby.")
+        await ctx.send(embed=_lobby_embed(lobby, f"👋 {ctx.author.display_name} left the lobby."))
+
+    @commands.command(name="lobby", aliases=["viewmatch", "mlobby"],
+                      help="Show the current club-match lobby.\nUsage: lobby")
+    async def lobby_view(self, ctx):
+        if not _can_use_career(ctx):
+            return await ctx.send(_CAREER_SOON)
+        lobby = career_match.LOBBIES.get(ctx.channel.id)
+        if not lobby:
+            return await ctx.send("❌ No lobby here. Create one with `cv create_match`.")
+        await ctx.send(embed=_lobby_embed(lobby, "🏟️ Club Match — Lobby"))
+
+    @commands.command(name="cancelmatch", aliases=["endlobby"],
+                      help="Cancel the club-match lobby (host/admin).\nUsage: cancelmatch")
+    async def cancelmatch(self, ctx):
+        if not _can_use_career(ctx):
+            return await ctx.send(_CAREER_SOON)
+        lobby = career_match.LOBBIES.get(ctx.channel.id)
+        if not lobby:
+            return await ctx.send("❌ No lobby here.")
+        is_admin = ctx.author.id == ADMIN_DISCORD_ID or (ctx.guild and ctx.author.guild_permissions.administrator)
+        if ctx.author.id != lobby.host_id and not is_admin:
+            return await ctx.send("❌ Only the host (or an admin) can cancel the lobby.")
+        career_match.LOBBIES.pop(ctx.channel.id, None)
+        await ctx.send("🛑 Club-match lobby cancelled.")
+
+    @commands.command(name="startmatch", aliases=["beginmatch"],
+                      help="Start the club match — locks the teams (host).\nUsage: startmatch")
+    async def startmatch(self, ctx):
+        if not _can_use_career(ctx):
+            return await ctx.send(_CAREER_SOON)
+        lobby = career_match.LOBBIES.get(ctx.channel.id)
+        if not lobby:
+            return await ctx.send("❌ No lobby here. Create one with `cv create_match`.")
+        is_admin = ctx.author.id == ADMIN_DISCORD_ID or (ctx.guild and ctx.author.guild_permissions.administrator)
+        if ctx.author.id != lobby.host_id and not is_admin:
+            return await ctx.send("❌ Only the host (or an admin) can start the match.")
+        if not lobby.is_ready():
+            return await ctx.send("❌ Need an **even** number of players (min 2). Get the teams level first.")
+        a, b = lobby.make_teams()
+        lobby.started = True
+        e = discord.Embed(
+            title="🏏 Teams Locked — Club Match Ready!",
+            description=(f"⏱️ **{lobby.overs} overs**  ·  {lobby.per_side()}-a-side\n"
+                         f"Team A **{lobby.team_strength(a)}** OVR  vs  Team B **{lobby.team_strength(b)}** OVR"),
+            color=discord.Color.gold())
+        e.add_field(name="🟢 Team A", value="\n".join(f"`{p['ovr']}` {p['name']}" for p in a), inline=True)
+        e.add_field(name="🔴 Team B", value="\n".join(f"`{p['ovr']}` {p['name']}" for p in b), inline=True)
+        e.set_footer(text="Lobby ✅ (Sub-phase 4.1). Interactive ball-by-ball play + coin payouts arrive in 4.2–4.3.")
+        await ctx.send(embed=e)
+        # 4.1 ends here — release the lobby until the gameplay sub-phases are wired in.
+        career_match.LOBBIES.pop(ctx.channel.id, None)
 
     # ======================================================================
 

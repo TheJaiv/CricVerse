@@ -67,6 +67,14 @@ def tier_for_ovr(ovr: int) -> str:
     return "Bronze"
 
 
+def next_tier_info(ovr: int):
+    """Return (next_tier_name, min_ovr_needed) for the tier above `ovr`, or (None, None) at Diamond."""
+    for lo, hi, name, _ in sorted(TIERS, key=lambda t: t[0]):
+        if lo > ovr:
+            return name, lo
+    return None, None
+
+
 def _clamp(v, lo=0, hi=99):
     return max(lo, min(hi, int(round(v))))
 
@@ -100,8 +108,16 @@ def career_to_engine(career: dict) -> dict:
 # Cost ramps steeply so Gold is a multi-week goal, Platinum months, and Diamond
 # a long-term grind that even premium players can't rush.
 def upgrade_cost(v: int) -> int:
-    """Coin cost to raise an attribute from v to v+1."""
-    return int(round(40 + (v - 65) * 10 + max(0, v - 80) * 22 + max(0, v - 90) * 45))
+    """Coin cost to raise an attribute from v to v+1.
+    Steep, multi-stage curve so the high tiers are a real long-term grind:
+      v70≈110  v74≈158  v80≈290  v86≈542  v90≈990  v95≈1970  v98≈2726."""
+    return int(round(
+        50
+        + (v - 65) * 12
+        + max(0, v - 78) * 30
+        + max(0, v - 86) * 70
+        + max(0, v - 92) * 150
+    ))
 
 
 def _blank_stats():
@@ -249,9 +265,9 @@ def upgrade_attribute(career: dict, attr: str, want: int = 1):
     return bought, spent, "ok"
 
 
-DAILY_MIN, DAILY_MAX = 80, 180     # lowered: dailies alone shouldn't fast-track tiers
-WEEKLY_AMOUNT  = 1200
-MONTHLY_AMOUNT = 5000
+DAILY_MIN, DAILY_MAX = 25, 55      # tightened — dailies alone are a slow trickle, not a fast-track
+WEEKLY_AMOUNT  = 800               # PREMIUM ONLY
+MONTHLY_AMOUNT = 3000              # PREMIUM ONLY
 WEEK_BOOST = 1.05                  # 5% coin boost for the week (premium weekly perk)
 
 
@@ -314,12 +330,12 @@ def award_match_earnings(career, *, runs=0, fifties=0, hundreds=0, wickets=0,
     purely for quests/practice). Returns coins awarded."""
     if not is_real_match:
         return 0
-    coins = 100                                   # base pay
+    coins = 60                                    # base pay
     if won:
-        coins += 50                               # victory bonus
-    coins += (runs // 10) * 5 + fifties * 20 + hundreds * 40   # batting
-    coins += wickets * 15 + maidens * 20          # bowling
-    coins += (catches + stumpings) * 10           # fielding
+        coins += 40                               # victory bonus
+    coins += (runs // 12) * 5 + fifties * 15 + hundreds * 30    # batting
+    coins += wickets * 12 + maidens * 12          # bowling
+    coins += (catches + stumpings) * 6            # fielding
     coins = int(round(coins * _boost_mult(career)))
     career["coins"] += coins
     async_save_career(career)

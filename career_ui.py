@@ -13,11 +13,20 @@ import career_manager as CM
 
 
 def _font(size, bold=True):
-    paths = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold
-        else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    paths = (
+        # Linux (server)
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        # macOS (local)
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
         "/Library/Fonts/Arial.ttf",
-    ]
+    ) if bold else (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/Library/Fonts/Arial.ttf",
+    )
     for p in paths:
         try:
             return ImageFont.truetype(p, size)
@@ -27,49 +36,106 @@ def _font(size, bold=True):
 
 
 TIER_COLOR = {
-    "Bronze": (176, 113, 70), "Silver": (158, 168, 181), "Gold": (212, 175, 55),
-    "Platinum": (110, 200, 210), "Diamond": (120, 160, 255),
+    "Bronze": (205, 127, 50), "Silver": (176, 186, 199), "Gold": (224, 184, 56),
+    "Platinum": (104, 214, 226), "Diamond": (130, 170, 255),
+}
+TIER_BLURB = {
+    "Bronze": "THE ROOKIE", "Silver": "THE PRO", "Gold": "THE STAR",
+    "Platinum": "THE ELITE", "Diamond": "THE LEGEND",
 }
 
 
+def _mix(a, b, t):
+    return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
+
+
+def _rrect(d, box, radius, **kw):
+    try:
+        d.rounded_rectangle(box, radius=radius, **kw)
+    except Exception:
+        d.rectangle(box, **kw)
+
+
+def _rating_color(v):
+    if v >= 88: return (64, 220, 120)    # elite green
+    if v >= 80: return (140, 220, 110)   # strong
+    if v >= 74: return (224, 200, 90)    # gold
+    if v >= 68: return (235, 165, 80)    # orange
+    return (220, 110, 110)               # weak red
+
+
+def _ctext(d, cx, y, text, font, fill):
+    """Draw horizontally-centered text at center-x = cx."""
+    try:
+        w = d.textlength(text, font=font)
+    except Exception:
+        w = font.getbbox(text)[2] if hasattr(font, "getbbox") else len(text) * 8
+    d.text((cx - w / 2, y), text, font=font, fill=fill)
+
+
 def render_career_card(career: dict) -> io.BytesIO:
-    W, H = 540, 320
+    W, H = 660, 380
     tier = career.get("tier", "Bronze")
-    accent = TIER_COLOR.get(tier, (176, 113, 70))
-    img = Image.new("RGB", (W, H), (18, 20, 28))
+    accent = TIER_COLOR.get(tier, (205, 127, 50))
+
+    # ── Vertical gradient background, faintly tinted by the tier colour ──
+    img = Image.new("RGB", (W, H))
     d = ImageDraw.Draw(img)
-    d.rectangle([0, 0, W, 74], fill=(28, 31, 44))
-    d.rectangle([0, 0, 8, H], fill=accent)
+    top = _mix((24, 27, 38), accent, 0.10)
+    bot = (10, 11, 16)
+    for y in range(H):
+        d.line([(0, y), (W, y)], fill=_mix(top, bot, y / H))
+
+    # Card border + left accent rail
+    _rrect(d, [6, 6, W - 7, H - 7], 22, outline=_mix(accent, (255, 255, 255), 0.15), width=2)
+    _rrect(d, [6, 6, 18, H - 7], 6, fill=accent)
 
     bt = CM.BOWLING_TYPES[career["bowling_type"]]
     ms = CM.MINDSETS[career["mindset"]]
-    f_name, f_big, f_lbl, f_val, f_sm = _font(30), _font(56), _font(18), _font(20), _font(16)
+    f_name = _font(40); f_sub = _font(19, bold=False); f_lbl = _font(20)
+    f_val = _font(24); f_ovr = _font(72); f_tag = _font(17); f_pill = _font(18)
 
-    d.text((26, 14), career.get("username", "Rookie")[:22], font=f_name, fill=(255, 255, 255))
-    d.text((26, 50), f"{ms['emoji']} {ms['label']}  •  {bt['emoji']} {bt['label']}", font=f_sm, fill=(180, 186, 200))
-
+    # ── OVR badge (top-right) ──
+    bx, by, br = W - 96, 92, 60
+    _rrect(d, [bx - br, by - br, bx + br, by + br], br, fill=_mix(accent, (0, 0, 0), 0.18))
+    _rrect(d, [bx - br, by - br, bx + br, by + br], br, outline=_mix(accent, (255, 255, 255), 0.35), width=3)
     ovr = career.get("ovr", CM.BASE_OVR)
-    d.text((W - 150, 6), str(ovr), font=f_big, fill=accent)
-    d.text((W - 150, 64), "OVR  ·  ALL-ROUNDER", font=f_sm, fill=(150, 156, 170))
-    d.rectangle([W - 170, 96, W - 26, 126], fill=accent)
-    d.text((W - 162, 100), tier.upper(), font=f_lbl, fill=(15, 15, 20))
+    _ctext(d, bx, by - 46, str(ovr), f_ovr, (16, 16, 20))
+    _ctext(d, bx, by + 30, "OVERALL", f_tag, (30, 30, 36))
 
-    y = 118
-    short = {"power": "POWER", "control": "CONTROL", "bowling": "BOWLING", "stamina": "STAMINA"}
-    for k in CM.ATTRS:
-        v = career["attributes"][k]
-        d.text((26, y), short[k], font=f_lbl, fill=(190, 196, 210))
-        bx0, bx1 = 150, 380
-        d.rectangle([bx0, y + 2, bx1, y + 18], fill=(40, 44, 56))
-        d.rectangle([bx0, y + 2, bx0 + int((bx1 - bx0) * v / 99), y + 18], fill=accent)
-        d.text((bx1 + 12, y), str(v), font=f_val, fill=(255, 255, 255))
-        y += 36
+    # Tier pill under the badge
+    pill = [bx - 78, by + br + 12, bx + 78, by + br + 44]
+    _rrect(d, pill, 16, fill=accent)
+    _ctext(d, bx, by + br + 16, f"{tier.upper()}", f_pill, (16, 16, 20))
+    _ctext(d, bx, by + br + 50, TIER_BLURB.get(tier, ""), f_tag, _mix(accent, (255, 255, 255), 0.3))
 
-    d.text((26, H - 30), f"🪙 {career.get('coins', 0):,} coins", font=f_lbl, fill=(212, 175, 55))
-    if not career.get("debut_done"):
-        d.text((W - 230, H - 30), "⚠ Debut pending", font=f_sm, fill=(220, 120, 120))
+    # ── Identity block ──
+    d.text((40, 34), str(career.get("username", "Rookie"))[:18], font=f_name, fill=(245, 247, 252))
+    d.text((42, 86), "ALL-ROUNDER", font=f_lbl, fill=accent)
+    d.text((42, 114), f"{ms['label']} batter   ·   {bt['label']} bowler", font=f_sub, fill=(176, 182, 198))
     if career.get("cosmetic_title"):
-        d.text((W - 200, 50), career["cosmetic_title"], font=f_sm, fill=accent)
+        d.text((42, 140), career["cosmetic_title"], font=f_sub, fill=_mix(accent, (255, 255, 255), 0.4))
+
+    # ── Attribute bars ──
+    short = {"power": "POWER", "control": "CONTROL", "bowling": "BOWLING", "stamina": "STAMINA"}
+    y = 180
+    bx0, bx1 = 160, 470
+    for k in CM.ATTRS:
+        v = int(career["attributes"][k])
+        col = _rating_color(v)
+        d.text((42, y - 2), short[k], font=f_lbl, fill=(206, 212, 226))
+        _rrect(d, [bx0, y + 2, bx1, y + 24], 11, fill=(38, 41, 52))
+        fill_w = bx0 + int((bx1 - bx0) * max(2, v) / 99)
+        _rrect(d, [bx0, y + 2, fill_w, y + 24], 11, fill=col)
+        d.text((bx1 + 16, y - 2), str(v), font=f_val, fill=col)
+        y += 44
+
+    # ── Footer: coins (+ debut state) ──
+    _rrect(d, [40, H - 56, 300, H - 18], 14, fill=(30, 26, 12))
+    d.text((56, H - 50), f"COINS   {career.get('coins', 0):,}", font=f_lbl, fill=(232, 196, 86))
+    if not career.get("debut_done"):
+        _rrect(d, [W - 220, H - 56, W - 40, H - 18], 14, fill=(60, 24, 24))
+        _ctext(d, W - 130, H - 50, "DEBUT PENDING", f_lbl, (235, 130, 130))
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
