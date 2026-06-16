@@ -2292,7 +2292,11 @@ async def prompt_bowler_then_hub(interaction, match: CricketMatch):
         innings.over_log.clear()
         innings.bouncers_in_over = 0; innings.cutters_in_over = 0
         innings.mystery_bowled_this_over = False
-        await prompt_over_pacing_hub(interaction, match)
+        # Career debut (and club matches): no Sim hub — go straight to interactive play.
+        if getattr(match, "is_debut", False) or getattr(match, "is_club", False):
+            await run_interactive_delivery_sequence(interaction, match)
+        else:
+            await prompt_over_pacing_hub(interaction, match)
         return
 
     # Human bowling: show bowler select, then show hub after selection
@@ -2922,8 +2926,9 @@ async def start_debut_match(channel, author, career):
     active_games[channel.id] = match
     await channel.send(
         f"🎓 **ACADEMY TRIAL — {author.display_name}**\n"
-        f"🏟️ Pitch: **{pitch}**  ·  ⏱️ **{_DEBUT_OVERS} overs**  ·  🎯 Pass mark: **{_DEBUT_TARGET}+ runs**\n"
-        f"You're opening vs the academy attack — pick your shots ball-by-ball. Survive and score!"
+        f"🏟️ Pitch: **{pitch}**  ·  ⏱️ **{_DEBUT_OVERS} overs**  ·  🎯 Pass mark: **{_DEBUT_TARGET}+ team runs**\n"
+        f"You're opening vs the academy attack — pick your shots ball-by-ball. "
+        f"Put **{_DEBUT_TARGET}** on the board before you're out or the overs run out!"
     )
     await prompt_bowler_then_hub(channel, match)
 
@@ -2947,8 +2952,11 @@ async def handle_debut_end(interaction_context, match: CricketMatch):
         await channel.send("⚠️ Couldn't find your career to finalize the debut.")
         return
 
-    passed = runs >= _DEBUT_TARGET
-    line = f"You scored **{runs}** ({balls}b · {fours}×4 · {sixes}×6 · SR {sr:.0f}) — *{dism}*."
+    team = innings.total_runs
+    overs_str = f"{innings.total_balls // 6}.{innings.total_balls % 6}"
+    passed = team >= _DEBUT_TARGET
+    line = (f"**Team {team}/{innings.wickets}** in {overs_str} ov  (needed {_DEBUT_TARGET}).\n"
+            f"Your knock: **{runs}** ({balls}b · {fours}×4 · {sixes}×6 · SR {sr:.0f}) — *{dism}*.")
 
     if passed:
         # Record the official debut innings into lifetime stats (once).
@@ -2980,7 +2988,7 @@ async def handle_debut_end(interaction_context, match: CricketMatch):
     else:
         e = discord.Embed(
             title="❌ TRIAL FAILED",
-            description=f"{line}\n\nYou needed **{_DEBUT_TARGET}+** runs. Run `cv debut` to try again.",
+            description=f"{line}\n\nYou needed **{_DEBUT_TARGET}+** team runs. Run `cv debut` to try again.",
             color=discord.Color.red())
         await channel.send(embed=e)
 
