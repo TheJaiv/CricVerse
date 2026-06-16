@@ -6025,13 +6025,36 @@ class PrefixCog(commands.Cog):
     async def restore_tournament(self, ctx):
         if ctx.author.id != ADMIN_DISCORD_ID:
             return await ctx.send("❌ Owner only.")
-        if not ctx.message.attachments:
-            return await ctx.send("❌ Attach the tournament backup JSON to this message, then run `cv restore_tournament`.")
+        # Find the JSON from: this message, a replied-to message, or recent channel history
+        att = None
+        if ctx.message.attachments:
+            att = ctx.message.attachments[0]
+        elif ctx.message.reference and ctx.message.reference.message_id:
+            try:
+                ref = await ctx.channel.fetch_message(ctx.message.reference.message_id)
+                if ref.attachments:
+                    att = ref.attachments[0]
+            except Exception:
+                pass
+        if att is None:
+            try:
+                async for _m in ctx.channel.history(limit=25):
+                    _js = [a for a in _m.attachments if a.filename.lower().endswith(".json")]
+                    if _js:
+                        att = _js[0]; break
+            except Exception:
+                pass
+        if att is None:
+            return await ctx.send(
+                "❌ No JSON file found. Send it any of these ways:\n"
+                "• attach the file **with** `cv restore_tournament` typed as the caption, **or**\n"
+                "• upload the file, then **reply** to it with `cv restore_tournament`, **or**\n"
+                "• upload the file, then send `cv restore_tournament` right after (I scan the last 25 messages).")
         try:
-            raw = await ctx.message.attachments[0].read()
+            raw = await att.read()
             data = json.loads(raw.decode("utf-8"))
         except Exception as e:
-            return await ctx.send(f"❌ Could not read/parse the attachment: {e}")
+            return await ctx.send(f"❌ Could not read/parse `{att.filename}`: {e}")
         # accept {"tournaments":[...]} OR a single tournament object
         if isinstance(data, dict) and "tournaments" in data:
             incoming = data["tournaments"]
