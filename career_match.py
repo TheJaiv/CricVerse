@@ -10,6 +10,7 @@ Career Mode — Phase 4: Club Matches (PvP that pays coins).
 Lobbies are ephemeral (in-memory, per channel) like the bot's active_games.
 """
 import time
+import random
 
 import career_manager as CM
 
@@ -54,18 +55,40 @@ class ClubLobby:
             self._rebuild_teams()
         return changed
 
+    def add_bot(self):
+        """Add an AI bot whose ratings are the AVERAGE of the joined human players'.
+        Returns (ok, name_or_error)."""
+        humans = [p for p in self.players if not p.get("is_bot")]
+        careers = [c for c in (CM.get_career(p["id"]) for p in humans) if c]
+        if not careers:
+            return False, "Add at least one human player before adding bots."
+        if len(self.players) >= MAX_PER_SIDE * 2:
+            return False, "full"
+        attrs = {k: round(sum(c["attributes"][k] for c in careers) / len(careers)) for k in CM.ATTRS}
+        n = sum(1 for p in self.players if p.get("is_bot")) + 1
+        fake = {
+            "username": f"Bot {n}",
+            "attributes": attrs,
+            "bowling_type": random.choice(list(CM.BOWLING_TYPES)),
+            "mindset": random.choice(list(CM.MINDSETS)),
+        }
+        CM.refresh_ovr(fake)
+        self.players.append({"id": -(1000 + n), "name": f"Bot {n}", "is_bot": True, "career": fake})
+        self._rebuild_teams()
+        return True, f"Bot {n}"
+
     # ── teams ──
-    def _ovr(self, uid):
-        c = CM.get_career(uid)
-        return c["ovr"] if c else CM.BASE_OVR
+    def _entry(self, p):
+        if p.get("is_bot"):
+            return {"id": p["id"], "name": p["name"], "ovr": p["career"]["ovr"],
+                    "is_bot": True, "career": p["career"]}
+        c = CM.get_career(p["id"])
+        return {"id": p["id"], "name": p["name"], "ovr": c["ovr"] if c else CM.BASE_OVR}
 
     def _rebuild_teams(self):
         """Snake-draft current players by OVR into two balanced sides. Called on every
         join/leave, so finalize joins BEFORE using `cv swap` to arrange captains/order."""
-        ranked = sorted(
-            ({"id": p["id"], "name": p["name"], "ovr": self._ovr(p["id"])} for p in self.players),
-            key=lambda x: x["ovr"], reverse=True,
-        )
+        ranked = sorted((self._entry(p) for p in self.players), key=lambda x: x["ovr"], reverse=True)
         self.team_a, self.team_b = [], []
         for i, p in enumerate(ranked):
             (self.team_a if i % 4 in (0, 3) else self.team_b).append(p)

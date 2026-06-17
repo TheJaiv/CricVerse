@@ -163,7 +163,8 @@ def _lobby_embed(lobby, title):
         rows = []
         for idx, p in enumerate(team):
             cap = " 🧢" if idx == 0 else ""
-            rows.append(f"`{start + idx}.` {p['name']} ({p['ovr']}){cap}")
+            bot = " 🤖" if p.get("is_bot") else ""
+            rows.append(f"`{start + idx}.` {p['name']} ({p['ovr']}){bot}{cap}")
         return "\n".join(rows)
 
     e.add_field(name=f"🟢 Team A  ·  {lobby.team_strength(lobby.team_a)} OVR",
@@ -407,6 +408,24 @@ class ClubMatch(CricketMatch):
 
     def bowling_captain_id(self):
         return self._cap_of(self.current_innings.bowling_team) if self.current_innings else None
+
+
+def _is_bot_uid(uid):
+    """Club bots use negative pseudo-ids so no real Discord user can act for them."""
+    return uid is not None and uid < 0
+
+def _striker_is_bot(match):
+    try:
+        inn = match.current_innings
+        return bool(inn.batting_team["players"][inn.current_striker_idx].get("is_bot"))
+    except Exception:
+        return False
+
+def _bowler_is_bot(match):
+    try:
+        return bool(match.current_innings.current_bowler.get("is_bot"))
+    except Exception:
+        return False
 
 # ==========================================
 # 🧠 3. SIMULATION ROUTING ENGINE
@@ -2220,6 +2239,18 @@ async def prompt_next_batter(interaction, match: CricketMatch):
         await run_interactive_delivery_sequence(interaction, match)
         return
 
+    if is_club and _is_bot_uid(uid):
+        # Bot captain sends in the best available batsman.
+        best = max(available, key=lambda p: p["bat"])
+        idx = next(i for i, p in enumerate(innings.batting_team["players"]) if p["name"] == best["name"])
+        innings.batting_team["players"][innings.next_batter_idx], innings.batting_team["players"][idx] = \
+            innings.batting_team["players"][idx], innings.batting_team["players"][innings.next_batter_idx]
+        innings.current_striker_idx = innings.next_batter_idx
+        innings.next_batter_idx += 1
+        await channel.send(f"🤖 **{innings.batting_team['name']}** (bot) sends in **{best['name']}**.")
+        await run_interactive_delivery_sequence(interaction, match)
+        return
+
     options = []
     for p in available:
         role_short = p["role"].split("_")[0]
@@ -2364,6 +2395,23 @@ async def prompt_bowler_then_hub(interaction, match: CricketMatch):
             await run_interactive_delivery_sequence(interaction, match)
         else:
             await prompt_over_pacing_hub(interaction, match)
+        return
+
+    # Club match with a BOT captain bowling: bot auto-picks the next bowler.
+    if getattr(match, "is_club", False) and _is_bot_uid(bowler_uid):
+        new_bowler = get_smart_ai_bowler(innings, match.pitch, match.weather, match.format_overs)
+        if not new_bowler:
+            new_bowler = next((p for p in innings.bowling_team["players"]
+                               if not innings.current_bowler or p["name"] != innings.current_bowler["name"]), None)
+        if not new_bowler:
+            await channel.send("🚨 No valid bowler for the bot — ending. Use `cv endmatch`.")
+            return
+        innings.current_bowler = new_bowler
+        innings.over_log.clear()
+        innings.bouncers_in_over = 0; innings.cutters_in_over = 0
+        innings.mystery_bowled_this_over = False
+        await channel.send(f"🤖 **{innings.bowling_team['name']}** (bot) brings on **{new_bowler['name']}**.")
+        await run_interactive_delivery_sequence(interaction, match)
         return
 
     # Human bowling: show bowler select, then show hub after selection
@@ -2859,7 +2907,7 @@ async def run_interactive_delivery_sequence(interaction, match: CricketMatch):
         
     channel = interaction.channel if hasattr(interaction, 'channel') else interaction
     
-    if match.is_ai_game and match.get_bowler_user_id() == match.p2_id:
+    if (match.is_ai_game and match.get_bowler_user_id() == match.p2_id) or _bowler_is_bot(match):
         if getattr(innings, "total_balls", 0) % 6 == 0 or (innings.over_log and innings.over_log[-1] == "<a:wickett:1510369641959264429>"):
             try_ai_impact_player(match, innings)
         role = innings.current_bowler["role"]
@@ -2892,7 +2940,7 @@ async def run_interactive_delivery_sequence(interaction, match: CricketMatch):
             await channel.send(f"🔮 <@{match.get_bowler_user_id()}> (**{innings.current_bowler['name']}**), select your Pace Variation:{free_hit_notice}", view=PaceBowlingView(match))
 
 async def prompt_batter_shot(channel, match: CricketMatch, prev=None):
-    if match.is_ai_game and match.get_striker_user_id() == match.p2_id:
+    if (match.is_ai_game and match.get_striker_user_id() == match.p2_id) or _striker_is_bot(match):
         if getattr(match.current_innings, "total_balls", 0) % 6 == 0 or (match.current_innings.over_log and match.current_innings.over_log[-1] == "<a:wickett:1510369641959264429>"):
             try_ai_impact_player(match, match.current_innings)
         execute_ball_math(match)
@@ -3079,11 +3127,13 @@ async def handle_debut_end(interaction_context, match: CricketMatch):
 def _build_club_team(players, name, color):
     eng, seen = [], {}
     for p in players:
-        c = CM.get_career(p["id"])
+        c = p["career"] if p.get("is_bot") else CM.get_career(p["id"])
         if not c:
             continue
         e = CM.career_to_engine(c)
         e["owner_id"] = p["id"]
+        if p.get("is_bot"):
+            e["is_bot"] = True
         nm = e["name"]                       # engine stats key by name — keep them unique per team
         if nm in seen:
             seen[nm] += 1
@@ -3128,6 +3178,19 @@ async def prompt_club_openers(interaction, match):
     cap_id = match.batting_captain_id()
     channel = interaction.channel if hasattr(interaction, 'channel') else interaction
     players = innings.batting_team["players"]
+
+    if _is_bot_uid(cap_id):
+        # Bot captain: open with the two best batsmen.
+        idxs = sorted(sorted(range(len(players)), key=lambda i: players[i]["bat"], reverse=True)[:2])
+        chosen = [players[i] for i in idxs]
+        rest = [p for k, p in enumerate(players) if k not in idxs]
+        innings.batting_team["players"][:] = chosen + rest
+        innings.current_striker_idx = 0
+        innings.current_non_striker_idx = 1
+        innings.next_batter_idx = 2
+        await channel.send(f"🤖 **{innings.batting_team['name']}** (bot) opens with **{chosen[0]['name']}** & **{chosen[1]['name']}**.")
+        await prompt_bowler_then_hub(interaction, match)
+        return
 
     view = discord.ui.View(timeout=300)
     opts = [discord.SelectOption(label=f"{p['name']}", description=f"bat {p['bat']} · bowl {p['bowl']}",
@@ -6722,6 +6785,7 @@ class PrefixCog(commands.Cog):
             "`cv synctier` — re-apply your role here (e.g. in a new server)."), inline=False)
         e.add_field(name="⚔️ Club Matches (PvP) — *beta*", value=(
             "`cv create_match [overs]` — open a lobby   ·   `cv joinmatch` — join\n"
+            "`cv addbot` — add an AI bot (avg of joined players)\n"
             "`cv lobby` — numbered teams   ·   `cv swap <a> <b>` — host re-orders / sets captains\n"
             "`cv leavematch` / `cv cancelmatch`   ·   `cv startmatch` — begin\n"
             "*Each player bats & bowls their own turn; captains pick openers, next batter & bowler.*"), inline=False)
@@ -7026,6 +7090,24 @@ class PrefixCog(commands.Cog):
         if not lobby:
             return await ctx.send("❌ No lobby here. Create one with `cv create_match`.")
         await ctx.send(embed=_lobby_embed(lobby, "🏟️ Club Match — Lobby"))
+
+    @commands.command(name="addbot", aliases=["addai"],
+                      help="Add an AI bot (avg of joined players) to the lobby (host).\nUsage: addbot")
+    async def addbot(self, ctx):
+        if not _can_use_career(ctx):
+            return await ctx.send(_CAREER_SOON)
+        lobby = career_match.LOBBIES.get(ctx.channel.id)
+        if not lobby:
+            return await ctx.send("❌ No lobby here. Create one with `cv create_match`.")
+        if lobby.started:
+            return await ctx.send("❌ The match has already started.")
+        is_admin = ctx.author.id == ADMIN_DISCORD_ID or (ctx.guild and ctx.author.guild_permissions.administrator)
+        if ctx.author.id != lobby.host_id and not is_admin:
+            return await ctx.send("❌ Only the host (or an admin) can add bots.")
+        ok, info = lobby.add_bot()
+        if not ok:
+            return await ctx.send("❌ The lobby is full (22 max)." if info == "full" else f"❌ {info}")
+        await ctx.send(embed=_lobby_embed(lobby, f"🤖 **{info}** added (avg of joined players)"))
 
     @commands.command(name="swap", aliases=["swapplayer"],
                       help="Swap two players by their lobby number (host).\nUsage: swap <num1> <num2>")
