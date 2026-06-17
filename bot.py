@@ -4559,6 +4559,145 @@ def generate_test_scorecard_image(match: TestMatchObj) -> io.BytesIO:
     return buf
 
 
+def generate_test_summary_image(match: TestMatchObj) -> io.BytesIO:
+    """Compact Test match-SUMMARY card in the T20/ODI broadcast theme (1200×850):
+    each team's combined Test score, top batters & bowlers, result + POTM."""
+    img = Image.new("RGB", (1200, 850), color="#FFFFFF")
+    d = ImageDraw.Draw(img)
+    try:
+        font_large = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 44)
+        font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 30)
+        font_bold  = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 24)
+        font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20)
+        font_micro = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 13)
+    except Exception:
+        font_large = font_title = font_bold = font_small = font_micro = ImageFont.load_default()
+
+    def get_tw(t, f):
+        try: return f.getbbox(t)[2]
+        except Exception: return len(t) * 12
+
+    c_white = "#FFFFFF"; c_navy = "#0A0F24"; c_grid = "#E8E8E8"; c_text_grey = "#777777"
+    c_accent = "#BCC4CD"   # Test whites — greyish-white silver
+
+    potm_full = _test_player_of_match(match) or ""
+    potm_name = potm_full.split(" (")[0] if potm_full else ""
+
+    def _bat_innings(tn):  return [i for i in match.innings_list if i.batting_team["name"] == tn]
+    def _bowl_innings(tn): return [i for i in match.innings_list if i.bowling_team["name"] == tn]
+
+    def _score_str(tn):
+        parts = []
+        for i in _bat_innings(tn):
+            dec = "d" if getattr(i, "declared", False) else ""
+            parts.append(f"{i.total_runs}" if (i.wickets >= 10 and not dec) else f"{i.total_runs}/{i.wickets}{dec}")
+        return " & ".join(parts) if parts else "—"
+
+    def _top_bat(tn):
+        agg = {}
+        for i in _bat_innings(tn):
+            for p in i.batting_team["players"]:
+                st = i.batting_stats[p["name"]]
+                if st.balls_faced > 0 or st.dismissal != "not out":
+                    a = agg.setdefault(p["name"], {"r": 0, "b": 0, "no": False})
+                    a["r"] += st.runs_scored; a["b"] += st.balls_faced
+                    if st.dismissal == "not out": a["no"] = True
+        return sorted(({"name": n, **v} for n, v in agg.items()), key=lambda x: x["r"], reverse=True)[:4]
+
+    def _top_bowl(tn):
+        agg = {}
+        for i in _bowl_innings(tn):
+            for p in i.bowling_team["players"]:
+                st = i.bowling_stats[p["name"]]
+                if st.balls_bowled > 0:
+                    a = agg.setdefault(p["name"], {"w": 0, "r": 0, "balls": 0})
+                    a["w"] += st.wickets_taken; a["r"] += st.runs_conceded; a["balls"] += st.balls_bowled
+        return sorted(({"name": n, **v} for n, v in agg.items()), key=lambda x: (x["w"], -x["r"]), reverse=True)[:4]
+
+    t1, t2 = match.team1, match.team2
+
+    # bars / layout (same coords as the T20/ODI card)
+    d.rectangle([(0, 110), (1200, 140)], fill=c_accent)
+    d.rectangle([(0, 140), (1200, 220)], fill=c_navy);  d.line([(600, 140), (600, 220)], fill=c_white, width=1)
+    d.rectangle([(0, 470), (1200, 550)], fill=c_navy);  d.line([(600, 470), (600, 550)], fill=c_white, width=1)
+    d.rectangle([(0, 800), (1200, 850)], fill=c_accent)
+    d.rectangle([(0, 220), (1200, 470)], fill=c_white)
+    d.rectangle([(0, 550), (1200, 800)], fill=c_white)
+    for y0, y1 in [(220, 470), (550, 800)]:
+        for cx in (600, 465, 555, 1005, 1095):
+            d.line([(cx, y0), (cx, y1)], fill=c_grid, width=2)
+    for y in range(270, 471, 50): d.line([(0, y), (1200, y)], fill=c_grid, width=1)
+    for y in range(600, 801, 50): d.line([(0, y), (1200, y)], fill=c_grid, width=1)
+
+    n1 = t1["name"][:18].upper(); n2 = t2["name"][:18].upper()
+    d.text((300 - get_tw(n1, font_large)//2, 38), n1, fill=c_navy, font=font_large)
+    d.text((900 - get_tw(n2, font_large)//2, 38), n2, fill=c_navy, font=font_large)
+    _ctr = _format_match_no_label("test")
+    d.text((1195 - get_tw(_ctr, font_micro), 8), _ctr, fill=c_text_grey, font=font_micro)
+
+    try:
+        logo_path = "logo.png" if os.path.exists("logo.png") else "logo.jpg"
+        logo_img = Image.open(logo_path).convert("RGBA").resize((90, 90), Image.Resampling.LANCZOS)
+        mask = Image.new("L", (90, 90), 0); ImageDraw.Draw(mask).ellipse((0, 0, 90, 90), fill=255)
+        img.paste(logo_img, (555, 12), mask)
+        d.ellipse([(555, 12), (645, 102)], outline=c_grid, width=2)
+    except Exception:
+        d.ellipse([(550, 15), (650, 105)], fill=c_white, outline=c_grid, width=3)
+
+    left_text = "SIMULATION MATCH"; dot = "•"; fmt_text = "TEST MATCH"
+    d.text((600 - get_tw(dot, font_bold)//2, 112), dot, fill=c_navy, font=font_bold)
+    d.text((585 - get_tw(left_text, font_bold), 112), left_text, fill=c_navy, font=font_bold)
+    d.text((615, 112), fmt_text, fill=c_navy, font=font_bold)
+
+    s1 = _score_str(t1["name"]); s2 = _score_str(t2["name"])
+    d.text((300 - get_tw(s1, font_title)//2, 165), s1, fill=c_white, font=font_title)
+    d.text((900 - get_tw(s2, font_title)//2, 165), s2, fill=c_white, font=font_title)
+    d.text((300 - get_tw("BOWLING", font_title)//2, 495), "BOWLING", fill=c_white, font=font_title)
+    d.text((900 - get_tw("BOWLING", font_title)//2, 495), "BOWLING", fill=c_white, font=font_title)
+
+    def draw_bat(tn, ox):
+        d.text((ox + 75, 235), "BATTER", fill=c_text_grey, font=font_small)
+        d.text((ox + 465 - get_tw("R", font_small)//2, 235), "R", fill=c_text_grey, font=font_small)
+        d.text((ox + 555 - get_tw("B", font_small)//2, 235), "B", fill=c_text_grey, font=font_small)
+        for idx, b in enumerate(_top_bat(tn)):
+            y = 285 + idx * 50
+            nm = b["name"][:16].upper()
+            d.text((ox + 75, y), nm, fill=c_navy, font=font_bold)
+            if potm_name == b["name"]:
+                d.text((ox + 75 + get_tw(nm, font_bold) + 8, y - 4), "★", fill="#FFD700", font=font_title)
+            rs = f"{b['r']}{'*' if b['no'] else ''}"
+            d.text((ox + 465 - get_tw(rs, font_bold)//2, y), rs, fill=c_navy, font=font_bold)
+            d.text((ox + 555 - get_tw(str(b['b']), font_small)//2, y + 4), str(b['b']), fill=c_text_grey, font=font_small)
+    draw_bat(t1["name"], 0); draw_bat(t2["name"], 540)
+
+    def draw_bowl(tn, ox):
+        d.text((ox + 75, 565), "BOWLER", fill=c_text_grey, font=font_small)
+        d.text((ox + 465 - get_tw("W-R", font_small)//2, 565), "W-R", fill=c_text_grey, font=font_small)
+        d.text((ox + 555 - get_tw("O", font_small)//2, 565), "O", fill=c_text_grey, font=font_small)
+        for idx, b in enumerate(_top_bowl(tn)):
+            y = 615 + idx * 50
+            nm = b["name"][:16].upper()
+            d.text((ox + 75, y), nm, fill=c_navy, font=font_bold)
+            if potm_name == b["name"]:
+                d.text((ox + 75 + get_tw(nm, font_bold) + 8, y - 4), "★", fill="#FFD700", font=font_title)
+            wr = f"{b['w']}-{b['r']}"
+            d.text((ox + 465 - get_tw(wr, font_bold)//2, y), wr, fill=c_navy, font=font_bold)
+            ov = f"{b['balls']//6}.{b['balls']%6}"
+            d.text((ox + 555 - get_tw(ov, font_small)//2, y + 4), ov, fill=c_text_grey, font=font_small)
+    draw_bowl(t1["name"], 0); draw_bowl(t2["name"], 540)
+
+    res = (match.result or "MATCH DRAWN").upper()
+    if potm_name:
+        res += f" • POTM: {potm_name.upper()}"
+    rf = font_title if get_tw(res, font_title) <= 1180 else font_bold
+    d.text((600 - get_tw(res, rf)//2, 808 if rf is font_title else 812), res, fill=c_navy, font=rf)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
 class TestScorecardView(discord.ui.View):
     """Navigate through per-innings scorecards after a Test match ends."""
 
@@ -4604,19 +4743,45 @@ class TestScorecardView(discord.ui.View):
         await self._navigate(interaction)
 
 
+class TestImageToggleView(discord.ui.View):
+    """Switch the result graphic between the compact Summary and the Full Scorecard."""
+    def __init__(self, match: TestMatchObj):
+        super().__init__(timeout=900)
+        self.match = match
+
+    async def _swap(self, interaction, gen, fname):
+        try:
+            file = discord.File(fp=gen(self.match), filename=fname)
+            await interaction.response.edit_message(attachments=[file], view=self)
+        except Exception as e:
+            print(f"⚠️ Test image toggle failed: {e}")
+            try:
+                await interaction.response.send_message("⚠️ Couldn't switch the view.", ephemeral=True)
+            except Exception:
+                pass
+
+    @discord.ui.button(label="Summary", style=discord.ButtonStyle.primary, emoji="📊")
+    async def summary(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._swap(interaction, generate_test_summary_image, "test_summary.png")
+
+    @discord.ui.button(label="Full Scorecard", style=discord.ButtonStyle.secondary, emoji="📋")
+    async def full(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._swap(interaction, generate_test_scorecard_image, "test_full.png")
+
+
 async def _test_finish_match(match: TestMatchObj, channel_id: int, channel):
     """Shared finish routine: increment counter, post final scorecard, clean up."""
     _increment_match_count("test")
     result_text = match.result or "Match Drawn"
-    img_buf = None
     try:
-        img_buf = generate_test_scorecard_image(match)
-        file    = discord.File(fp=img_buf, filename="test_scorecard.png")
+        file = discord.File(fp=generate_test_summary_image(match), filename="test_summary.png")
         await channel.send(
-            f"🏆 **Test Match Complete · {result_text}**",
-            file=file
+            f"🏆 **Test Match Complete · {result_text}**\n"
+            f"-# 📊 Summary shown — tap **Full Scorecard** for the detailed card.",
+            file=file, view=TestImageToggleView(match)
         )
-    except Exception:
+    except Exception as _e:
+        print(f"⚠️ Test summary image failed: {_e}")
         await channel.send(f"🏆 **Test Match Result:** {result_text}")
 
     # Interactive per-innings scorecard navigator
@@ -4630,11 +4795,7 @@ async def _test_finish_match(match: TestMatchObj, channel_id: int, channel):
             try:
                 log_channel = bot.get_channel(int(log_channel_id))
                 if log_channel:
-                    if img_buf:
-                        img_buf.seek(0)
-                        log_file = discord.File(fp=img_buf, filename="test_scorecard.png")
-                    else:
-                        log_file = discord.File(fp=generate_test_scorecard_image(match), filename="test_scorecard.png")
+                    log_file = discord.File(fp=generate_test_scorecard_image(match), filename="test_scorecard.png")
                     t1 = match.team1["name"]
                     t2 = match.team2["name"]
                     await log_channel.send(
