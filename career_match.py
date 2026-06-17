@@ -1,13 +1,13 @@
 """
 Career Mode — Phase 4: Club Matches (PvP that pays coins).
 
-Built in independently-testable sub-phases:
-  4.1  Lobby   : create / join / leave / view / start — forms balanced teams. (THIS FILE)
-  4.2  Simulate: build both XIs from careers and run a full match -> scorecard.
-  4.3  Payouts : coins + lifetime stats per player (PvP only — AI never pays).
-  4.4  Interactive, turn-gated ball-by-ball club match.
+4.1  Lobby   : create / join / leave / view / swap / start — numbered roster, two
+               balanced teams, slot 1 of each team = captain (host can re-order via swap).
+4.2  Match   : interactive, per-player control (each player bats/bowls their own turn;
+               the captain picks openers, the next batter, and the bowler).
+4.3  Payouts : coins + lifetime stats per player (PvP only — AI never pays).
 
-Lobbies are ephemeral (in-memory, per channel) just like the bot's active_games.
+Lobbies are ephemeral (in-memory, per channel) like the bot's active_games.
 """
 import time
 
@@ -28,7 +28,9 @@ class ClubLobby:
         self.overs = max(MIN_OVERS, min(int(overs), MAX_OVERS))
         self.created_at = int(time.time())
         self.started = False
-        self.players = []           # list of {"id": int, "name": str}
+        self.players = []          # flat join list: {"id", "name"}
+        self.team_a = []           # ordered: {"id","name","ovr"}  (index 0 = captain)
+        self.team_b = []
         self.add(host_id, host_name)
 
     # ── membership ──
@@ -41,39 +43,68 @@ class ClubLobby:
         if len(self.players) >= MAX_PER_SIDE * 2:
             return False, "full"
         self.players.append({"id": uid, "name": name})
+        self._rebuild_teams()
         return True, None
 
     def remove(self, uid):
         before = len(self.players)
         self.players = [p for p in self.players if p["id"] != uid]
-        return len(self.players) != before
+        changed = len(self.players) != before
+        if changed:
+            self._rebuild_teams()
+        return changed
 
-    # ── readiness / teams ──
-    def count(self):
-        return len(self.players)
-
-    def per_side(self):
-        return len(self.players) // 2
-
-    def is_ready(self):
-        n = len(self.players)
-        return n >= 2 and n % 2 == 0
-
+    # ── teams ──
     def _ovr(self, uid):
         c = CM.get_career(uid)
         return c["ovr"] if c else CM.BASE_OVR
 
-    def make_teams(self):
-        """Snake-draft players by OVR into two equal, balanced sides.
-        Returns (team_a, team_b) as lists of {id,name,ovr}."""
+    def _rebuild_teams(self):
+        """Snake-draft current players by OVR into two balanced sides. Called on every
+        join/leave, so finalize joins BEFORE using `cv swap` to arrange captains/order."""
         ranked = sorted(
             ({"id": p["id"], "name": p["name"], "ovr": self._ovr(p["id"])} for p in self.players),
             key=lambda x: x["ovr"], reverse=True,
         )
-        a, b = [], []
+        self.team_a, self.team_b = [], []
         for i, p in enumerate(ranked):
-            (a if i % 4 in (0, 3) else b).append(p)   # snake: A B B A A B B A ...
-        return a, b
+            (self.team_a if i % 4 in (0, 3) else self.team_b).append(p)
+
+    def count(self):
+        return len(self.players)
+
+    def per_side(self):
+        return min(len(self.team_a), len(self.team_b))
+
+    def is_ready(self):
+        n = len(self.players)
+        return n >= 2 and n % 2 == 0 and len(self.team_a) == len(self.team_b)
+
+    def captain_a(self):
+        return self.team_a[0] if self.team_a else None
+
+    def captain_b(self):
+        return self.team_b[0] if self.team_b else None
 
     def team_strength(self, team):
         return sum(p["ovr"] for p in team)
+
+    # ── swap (host re-orders by global number; slot 1 of a team = captain) ──
+    def _locate(self, num):
+        if 1 <= num <= len(self.team_a):
+            return ("a", num - 1)
+        k = num - len(self.team_a)
+        if 1 <= k <= len(self.team_b):
+            return ("b", k - 1)
+        return None
+
+    def swap(self, i, j):
+        if i == j:
+            return False, "Pick two different numbers."
+        li, lj = self._locate(i), self._locate(j)
+        if not li or not lj:
+            return False, "Invalid player number — check `cv lobby`."
+        ta = self.team_a if li[0] == "a" else self.team_b
+        tb = self.team_a if lj[0] == "a" else self.team_b
+        ta[li[1]], tb[lj[1]] = tb[lj[1]], ta[li[1]]
+        return True, None

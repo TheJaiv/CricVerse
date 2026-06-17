@@ -203,6 +203,18 @@ def get_smart_ai_bowler_t20(innings, pitch, weather="Clear", format_overs=20):
 
     return random.choices(valid_bowlers, weights=weights, k=1)[0]
 
+
+def _solo_batting(innings):
+    """True if the non-striker is already out — i.e. the last man is batting ALONE.
+    Only reachable in career club matches (max_wickets == squad size); there the lone
+    batsman keeps strike and the over-end / single rotation is suppressed."""
+    try:
+        ns = innings.batting_team["players"][innings.current_non_striker_idx]
+        return innings.batting_stats[ns["name"]].dismissal != "not out"
+    except Exception:
+        return True
+
+
 def execute_ball_math_t20(match):
     innings = match.current_innings
     striker = innings.batting_team["players"][innings.current_striker_idx]
@@ -770,7 +782,7 @@ def execute_ball_math_t20(match):
             match.pending_drs = True
             match.drs_dismissal = dismissal_type
         
-        max_wickets = 2 if getattr(match, "is_super_over", False) else 10
+        max_wickets = 2 if getattr(match, "is_super_over", False) else getattr(match, "max_wickets", 10)
         if innings.wickets < max_wickets:
             is_ai_batting = match.is_ai_game and match.get_striker_user_id() == match.p2_id
             if match.simulation_mode == "whole_match" or is_ai_batting:
@@ -823,7 +835,7 @@ def execute_ball_math_t20(match):
             
         innings.over_log.append(log_entry)
         
-        if runs in [1, 3]:
+        if runs in [1, 3] and not (getattr(match, "is_club", False) and _solo_batting(innings)):
             innings.current_striker_idx, innings.current_non_striker_idx = innings.current_non_striker_idx, innings.current_striker_idx
 
     if not is_no_ball:
@@ -832,8 +844,9 @@ def execute_ball_math_t20(match):
         match.free_hit = False
         if innings.total_balls % 6 == 0:
             match.over_completed = True
-            # End-of-over strike rotation: runs of 1/3 already swapped mid-ball
-            if outcome == "wicket" or runs not in [1, 3]:
+            # End-of-over strike rotation: runs of 1/3 already swapped mid-ball.
+            # Suppressed in career last-man (solo) batting so the lone batsman keeps strike.
+            if (outcome == "wicket" or runs not in [1, 3]) and not (getattr(match, "is_club", False) and _solo_batting(innings)):
                 innings.current_striker_idx, innings.current_non_striker_idx = innings.current_non_striker_idx, innings.current_striker_idx
         
     match.last_commentary = prefix + f"**{bowler['name']}** bowled a **{deliv}**\n**{striker['name']}** played: **{shot}**\n💥 **Result:** {outcome_text}"
