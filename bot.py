@@ -2200,6 +2200,12 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
                 print(f"⚠️ Could not extract scorecard players: {_e}")
                 match_to_finalize._scorecard_players = None
 
+        if getattr(match_to_finalize, "is_club", False) and _CAREER_OK:
+            try:
+                await _club_match_payout(channel, match_to_finalize)
+            except Exception as _e:
+                print(f"⚠️ Club match payout failed: {_e}")
+
         if channel.id in active_games:
             del active_games[channel.id]
 
@@ -3017,17 +3023,17 @@ def _build_debut_teams(career, author_name):
     you = _academy_player(author_name, eng["bat"], eng["bowl"], eng["role"], eng["archetype"])
     # You open; modest academy partners fill the order so the line-up is valid and a
     # single non-striker run-out doesn't abort the innings.
-    partners = [_academy_player(f"Academy Partner {i+1}", 58 - i, 50, "Batter", "Standard")
+    partners = [_academy_player(f"Academy Partner {i+1}", 52 - i, 46, "Batter", "Standard")
                 for i in range(10)]
     bat_team = {"name": f"{author_name}'s XI", "players": [you] + partners, "subs": [], "color": "#3BA55D"}
-    # A fair-but-real academy attack (weakest-pro range, ~68-71).
+    # A fair academy attack scaled to a fresh OVR-60 rookie (~60-63).
     attack = [
-        _academy_player("Academy Quick A",  30, 70, "Bowler_Pace",     "Standard"),
-        _academy_player("Academy Quick B",  30, 69, "Bowler_Pace",     "Standard"),
-        _academy_player("Academy Off-Spin", 30, 70, "Bowler_Spin_Off", "Standard"),
-        _academy_player("Academy Leg-Spin", 30, 69, "Bowler_Spin_Leg", "Standard"),
-        _academy_player("Academy Seamer",   38, 67, "All-Rounder_Pace", "Standard"),
-        _academy_player("Academy Keeper",   55, 20, "Batter_WK",       "Standard"),
+        _academy_player("Academy Quick A",  28, 63, "Bowler_Pace",     "Standard"),
+        _academy_player("Academy Quick B",  28, 61, "Bowler_Pace",     "Standard"),
+        _academy_player("Academy Off-Spin", 28, 62, "Bowler_Spin_Off", "Standard"),
+        _academy_player("Academy Leg-Spin", 28, 60, "Bowler_Spin_Leg", "Standard"),
+        _academy_player("Academy Seamer",   34, 58, "All-Rounder_Pace", "Standard"),
+        _academy_player("Academy Keeper",   48, 18, "Batter_WK",       "Standard"),
     ]
     while len(attack) < 11:
         attack.append(_academy_player(f"Academy Fielder {len(attack)}", 45, 25, "Batter", "Standard"))
@@ -3146,6 +3152,80 @@ def _build_club_team(players, name, color):
             seen[nm] = 1
         eng.append(e)
     return {"name": name, "players": eng, "subs": [], "color": color}
+
+
+async def _club_match_payout(channel, match):
+    """Phase 4.3 — pay coins + record lifetime stats for every HUMAN player after a
+    club match. Bots earn nothing. Winner's side gets the victory bonus."""
+    inns = [i for i in (match.innings1, match.innings2) if i]
+    target = getattr(match, "target", match.innings1.total_runs + 1)
+    inn2 = match.innings2
+    if inn2 and inn2.total_runs >= target:
+        winner = inn2.batting_team["name"]
+    elif inn2 and inn2.total_runs == target - 1:
+        winner = None   # tie
+    else:
+        winner = match.innings1.batting_team["name"]
+
+    def _inn(team_name, role):
+        for i in inns:
+            if role == "bat" and i.batting_team["name"] == team_name: return i
+            if role == "bowl" and i.bowling_team["name"] == team_name: return i
+        return None
+
+    lines = []
+    for team in (match.team1, match.team2):
+        tn = team["name"]
+        bat_inn, bowl_inn = _inn(tn, "bat"), _inn(tn, "bowl")
+        won = (winner == tn)
+        for p in team["players"]:
+            oid = p.get("owner_id")
+            if p.get("is_bot") or oid is None or oid < 0:
+                continue
+            career = CM.get_career(oid)
+            if not career:
+                continue
+            bs = bat_inn.batting_stats.get(p["name"]) if bat_inn else None
+            ws = bowl_inn.bowling_stats.get(p["name"]) if bowl_inn else None
+            runs = bs.runs_scored if bs else 0
+            balls = bs.balls_faced if bs else 0
+            fours = bs.fours if bs else 0
+            sixes = bs.sixes if bs else 0
+            out = bool(bs and bs.dismissal != "not out")
+            batted = bool(bs and (balls > 0 or out))
+            wkts = ws.wickets_taken if ws else 0
+            b_balls = ws.balls_bowled if ws else 0
+            b_runs = ws.runs_conceded if ws else 0
+            fifties = 1 if 50 <= runs < 100 else 0
+            hundreds = 1 if runs >= 100 else 0
+
+            coins = CM.award_match_earnings(career, runs=runs, fifties=fifties, hundreds=hundreds,
+                                            wickets=wkts, won=won, is_real_match=True)
+            try:
+                st = career.setdefault("stats", CM._blank_stats())
+                b = st["bat"]
+                b["matches"] += 1
+                if batted:
+                    b["innings"] += 1
+                    b["not_outs" if not out else "outs"] += 1
+                    b["runs"] += runs; b["balls"] += balls; b["fours"] += fours; b["sixes"] += sixes
+                    b["hs"] = max(b["hs"], runs)
+                    b["fifties"] += fifties; b["hundreds"] += hundreds
+                bw = st["bowl"]
+                bw["balls"] += b_balls; bw["runs"] += b_runs; bw["wickets"] += wkts
+                if wkts > bw.get("best_w", 0) or (wkts == bw.get("best_w", 0) and b_runs < bw.get("best_r", 999)):
+                    bw["best_w"] = wkts; bw["best_r"] = b_runs
+            except Exception:
+                pass
+            CM.async_save_career(career)
+            tag = []
+            if runs or batted: tag.append(f"{runs}{'*' if not out and batted else ''}")
+            if wkts: tag.append(f"{wkts}w")
+            lines.append(f"<@{oid}> **+{coins}**🪙" + (f" ({', '.join(tag)})" if tag else ""))
+
+    if lines:
+        head = f"🏆 **{winner} win!**" if winner else "🤝 **Match tied!**"
+        await channel.send(f"💰 **Match Earnings** — {head}\n" + "  ·  ".join(lines))
 
 
 async def start_club_match(channel, lobby, host):
@@ -6650,13 +6730,13 @@ class PrefixCog(commands.Cog):
             "`cv weekly` — *Premium/Booster:* coins + 5% week boost\n"
             "`cv monthly` — *Premium/Booster:* coins + cosmetic title\n"
             "`cv balance` — check your coins\n"
-            "🪙 *Right now coins come from `cv daily` (+ Premium weekly/monthly). **Club matches** that pay coins are coming soon — matches vs AI will never pay.*"), inline=False)
+            "🪙 *Coins come from `cv daily` (+ Premium weekly/monthly) and **club matches** (`cv create_match`). Bots & AI never pay.*"), inline=False)
         e.add_field(name="📈 Progress", value=(
             "`cv upgrade <power|control|bowling|stamina> [amount]` — spend coins to raise an attribute & OVR\n"
             "`cv profile [@user]` — view your player card\n"
             "`cv stats [@user]` — lifetime batting / bowling / fielding stats"), inline=False)
         e.add_field(name="🏅 Tiers & Roles", value=(
-            "Bronze 70–73 · Silver 74–79 · Gold 80–85 · Platinum 86–91 · Diamond 92–99\n"
+            "Bronze 60–68 · Silver 69–76 · Gold 77–84 · Platinum 85–92 · Diamond 93–99\n"
             "Climbing a tier auto-grants the matching **CricVerse <Tier>** Discord role. "
             "`cv synctier` — re-apply your role here (e.g. in a new server)."), inline=False)
         e.add_field(name="⚔️ Club Matches (PvP) — *beta*", value=(

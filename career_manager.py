@@ -44,19 +44,18 @@ MINDSETS = {
                   "desc": "Low-risk accumulator who builds long innings."},
 }
 
-# Rookie starts at a clean OVR 70 (normalised exactly at creation). Synced to the
-# sim — the player DB floor is ~68, so a rookie is the weakest pro, with a long
-# climb to the 90s legends.
-BASE_ATTRS = {"power": 70, "control": 72, "bowling": 68, "stamina": 70}
-BASE_OVR = 70
+# Rookie starts at a clean OVR 60 (normalised exactly at creation) — a raw prospect
+# below the sim's pro floor, with a long climb through the tiers to the 90s legends.
+BASE_ATTRS = {"power": 58, "control": 62, "bowling": 56, "stamina": 60}
+BASE_OVR = 60
 
-# Tiers mapped onto the sim's real rating spread (good players 78-88, legends 92+).
+# Tiers spread across the full 60→99 career range.
 TIERS = [  # (min, max, name, blurb)
-    (92, 99, "Diamond",  "The Legend"),
-    (86, 91, "Platinum", "The Elite"),
-    (80, 85, "Gold",     "The Star"),
-    (74, 79, "Silver",   "The Pro"),
-    (0,  73, "Bronze",   "The Rookie"),
+    (93, 99, "Diamond",  "The Legend"),
+    (85, 92, "Platinum", "The Elite"),
+    (77, 84, "Gold",     "The Star"),
+    (69, 76, "Silver",   "The Pro"),
+    (0,  68, "Bronze",   "The Rookie"),
 ]
 
 
@@ -108,15 +107,16 @@ def career_to_engine(career: dict) -> dict:
 # Cost ramps steeply so Gold is a multi-week goal, Platinum months, and Diamond
 # a long-term grind that even premium players can't rush.
 def upgrade_cost(v: int) -> int:
-    """Coin cost to raise an attribute from v to v+1.
-    Steep, multi-stage curve so the high tiers are a real long-term grind:
-      v70≈110  v74≈158  v80≈290  v86≈542  v90≈990  v95≈1970  v98≈2726."""
+    """Coin cost to raise an attribute from v to v+1. Positive & rising from the
+    new ~56 base; steep at the top so the high tiers are a real long-term grind:
+      v58≈48  v65≈90  v70≈140  v77≈266  v85≈516  v90≈786  v95≈1426  v98≈2166."""
     return int(round(
-        50
-        + (v - 65) * 12
-        + max(0, v - 78) * 30
-        + max(0, v - 86) * 70
-        + max(0, v - 92) * 150
+        30
+        + max(0, v - 55) * 6
+        + max(0, v - 70) * 14
+        + max(0, v - 82) * 32
+        + max(0, v - 90) * 70
+        + max(0, v - 95) * 120
     ))
 
 

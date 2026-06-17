@@ -1473,18 +1473,24 @@ def _format_scorecard(innings: TestInnings) -> str:
     return "\n".join(lines)
 
 def _player_of_match(match: TestMatch) -> str:
-    best_bat, best_bat_r = "", 0
-    best_bowl, best_bowl_w = "", 0
+    """POTM by whole-match contribution. Impact = aggregate RUNS + 20 per WICKET,
+    summed across BOTH innings. There is deliberately NO strike-rate or economy
+    term — Test cricket values accumulation and wicket-taking, not tempo, so slow
+    batters aren't penalised and tight bowlers aren't artificially boosted.
+    All-rounders are rewarded since runs and wickets add into one impact score."""
+    agg = {}   # name -> {"runs", "wkts"}  aggregated over the match
     for inn in match.innings_list:
         for n, st in inn.batting_stats.items():
-            if st.runs_scored > best_bat_r:
-                best_bat_r = st.runs_scored; best_bat = n
+            agg.setdefault(n, {"runs": 0, "wkts": 0})["runs"] += st.runs_scored
         for n, st in inn.bowling_stats.items():
-            if st.wickets_taken > best_bowl_w:
-                best_bowl_w = st.wickets_taken; best_bowl = n
-    if best_bat_r >= best_bowl_w * 22:
-        return f"{best_bat} ({best_bat_r} runs)"
-    return f"{best_bowl} ({best_bowl_w} wkts)"
+            agg.setdefault(n, {"runs": 0, "wkts": 0})["wkts"] += st.wickets_taken
+    if not agg:
+        return ""
+    name, a = max(agg.items(), key=lambda kv: kv[1]["runs"] + kv[1]["wkts"] * 20)
+    parts = []
+    if a["runs"] > 0: parts.append(f"{a['runs']} runs")
+    if a["wkts"] > 0: parts.append(f"{a['wkts']} wkts")
+    return f"{name} ({' & '.join(parts)})" if parts else name
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TEAMS  (good vs bad ratings clearly matter)
