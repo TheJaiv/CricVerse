@@ -242,32 +242,37 @@ def _batting_intent(match: TestMatch) -> float:
 
     rpo_needed = runs_needed / overs_left
 
-    # ── Last pair: always block for draw ──────────────────────────────────
-    if wickets_left <= 2:
-        return 0.20
+    # The chase keys off WICKETS IN HAND, not "a wicket fell": losing 2 early
+    # (8 in hand) keeps chasing; only a thinning line-up plays for the draw.
 
-    # ── Tail (3-4 wickets): limited options ───────────────────────────────
-    if wickets_left <= 4:
-        if rpo_needed < 1.5:  return 0.75   # nearly home, careful
-        if rpo_needed < 3.5:  return 1.00   # gettable, sensible push
-        if rpo_needed < 5.5:  return 1.40   # tail must swing
-        return 0.20                          # impossible → survive
+    # Win is a near-formality — knock it off regardless of how many are down.
+    if rpo_needed < 1.3:
+        return 0.90
 
-    # ── Middle order (5-6 wickets): calculated aggression ─────────────────
-    if wickets_left <= 6:
-        if rpo_needed < 2.0:  return 0.85
-        if rpo_needed < 3.5:  return 1.10
-        if rpo_needed < 5.5:  return 1.45
-        if rpo_needed < 7.0:  return 1.65   # last throw of the dice
-        return 0.25                          # unachievable → draw
+    # ── 0-3 down (7+ in hand): chase freely, the win is clearly on ────────
+    if wickets_left >= 7:
+        if rpo_needed < 2.5:  return 1.00
+        if rpo_needed < 4.0:  return 1.25
+        if rpo_needed < 5.5:  return 1.55
+        if rpo_needed < 8.0:  return 1.78   # going for the win
+        return 0.35                          # truly impossible → bat for draw
 
-    # ── Top order intact (7+ wickets): attack freely or bat time ──────────
-    if rpo_needed < 1.8:  return 0.80   # comfortable — don't gift wickets
-    if rpo_needed < 3.0:  return 1.05
-    if rpo_needed < 4.5:  return 1.35
-    if rpo_needed < 6.0:  return 1.60
-    if rpo_needed < 8.0:  return 1.75   # top order going for broke
-    return 0.25                          # impossible rate → bat for draw
+    # ── 4-5 down (5-6 in hand): push if the win is realistic, else protect ─
+    if wickets_left >= 5:
+        if rpo_needed < 3.0:  return 1.10
+        if rpo_needed < 4.5:  return 1.35
+        if rpo_needed < 6.0:  return 1.45   # last real push
+        return 0.24                          # win gone + wickets thinning → save it
+
+    # ── 6-7 down (3-4 in hand): tail exposed — the draw is the floor ──────
+    if wickets_left >= 3:
+        if rpo_needed < 2.2:  return 0.85   # gettable — knock it off carefully
+        return 0.18                          # otherwise dig in for the draw
+
+    # ── 8-9 down (1-2 in hand): survive — unless a tiny target is right there
+    if rpo_needed < 2.0:
+        return 0.70
+    return 0.16
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SHOT SELECTION
@@ -578,24 +583,24 @@ def execute_test_ball(match: TestMatch) -> bool:
     diff = bat_r - bowl_r   # positive = batter advantage
 
     # ── Base weights ───────────────────────────────────────────────────────
-    # sing_w is now responsive so RPO reflects conditions.
-    # Higher wkt floor (0.85) prevents infinite innings for dominant teams.
-    # At diff=0, neutral 80v80: ~270 runs, wicket every 42 balls.
-    # Flat+Clear ~380, Sticky+Overcast ~140, 90v70 ~700, 70v90 ~130.
-    dot_w  = max(30.0,  55.0 - diff * 0.28)
-    sing_w = max(12.0,  22.0 + diff * 0.06)
-    two_w  = 7.0
-    thr_w  = 0.5
-    four_w = max(0.3,   5.0  + diff * 0.10)
-    six_w  = max(0.05,  0.45 + diff * 0.022)
-    wkt_w  = max(0.85,  2.2  - diff * 0.060)
+    # Calibrated to REAL Test cricket: wickets are dear (innings last ~100 overs),
+    # run-rate ~3.2, so first innings average ~300-340, matches consume time and
+    # ~25-35% are drawn. Conditions still bite (collapses on bowler pitches).
+    # At diff=0, neutral 80v80: ~330 runs, wicket every ~62 balls (~105 ov all out).
+    dot_w  = max(40.0,  64.0 - diff * 0.26)
+    sing_w = max(13.0,  22.0 + diff * 0.055)
+    two_w  = 6.0
+    thr_w  = 0.4
+    four_w = max(0.3,   4.0  + diff * 0.095)
+    six_w  = max(0.05,  0.30 + diff * 0.018)
+    wkt_w  = max(0.62,  1.55 - diff * 0.045)
 
     wkt_w *= wkt_mult
 
     # ── Batting context (4th innings survival / attack) ────────────────────
     intent = _batting_intent(match)
-    if intent < 0.5:          # survival: slash boundaries, cling to wickets
-        four_w *= 0.40; six_w *= 0.25; wkt_w *= 0.45; dot_w *= 1.25
+    if intent < 0.5:          # survival: dig in for the draw — very hard to dislodge
+        four_w *= 0.35; six_w *= 0.20; wkt_w *= 0.30; dot_w *= 1.45
     elif intent > 1.3:        # attack
         four_w *= intent; six_w *= intent * 1.2; wkt_w *= (1.0 + (intent - 1.3) * 0.5)
 
@@ -1008,12 +1013,17 @@ def _should_declare(match: TestMatch) -> bool:
     inn      = match.current_innings
     bat_name = inn.batting_team["name"]
 
-    # No first-innings declarations
+    # First-innings declarations are rare, but real teams DO close a huge total
+    # rather than bat forever (e.g. 7/600 dec) — this also caps runaway innings.
     batted_before = sum(
         1 for i in match.innings_list[:-1]
         if i.batting_team["name"] == bat_name and i.is_complete
     )
     if batted_before == 0:
+        # Even a flat/dead road won't be batted forever — close a massive total.
+        inn_overs = inn.total_balls / 6
+        if inn.total_runs >= 550 and inn_overs >= 125:
+            return True
         return False
 
     # Lead from batting team's perspective
@@ -1034,7 +1044,7 @@ def _should_declare(match: TestMatch) -> bool:
     # Pitch-aware threshold: declare only when RRR ≥ 85% of expected pitch scoring rate.
     # On Flat (3.6 RPO) → threshold 3.06; on Turning (2.6) → 2.21; default 3.0 → 2.55.
     typical_rpo = _PITCH_SCORING_RATE.get(match.pitch, 3.0)
-    threshold   = typical_rpo * 0.85
+    threshold   = typical_rpo * 0.92   # slightly less eager to declare — fewer forced wins
     return (lead / overs_left) >= threshold
 
 

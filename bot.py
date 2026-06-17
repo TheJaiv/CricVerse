@@ -3323,16 +3323,7 @@ class FormatSelectView(discord.ui.View):
         else:
             await interaction.response.defer()
 
-            # Test format is restricted to admins and bot owner only
-            if val == "90":
-                is_owner = interaction.user.id == ADMIN_DISCORD_ID
-                is_admin_user = is_owner or str(interaction.user.id) in get_auth_admins()
-                if not is_admin_user:
-                    return await interaction.followup.send(
-                        "❌ **Test format** is currently restricted to **admins and bot owner** only.",
-                        ephemeral=True
-                    )
-
+            # Test format is now open to everyone 🎉
             allowed, reason = await asyncio.to_thread(consume_quota, str(interaction.user.id), str(interaction.guild.id) if interaction.guild else None, val, str(ADMIN_DISCORD_ID))
             if not allowed:
                 return await interaction.followup.send(reason, ephemeral=True)
@@ -4390,153 +4381,177 @@ def _render_test_innings_embed(match: TestMatchObj, inn_idx: int) -> discord.Emb
 
 
 def generate_test_scorecard_image(match: TestMatchObj) -> io.BytesIO:
-    """Crimson-Cricket-inspired 4-innings Test scorecard (1200 × 750)."""
-    _W, _H = 1200, 750
-    _HDR_H, _RES_H = 120, 38
-    _PANEL_W = 600
-    _PANEL_H = (_H - _HDR_H - _RES_H) // 2   # ≈ 296 px per row
+    """Broadcast-style FULL Test scorecard: every batter (dismissal/R/B/4s/6s/SR),
+    extras + total, fall of wickets and the full bowling card, per innings.
+    Dark theme with team-colour bars; height auto-sizes to innings played."""
+    W = 1080
+    M = 36                       # side margin
+    ROW = 30                     # data row height
+    HDR_H, RES_H = 104, 46
 
-    _GRAD_L = (10, 15, 50);  _GRAD_M = (15, 60, 110);  _GRAD_R = (20, 100, 145)
-    _C_EVEN = (248, 248, 248);  _C_ODD = (236, 236, 236);  _C_DIV = (200, 200, 200)
-    _C_WH   = "#FFFFFF";  _C_GY = "#888888";  _C_NM = "#111111";  _C_SC = "#00D4FF"
-    _C_GOLD = (255, 215, 0)
+    # Palette (modern broadcast / dark)
+    C_BG      = (17, 21, 32)
+    C_GRAD_L  = (11, 17, 44);  C_GRAD_R = (21, 92, 140)
+    C_RESBAR  = (13, 14, 19)
+    C_ROW_A   = (26, 31, 44);  C_ROW_B = (21, 26, 38)
+    C_HEADTXT = (255, 255, 255)
+    C_SUB     = (176, 184, 200)
+    C_COL     = (132, 142, 160)
+    C_NAME    = (236, 239, 246)
+    C_DISM    = (150, 158, 174)
+    C_NUM     = (224, 230, 240)
+    C_SCORE   = (0, 212, 255)
+    C_GOLD    = (255, 209, 64)
+    C_DIV     = (44, 51, 68)
+    C_EXTRA   = (200, 206, 218)
 
-    img = Image.new("RGB", (_W, _H), "#F5F5F5")
-    d   = ImageDraw.Draw(img)
-
-    def _lerp(a, b, t): return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
     def _hex(h):
-        h = h.lstrip('#')
-        return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
-    def _tw(text, font):
-        return font.getbbox(text)[2] if hasattr(font, 'getbbox') else len(text) * 10
-    def _th(font):
-        bb = font.getbbox("Ag") if hasattr(font, 'getbbox') else None
-        return (bb[3] - bb[1]) if bb else 14
+        try:
+            h = h.lstrip('#'); return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+        except Exception:
+            return (29, 78, 216)
+    def _lerp(a, b, t): return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
 
     try:
         _fbd = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
         _frg = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-        fHUGE = ImageFont.truetype(_fbd, 38);  fRES = ImageFont.truetype(_fbd, 17)
-        fSUB  = ImageFont.truetype(_frg, 14);  fTEAM = ImageFont.truetype(_fbd, 18)
-        fSC   = ImageFont.truetype(_fbd, 24);  fOVR = ImageFont.truetype(_frg, 12)
-        fCOL  = ImageFont.truetype(_fbd, 12);  fNM  = ImageFont.truetype(_fbd, 14)
-        fRUN  = ImageFont.truetype(_fbd, 16);  fSM  = ImageFont.truetype(_frg, 12)
+        f_huge = ImageFont.truetype(_fbd, 40); f_sub = ImageFont.truetype(_frg, 16)
+        f_res  = ImageFont.truetype(_fbd, 20); f_potm = ImageFont.truetype(_fbd, 15)
+        f_team = ImageFont.truetype(_fbd, 21); f_sc = ImageFont.truetype(_fbd, 24)
+        f_meta = ImageFont.truetype(_frg, 14); f_col = ImageFont.truetype(_fbd, 13)
+        f_nm   = ImageFont.truetype(_fbd, 16); f_dm = ImageFont.truetype(_frg, 14)
+        f_num  = ImageFont.truetype(_fbd, 16); f_sm = ImageFont.truetype(_frg, 13)
     except Exception:
-        fHUGE = fRES = fSUB = fTEAM = fSC = fOVR = fCOL = fNM = fRUN = fSM = ImageFont.load_default()
+        f_huge = f_sub = f_res = f_potm = f_team = f_sc = f_meta = f_col = f_nm = f_dm = f_num = f_sm = ImageFont.load_default()
 
-    # Gradient header
-    for x in range(_W):
-        t   = x / (_W - 1)
-        col = _lerp(_GRAD_L, _GRAD_M, t * 2) if t < 0.5 else _lerp(_GRAD_M, _GRAD_R, (t - 0.5) * 2)
-        d.line([(x, 0), (x, _HDR_H)], fill=col)
-    d.text((40, 18), "TEST MATCH", fill=_C_WH, font=fHUGE)
-    sub = f"{match.team1['name']}  vs  {match.team2['name']}  ·  {match.pitch} / {match.weather}"
-    d.text((44, 18 + _th(fHUGE) + 6), sub[:72], fill="#BBBBBB", font=fSUB)
+    measure = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    def tw(t, f):
+        try: return measure.textlength(t, font=f)
+        except Exception: return len(t) * 8
 
-    # Match number — top-right of header, small/unobtrusive
-    _ctr = _format_match_no_label("test")
-    _ctr_w = _tw(_ctr, fSM)
-    d.text((_W - 12 - _ctr_w, _HDR_H - _th(fSM) - 8), _ctr, fill="#AAAAAA", font=fSM)
+    # Which batters/bowlers appear per innings
+    def _bat_rows(inn):
+        return [p for p in inn.batting_team["players"]
+                if inn.batting_stats[p["name"]].balls_faced > 0
+                or inn.batting_stats[p["name"]].dismissal != "not out"]
+    def _bowl_rows(inn):
+        return [p for p in inn.bowling_team["players"]
+                if inn.bowling_stats[p["name"]].balls_bowled > 0]
 
-    # Result bar
-    d.rectangle([(0, _HDR_H), (_W, _HDR_H + _RES_H)], fill=(22, 22, 22))
-    res_str = (match.result or "IN PROGRESS").upper()
-    rx = 600 - _tw(res_str, fRES) // 2
-    d.text((rx, _HDR_H + (_RES_H - _th(fRES)) // 2), res_str, fill="#FFD700", font=fRES)
-    _potm = _test_player_of_match(match)
-    if _potm:
-        _potm_str = f"★ POTM: {_potm.upper()}"
-        _py = _HDR_H + (_RES_H - _th(fSUB)) // 2
-        d.text((_W - 12 - _tw(_potm_str, fSUB), _py), _potm_str, fill=_C_GOLD, font=fSUB)
+    played = match.innings_list
 
-    # 4 innings panels  (positions: top-left, top-right, bot-left, bot-right)
-    panel_top = _HDR_H + _RES_H
-    for inn_idx in range(4):
-        col  = inn_idx % 2
-        row  = inn_idx // 2
-        x0   = col * _PANEL_W
-        y0   = panel_top + row * _PANEL_H
-        x1, y1 = x0 + _PANEL_W, y0 + _PANEL_H
-        bg   = _C_EVEN if inn_idx % 2 == 0 else _C_ODD
-        d.rectangle([(x0, y0), (x1, y1)], fill=bg)
-        d.rectangle([(x0, y0), (x1, y1)], outline=_C_DIV, width=1)
+    # ── First pass: compute total height ──
+    INN_HEAD, GAP = 46, 16
+    y = HDR_H + RES_H + 8
+    for inn in played:
+        nb, nbo = len(_bat_rows(inn)), len(_bowl_rows(inn))
+        y += INN_HEAD + 6
+        y += 24 + nb * ROW            # batting col header + rows
+        y += ROW + 6                  # extras+total line
+        y += 22                       # FoW line
+        y += 10 + 24 + nbo * ROW      # bowling header + rows
+        y += GAP
+    H = max(560, y + 18)
 
-        _BAR = 48
-        if inn_idx < len(match.innings_list):
-            inn  = match.innings_list[inn_idx]
-            tc   = _hex(inn.batting_team.get("color", "#1D4ED8"))
-            d.rectangle([(x0, y0), (x1, y0 + _BAR)], fill=tc)
+    img = Image.new("RGB", (W, H), C_BG)
+    d = ImageDraw.Draw(img)
 
-            lbl  = f"INNINGS {inn_idx + 1}"
-            if getattr(inn, "declared", False):
-                lbl += "  (DEC)"
-            elif inn_idx == 2 and match.follow_on_enforced:
-                lbl += "  (FOLLOW-ON)"
-            d.text((x0 + 10, y0 + 5),  lbl, fill="#DDDDDD", font=fOVR)
-            tnm  = inn.batting_team["name"][:20].upper()
-            d.text((x0 + 10, y0 + 18), tnm, fill=_C_WH,     font=fTEAM)
+    def rt(x, yy, t, f, fill):     # right-align ending at x
+        d.text((x - tw(t, f), yy), t, font=f, fill=fill)
 
-            dec_tag = "d" if getattr(inn, "declared", False) else ""
-            sc   = f"{inn.total_runs}/{inn.wickets}{dec_tag}"
-            d.text((x1 - _tw(sc, fSC) - 10, y0 + (_BAR - _th(fSC)) // 2), sc, fill=_C_SC, font=fSC)
-            ovr  = f"{inn.overs_str} ov  RR:{inn.run_rate}"
-            d.text((x1 - _tw(ovr, fOVR) - 10, y0 + _BAR - _th(fOVR) - 3), ovr, fill="#CCCCCC", font=fOVR)
+    # ── Header gradient ──
+    for x in range(W):
+        d.line([(x, 0), (x, HDR_H)], fill=_lerp(C_GRAD_L, C_GRAD_R, x / (W - 1)))
+    d.text((M, 20), "TEST MATCH", font=f_huge, fill=C_HEADTXT)
+    d.text((M + 2, 70), f"{match.team1['name']}  vs  {match.team2['name']}", font=f_sub, fill=C_SUB)
+    meta = f"{match.pitch} · {match.weather} · {_format_match_no_label('test')}"
+    rt(W - M, 24, meta, f_meta, (200, 210, 224))
 
-            # Stats columns
-            _NX, _RX, _BX = x0 + 10, x0 + 400, x0 + 460
-            sy = y0 + _BAR + 6
+    # ── Result bar ──
+    d.rectangle([(0, HDR_H), (W, HDR_H + RES_H)], fill=C_RESBAR)
+    res = (match.result or "IN PROGRESS").upper()
+    d.text((M, HDR_H + (RES_H - 20) // 2), res, font=f_res, fill=C_GOLD)
+    potm = _test_player_of_match(match)
+    if potm:
+        rt(W - M, HDR_H + (RES_H - 15) // 2, f"★ POTM  {potm.upper()}", f_potm, C_GOLD)
 
-            # Batting
-            d.text((_NX, sy), "BATTER", fill=_C_GY, font=fCOL)
-            d.text((_RX, sy), "R",      fill=_C_GY, font=fCOL)
-            d.text((_BX, sy), "B",      fill=_C_GY, font=fCOL)
-            sy += _th(fCOL) + 3;  d.line([(x0, sy), (x1, sy)], fill=_C_DIV, width=1);  sy += 4
+    # column anchors
+    BAT_DISM = 300
+    BAT_R, BAT_B, BAT_4, BAT_6, BAT_SR = 690, 760, 826, 892, W - M
+    BOW_O, BOW_M, BOW_R, BOW_W, BOW_E = 560, 648, 740, 832, W - M
 
-            bats = sorted(
-                [(p, inn.batting_stats[p["name"]]) for p in inn.batting_team["players"]
-                 if inn.batting_stats[p["name"]].balls_faced > 0],
-                key=lambda x: x[1].runs_scored, reverse=True
-            )[:2]
-            for p, st in bats:
-                nm = p["name"][:22].upper()
-                rs = f"{st.runs_scored}{'*' if st.dismissal == 'not out' else ''}"
-                d.text((_NX, sy), nm, fill=_C_NM, font=fNM)
-                d.text((_RX, sy), rs, fill=_C_NM, font=fRUN)
-                d.text((_BX, sy), str(st.balls_faced), fill="#555555", font=fSM)
-                sy += _th(fNM) + 5
+    y = HDR_H + RES_H + 8
+    for idx, inn in enumerate(played):
+        tc = _hex(inn.batting_team.get("color", "#1D4ED8"))
+        # innings header bar
+        d.rectangle([(0, y), (W, y + INN_HEAD)], fill=tc)
+        d.rectangle([(0, y), (6, y + INN_HEAD)], fill=C_GOLD)
+        lbl = ["1ST", "2ND", "3RD", "4TH"][idx] + " INNINGS"
+        d.text((M, y + 6), lbl, font=f_sm, fill=(255, 255, 255))
+        d.text((M, y + 21), inn.batting_team["name"].upper()[:26], font=f_team, fill=C_HEADTXT)
+        dec = " dec" if getattr(inn, "declared", False) else ""
+        sc = f"{inn.total_runs}/{inn.wickets}{dec}"
+        rt(W - M, y + 8, sc, f_sc, C_HEADTXT)
+        rt(W - M, y + 26, f"{inn.overs_str} ov · RR {inn.run_rate}", f_sm, (235, 240, 248))
+        y += INN_HEAD + 6
 
-            sy += 4;  d.line([(x0 + 10, sy), (x1 - 10, sy)], fill=_C_DIV, width=1);  sy += 6
+        # batting column header
+        d.text((M, y), "BATTER", font=f_col, fill=C_COL)
+        for x, t in ((BAT_R, "R"), (BAT_B, "B"), (BAT_4, "4s"), (BAT_6, "6s"), (BAT_SR, "SR")):
+            rt(x, y, t, f_col, C_COL)
+        y += 22
+        d.line([(M, y - 4), (W - M, y - 4)], fill=C_DIV, width=1)
 
-            # Bowling
-            _WX = x0 + 400;  _OX = x0 + 470
-            d.text((_NX, sy), "BOWLER", fill=_C_GY, font=fCOL)
-            d.text((_WX, sy), "W-R",    fill=_C_GY, font=fCOL)
-            d.text((_OX, sy), "O",      fill=_C_GY, font=fCOL)
-            sy += _th(fCOL) + 3;  d.line([(x0, sy), (x1, sy)], fill=_C_DIV, width=1);  sy += 4
+        for i, p in enumerate(_bat_rows(inn)):
+            st = inn.batting_stats[p["name"]]
+            d.rectangle([(0, y), (W, y + ROW)], fill=C_ROW_A if i % 2 == 0 else C_ROW_B)
+            no = "*" if st.dismissal == "not out" else ""
+            sr = round(st.runs_scored / st.balls_faced * 100, 1) if st.balls_faced else 0.0
+            d.text((M, y + 6), p["name"][:20], font=f_nm, fill=C_NAME)
+            d.text((BAT_DISM, y + 7), (st.dismissal or "")[:34], font=f_dm, fill=C_DISM)
+            rt(BAT_R, y + 6, f"{st.runs_scored}{no}", f_num, C_SCORE if st.runs_scored >= 50 else C_NUM)
+            rt(BAT_B, y + 6, str(st.balls_faced), f_num, C_NUM)
+            rt(BAT_4, y + 6, str(st.fours), f_sm, C_SUB)
+            rt(BAT_6, y + 6, str(st.sixes), f_sm, C_SUB)
+            rt(BAT_SR, y + 6, f"{sr:.1f}", f_sm, C_SUB)
+            y += ROW
 
-            bowls = sorted(
-                [(p, inn.bowling_stats[p["name"]]) for p in inn.bowling_team["players"]
-                 if inn.bowling_stats[p["name"]].balls_bowled > 0],
-                key=lambda x: (x[1].wickets_taken, -x[1].runs_conceded), reverse=True
-            )[:2]
-            for p, st in bowls:
-                nm  = p["name"][:22].upper()
-                wr  = f"{st.wickets_taken}-{st.runs_conceded}"
-                d.text((_NX, sy), nm, fill=_C_NM, font=fNM)
-                d.text((_WX, sy), wr, fill=_C_NM, font=fRUN)
-                d.text((_OX, sy), st.overs_str, fill="#555555", font=fSM)
-                sy += _th(fNM) + 5
-        else:
-            # Panel not yet played
-            d.rectangle([(x0, y0), (x1, y0 + _BAR)], fill=(70, 70, 70))
-            d.text((x0 + 10, y0 + 5),  f"INNINGS {inn_idx + 1}", fill="#CCCCCC", font=fOVR)
-            ytb = "YET TO BAT"
-            d.text((x0 + (_PANEL_W - _tw(ytb, fTEAM)) // 2, y0 + _BAR + 30), ytb, fill="#AAAAAA", font=fTEAM)
+        # extras + total (one line)
+        d.line([(M, y + 2), (W - M, y + 2)], fill=C_DIV, width=1)
+        y += 8
+        d.text((M, y), "Extras", font=f_dm, fill=C_EXTRA)
+        d.text((M + 92, y), str(inn.extras), font=f_num, fill=C_EXTRA)
+        d.text((620, y), "TOTAL", font=f_num, fill=C_HEADTXT)
+        tot = f"{inn.total_runs}/{inn.wickets}{dec}  ({inn.overs_str} ov)"
+        rt(W - M, y, tot, f_num, C_GOLD)
+        y += ROW
 
-    # Grid lines
-    d.line([(_PANEL_W, panel_top), (_PANEL_W, _H)], fill=_C_DIV, width=2)
-    d.line([(0, panel_top + _PANEL_H), (_W, panel_top + _PANEL_H)], fill=_C_DIV, width=2)
+        # FoW
+        if inn.fow:
+            fow_txt = "FoW: " + "  ".join(inn.fow)
+            while tw(fow_txt, f_sm) > (W - 2 * M) and len(fow_txt) > 10:
+                fow_txt = fow_txt[:-4].rstrip() + "…"
+            d.text((M, y), fow_txt, font=f_sm, fill=(126, 134, 150))
+        y += 22
+
+        # bowling header
+        y += 10
+        d.text((M, y), "BOWLING", font=f_col, fill=C_COL)
+        for x, t in ((BOW_O, "O"), (BOW_M, "M"), (BOW_R, "R"), (BOW_W, "W"), (BOW_E, "ECON")):
+            rt(x, y, t, f_col, C_COL)
+        y += 22
+        d.line([(M, y - 4), (W - M, y - 4)], fill=C_DIV, width=1)
+        for i, p in enumerate(_bowl_rows(inn)):
+            st = inn.bowling_stats[p["name"]]
+            d.rectangle([(0, y), (W, y + ROW)], fill=C_ROW_A if i % 2 == 0 else C_ROW_B)
+            d.text((M, y + 6), p["name"][:24], font=f_nm, fill=C_NAME)
+            rt(BOW_O, y + 6, st.overs_str, f_num, C_NUM)
+            rt(BOW_M, y + 6, str(st.maidens), f_sm, C_SUB)
+            rt(BOW_R, y + 6, str(st.runs_conceded), f_num, C_NUM)
+            rt(BOW_W, y + 6, str(st.wickets_taken), f_num, C_SCORE if st.wickets_taken >= 3 else C_NUM)
+            rt(BOW_E, y + 6, f"{st.economy:.2f}", f_sm, C_SUB)
+            y += ROW
+        y += INN_HEAD - 30
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
