@@ -8146,10 +8146,24 @@ class PrefixCog(commands.Cog):
 # ==========================================
 
 if __name__ == "__main__":
+    import time as _time
+
     keep_alive()
 
     TOKEN = os.environ.get("DISCORD_TOKEN")
     if not TOKEN:
         print("🚨 CRITICAL ERROR: DISCORD_TOKEN environment variable is missing from Render!")
     else:
-        bot.run(TOKEN)
+        try:
+            bot.run(TOKEN)
+        except discord.HTTPException as e:
+            # 429 at login == Cloudflare error 1015 (host IP temporarily rate-limited).
+            # If we exit now, the supervisor (Render) restarts instantly and logs in again,
+            # which KEEPS the ban alive. Instead stay alive and back off ~12 min — the keep_alive
+            # web server keeps the process healthy so Render won't cycle it — letting the ban clear.
+            if getattr(e, "status", None) == 429:
+                print("⚠️ 429 / Cloudflare 1015 at login: host IP is temporarily rate-limited by Discord.")
+                print("   Backing off ~12 min before exit to avoid a restart storm that sustains the ban.")
+                print("   If this repeats, STOP the service and leave it down for ~1 hour.")
+                _time.sleep(720)
+            raise
