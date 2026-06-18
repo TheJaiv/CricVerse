@@ -93,10 +93,14 @@ def _can_use_career(ctx):
     return False
 
 def _is_premium(ctx):
-    """Weekly/monthly perks: Nitro boosters, paid sub tiers, or owner (testing)."""
+    """Weekly/monthly perks: bot-granted premium pass, Nitro boosters, paid sub tiers, or owner."""
     try:
         if ctx.author.id == ADMIN_DISCORD_ID:
             return True
+        if _CAREER_OK:
+            _c = CM.get_career(ctx.author.id)
+            if _c and CM.career_is_premium(_c):
+                return True
         if getattr(ctx.author, "premium_since", None):
             return True
         u_tier, _, _, _, _ = get_tier_status(str(ctx.author.id), str(ctx.guild.id) if ctx.guild else "")
@@ -183,6 +187,80 @@ def _lobby_embed(lobby, title):
     else:
         e.set_footer(text="Waiting for an even number of players. Join with `cv joinmatch`.")
     return e
+
+
+# ── Career leaderboard ────────────────────────────────────────────────────────
+_LB_CATS = {
+    "ovr":   ("🏆 OVR",        lambda c: (c.get("ovr", 60), c.get("coins", 0))),
+    "coins": ("🪙 Coins",      lambda c: c.get("coins", 0)),
+    "wins":  ("✅ Club Wins",  lambda c: c.get("club", {}).get("won", 0)),
+}
+
+def _build_lb_embed(guild, category, scope, requester_id):
+    if not _CAREER_OK:
+        return discord.Embed(title="Leaderboard unavailable", color=discord.Color.red())
+    careers = [c for c in CM.all_careers() if c.get("debut_done")]
+    if scope == "server" and guild:
+        careers = [c for c in careers if guild.get_member(int(c["_id"])) is not None]
+    label, key = _LB_CATS.get(category, _LB_CATS["ovr"])
+    ranked = sorted(careers, key=key, reverse=True)
+
+    e = discord.Embed(title=f"🏏 Career Leaderboard · {label}", color=discord.Color.gold())
+    head = f"Scope: **{'This server' if scope == 'server' else 'Global'}**  ·  {len(ranked)} player(s)"
+    if not ranked:
+        e.description = head + "\n\n*No ranked players yet — `cv start_career` and make your debut!*"
+        return e
+
+    medals = ["🥇", "🥈", "🥉"]
+    rows = []
+    for i, c in enumerate(ranked[:15]):
+        rk = medals[i] if i < 3 else f"`#{i+1:<2}`"
+        nm = c.get("username", "?")[:16]
+        if category == "coins":
+            val = f"{c.get('coins', 0):,} 🪙"
+        elif category == "wins":
+            val = f"{c.get('club', {}).get('won', 0)} W"
+        else:
+            val = f"OVR {c.get('ovr', 60)} · {c.get('tier', 'Bronze')}"
+        mine = " ⬅️ **you**" if c["_id"] == str(requester_id) else ""
+        rows.append(f"{rk} **{nm}** — {val}{mine}")
+    e.description = head + "\n\n" + "\n".join(rows)
+
+    own = next((i for i, c in enumerate(ranked) if c["_id"] == str(requester_id)), None)
+    if own is not None and own >= 15:
+        e.set_footer(text=f"Your rank: #{own + 1} of {len(ranked)}")
+    return e
+
+
+class LeaderboardView(discord.ui.View):
+    def __init__(self, guild, requester_id, category="ovr", scope="global"):
+        super().__init__(timeout=180)
+        self.guild = guild
+        self.requester = requester_id
+        self.category = category
+        self.scope = scope
+
+    async def _refresh(self, interaction):
+        await interaction.response.edit_message(
+            embed=_build_lb_embed(self.guild, self.category, self.scope, self.requester), view=self)
+
+    @discord.ui.button(label="OVR", style=discord.ButtonStyle.primary, emoji="🏆")
+    async def by_ovr(self, interaction, button):
+        self.category = "ovr"; await self._refresh(interaction)
+
+    @discord.ui.button(label="Coins", style=discord.ButtonStyle.secondary, emoji="🪙")
+    async def by_coins(self, interaction, button):
+        self.category = "coins"; await self._refresh(interaction)
+
+    @discord.ui.button(label="Wins", style=discord.ButtonStyle.secondary, emoji="✅")
+    async def by_wins(self, interaction, button):
+        self.category = "wins"; await self._refresh(interaction)
+
+    @discord.ui.button(label="Server / Global", style=discord.ButtonStyle.success, emoji="🌍")
+    async def toggle_scope(self, interaction, button):
+        self.scope = "global" if self.scope == "server" else "server"
+        await self._refresh(interaction)
+
 
 # ── Match counters (backed by MongoDB via subscription_manager) ───────────────
 
@@ -727,7 +805,7 @@ def render_embed_scoreboard(match: CricketMatch) -> discord.Embed:
         desc += f"### {t2_name}  {match.innings1.total_runs}/{match.innings1.wickets}  ({t1_overs}/{match.format_overs}.0)\n"
 
     # Ball-by-ball commentary (career matches only)
-    if getattr(match, "is_club", False) or getattr(match, "is_debut", False):
+    if getattr(match, "is_club", False) or getattr(match, "is_debut", False) or getattr(match, "is_scenario", False):
         comm = getattr(match, "last_commentary", "") or ""
         if comm and "initial" not in comm.lower():
             desc += f"\n🎙️ {comm}\n"
@@ -2078,6 +2156,9 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
     if getattr(match, "is_debut", False):   # Career debut: never start innings 2 — score the trial.
         await handle_debut_end(interaction_context, match)
         return
+    if getattr(match, "is_scenario", False):   # Solo scenario: single innings, then settle.
+        await handle_scenario_end(interaction_context, match)
+        return
     channel = interaction_context if isinstance(interaction_context, discord.TextChannel) else interaction_context.channel
 
     if match.current_innings_num == 1:
@@ -2229,6 +2310,11 @@ async def prompt_next_batter(interaction, match: CricketMatch):
         bs = innings.batting_stats.get(match.debut_player_name)
         if bs and bs.dismissal != "not out":
             await handle_debut_end(interaction, match)
+            return
+    if getattr(match, "is_scenario", False):   # Scenario: ends the moment YOU are out.
+        bs = innings.batting_stats.get(match.scenario_player_name)
+        if bs and bs.dismissal != "not out":
+            await handle_scenario_end(interaction, match)
             return
     is_club = getattr(match, "is_club", False)
     if is_club:
@@ -2405,8 +2491,8 @@ async def prompt_bowler_then_hub(interaction, match: CricketMatch):
         innings.over_log.clear()
         innings.bouncers_in_over = 0; innings.cutters_in_over = 0
         innings.mystery_bowled_this_over = False
-        # Career debut (and club matches): no Sim hub — go straight to interactive play.
-        if getattr(match, "is_debut", False) or getattr(match, "is_club", False):
+        # Career debut / scenario / club: no Sim hub — go straight to interactive play.
+        if getattr(match, "is_debut", False) or getattr(match, "is_club", False) or getattr(match, "is_scenario", False):
             await run_interactive_delivery_sequence(interaction, match)
         else:
             await prompt_over_pacing_hub(interaction, match)
@@ -2911,10 +2997,11 @@ async def run_interactive_delivery_sequence(interaction, match: CricketMatch):
     innings = match.current_innings
     
     max_w = _match_max_wickets(match)
-    if innings.wickets >= max_w or innings.total_balls >= match.max_balls or (match.current_innings_num == 2 and innings.total_runs >= getattr(match, "target", match.innings1.total_runs + 1)):
+    _scenario_done = getattr(match, "is_scenario", False) and innings.total_runs >= getattr(match, "scenario_target", 10**9)
+    if innings.wickets >= max_w or innings.total_balls >= match.max_balls or _scenario_done or (match.current_innings_num == 2 and innings.total_runs >= getattr(match, "target", match.innings1.total_runs + 1)):
         await handle_innings_end(interaction, match)
         return
-        
+
     if getattr(match, "over_completed", False):
         match.over_completed = False
         await prompt_bowler_then_hub(interaction, match)
@@ -3138,6 +3225,124 @@ async def handle_debut_end(interaction_context, match: CricketMatch):
 
 
 # ==========================================
+# 🎯 CAREER MODE — INTERACTIVE SCENARIO (solo, difficult, small reward + quests)
+# ==========================================
+_SCENARIO_DEFS = [("Quickfire", 2), ("Run Chase", 3), ("Pressure Cooker", 4)]
+
+
+def _build_scenario_teams(career, pname):
+    eng = CM.career_to_engine(career)
+    lvl = eng["bat"]
+    you = _academy_player(pname, eng["bat"], eng["bowl"], eng["role"], eng["archetype"])
+    partners = [_academy_player(f"Partner {i+1}", max(44, lvl - 12 - i * 2), 44, "Batter", "Standard")
+                for i in range(5)]
+    bat_team = {"name": f"{pname}'s XI", "players": [you] + partners, "subs": [], "color": "#3BA55D"}
+    # A deliberately TOUGH attack — bowlers rated above the player.
+    def bw(name, role):
+        return _academy_player(name, 24, min(95, lvl + random.randint(8, 16)), role, "Standard")
+    attack = [bw("Pace Ace", "Bowler_Pace"), bw("New-Ball Quick", "Bowler_Pace"),
+              bw("Off-Spinner", "Bowler_Spin_Off"), bw("Leg-Spinner", "Bowler_Spin_Leg"),
+              bw("Seamer", "All-Rounder_Pace"), _academy_player("Keeper", 44, 18, "Batter_WK", "Standard")]
+    while len(attack) < 11:
+        attack.append(_academy_player(f"Fielder {len(attack)}", 40, 22, "Batter", "Standard"))
+    bowl_team = {"name": "Challenge XI", "players": attack, "subs": [], "color": "#ED4245"}
+    return bat_team, bowl_team
+
+
+async def start_scenario_match(channel, author, career):
+    if channel.id in active_games or channel.id in active_setups:
+        return await channel.send("❌ A match or setup is already running here. Finish it (or `cv endmatch`) first.")
+    pname = career.get("username", author.display_name)
+    bat_team, bowl_team = _build_scenario_teams(career, pname)
+    lvl = bat_team["players"][0]["bat"]
+    title, overs = random.choice(_SCENARIO_DEFS)
+    target = max(overs * 8, round(overs * (9 + max(0, lvl - 60) / 15.0)))   # stiff chase, scales with level
+    pitch = random.choice(["Flat", "Hard", "Green", "Dry", "Bouncy"])
+    match = CricketMatch(pname, "Challenge XI", author.id, None, bat_team, bowl_team,
+                         format_overs=overs, pitch=pitch, weather="Clear")
+    match.is_scenario = True
+    match.scenario_user_id = author.id
+    match.scenario_player_name = pname
+    match.scenario_target = target
+    match.scenario_title = title
+    match.batting_first_id = author.id
+    match.bowling_first_id = None
+    match.innings1 = InningsState(bat_team, bowl_team)
+    match.current_innings = match.innings1
+    match.current_innings_num = 1
+    active_games[channel.id] = match
+    await channel.send(
+        f"🎯 **SCENARIO — {title}**  ({overs} overs)\n"
+        f"🎯 Chase **{target}** vs a tough **Challenge XI**  ·  🏟️ {pitch}\n"
+        f"One innings — it ends when you're out, the overs run out, or you reach the target. Good luck!"
+    )
+    await prompt_bowler_then_hub(channel, match)
+
+
+async def handle_scenario_end(interaction_context, match: CricketMatch):
+    channel = interaction_context.channel if hasattr(interaction_context, "channel") else interaction_context
+    active_games.pop(getattr(channel, "id", None), None)
+    innings = match.current_innings
+    bs = innings.batting_stats.get(match.scenario_player_name)
+    runs = bs.runs_scored if bs else 0
+    balls = bs.balls_faced if bs else 0
+    fours = bs.fours if bs else 0
+    sixes = bs.sixes if bs else 0
+    team = innings.total_runs
+    target = match.scenario_target
+    passed = team >= target
+    career = CM.get_career(match.scenario_user_id)
+    if not career:
+        return await channel.send("⚠️ Couldn't find your career to finalize the scenario.")
+    coins, capped, remaining = CM.scenario_complete(career, runs, fours, sixes, passed)
+    ov = f"{innings.total_balls // 6}.{innings.total_balls % 6}"
+    line = (f"**Team {team}/{innings.wickets}** in {ov} ov (target {target}).\n"
+            f"Your knock: **{runs}** ({balls}b · {fours}×4 · {sixes}×6).")
+    reward = (f"🪙 **+{coins}** coins  ·  {remaining} paid scenarios left today"
+              if coins else "🪙 Daily scenario coin cap reached — still counts toward quests!")
+    e = discord.Embed(
+        title=f"✅ SCENARIO CLEARED — {match.scenario_title}!" if passed else f"❌ {match.scenario_title} — target missed",
+        description=f"{line}\n{reward}",
+        color=discord.Color.green() if passed else discord.Color.orange())
+    e.set_footer(text="📜 Quest progress updated (claim with cv quests). Scenario stats are tracked separately from cv stats.")
+    await channel.send(embed=e)
+
+
+class ScenarioConfirmView(discord.ui.View):
+    """Confirm the entry fee before launching an interactive scenario."""
+    def __init__(self, user_id):
+        super().__init__(timeout=60)
+        self.uid = user_id
+        self.children[0].label = f"Play  (−{CM.SCENARIO_ENTRY_FEE} 🪙)"
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.uid:
+            await interaction.response.send_message("This isn't your scenario.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Play", style=discord.ButtonStyle.success, emoji="🎯")
+    async def play(self, interaction: discord.Interaction, button: discord.ui.Button):
+        career = CM.get_career(self.uid)
+        if not career:
+            return await interaction.response.edit_message(content="❌ No career found.", view=None)
+        if interaction.channel.id in active_games or interaction.channel.id in active_setups:
+            return await interaction.response.edit_message(content="❌ A match is already running in this channel.", view=None)
+        fee = CM.SCENARIO_ENTRY_FEE
+        if career["coins"] < fee:
+            return await interaction.response.edit_message(
+                content=f"❌ Not enough coins — entry fee is **{fee}** 🪙 (you have {career['coins']:,}).", view=None)
+        career["coins"] -= fee
+        CM.async_save_career(career)
+        await interaction.response.edit_message(content=f"🎟️ Entry fee paid (−{fee} 🪙). Starting your scenario…", view=None)
+        await start_scenario_match(interaction.channel, interaction.user, career)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="🚫 Scenario cancelled — no fee charged.", view=None)
+
+
+# ==========================================
 # ⚔️ CAREER MODE — CLUB MATCH (Phase 4.2): interactive, captain-controlled PvP
 # ==========================================
 # Both XIs are built from the joiners' careers. The top-OVR player on each side is
@@ -3225,6 +3430,10 @@ async def _club_match_payout(channel, match):
                 bw["balls"] += b_balls; bw["runs"] += b_runs; bw["wickets"] += wkts
                 if wkts > bw.get("best_w", 0) or (wkts == bw.get("best_w", 0) and b_runs < bw.get("best_r", 999)):
                     bw["best_w"] = wkts; bw["best_r"] = b_runs
+                club = career.setdefault("club", {"played": 0, "won": 0})
+                club["played"] += 1
+                if won:
+                    club["won"] += 1
             except Exception:
                 pass
             # Daily-quest progress (claimed later via `cv quests`)
@@ -6761,7 +6970,8 @@ class PrefixCog(commands.Cog):
             "`cv stats [@user]` — lifetime batting / bowling / fielding stats"), inline=False)
         e.add_field(name="🎯 Play & Quests", value=(
             "`cv scenario` — solo practice for small coins (great early-game)\n"
-            "`cv quests` — your **3 daily quests** (claim rewards here)"), inline=False)
+            "`cv quests` — your **3 daily quests** (claim rewards here)\n"
+            "`cv leaderboard` — top players by OVR / coins / club wins"), inline=False)
         e.add_field(name="🏅 Tiers & Roles", value=(
             "Bronze 60–68 · Silver 69–76 · Gold 77–84 · Platinum 85–92 · Diamond 93–99\n"
             "Climbing a tier auto-grants the matching **CricVerse <Tier>** Discord role. "
@@ -6799,6 +7009,14 @@ class PrefixCog(commands.Cog):
             who = "You don't" if target.id == ctx.author.id else f"{target.display_name} doesn't"
             return await ctx.send(f"❌ {who} have a career yet. Use `cv start_career` to begin.")
         await ctx.send(file=discord.File(career_ui.render_career_card(career), "career_card.png"))
+
+    @commands.command(name="leaderboard", aliases=["lb", "top", "rankings"], help="Career rankings — OVR / coins / club wins.\nUsage: leaderboard")
+    async def leaderboard(self, ctx):
+        if not _can_use_career(ctx):
+            return await ctx.send(_CAREER_SOON)
+        scope = "server" if ctx.guild else "global"
+        view = LeaderboardView(ctx.guild, ctx.author.id, "ovr", scope)
+        await ctx.send(embed=_build_lb_embed(ctx.guild, "ovr", scope, ctx.author.id), view=view)
 
     @commands.command(name="stats", aliases=["careerstats", "cstats"], help="View lifetime career statistics.\nUsage: stats [@user]")
     async def stats(self, ctx, member: discord.Member = None):
@@ -6936,21 +7154,25 @@ class PrefixCog(commands.Cog):
             return await ctx.send("❌ Start a career first: `cv start_career`.")
         if not career.get("debut_done"):
             return await ctx.send("❌ Make your debut first: `cv debut`.")
-        r = CM.play_scenario(career)
-        bd = []
-        if r["fours"]: bd.append(f"{r['fours']}×4")
-        if r["sixes"]: bd.append(f"{r['sixes']}×6")
-        line = f"You scored **{r['runs']}**" + (f" ({', '.join(bd)})" if bd else "") + f" — target {r['target']}."
-        if r["coins"]:
-            reward = f"🪙 **+{r['coins']}** coins  ·  {r['remaining']} paid scenarios left today"
-        else:
-            reward = "🪙 Daily scenario coin cap hit — still counts for quests!"
+        if ctx.channel.id in active_games or ctx.channel.id in active_setups:
+            return await ctx.send("❌ A match or setup is already running in this channel.")
+        fee = CM.SCENARIO_ENTRY_FEE
+        if career["coins"] < fee:
+            return await ctx.send(f"❌ You need **{fee}** 🪙 to enter a scenario (you have {career['coins']:,}). Earn coins via `cv daily` and quests.")
+        done = CM.scenarios_done_today(career)
+        capped = done >= CM.SCENARIO_DAILY_CAP
+        cap_line = ("⚠️ Daily coin cap reached — this one pays **0 coins**, but still counts for quests.\n"
+                    if capped else f"📊 **{CM.SCENARIO_DAILY_CAP - done}** paid scenarios left today\n")
         e = discord.Embed(
-            title=f"🎯 Scenario — {r['title']} ({r['overs']} ov)  {'✅ Cleared!' if r['passed'] else ''}",
-            description=f"{line}\n{reward}",
-            color=discord.Color.green() if r["passed"] else discord.Color.orange())
-        e.set_footer(text="📜 Quest progress updated — claim with `cv quests`.")
-        await ctx.send(embed=e)
+            title="🎯 Play a Scenario?",
+            description=(f"A **difficult** solo batting challenge — chase a target vs a strong AI attack, "
+                         f"ball-by-ball. Beat it to **profit**.\n\n"
+                         f"🎟️ **Entry fee:** {fee} 🪙   (you have {career['coins']:,})\n"
+                         f"🪙 **Reward:** small, scaled to your runs (+bonus if you clear it)\n"
+                         f"{cap_line}"
+                         f"📜 Feeds your daily quests. *(Scenario stats stay separate from `cv stats`.)*"),
+            color=discord.Color.blurple())
+        await ctx.send(embed=e, view=ScenarioConfirmView(ctx.author.id))
 
     @commands.command(name="weekly", help="[Premium/Booster] Weekly coins + 5% boost.\nUsage: weekly")
     async def weekly(self, ctx):
@@ -7059,6 +7281,30 @@ class PrefixCog(commands.Cog):
         ok = CM.delete_career(target.id)
         await ctx.send(f"🗑️ Wiped **{target.display_name}**'s career — they can `cv start_career` fresh."
                        if ok else "❌ Delete failed (see logs).")
+
+    @commands.command(name="grant_premium", aliases=["givepremium", "setpremium"],
+                      help="[ADMIN] Grant career premium (weekly/monthly access).\nUsage: grant_premium @user [days=30]  (days=0 revokes)")
+    async def grant_premium(self, ctx, member: discord.Member = None, days: int = 30):
+        if not _can_use_career(ctx):
+            return await ctx.send(_CAREER_SOON)
+        is_admin = (ctx.author.id == ADMIN_DISCORD_ID
+                    or (ctx.guild and ctx.author.guild_permissions.administrator)
+                    or str(ctx.author.id) in get_auth_admins())
+        if not is_admin:
+            return await ctx.send("❌ Admin or owner only.")
+        if member is None:
+            return await ctx.send("Usage: `cv grant_premium @user [days]` — days=0 to revoke.")
+        career = CM.get_career(member.id)
+        if not career:
+            return await ctx.send(f"❌ {member.display_name} has no career yet (they must `cv start_career`).")
+        days = max(0, min(int(days), 3650))
+        CM.grant_premium(career, days)
+        if days <= 0:
+            return await ctx.send(f"🔓 Premium **revoked** for **{career.get('username', member.display_name)}**.")
+        total_days = CM.premium_remaining(career) // 86400
+        await ctx.send(
+            f"⭐ **Premium granted** to {member.mention} (**+{days} days**, ~{total_days}d total remaining).\n"
+            f"They can now claim `cv weekly` & `cv monthly`.")
 
     # ===================== CAREER CLUB MATCHES (Phase 4) =====================
     @commands.command(name="create_match", aliases=["creatematch", "cmatch", "hostmatch"],

@@ -178,6 +178,18 @@ def load_careers():
         print(f"❌ Career load error: {e}")
 
 
+def all_careers():
+    """Return every career doc (loads the full collection from Mongo into cache)."""
+    try:
+        docs = list(_get_db()["careers"].find({}))
+        for d in docs:
+            CAREER_CACHE[d["_id"]] = d
+        return docs
+    except Exception as e:
+        print(f"❌ all_careers error: {e}")
+        return list(CAREER_CACHE.values())
+
+
 def get_career(user_id):
     uid = str(user_id)
     if uid in CAREER_CACHE:
@@ -267,6 +279,27 @@ WEEK_BOOST = 1.05                  # 5% coin boost for the week (premium weekly 
 
 def _boost_mult(career: dict) -> float:
     return WEEK_BOOST if career.get("week_boost_until", 0) > int(time.time()) else 1.0
+
+
+def career_is_premium(career: dict) -> bool:
+    """True if this career has an active bot-granted premium pass (weekly/monthly access)."""
+    return bool(career) and career.get("premium_until", 0) > int(time.time())
+
+
+def grant_premium(career: dict, days: int):
+    """Grant (or extend) a premium pass by `days` (0 = revoke). Returns the new expiry ts."""
+    now = int(time.time())
+    if days <= 0:
+        career["premium_until"] = 0
+    else:
+        base = max(now, career.get("premium_until", 0))   # stack onto remaining time
+        career["premium_until"] = base + days * 86400
+    async_save_career(career)
+    return career["premium_until"]
+
+
+def premium_remaining(career: dict) -> int:
+    return max(0, career.get("premium_until", 0) - int(time.time()))
 
 
 def _fmt_remaining(secs):
@@ -431,52 +464,39 @@ def quest_status(career):
     return out
 
 
-# ── Solo scenarios (early-game / no-PvP income — small coins, scaled to level) ─
-SCENARIO_DAILY_CAP = 6   # paid scenarios per day; extras still progress quests, pay 0
-_SCENARIOS = [("Net Session", 2), ("Powerplay Blitz", 3), ("Run Chase", 4)]
+# ── Solo scenarios (interactive challenges; small coins, separate stats) ──────
+SCENARIO_DAILY_CAP = 6   # paid scenarios per day; extras still feed quests, pay 0
+SCENARIO_ENTRY_FEE = 10  # coins to enter a scenario (skill bet — beat it to profit)
 
 
-def _sim_scenario_bat(bat, ai, balls):
-    """Lightweight batting practice sim — tally runs/4s/6s over `balls` (no dismissals)."""
-    dom = bat / (bat + ai)
-    runs = fours = sixes = 0
-    for _ in range(balls):
-        r = random.random()
-        if   r < 0.42 - dom * 0.08: runs += 0
-        elif r < 0.70:              runs += 1
-        elif r < 0.84:              runs += 2
-        elif r < 0.94:              runs += 4; fours += 1
-        else:                       runs += 6; sixes += 1
-    return runs, fours, sixes
+def scenarios_done_today(career):
+    return _ensure_quests(career)["progress"].get("scenarios", 0)
 
 
-def play_scenario(career):
-    """Play a solo scenario. Small coins scaled to level (low level -> less), capped
-    daily; always feeds daily-quest progress. Returns a result dict."""
-    q = _ensure_quests(career)
-    done_today = q["progress"].get("scenarios", 0)
-    capped = done_today >= SCENARIO_DAILY_CAP
-
-    eng = career_to_engine(career)
-    bat = eng["bat"]
-    title, overs = random.choice(_SCENARIOS)
-    balls = overs * 6
-    ai = max(40, bat - 5 + random.randint(-3, 4))
-    runs, fours, sixes = _sim_scenario_bat(bat, ai, balls)
-    target = int(round(balls * (1.0 + (bat - 55) / 110.0)))
-    passed = runs >= target
-
-    coins = 0 if capped else int(4 + runs // 8 + (6 if passed else 0))   # small reward
+def scenario_complete(career, runs, fours, sixes, passed):
+    """Settle a finished interactive scenario: small capped coins, SEPARATE scenario
+    stats (kept OUT of lifetime cv stats), and daily-quest progress. Returns
+    (coins, capped, remaining_today)."""
+    done = scenarios_done_today(career)
+    capped = done >= SCENARIO_DAILY_CAP
+    coins = 0 if capped else int(5 + runs // 6 + (12 if passed else 0))   # small reward
     if coins:
         career["coins"] += coins
 
+    # Separate practice stats — NOT part of the real career stats shown in `cv stats`.
+    ss = career.setdefault("scenario_stats", {"played": 0, "runs": 0, "best": 0, "passed": 0})
+    ss["played"] += 1
+    ss["runs"] += runs
+    ss["best"] = max(ss.get("best", 0), runs)
+    if passed:
+        ss["passed"] += 1
+
+    # Quest progress (scenarios count toward quests, just not lifetime stats).
     quest_progress(career, "scenarios", 1)
     quest_progress(career, "matches", 1)
-    quest_progress(career, "runs", runs)
+    if runs:       quest_progress(career, "runs", runs)
     if fours:      quest_progress(career, "fours", fours)
     if sixes:      quest_progress(career, "sixes", sixes)
     if runs >= 50: quest_progress(career, "fifties", 1)
     async_save_career(career)
-    return {"title": title, "overs": overs, "runs": runs, "fours": fours, "sixes": sixes,
-            "target": target, "passed": passed, "coins": coins, "capped": capped,
-            "remaining": max(0, SCENARIO_DAILY_CAP - done_today - 1)}
+    return coins, capped, max(0, SCENARIO_DAILY_CAP - done - 1)
