@@ -220,6 +220,39 @@ class _MindsetSelect(discord.ui.Select):
         await interaction.response.edit_message(view=self.picker)
 
 
+class _NameModal(discord.ui.Modal, title="Name Your Player"):
+    player_name = discord.ui.TextInput(
+        label="Player Name (shown everywhere in Career Mode)",
+        placeholder="e.g. V. Kohli",
+        min_length=2, max_length=16, required=True,
+    )
+
+    def __init__(self, picker):
+        super().__init__()
+        self.picker = picker
+        if getattr(picker, "username", None):
+            self.player_name.default = str(picker.username)[:16]
+
+    async def on_submit(self, interaction):
+        p = self.picker
+        name = " ".join(str(self.player_name.value).split()).strip()[:16] or "Rookie"
+        career, err = CM.create_career(p.uid, name, p.bowling, p.mindset)
+        if err:
+            return await interaction.response.send_message(f"❌ {err}", ephemeral=True)
+        bt, ms = CM.BOWLING_TYPES[p.bowling], CM.MINDSETS[p.mindset]
+        await interaction.response.send_message(
+            content=(f"🎉 **Career created — {name}!**  All-Rounder · {ms['emoji']} **{ms['label']}** batter · "
+                     f"{bt['emoji']} **{bt['label']}** bowler · **{CM.BASE_OVR} OVR** {career['tier']}.\n"
+                     f"Next: pass your **`cv debut`** to unlock your official card!"),
+            file=discord.File(render_career_card(career), "career_card.png"),
+        )
+        try:
+            if getattr(p, "message", None):
+                await p.message.edit(content="✅ Career created!", view=None)
+        except Exception:
+            pass
+
+
 class _CreateButton(discord.ui.Button):
     def __init__(self, picker):
         super().__init__(label="Create Career", style=discord.ButtonStyle.success, row=2, disabled=True)
@@ -229,24 +262,15 @@ class _CreateButton(discord.ui.Button):
         p = self.picker
         if interaction.user.id != p.uid:
             return await interaction.response.send_message("This isn't your setup.", ephemeral=True)
-        career, err = CM.create_career(p.uid, p.username, p.bowling, p.mindset)
-        if err:
-            return await interaction.response.send_message(f"❌ {err}", ephemeral=True)
-        bt, ms = CM.BOWLING_TYPES[p.bowling], CM.MINDSETS[p.mindset]
-        await interaction.response.edit_message(
-            content=(f"🎉 **Career created!** All-Rounder — {ms['emoji']} **{ms['label']}** batter, "
-                     f"{bt['emoji']} **{bt['label']}** bowler — **{CM.BASE_OVR} OVR** Bronze.\n"
-                     f"Next: pass your **`cv debut`** to unlock your official card!"),
-            view=None,
-        )
-        await interaction.followup.send(file=discord.File(render_career_card(career), "career_card.png"))
+        await interaction.response.send_modal(_NameModal(p))
 
 
 class CareerCreateView(discord.ui.View):
     def __init__(self, user_id, username):
         super().__init__(timeout=180)
         self.uid = user_id
-        self.username = username
+        self.username = username       # Discord name — only the default in the name prompt
+        self.message = None
         self.bowling = None
         self.mindset = None
         self.add_item(_BowlingSelect(self))

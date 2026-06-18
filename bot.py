@@ -726,9 +726,14 @@ def render_embed_scoreboard(match: CricketMatch) -> discord.Embed:
         desc += f"### 🏏 {t1_name}  {innings.total_runs}/{innings.wickets}  ({overs}/{match.format_overs}.0)\n"
         desc += f"### {t2_name}  {match.innings1.total_runs}/{match.innings1.wickets}  ({t1_overs}/{match.format_overs}.0)\n"
 
-    
+    # Ball-by-ball commentary (career matches only)
+    if getattr(match, "is_club", False) or getattr(match, "is_debut", False):
+        comm = getattr(match, "last_commentary", "") or ""
+        if comm and "initial" not in comm.lower():
+            desc += f"\n🎙️ {comm}\n"
+
     # Inline Codeblock Grid (Tight boxes matching the font size perfectly)
-    desc += f"**`{'BATTER':<16}{'R':<5}{'B':<5}{'SR':<6}`**\n"
+    desc += f"\n**`{'BATTER':<16}{'R':<5}{'B':<5}{'SR':<6}`**\n"
     for idx, p_item in enumerate(innings.batting_team["players"][:innings.next_batter_idx]):
         stats = innings.batting_stats[p_item["name"]]
         if stats.dismissal == "not out":
@@ -3045,13 +3050,14 @@ async def start_debut_match(channel, author, career):
     if channel.id in active_games or channel.id in active_setups:
         await channel.send("❌ A match or setup is already running in this channel. Finish it (or `cv endmatch`) first.")
         return
-    bat_team, bowl_team = _build_debut_teams(career, author.display_name)
+    pname = career.get("username", author.display_name)
+    bat_team, bowl_team = _build_debut_teams(career, pname)
     pitch = random.choice(["Flat", "Hard", "Green", "Dry"])
-    match = CricketMatch(author.display_name, "Academy XI", author.id, None,
+    match = CricketMatch(pname, "Academy XI", author.id, None,
                          bat_team, bowl_team, format_overs=_DEBUT_OVERS, pitch=pitch, weather="Clear")
     match.is_debut = True
     match.debut_user_id = author.id
-    match.debut_player_name = author.display_name
+    match.debut_player_name = pname
     match.batting_first_id = author.id   # you bat first
     match.bowling_first_id = None        # AI bowls (p2_id is None -> is_ai_game)
     match.innings1 = InningsState(bat_team, bowl_team)
@@ -3059,7 +3065,7 @@ async def start_debut_match(channel, author, career):
     match.current_innings_num = 1
     active_games[channel.id] = match
     await channel.send(
-        f"🎓 **ACADEMY TRIAL — {author.display_name}**\n"
+        f"🎓 **ACADEMY TRIAL — {pname}**\n"
         f"🏟️ Pitch: **{pitch}**  ·  ⏱️ **{_DEBUT_OVERS} overs**  ·  🎯 Pass mark: **{_DEBUT_TARGET}+ team runs**\n"
         f"You're opening vs the academy attack — pick your shots ball-by-ball. "
         f"Put **{_DEBUT_TARGET}** on the board before you're out or the overs run out!"
@@ -3104,6 +3110,10 @@ async def handle_debut_end(interaction_context, match: CricketMatch):
         except Exception:
             pass
         career["debut_done"] = True
+        CM.quest_progress(career, "matches", 1)
+        if runs: CM.quest_progress(career, "runs", runs)
+        if fours: CM.quest_progress(career, "fours", fours)
+        if sixes: CM.quest_progress(career, "sixes", sixes)
         CM.async_save_career(career)
         e = discord.Embed(
             title="✅ TRIAL PASSED — Welcome to the pros!",
@@ -3217,6 +3227,14 @@ async def _club_match_payout(channel, match):
                     bw["best_w"] = wkts; bw["best_r"] = b_runs
             except Exception:
                 pass
+            # Daily-quest progress (claimed later via `cv quests`)
+            CM.quest_progress(career, "matches", 1)
+            if runs:           CM.quest_progress(career, "runs", runs)
+            if wkts:           CM.quest_progress(career, "wickets", wkts)
+            if won:            CM.quest_progress(career, "wins", 1)
+            if fours:          CM.quest_progress(career, "fours", fours)
+            if sixes:          CM.quest_progress(career, "sixes", sixes)
+            if fifties:        CM.quest_progress(career, "fifties", 1)
             CM.async_save_career(career)
             tag = []
             if runs or batted: tag.append(f"{runs}{'*' if not out and batted else ''}")
@@ -4718,7 +4736,9 @@ async def _test_ia_start_over(channel, match: TestMatchObj, channel_id: int):
               f"Day {match.day} · {sess_name}",
         inline=False,
     )
-    await channel.send(embed=embed, view=TestInteractiveBowlerSelectView(match, channel_id, options))
+    _owner = _test_bowling_owner(match)
+    _ping = f"<@{_owner}> 🎳 your over — pick your bowler:" if _owner else None
+    await channel.send(content=_ping, embed=embed, view=TestInteractiveBowlerSelectView(match, channel_id, options))
 
 
 async def _test_ia_show_delivery(channel, match: TestMatchObj, channel_id: int):
@@ -4761,7 +4781,9 @@ async def _test_ia_show_delivery(channel, match: TestMatchObj, channel_id: int):
         color=0x1a252f,
     )
     is_spin = "Spin" in bowler["role"]
-    await channel.send(embed=embed, view=TestInteractiveDeliveryView(match, channel_id, is_spin, bowler))
+    _owner = _test_bowling_owner(match)
+    _ping = f"<@{_owner}> 🔮 (**{bowler['name']}**) — choose your delivery:" if _owner else None
+    await channel.send(content=_ping, embed=embed, view=TestInteractiveDeliveryView(match, channel_id, is_spin, bowler))
 
 
 async def _test_ia_show_shot(channel, match: TestMatchObj, channel_id: int, delivery: str):
@@ -4783,7 +4805,9 @@ async def _test_ia_show_shot(channel, match: TestMatchObj, channel_id: int, deli
         description=f"Score: **{innings.total_runs}/{innings.wickets}** ({innings.overs_str} ov)",
         color=0x27ae60,
     )
-    await channel.send(embed=embed, view=TestInteractiveShotView(match, channel_id))
+    _owner = _test_batting_owner(match)
+    _ping = f"<@{_owner}> ⚔️ (**{striker['name']}**) — a **{delivery}** is coming, pick your shot:" if _owner else None
+    await channel.send(content=_ping, embed=embed, view=TestInteractiveShotView(match, channel_id))
 
 
 async def _test_ia_ball_result(channel, match: TestMatchObj, channel_id: int,
@@ -6735,6 +6759,9 @@ class PrefixCog(commands.Cog):
             "`cv upgrade <power|control|bowling|stamina> [amount]` — spend coins to raise an attribute & OVR\n"
             "`cv profile [@user]` — view your player card\n"
             "`cv stats [@user]` — lifetime batting / bowling / fielding stats"), inline=False)
+        e.add_field(name="🎯 Play & Quests", value=(
+            "`cv scenario` — solo practice for small coins (great early-game)\n"
+            "`cv quests` — your **3 daily quests** (claim rewards here)"), inline=False)
         e.add_field(name="🏅 Tiers & Roles", value=(
             "Bronze 60–68 · Silver 69–76 · Gold 77–84 · Platinum 85–92 · Diamond 93–99\n"
             "Climbing a tier auto-grants the matching **CricVerse <Tier>** Discord role. "
@@ -6756,10 +6783,11 @@ class PrefixCog(commands.Cog):
             return await ctx.send(_CAREER_SOON)
         if CM.get_career(ctx.author.id):
             return await ctx.send("❌ You already have a career! Use `cv profile` to view it.")
-        await ctx.send(
+        view = career_ui.CareerCreateView(ctx.author.id, ctx.author.display_name)
+        view.message = await ctx.send(
             f"🏏 **Start your Career, {ctx.author.display_name}!**\nEvery player is an **all-rounder** — "
-            f"pick how you bowl and how you bat:",
-            view=career_ui.CareerCreateView(ctx.author.id, ctx.author.display_name))
+            f"pick how you bowl and bat, then **name your player**:",
+            view=view)
 
     @commands.command(name="profile", aliases=["card", "me"], help="View a player card.\nUsage: profile [@user]")
     async def profile(self, ctx, member: discord.Member = None):
@@ -6871,7 +6899,58 @@ class PrefixCog(commands.Cog):
         amount, err = CM.claim_daily(career)
         if err:
             return await ctx.send(err)
-        await ctx.send(f"🪙 **+{amount} coins!** Daily claimed. Balance: **{career['coins']:,}**.")
+        CM.quest_progress(career, "daily", 1)
+        CM.async_save_career(career)
+        await ctx.send(f"🪙 **+{amount} coins!** Daily claimed. Balance: **{career['coins']:,}**.\n-# 📜 Quest progress updated — check `cv quests`.")
+
+    @commands.command(name="quests", aliases=["quest", "dq"], help="View & claim your 3 daily quests.\nUsage: quests")
+    async def quests(self, ctx):
+        if not _can_use_career(ctx):
+            return await ctx.send(_CAREER_SOON)
+        career = CM.get_career(ctx.author.id)
+        if not career:
+            return await ctx.send("❌ Start a career first: `cv start_career`.")
+        claimed = CM.claim_quests(career)              # pay out anything ready
+        rows = CM.quest_status(career)
+        e = discord.Embed(
+            title="📜 Daily Quests",
+            description="3 random quests each day. Progress comes from matches & `cv scenario`.",
+            color=discord.Color.blurple())
+        for q, cur, done, ready in rows:
+            icon = "✅" if done else ("🎁" if ready else "⬜")
+            state = "**CLAIMED**" if done else (f"{cur}/{q['target']}")
+            e.add_field(name=f"{icon} {q['desc']}", value=f"{state}  ·  **{q['reward']}** 🪙", inline=False)
+        if claimed:
+            tot = sum(q["reward"] for q in claimed)
+            e.set_footer(text=f"🎉 Claimed {len(claimed)} quest(s) just now: +{tot} coins! Balance {career['coins']:,}.")
+        else:
+            e.set_footer(text=f"Balance: {career['coins']:,} 🪙  ·  resets daily.")
+        await ctx.send(embed=e)
+
+    @commands.command(name="scenario", aliases=["practice", "scn"], help="Play a solo scenario for coins + quest progress.\nUsage: scenario")
+    async def scenario(self, ctx):
+        if not _can_use_career(ctx):
+            return await ctx.send(_CAREER_SOON)
+        career = CM.get_career(ctx.author.id)
+        if not career:
+            return await ctx.send("❌ Start a career first: `cv start_career`.")
+        if not career.get("debut_done"):
+            return await ctx.send("❌ Make your debut first: `cv debut`.")
+        r = CM.play_scenario(career)
+        bd = []
+        if r["fours"]: bd.append(f"{r['fours']}×4")
+        if r["sixes"]: bd.append(f"{r['sixes']}×6")
+        line = f"You scored **{r['runs']}**" + (f" ({', '.join(bd)})" if bd else "") + f" — target {r['target']}."
+        if r["coins"]:
+            reward = f"🪙 **+{r['coins']}** coins  ·  {r['remaining']} paid scenarios left today"
+        else:
+            reward = "🪙 Daily scenario coin cap hit — still counts for quests!"
+        e = discord.Embed(
+            title=f"🎯 Scenario — {r['title']} ({r['overs']} ov)  {'✅ Cleared!' if r['passed'] else ''}",
+            description=f"{line}\n{reward}",
+            color=discord.Color.green() if r["passed"] else discord.Color.orange())
+        e.set_footer(text="📜 Quest progress updated — claim with `cv quests`.")
+        await ctx.send(embed=e)
 
     @commands.command(name="weekly", help="[Premium/Booster] Weekly coins + 5% boost.\nUsage: weekly")
     async def weekly(self, ctx):
@@ -6908,7 +6987,7 @@ class PrefixCog(commands.Cog):
         career = CM.get_career(ctx.author.id)
         if not career:
             return await ctx.send("❌ Start a career first: `cv start_career`.")
-        await ctx.send(f"🪙 **{ctx.author.display_name}** — **{career['coins']:,} coins**  ·  OVR {career['ovr']} ({career['tier']})")
+        await ctx.send(f"🪙 **{career.get('username', ctx.author.display_name)}** — **{career['coins']:,} coins**  ·  OVR {career['ovr']} ({career['tier']})")
 
     @commands.command(name="upgrade", aliases=["ug", "train"], help="Spend coins to raise an attribute.\nUsage: upgrade <power|control|bowling|stamina> [amount]")
     async def upgrade(self, ctx, attribute: str = None, amount: int = 1):
@@ -6923,7 +7002,7 @@ class PrefixCog(commands.Cog):
             a = career["attributes"]
             coins = career["coins"]
             e = discord.Embed(
-                title=f"🏋️ Training Ground — {ctx.author.display_name}",
+                title=f"🏋️ Training Ground — {career.get('username', ctx.author.display_name)}",
                 description=(f"**OVR {career['ovr']}**  ·  {career['tier']}  ·  🪙 **{coins:,}** coins\n"
                              f"Raise an attribute with `cv upgrade <attribute> [amount]`."),
                 color=_tier_embed_color(career["tier"]))
@@ -6996,7 +7075,7 @@ class PrefixCog(commands.Cog):
             return await ctx.send("❌ A match or setup is already running in this channel.")
         if ctx.channel.id in career_match.LOBBIES:
             return await ctx.send("❌ A club-match lobby already exists here. Use `cv lobby` or `cv cancelmatch`.")
-        lobby = career_match.ClubLobby(ctx.channel.id, ctx.author.id, ctx.author.display_name, overs)
+        lobby = career_match.ClubLobby(ctx.channel.id, ctx.author.id, career["username"], overs)
         career_match.LOBBIES[ctx.channel.id] = lobby
         await ctx.send(embed=_lobby_embed(lobby, "🏟️ Club Match — Lobby Open!"))
 
@@ -7013,11 +7092,11 @@ class PrefixCog(commands.Cog):
         career = CM.get_career(ctx.author.id)
         if not career or not career.get("debut_done"):
             return await ctx.send("❌ You need a **debuted** career to join. `cv start_career` → `cv debut`.")
-        ok, reason = lobby.add(ctx.author.id, ctx.author.display_name)
+        ok, reason = lobby.add(ctx.author.id, career["username"])
         if not ok:
             return await ctx.send("❌ You're already in the lobby." if reason == "already_in"
                                   else "❌ The lobby is full (22 players max).")
-        await ctx.send(embed=_lobby_embed(lobby, f"✅ {ctx.author.display_name} joined the lobby!"))
+        await ctx.send(embed=_lobby_embed(lobby, f"✅ {career['username']} joined the lobby!"))
 
     @commands.command(name="leavematch", aliases=["leaveclub"],
                       help="Leave the club-match lobby.\nUsage: leavematch")
@@ -7111,7 +7190,11 @@ class PrefixCog(commands.Cog):
         if ctx.author.id != lobby.host_id and not is_admin:
             return await ctx.send("❌ Only the host (or an admin) can start the match.")
         if not lobby.is_ready() or lobby.per_side() < 2:
-            return await ctx.send("❌ Club matches need an **even** number of players, **min 2 per side (4 total)**. Get more to `cv joinmatch`.")
+            return await ctx.send("❌ Club matches need an **even** number of players, **min 2 per side (4 total)**. Get more to `cv joinmatch` (or `cv addbot`).")
+        if lobby.human_count() < 2:
+            return await ctx.send("❌ Need at least **2 real players** to start — bots don't count. Get another person to `cv joinmatch`.")
+        if not lobby.each_side_has_human():
+            return await ctx.send("❌ Each side needs at least **1 real player**. Use `cv swap` to put a human on each team.")
         if ctx.channel.id in active_games or ctx.channel.id in active_setups:
             return await ctx.send("❌ A match is already running in this channel.")
         lobby.started = True

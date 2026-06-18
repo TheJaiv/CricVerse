@@ -96,6 +96,13 @@ class ClubLobby:
     def count(self):
         return len(self.players)
 
+    def human_count(self):
+        return sum(1 for p in self.players if not p.get("is_bot"))
+
+    def each_side_has_human(self):
+        return (any(not p.get("is_bot") for p in self.team_a)
+                and any(not p.get("is_bot") for p in self.team_b))
+
     def per_side(self):
         return min(len(self.team_a), len(self.team_b))
 

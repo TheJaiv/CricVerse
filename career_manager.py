@@ -107,17 +107,11 @@ def career_to_engine(career: dict) -> dict:
 # Cost ramps steeply so Gold is a multi-week goal, Platinum months, and Diamond
 # a long-term grind that even premium players can't rush.
 def upgrade_cost(v: int) -> int:
-    """Coin cost to raise an attribute from v to v+1. Positive & rising from the
-    new ~56 base; steep at the top so the high tiers are a real long-term grind:
-      v58≈48  v65≈90  v70≈140  v77≈266  v85≈516  v90≈786  v95≈1426  v98≈2166."""
-    return int(round(
-        30
-        + max(0, v - 55) * 6
-        + max(0, v - 70) * 14
-        + max(0, v - 82) * 32
-        + max(0, v - 90) * 70
-        + max(0, v - 95) * 120
-    ))
+    """Coin cost to raise an attribute from v to v+1 — EXPONENTIAL: every point is
+    dearer than the last, so the higher tiers get punishingly hard (you can't sprint
+    to 95). Each +1 costs ~16% more than the one before:
+      v60≈28  v68≈92  v77≈365  v85≈1146  v90≈2403  v95≈5045  v98≈7876  v99≈9136."""
+    return int(round(28 * (1.16 ** (max(0, v - 60)))))
 
 
 def _blank_stats():
@@ -344,3 +338,145 @@ def award_match_earnings(career, *, runs=0, fifties=0, hundreds=0, wickets=0,
 
 def get_today_str():
     return datetime.date.today().isoformat()
+
+
+# ── Daily quests ──────────────────────────────────────────────────────────────
+# A pool of 25 quests; each player is dealt 3 RANDOM ones per day (deterministic by
+# player+date). Progress is tracked all day; rewards are CLAIMED via `cv quests`.
+QUEST_POOL = [
+    {"id": "play1",  "desc": "Play 1 match or scenario",  "metric": "matches",  "target": 1,   "reward": 15},
+    {"id": "play2",  "desc": "Play 2 matches/scenarios",  "metric": "matches",  "target": 2,   "reward": 25},
+    {"id": "play3",  "desc": "Play 3 matches/scenarios",  "metric": "matches",  "target": 3,   "reward": 40},
+    {"id": "play5",  "desc": "Play 5 matches/scenarios",  "metric": "matches",  "target": 5,   "reward": 70},
+    {"id": "runs20", "desc": "Score 20 runs today",       "metric": "runs",     "target": 20,  "reward": 20},
+    {"id": "runs30", "desc": "Score 30 runs today",       "metric": "runs",     "target": 30,  "reward": 28},
+    {"id": "runs50", "desc": "Score 50 runs today",       "metric": "runs",     "target": 50,  "reward": 42},
+    {"id": "runs75", "desc": "Score 75 runs today",       "metric": "runs",     "target": 75,  "reward": 60},
+    {"id": "runs100","desc": "Score 100 runs today",      "metric": "runs",     "target": 100, "reward": 80},
+    {"id": "runs150","desc": "Score 150 runs today",      "metric": "runs",     "target": 150, "reward": 120},
+    {"id": "wkt1",   "desc": "Take 1 wicket today",       "metric": "wickets",  "target": 1,   "reward": 20},
+    {"id": "wkt2",   "desc": "Take 2 wickets today",      "metric": "wickets",  "target": 2,   "reward": 34},
+    {"id": "wkt3",   "desc": "Take 3 wickets today",      "metric": "wickets",  "target": 3,   "reward": 48},
+    {"id": "wkt5",   "desc": "Take 5 wickets today",      "metric": "wickets",  "target": 5,   "reward": 85},
+    {"id": "win1",   "desc": "Win a club match",          "metric": "wins",     "target": 1,   "reward": 50},
+    {"id": "win2",   "desc": "Win 2 club matches",        "metric": "wins",     "target": 2,   "reward": 100},
+    {"id": "four3",  "desc": "Hit 3 fours today",         "metric": "fours",    "target": 3,   "reward": 25},
+    {"id": "four6",  "desc": "Hit 6 fours today",         "metric": "fours",    "target": 6,   "reward": 45},
+    {"id": "four10", "desc": "Hit 10 fours today",        "metric": "fours",    "target": 10,  "reward": 70},
+    {"id": "six1",   "desc": "Hit a six today",           "metric": "sixes",    "target": 1,   "reward": 25},
+    {"id": "six3",   "desc": "Hit 3 sixes today",         "metric": "sixes",    "target": 3,   "reward": 55},
+    {"id": "fifty1", "desc": "Score a fifty",             "metric": "fifties",  "target": 1,   "reward": 60},
+    {"id": "scen2",  "desc": "Complete 2 scenarios",      "metric": "scenarios","target": 2,   "reward": 25},
+    {"id": "scen4",  "desc": "Complete 4 scenarios",      "metric": "scenarios","target": 4,   "reward": 50},
+    {"id": "daily",  "desc": "Claim your daily reward",   "metric": "daily",    "target": 1,   "reward": 15},
+]
+QUEST_BY_ID = {q["id"]: q for q in QUEST_POOL}
+QUESTS_PER_DAY = 3
+
+
+def _daily_quest_ids(career_id):
+    rng = random.Random(f"{career_id}:{get_today_str()}")
+    return rng.sample([q["id"] for q in QUEST_POOL], QUESTS_PER_DAY)
+
+
+def _ensure_quests(career):
+    q = career.get("quests")
+    if not isinstance(q, dict) or q.get("date") != get_today_str():
+        q = {"date": get_today_str(), "ids": _daily_quest_ids(career.get("_id", "?")),
+             "progress": {}, "claimed": []}
+        career["quests"] = q
+    if not q.get("ids"):
+        q["ids"] = _daily_quest_ids(career.get("_id", "?"))
+    return q
+
+
+def _active_quests(career):
+    q = _ensure_quests(career)
+    return [QUEST_BY_ID[i] for i in q["ids"] if i in QUEST_BY_ID]
+
+
+def quest_progress(career, metric, amount=1):
+    """Track progress toward today's 3 quests (does not pay — claim via claim_quests)."""
+    if amount <= 0:
+        return
+    q = _ensure_quests(career)
+    q["progress"][metric] = q["progress"].get(metric, 0) + amount
+
+
+def claim_quests(career):
+    """Pay out every completed-but-unclaimed active quest. Returns the claimed list."""
+    q = _ensure_quests(career)
+    claimed = []
+    for quest in _active_quests(career):
+        if quest["id"] in q["claimed"]:
+            continue
+        if q["progress"].get(quest["metric"], 0) >= quest["target"]:
+            q["claimed"].append(quest["id"])
+            career["coins"] += quest["reward"]
+            claimed.append(quest)
+    if claimed:
+        async_save_career(career)
+    return claimed
+
+
+def quest_status(career):
+    """Return [(quest, current, claimed, ready)] for the 3 active quests."""
+    q = _ensure_quests(career)
+    out = []
+    for quest in _active_quests(career):
+        prog = q["progress"].get(quest["metric"], 0)
+        claimed = quest["id"] in q["claimed"]
+        out.append((quest, min(prog, quest["target"]), claimed,
+                    (not claimed) and prog >= quest["target"]))
+    return out
+
+
+# ── Solo scenarios (early-game / no-PvP income — small coins, scaled to level) ─
+SCENARIO_DAILY_CAP = 6   # paid scenarios per day; extras still progress quests, pay 0
+_SCENARIOS = [("Net Session", 2), ("Powerplay Blitz", 3), ("Run Chase", 4)]
+
+
+def _sim_scenario_bat(bat, ai, balls):
+    """Lightweight batting practice sim — tally runs/4s/6s over `balls` (no dismissals)."""
+    dom = bat / (bat + ai)
+    runs = fours = sixes = 0
+    for _ in range(balls):
+        r = random.random()
+        if   r < 0.42 - dom * 0.08: runs += 0
+        elif r < 0.70:              runs += 1
+        elif r < 0.84:              runs += 2
+        elif r < 0.94:              runs += 4; fours += 1
+        else:                       runs += 6; sixes += 1
+    return runs, fours, sixes
+
+
+def play_scenario(career):
+    """Play a solo scenario. Small coins scaled to level (low level -> less), capped
+    daily; always feeds daily-quest progress. Returns a result dict."""
+    q = _ensure_quests(career)
+    done_today = q["progress"].get("scenarios", 0)
+    capped = done_today >= SCENARIO_DAILY_CAP
+
+    eng = career_to_engine(career)
+    bat = eng["bat"]
+    title, overs = random.choice(_SCENARIOS)
+    balls = overs * 6
+    ai = max(40, bat - 5 + random.randint(-3, 4))
+    runs, fours, sixes = _sim_scenario_bat(bat, ai, balls)
+    target = int(round(balls * (1.0 + (bat - 55) / 110.0)))
+    passed = runs >= target
+
+    coins = 0 if capped else int(4 + runs // 8 + (6 if passed else 0))   # small reward
+    if coins:
+        career["coins"] += coins
+
+    quest_progress(career, "scenarios", 1)
+    quest_progress(career, "matches", 1)
+    quest_progress(career, "runs", runs)
+    if fours:      quest_progress(career, "fours", fours)
+    if sixes:      quest_progress(career, "sixes", sixes)
+    if runs >= 50: quest_progress(career, "fifties", 1)
+    async_save_career(career)
+    return {"title": title, "overs": overs, "runs": runs, "fours": fours, "sixes": sixes,
+            "target": target, "passed": passed, "coins": coins, "capped": capped,
+            "remaining": max(0, SCENARIO_DAILY_CAP - done_today - 1)}
