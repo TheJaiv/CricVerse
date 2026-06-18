@@ -212,6 +212,15 @@ def _ball_condition_bonus(ball_age: int, bowler: dict) -> float:
         return 0.0
     return 0.0   # second new ball: ball_age reset to 0 elsewhere
 
+def _pitch_intent(pitch: str) -> float:
+    """Baseline batting tempo for the pitch (innings 1-3). ASYMMETRIC: roads get a big
+    attack boost (the original 'flat is too slow' fix), but bowler decks only ease off
+    mildly — grinding them to a crawl makes innings eat 180 overs and forces fake draws.
+    Flat 1.33 · Dead 1.44 · Hard 1.17 · neutral 1.0 · Green 0.92 · Turning 0.90 · Sticky 0.87."""
+    dev = _PITCH_SCORING_RATE.get(pitch, 3.0) - 3.0
+    return max(0.85, min(1.55, 1.0 + dev * (0.55 if dev >= 0 else 0.26)))
+
+
 def _batting_intent(match: TestMatch) -> float:
     """
     Match-aware intent: 0.2 = survive for draw, 1.0 = normal, 1.8 = all-out attack.
@@ -219,12 +228,12 @@ def _batting_intent(match: TestMatch) -> float:
     """
     idx = match.current_innings_idx
     if idx < 2:
-        return 1.0
+        return _pitch_intent(match.pitch)
 
     innings = match.current_innings
     target  = _get_chase_target(match)
     if target is None:
-        return 1.0
+        return _pitch_intent(match.pitch)
 
     runs_needed  = target - innings.total_runs
     if runs_needed <= 0:
@@ -294,6 +303,16 @@ def _get_delivery(bowler: dict, innings: TestInnings) -> str:
     swing = random.choice(["Inswing","Outswing","Seam","Fast","Slow"])
     length = random.choice(["Bouncer","Full","Good length","Yorker","Short"])
     return f"{swing} {length}"
+
+# Batting-style tempo multiplier applied to match intent (syncs Test SR with style):
+# Aggressors push the tempo up, Anchors grind it down, bowlers (Wicket-Takers) just survive.
+_ARCH_TEMPO = {"Aggressor": 1.18, "Finisher": 1.06, "Anchor": 0.84, "Wicket-Taker": 0.74}
+
+# Wicket multiplier when a batter is in full survival/block-for-the-draw mode. Low enough
+# that blocking is genuinely hard to break in a short defence, high enough that a long
+# rearguard (80+ overs) realistically gets prised open — so 3rd-innings declarations win.
+_SURVIVAL_WKT = 0.52
+
 
 def _get_shot(deliv: str, is_collapse: bool, balls_faced: int, archetype: str, intent: float, bat_position: int = 0) -> str:
     is_new  = balls_faced < 15
@@ -376,7 +395,9 @@ def get_smart_test_bowler(innings: TestInnings, match: TestMatch) -> Optional[di
     wear  = _wear_level(match)
     ball_age = innings.ball_age
 
-    def _nc(p):   return innings.current_bowler is None or innings.current_bowler["name"] != p["name"]
+    # No back-to-back overs: exclude the bowler who bowled the PREVIOUS over. (current_bowler
+    # is None at selection time — it's reset at over-end — so we must check prev_bowler.)
+    def _nc(p):   return innings.prev_bowler is None or innings.prev_bowler["name"] != p["name"]
     def _main(p): return "Bowler" in p["role"] or "All-Rounder" in p["role"]
     def _pace(p): return "Pace" in p["role"]
     def _spin(p): return "Spin" in p["role"]
@@ -513,12 +534,15 @@ def execute_test_ball(match: TestMatch) -> bool:
     # ── Pitch type ─────────────────────────────────────────────────────────
     cb       = innings.total_balls             # balls in this innings (new-ball periods)
     total_cb = match.total_match_overs * 6    # balls across whole match (cross-innings wear)
-    if   match.pitch == "Green"  and "Pace" in bowler["role"]:                  bowl_r += 6
+    if   match.pitch == "Green"  and "Pace" in bowler["role"]:                  bowl_r += 7
     elif match.pitch == "Flat":                                                  bat_r  += 10
     elif match.pitch == "Dusty"  and "Spin" in bowler["role"]:
         bowl_r += 6;  bat_r -= 4
-    elif match.pitch == "Hard"   and "Pace" in bowler["role"] and cb < 120:
-        bowl_r += 3;  bat_r  += 3
+    elif match.pitch == "Hard"   and "Pace" in bowler["role"]:
+        # True bounce all innings: bats beautifully (fast outfield, full value for shots),
+        # so it posts BIG scores — results come from the fast tempo + declarations, with
+        # the odd extra edge off the carry. A road, never a seamer.
+        bowl_r += 2;  bat_r  += 6
     elif match.pitch == "Cracked":
         bowl_r += 5;  bat_r -= 4
     elif match.pitch == "Damp"   and "Pace" in bowler["role"] and cb < 180:
@@ -597,12 +621,33 @@ def execute_test_ball(match: TestMatch) -> bool:
 
     wkt_w *= wkt_mult
 
-    # ── Batting context (4th innings survival / attack) ────────────────────
+    # True-bounce surfaces: pace gets extra carry → more edges/catches (results, not
+    # draws) without choking the run-rate the way a green/turning deck does.
+    if "Pace" in bowler["role"]:
+        if   match.pitch == "Hard":   wkt_w *= 1.06   # true carry — a few extra edges, still bats well
+        elif match.pitch == "Bouncy": wkt_w *= 1.15
+        elif match.pitch == "Green":  wkt_w *= 1.08   # seam movement finds the edge
+
+    # ── Per-batter intent: pitch/chase baseline × the striker's batting STYLE ──
+    # This is what syncs Test with the other formats — an Aggressor on a road goes
+    # into attack mode, an Anchor controls, a tail-ender just survives.
     intent = _batting_intent(match)
-    if intent < 0.5:          # survival: dig in for the draw — very hard to dislodge
-        four_w *= 0.35; six_w *= 0.20; wkt_w *= 0.30; dot_w *= 1.45
-    elif intent > 1.3:        # attack
-        four_w *= intent; six_w *= intent * 1.2; wkt_w *= (1.0 + (intent - 1.3) * 0.5)
+    intent *= _ARCH_TEMPO.get(striker.get("archetype", ""), 1.0)
+    if innings.current_striker_idx >= 7:      # tail: rein it in further
+        intent *= 0.88
+    intent = max(0.12, min(1.60, intent))
+    if intent < 0.5:          # survival: dig in for the draw — hard, but breakable over time
+        four_w *= 0.35; six_w *= 0.20; wkt_w *= _SURVIVAL_WKT; dot_w *= 1.45
+    else:
+        # Smooth scaling around 1.0: higher intent (flat tracks / chases) rotates more
+        # strike and finds the boundary → fewer dots, faster SR; lower intent grinds.
+        f = intent - 1.0
+        dot_w  *= max(0.45, 1.0 - f * 0.55)
+        sing_w *= (1.0 + f * 0.20)
+        two_w  *= (1.0 + f * 0.20)
+        four_w *= (1.0 + f * 1.05)
+        six_w  *= (1.0 + f * 1.25)
+        wkt_w  *= (1.0 + max(0.0, f) * 0.30)   # attacking carries a little more risk
 
     # ── Partnership protection ─────────────────────────────────────────────
     if innings.partnership_runs > 100:
@@ -658,15 +703,16 @@ def execute_test_ball(match: TestMatch) -> bool:
         elif perf_shot:
             four_w *= 1.35; wkt_w *= 0.70
 
-        # Archetype
-        arch = striker["archetype"]
+        # Batting style — quality nuance only (tempo is already set via intent above):
+        # Aggressors take a touch more risk, Anchors are harder to dislodge, Finishers
+        # cut loose once the tail is exposed.
+        arch = striker.get("archetype", "")
         if arch == "Aggressor":
-            four_w *= 1.20; wkt_w *= 1.10
+            wkt_w *= 1.06
         elif arch == "Anchor":
-            dot_w  *= 1.08; wkt_w *= 0.78
-        elif arch == "Finisher":
-            if innings.wickets >= 6:
-                four_w *= 1.15; six_w *= 1.30
+            wkt_w *= 0.82
+        elif arch == "Finisher" and innings.wickets >= 6:
+            four_w *= 1.15; six_w *= 1.30
 
     if "Mystery" in deliv:
         wkt_w *= 1.6; dot_w *= 1.35; four_w *= 0.50
@@ -993,7 +1039,7 @@ def _start_next_innings(match: TestMatch):
 
 # Typical runs-per-over on each pitch type (used by both declaration and intent)
 _PITCH_SCORING_RATE: dict = {
-    "Dead": 3.8, "Flat": 3.6, "Slow": 3.1, "Hard": 3.0, "Bouncy": 3.1,
+    "Dead": 3.8, "Flat": 3.6, "Slow": 3.1, "Hard": 3.3, "Bouncy": 3.1,
     "Green": 2.7, "Damp": 2.7, "Turning": 2.6, "Cracked": 2.5, "Sticky": 2.5,
     "Dusty": 2.8, "Worn": 2.7, "Two-Paced": 3.0, "Soft": 2.8, "Dry": 3.1,
 }
@@ -1031,21 +1077,36 @@ def _should_declare(match: TestMatch) -> bool:
     t1   = sum(i.total_runs for i in inns if i.batting_team["name"] == match.team1["name"])
     t2   = sum(i.total_runs for i in inns if i.batting_team["name"] == match.team2["name"])
     lead = (t1 - t2) if bat_name == match.team1["name"] else (t2 - t1)
-    if lead < 80:          # no meaningful declaration below 80-run lead
-        return False
-
     # Overs remaining = full future sessions + remainder of current session
     sessions_after = 15 - (match.day - 1) * 3 - match.session
     overs_left     = sessions_after * 30 + max(0, 30 - match.overs_in_session)
 
-    if overs_left < 15:    # almost no time — declare regardless
+    typical_rpo = _PITCH_SCORING_RATE.get(match.pitch, 3.0)
+
+    # A captain declares the 3rd innings to SET A TARGET and still leave enough overs to
+    # bowl the opposition out. Two things matter: the lead must be defensible, and there
+    # must be time to take 10 wickets. Declaring too late (over-batting) is what kills
+    # results — so once the lead is safe we close and attack.
+    #
+    # Defensible-lead floor scales with the pitch (a flat road needs more runs in the
+    # bank than a turner): Dead 206 · Flat 192 · default 150 · Green 129 · Turning 122.
+    min_lead = 170 + (typical_rpo - 3.0) * 70   # neutral 170 · Flat 212 · Turning 142
+    if lead < min_lead:
+        return False
+
+    # Almost no time left: declare with whatever defensible lead we have and force a result.
+    if overs_left < 20:
         return True
 
-    # Pitch-aware threshold: declare only when RRR ≥ 85% of expected pitch scoring rate.
-    # On Flat (3.6 RPO) → threshold 3.06; on Turning (2.6) → 2.21; default 3.0 → 2.55.
-    typical_rpo = _PITCH_SCORING_RATE.get(match.pitch, 3.0)
-    threshold   = typical_rpo * 0.92   # slightly less eager to declare — fewer forced wins
-    return (lead / overs_left) >= threshold
+    # The cardinal rule: NEVER set a soft, gettable target. The opponent must be asked to
+    # chase at ABOVE the pitch's par rate — a below-par asking rate is a free stroll that
+    # loses Tests, so a captain bats on instead. With plenty of time we hold out for a
+    # clearly-tough target (≥ 1.10× par); as the clock runs down we'll accept par.
+    asking = lead / overs_left
+    par    = typical_rpo
+    if overs_left >= 45:
+        return asking >= par * 1.10
+    return asking >= par * 1.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────

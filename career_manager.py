@@ -473,21 +473,23 @@ def scenarios_done_today(career):
     return _ensure_quests(career)["progress"].get("scenarios", 0)
 
 
-def scenario_complete(career, runs, fours, sixes, passed):
-    """Settle a finished interactive scenario: small capped coins, SEPARATE scenario
-    stats (kept OUT of lifetime cv stats), and daily-quest progress. Returns
-    (coins, capped, remaining_today)."""
+def scenario_complete(career, runs=0, fours=0, sixes=0, wickets=0, passed=False, mode="bat"):
+    """Settle a finished interactive scenario (batting OR bowling). Reward is tied to
+    PERFORMANCE — no flat freebie, so a poor loss pays ~0 and you forfeit the entry
+    fee. Stats are SEPARATE from cv stats; quests are fed. Returns (coins, capped, left)."""
     done = scenarios_done_today(career)
     capped = done >= SCENARIO_DAILY_CAP
-    coins = 0 if capped else int(5 + runs // 6 + (12 if passed else 0))   # small reward
+    perf = (wickets * 6) if mode == "bowl" else (runs // 5)
+    coins = 0 if capped else max(0, int(perf + (16 if passed else 0)))
     if coins:
         career["coins"] += coins
 
     # Separate practice stats — NOT part of the real career stats shown in `cv stats`.
-    ss = career.setdefault("scenario_stats", {"played": 0, "runs": 0, "best": 0, "passed": 0})
+    ss = career.setdefault("scenario_stats", {"played": 0, "runs": 0, "best": 0, "passed": 0, "wickets": 0})
     ss["played"] += 1
     ss["runs"] += runs
     ss["best"] = max(ss.get("best", 0), runs)
+    ss["wickets"] = ss.get("wickets", 0) + wickets
     if passed:
         ss["passed"] += 1
 
@@ -498,5 +500,6 @@ def scenario_complete(career, runs, fours, sixes, passed):
     if fours:      quest_progress(career, "fours", fours)
     if sixes:      quest_progress(career, "sixes", sixes)
     if runs >= 50: quest_progress(career, "fifties", 1)
+    if wickets:    quest_progress(career, "wickets", wickets)
     async_save_career(career)
     return coins, capped, max(0, SCENARIO_DAILY_CAP - done - 1)

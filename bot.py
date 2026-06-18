@@ -804,14 +804,8 @@ def render_embed_scoreboard(match: CricketMatch) -> discord.Embed:
         desc += f"### 🏏 {t1_name}  {innings.total_runs}/{innings.wickets}  ({overs}/{match.format_overs}.0)\n"
         desc += f"### {t2_name}  {match.innings1.total_runs}/{match.innings1.wickets}  ({t1_overs}/{match.format_overs}.0)\n"
 
-    # Ball-by-ball commentary (career matches only)
-    if getattr(match, "is_club", False) or getattr(match, "is_debut", False) or getattr(match, "is_scenario", False):
-        comm = getattr(match, "last_commentary", "") or ""
-        if comm and "initial" not in comm.lower():
-            desc += f"\n🎙️ {comm}\n"
-
     # Inline Codeblock Grid (Tight boxes matching the font size perfectly)
-    desc += f"\n**`{'BATTER':<16}{'R':<5}{'B':<5}{'SR':<6}`**\n"
+    desc += f"**`{'BATTER':<16}{'R':<5}{'B':<5}{'SR':<6}`**\n"
     for idx, p_item in enumerate(innings.batting_team["players"][:innings.next_batter_idx]):
         stats = innings.batting_stats[p_item["name"]]
         if stats.dismissal == "not out":
@@ -847,10 +841,25 @@ def render_embed_scoreboard(match: CricketMatch) -> discord.Embed:
     
     desc += f"**Timeline**\n{timeline_str}\n"
     
-    if match.current_innings_num == 2:
+    balls_left = match.max_balls - innings.total_balls
+    if getattr(match, "is_scenario", False):
+        if getattr(match, "scenario_mode", "bat") == "bowl":
+            tgt = getattr(match, "scenario_wkt_target", 0)
+            ws = innings.bowling_stats.get(getattr(match, "scenario_player_name", ""))
+            got = ws.wickets_taken if ws else 0
+            desc += f"-# 🎳 Take **{tgt}** wickets — you have **{got}/{tgt}** ({balls_left} balls left)"
+        else:
+            tgt = getattr(match, "scenario_target", 0)
+            need = max(0, tgt - innings.total_runs)
+            desc += (f"-# 🎯 Chasing **{tgt}** — need **{need}** off {balls_left} balls"
+                     if need > 0 else f"-# 🏆 Target {tgt} reached!")
+    elif getattr(match, "is_debut", False):
+        need = max(0, _DEBUT_TARGET - innings.total_runs)
+        desc += (f"-# 🎯 Pass mark **{_DEBUT_TARGET}** team runs — **{need}** to go ({balls_left} balls left)"
+                 if need > 0 else f"-# ✅ Pass mark {_DEBUT_TARGET} reached!")
+    elif match.current_innings_num == 2:
         target = getattr(match, "target", match.innings1.total_runs + 1)
         target_needed = target - innings.total_runs
-        balls_left = match.max_balls - innings.total_balls
         if target_needed > 0 and balls_left > 0:
             dls_txt = " (DLS)" if getattr(match, "dls_active", False) else ""
             desc += f"-# Equation: Need {target_needed} runs from {balls_left} balls{dls_txt}"
@@ -2498,6 +2507,15 @@ async def prompt_bowler_then_hub(interaction, match: CricketMatch):
             await prompt_over_pacing_hub(interaction, match)
         return
 
+    # Bowling scenario: YOU bowl every over — auto-select the player, no dropdown/quota.
+    if getattr(match, "is_scenario", False) and getattr(match, "scenario_mode", "bat") == "bowl":
+        innings.current_bowler = innings.bowling_team["players"][0]
+        innings.over_log.clear()
+        innings.bouncers_in_over = 0; innings.cutters_in_over = 0
+        innings.mystery_bowled_this_over = False
+        await run_interactive_delivery_sequence(interaction, match)
+        return
+
     # Club match with a BOT captain bowling: bot auto-picks the next bowler.
     if getattr(match, "is_club", False) and _is_bot_uid(bowler_uid):
         new_bowler = get_smart_ai_bowler(innings, match.pitch, match.weather, match.format_overs)
@@ -2993,6 +3011,19 @@ class DRSView(discord.ui.View):
         await interaction.channel.send(embed=render_embed_scoreboard(self.match))
         await run_interactive_delivery_sequence(self.origin_inter, self.match)
 
+async def _send_career_commentary(channel, match):
+    """Career matches: post the last ball's commentary as a plain line, just above
+    the next selection prompt (kept out of the scoreboard embed)."""
+    if not (getattr(match, "is_club", False) or getattr(match, "is_debut", False) or getattr(match, "is_scenario", False)):
+        return
+    comm = getattr(match, "last_commentary", "") or ""
+    if comm and "initial" not in comm.lower():
+        try:
+            await channel.send(f"🎙️ {comm}")
+        except Exception:
+            pass
+
+
 async def run_interactive_delivery_sequence(interaction, match: CricketMatch):
     innings = match.current_innings
     
@@ -3034,6 +3065,7 @@ async def run_interactive_delivery_sequence(interaction, match: CricketMatch):
         role = innings.current_bowler["role"]
         free_hit_notice = "\n🛡️ **FREE HIT BALL!** Batter cannot be dismissed (except run out)!" if getattr(match, "free_hit", False) else ""
 
+        await _send_career_commentary(channel, match)
         if "Spin" in role:
             spin_type = "off" if "Off" in role else "leg"
             title = "Off-Spin" if spin_type == "off" else "Leg-Spin"
@@ -3093,6 +3125,7 @@ async def prompt_batter_shot(channel, match: CricketMatch, prev=None):
             
         sn = match.current_innings.batting_team["players"][match.current_innings.current_striker_idx]["name"]
         free_hit_notice = "\n🛡️ **FREE HIT!** You cannot be dismissed (except run out)!" if getattr(match, "free_hit", False) else ""
+        await _send_career_commentary(channel, match)
         await channel.send(f"⚔️ <@{match.get_striker_user_id()}> (**{sn}**)\n🚨 The bowler bowled a **{match.current_delivery_selection}**!{free_hit_notice}\nSelect your shot:", view=BattingView(match))
 
 
@@ -3230,52 +3263,82 @@ async def handle_debut_end(interaction_context, match: CricketMatch):
 _SCENARIO_DEFS = [("Quickfire", 2), ("Run Chase", 3), ("Pressure Cooker", 4)]
 
 
-def _build_scenario_teams(career, pname):
+def _scenario_player_team(career, pname, roles_are_field=False):
     eng = CM.career_to_engine(career)
-    lvl = eng["bat"]
     you = _academy_player(pname, eng["bat"], eng["bowl"], eng["role"], eng["archetype"])
-    partners = [_academy_player(f"Partner {i+1}", max(44, lvl - 12 - i * 2), 44, "Batter", "Standard")
-                for i in range(5)]
-    bat_team = {"name": f"{pname}'s XI", "players": [you] + partners, "subs": [], "color": "#3BA55D"}
-    # A deliberately TOUGH attack — bowlers rated above the player.
+    if roles_are_field:   # bowling scenario: you + fielders (you bowl every over)
+        rest = [_academy_player(f"Fielder {i+1}", 42, 30, "Batter", "Standard") for i in range(10)]
+    else:                 # batting scenario: partners rated the SAME as you
+        rest = [_academy_player(f"Partner {i+1}", eng["bat"], eng["bowl"], "Batter", "Standard") for i in range(5)]
+    return {"name": f"{pname}'s XI", "players": [you] + rest, "subs": [], "color": "#3BA55D"}
+
+
+def _challenge_attack(lvl):
     def bw(name, role):
         return _academy_player(name, 24, min(95, lvl + random.randint(8, 16)), role, "Standard")
-    attack = [bw("Pace Ace", "Bowler_Pace"), bw("New-Ball Quick", "Bowler_Pace"),
-              bw("Off-Spinner", "Bowler_Spin_Off"), bw("Leg-Spinner", "Bowler_Spin_Leg"),
-              bw("Seamer", "All-Rounder_Pace"), _academy_player("Keeper", 44, 18, "Batter_WK", "Standard")]
-    while len(attack) < 11:
-        attack.append(_academy_player(f"Fielder {len(attack)}", 40, 22, "Batter", "Standard"))
-    bowl_team = {"name": "Challenge XI", "players": attack, "subs": [], "color": "#ED4245"}
-    return bat_team, bowl_team
+    a = [bw("Pace Ace", "Bowler_Pace"), bw("New-Ball Quick", "Bowler_Pace"),
+         bw("Off-Spinner", "Bowler_Spin_Off"), bw("Leg-Spinner", "Bowler_Spin_Leg"),
+         bw("Seamer", "All-Rounder_Pace"), _academy_player("Keeper", 44, 18, "Batter_WK", "Standard")]
+    while len(a) < 11:
+        a.append(_academy_player(f"Fielder {len(a)}", 40, 22, "Batter", "Standard"))
+    return {"name": "Challenge XI", "players": a, "subs": [], "color": "#ED4245"}
 
 
-async def start_scenario_match(channel, author, career):
+def _challenge_batting(lvl):
+    def bt(name, role="Batter"):
+        return _academy_player(name, min(95, lvl + random.randint(8, 16)), 24, role, "Aggressor")
+    b = [bt("C. Opener"), bt("S. Opener"), bt("T. No.3"), bt("M. No.4"),
+         bt("F. Finisher", "Batter"), bt("WK Bat", "Batter_WK")]
+    while len(b) < 11:
+        b.append(_academy_player(f"Tail {len(b)}", 40, 60, "Bowler_Pace", "Standard"))
+    return {"name": "Challenge XI", "players": b, "subs": [], "color": "#ED4245"}
+
+
+async def start_scenario_match(channel, author, career, mode="bat"):
     if channel.id in active_games or channel.id in active_setups:
         return await channel.send("❌ A match or setup is already running here. Finish it (or `cv endmatch`) first.")
     pname = career.get("username", author.display_name)
-    bat_team, bowl_team = _build_scenario_teams(career, pname)
-    lvl = bat_team["players"][0]["bat"]
+    eng = CM.career_to_engine(career)
     title, overs = random.choice(_SCENARIO_DEFS)
-    target = max(overs * 8, round(overs * (9 + max(0, lvl - 60) / 15.0)))   # stiff chase, scales with level
     pitch = random.choice(["Flat", "Hard", "Green", "Dry", "Bouncy"])
-    match = CricketMatch(pname, "Challenge XI", author.id, None, bat_team, bowl_team,
-                         format_overs=overs, pitch=pitch, weather="Clear")
+
+    if mode == "bowl":
+        you_team = _scenario_player_team(career, pname, roles_are_field=True)
+        opp = _challenge_batting(eng["bowl"])
+        wkt_target = 2 if overs <= 3 else 3
+        # team1 = your (bowling) side, team2 = Challenge XI (bats) — AI bats, you bowl.
+        match = CricketMatch(pname, "Challenge XI", author.id, None, you_team, opp,
+                             format_overs=overs, pitch=pitch, weather="Clear")
+        match.batting_first_id = None          # AI bats
+        match.bowling_first_id = author.id      # you bowl
+        match.innings1 = InningsState(opp, you_team)
+        match.scenario_wkt_target = wkt_target
+        intro = (f"🎳 **SCENARIO — {title}**  ({overs} overs · BOWLING)\n"
+                 f"🎯 Take **{wkt_target}** wickets vs a strong **Challenge XI**  ·  🏟️ {pitch}\n"
+                 f"You bowl every over — pick your deliveries. Strike!")
+    else:
+        you_team = _scenario_player_team(career, pname)
+        opp = _challenge_attack(eng["bat"])
+        target = max(overs * 8, round(overs * (9 + max(0, eng["bat"] - 60) / 15.0)))
+        match = CricketMatch(pname, "Challenge XI", author.id, None, you_team, opp,
+                             format_overs=overs, pitch=pitch, weather="Clear")
+        match.batting_first_id = author.id      # you bat
+        match.bowling_first_id = None           # AI bowls
+        match.innings1 = InningsState(you_team, opp)
+        match.scenario_target = target
+        intro = (f"🏏 **SCENARIO — {title}**  ({overs} overs · BATTING)\n"
+                 f"🎯 Chase **{target}** vs a tough **Challenge XI**  ·  🏟️ {pitch}\n"
+                 f"One innings — ends when you're out, the overs run out, or you reach the target.")
+
     match.is_scenario = True
+    match.scenario_mode = mode
     match.scenario_user_id = author.id
     match.scenario_player_name = pname
-    match.scenario_target = target
     match.scenario_title = title
-    match.batting_first_id = author.id
-    match.bowling_first_id = None
-    match.innings1 = InningsState(bat_team, bowl_team)
     match.current_innings = match.innings1
     match.current_innings_num = 1
     active_games[channel.id] = match
-    await channel.send(
-        f"🎯 **SCENARIO — {title}**  ({overs} overs)\n"
-        f"🎯 Chase **{target}** vs a tough **Challenge XI**  ·  🏟️ {pitch}\n"
-        f"One innings — it ends when you're out, the overs run out, or you reach the target. Good luck!"
-    )
+    await channel.send(intro)
     await prompt_bowler_then_hub(channel, match)
 
 
@@ -3283,37 +3346,49 @@ async def handle_scenario_end(interaction_context, match: CricketMatch):
     channel = interaction_context.channel if hasattr(interaction_context, "channel") else interaction_context
     active_games.pop(getattr(channel, "id", None), None)
     innings = match.current_innings
-    bs = innings.batting_stats.get(match.scenario_player_name)
-    runs = bs.runs_scored if bs else 0
-    balls = bs.balls_faced if bs else 0
-    fours = bs.fours if bs else 0
-    sixes = bs.sixes if bs else 0
-    team = innings.total_runs
-    target = match.scenario_target
-    passed = team >= target
     career = CM.get_career(match.scenario_user_id)
     if not career:
         return await channel.send("⚠️ Couldn't find your career to finalize the scenario.")
-    coins, capped, remaining = CM.scenario_complete(career, runs, fours, sixes, passed)
     ov = f"{innings.total_balls // 6}.{innings.total_balls % 6}"
-    line = (f"**Team {team}/{innings.wickets}** in {ov} ov (target {target}).\n"
-            f"Your knock: **{runs}** ({balls}b · {fours}×4 · {sixes}×6).")
+
+    if getattr(match, "scenario_mode", "bat") == "bowl":
+        ws = innings.bowling_stats.get(match.scenario_player_name)
+        wkts = ws.wickets_taken if ws else 0
+        conceded = ws.runs_conceded if ws else 0
+        tgt = match.scenario_wkt_target
+        passed = wkts >= tgt
+        coins, capped, remaining = CM.scenario_complete(career, wickets=wkts, passed=passed, mode="bowl")
+        line = (f"Challenge XI **{innings.total_runs}/{innings.wickets}** in {ov} ov.\n"
+                f"Your figures: **{wkts}/{conceded}** — needed **{tgt}** wickets.")
+        title = (f"✅ SCENARIO CLEARED — {match.scenario_title}!" if passed
+                 else f"❌ {match.scenario_title} — only {wkts}/{tgt} wickets")
+    else:
+        bs = innings.batting_stats.get(match.scenario_player_name)
+        runs = bs.runs_scored if bs else 0
+        balls = bs.balls_faced if bs else 0
+        fours = bs.fours if bs else 0
+        sixes = bs.sixes if bs else 0
+        target = match.scenario_target
+        passed = innings.total_runs >= target
+        coins, capped, remaining = CM.scenario_complete(career, runs=runs, fours=fours, sixes=sixes, passed=passed, mode="bat")
+        line = (f"**Team {innings.total_runs}/{innings.wickets}** in {ov} ov (target {target}).\n"
+                f"Your knock: **{runs}** ({balls}b · {fours}×4 · {sixes}×6).")
+        title = (f"✅ SCENARIO CLEARED — {match.scenario_title}!" if passed
+                 else f"❌ {match.scenario_title} — target missed")
+
     reward = (f"🪙 **+{coins}** coins  ·  {remaining} paid scenarios left today"
-              if coins else "🪙 Daily scenario coin cap reached — still counts toward quests!")
-    e = discord.Embed(
-        title=f"✅ SCENARIO CLEARED — {match.scenario_title}!" if passed else f"❌ {match.scenario_title} — target missed",
-        description=f"{line}\n{reward}",
-        color=discord.Color.green() if passed else discord.Color.orange())
-    e.set_footer(text="📜 Quest progress updated (claim with cv quests). Scenario stats are tracked separately from cv stats.")
+              if coins else "🪙 No coins (cap reached or fee forfeited) — still counts toward quests!")
+    e = discord.Embed(title=title, description=f"{line}\n{reward}",
+                      color=discord.Color.green() if passed else discord.Color.orange())
+    e.set_footer(text="📜 Quest progress updated (claim with cv quests). Scenario stats are separate from cv stats.")
     await channel.send(embed=e)
 
 
 class ScenarioConfirmView(discord.ui.View):
-    """Confirm the entry fee before launching an interactive scenario."""
+    """Pick Batting or Bowling and pay the entry fee to launch an interactive scenario."""
     def __init__(self, user_id):
         super().__init__(timeout=60)
         self.uid = user_id
-        self.children[0].label = f"Play  (−{CM.SCENARIO_ENTRY_FEE} 🪙)"
 
     async def interaction_check(self, interaction):
         if interaction.user.id != self.uid:
@@ -3321,8 +3396,7 @@ class ScenarioConfirmView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="Play", style=discord.ButtonStyle.success, emoji="🎯")
-    async def play(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _start(self, interaction, mode):
         career = CM.get_career(self.uid)
         if not career:
             return await interaction.response.edit_message(content="❌ No career found.", view=None)
@@ -3334,8 +3408,16 @@ class ScenarioConfirmView(discord.ui.View):
                 content=f"❌ Not enough coins — entry fee is **{fee}** 🪙 (you have {career['coins']:,}).", view=None)
         career["coins"] -= fee
         CM.async_save_career(career)
-        await interaction.response.edit_message(content=f"🎟️ Entry fee paid (−{fee} 🪙). Starting your scenario…", view=None)
-        await start_scenario_match(interaction.channel, interaction.user, career)
+        await interaction.response.edit_message(content=f"🎟️ Entry fee paid (−{fee} 🪙). Starting your **{'bowling' if mode=='bowl' else 'batting'}** scenario…", view=None)
+        await start_scenario_match(interaction.channel, interaction.user, career, mode)
+
+    @discord.ui.button(label="Bat", style=discord.ButtonStyle.success, emoji="🏏")
+    async def bat(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._start(interaction, "bat")
+
+    @discord.ui.button(label="Bowl", style=discord.ButtonStyle.primary, emoji="🎳")
+    async def bowl(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._start(interaction, "bowl")
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -4802,7 +4884,7 @@ async def _test_finish_match(match: TestMatchObj, channel_id: int, channel):
             try:
                 log_channel = bot.get_channel(int(log_channel_id))
                 if log_channel:
-                    log_file = discord.File(fp=generate_test_scorecard_image(match), filename="test_scorecard.png")
+                    log_file = discord.File(fp=generate_test_summary_image(match), filename="test_summary.png")
                     t1 = match.team1["name"]
                     t2 = match.team2["name"]
                     await log_channel.send(
@@ -5082,26 +5164,33 @@ async def _test_ia_ball_result(channel, match: TestMatchObj, channel_id: int,
 
 
 def _test_bowling_owner(match: TestMatchObj):
-    """Return the user ID that owns the bowling team (None = AI owns it)."""
-    inn = match.current_innings
-    if inn.bowling_team is match.team1:
+    """User ID that owns the team CURRENTLY BOWLING (None = AI). Keyed by team
+    identity, so it's correct no matter who won the toss / bats first."""
+    bt = match.current_innings.bowling_team
+    if bt is getattr(match, "host_team", None):
         return getattr(match, "host_id", None)
-    return getattr(match, "p2_id", None)
+    if bt is getattr(match, "p2_team", None):
+        return getattr(match, "p2_id", None)
+    return None
 
 def _test_batting_owner(match: TestMatchObj):
-    """Return the user ID that owns the batting team (None = AI owns it)."""
-    inn = match.current_innings
-    if inn.batting_team is match.team1:
+    """User ID that owns the team CURRENTLY BATTING (None = AI)."""
+    bt = match.current_innings.batting_team
+    if bt is getattr(match, "host_team", None):
         return getattr(match, "host_id", None)
-    return getattr(match, "p2_id", None)
+    if bt is getattr(match, "p2_team", None):
+        return getattr(match, "p2_id", None)
+    return None
 
 def _test_ai_bowling(match: TestMatchObj) -> bool:
-    """True when the AI (no p2) controls the bowling team."""
-    return getattr(match, "p2_id", None) is None and match.current_innings.bowling_team is match.team2
+    """True when the AI (no p2) controls the team currently bowling."""
+    return getattr(match, "p2_id", None) is None and \
+        match.current_innings.bowling_team is getattr(match, "p2_team", match.team2)
 
 def _test_ai_batting(match: TestMatchObj) -> bool:
-    """True when the AI (no p2) controls the batting team."""
-    return getattr(match, "p2_id", None) is None and match.current_innings.batting_team is match.team2
+    """True when the AI (no p2) controls the team currently batting."""
+    return getattr(match, "p2_id", None) is None and \
+        match.current_innings.batting_team is getattr(match, "p2_team", match.team2)
 
 
 class TestInteractiveBowlerSelectView(discord.ui.View):
@@ -5606,6 +5695,8 @@ class TestTossDecisionView(discord.ui.View):
         match          = TestMatchObj(t_bat, t_bowl, state.pitch, state.weather)
         match.host_id  = state.p1_id
         match.p2_id    = getattr(state, "p2_id", None)
+        match.host_team = t1            # team identity → owner (NOT bat/bowl order)
+        match.p2_team   = t2
         active_test_matches[self.channel.id] = match
 
         await interaction.response.defer()
@@ -5653,6 +5744,8 @@ async def _begin_test_match(channel, state):
         match          = TestMatchObj(t_bat, t_bowl, state.pitch, weather)
         match.host_id  = state.p1_id
         match.p2_id    = getattr(state, "p2_id", None)
+        match.host_team = t1            # host owns team 1; AI owns team 2
+        match.p2_team   = t2
         active_test_matches[channel.id] = match
         await channel.send(embed=render_test_embed(match), view=TestSimView(match, channel.id))
         return
@@ -6952,39 +7045,27 @@ class PrefixCog(commands.Cog):
         if not _can_use_career(ctx):
             return await ctx.send(_CAREER_SOON)
         e = discord.Embed(
-            title="🏏 Career Mode — Help",
-            description="Build **one** global all-rounder, earn coins, upgrade attributes and climb the tiers from **Bronze → Diamond**.",
+            title="🏏 Career Mode",
+            description=("Build your own all-rounder and climb **Bronze → Diamond**.\n"
+                         "**The loop:** `start_career` → `debut` → earn → `upgrade` → `create_match` 🏆"),
             color=discord.Color.blurple())
-        e.add_field(name="🚀 Getting Started", value=(
-            "`cv start_career` — create your all-rounder (choose bowling type + batting mindset)\n"
-            "`cv debut` — pass the Academy Trial to unlock your official card"), inline=False)
-        e.add_field(name="💰 Economy", value=(
-            "`cv daily` — daily coins (24h)\n"
-            "`cv weekly` — *Premium/Booster:* coins + 5% week boost\n"
-            "`cv monthly` — *Premium/Booster:* coins + cosmetic title\n"
-            "`cv balance` — check your coins\n"
-            "🪙 *Coins come from `cv daily` (+ Premium weekly/monthly) and **club matches** (`cv create_match`). Bots & AI never pay.*"), inline=False)
-        e.add_field(name="📈 Progress", value=(
-            "`cv upgrade <power|control|bowling|stamina> [amount]` — spend coins to raise an attribute & OVR\n"
-            "`cv profile [@user]` — view your player card\n"
-            "`cv stats [@user]` — lifetime batting / bowling / fielding stats"), inline=False)
-        e.add_field(name="🎯 Play & Quests", value=(
-            "`cv scenario` — solo practice for small coins (great early-game)\n"
-            "`cv quests` — your **3 daily quests** (claim rewards here)\n"
-            "`cv leaderboard` — top players by OVR / coins / club wins"), inline=False)
-        e.add_field(name="🏅 Tiers & Roles", value=(
-            "Bronze 60–68 · Silver 69–76 · Gold 77–84 · Platinum 85–92 · Diamond 93–99\n"
-            "Climbing a tier auto-grants the matching **CricVerse <Tier>** Discord role. "
-            "`cv synctier` — re-apply your role here (e.g. in a new server)."), inline=False)
-        e.add_field(name="⚔️ Club Matches (PvP) — *beta*", value=(
-            "`cv create_match [overs]` — open a lobby   ·   `cv joinmatch` — join\n"
-            "`cv addbot` — add an AI bot (avg of joined players)\n"
-            "`cv lobby` — numbered teams   ·   `cv swap <a> <b>` — host re-orders / sets captains\n"
-            "`cv leavematch` / `cv cancelmatch`   ·   `cv startmatch` — begin\n"
-            "*Each player bats & bowls their own turn; captains pick openers, next batter & bowler.*"), inline=False)
+        e.add_field(name="🚀 Your Player",
+                    value="`start_career` · `debut` · `profile` · `stats` · `leaderboard`", inline=False)
+        e.add_field(name="💰 Earn Coins",
+                    value=("`daily` · `quests` (3/day) · `scenario` (solo practice)\n"
+                           "Premium: `weekly` · `monthly`  ·  *bots/AI never pay*"), inline=False)
+        e.add_field(name="📈 Improve",
+                    value="`upgrade <power|control|bowling|stamina> [n]` · `balance`", inline=False)
+        e.add_field(name="⚔️ Club Matches (PvP)",
+                    value=("`create_match [overs]` · `joinmatch` · `addbot` · `lobby` · `swap` · `startmatch`\n"
+                           "*Each player bats & bowls their own turn; captains pick openers/bowler.*"), inline=False)
+        e.add_field(name="🏅 Tiers",
+                    value=("Bronze 60 · Silver 69 · Gold 77 · Platinum 85 · Diamond 93\n"
+                           "Auto Discord roles on promotion · `synctier` to re-apply"), inline=False)
         if ctx.author.id == ADMIN_DISCORD_ID or (ctx.guild and ctx.author.guild_permissions.administrator):
-            e.add_field(name="🛠️ Dev", value="`cv delete_career [@user]` — wipe a career", inline=False)
-        e.set_footer(text="Career Mode is in development — currently admin/owner only.")
+            e.add_field(name="🛠️ Admin",
+                        value="`grant_premium @user [days]` · `delete_career [@user]`", inline=False)
+        e.set_footer(text="Tip: prefix every command with cv  ·  e.g. cv start_career")
         await ctx.send(embed=e)
 
     @commands.command(name="start_career", aliases=["startcareer"], help="Create your career all-rounder.\nUsage: start_career")
@@ -7165,10 +7246,11 @@ class PrefixCog(commands.Cog):
                     if capped else f"📊 **{CM.SCENARIO_DAILY_CAP - done}** paid scenarios left today\n")
         e = discord.Embed(
             title="🎯 Play a Scenario?",
-            description=(f"A **difficult** solo batting challenge — chase a target vs a strong AI attack, "
-                         f"ball-by-ball. Beat it to **profit**.\n\n"
+            description=(f"A **difficult** solo challenge vs a strong AI — beat it to **profit**.\n"
+                         f"🏏 **Bat:** chase a target before you're out.\n"
+                         f"🎳 **Bowl:** take the required wickets in your overs.\n\n"
                          f"🎟️ **Entry fee:** {fee} 🪙   (you have {career['coins']:,})\n"
-                         f"🪙 **Reward:** small, scaled to your runs (+bonus if you clear it)\n"
+                         f"🪙 **Reward:** scaled to your performance — clear it to beat the fee; a poor effort forfeits it.\n"
                          f"{cap_line}"
                          f"📜 Feeds your daily quests. *(Scenario stats stay separate from `cv stats`.)*"),
             color=discord.Color.blurple())
