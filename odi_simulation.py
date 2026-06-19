@@ -102,17 +102,43 @@ def get_smart_ai_bowler_odi(innings, pitch, weather="Clear", format_overs=50):
     def _main(p):   return "Bowler" in p["role"] or "All-Rounder" in p["role"]
 
     all_live = [p for p in innings.bowling_team["players"] if _live(p)]
+    mains    = [p for p in all_live if _main(p)]
 
-    # ── Tier-based pool: part-timers NEVER enter until all mains with quota are gone ──
-    pool = [p for p in all_live if _main(p) and _quota(p) and _nc(p)]
-    if not pool:
-        pool = [p for p in all_live if _main(p) and _quota(p)]
-    if not pool:
-        pool = [p for p in all_live if _quota(p) and _nc(p)]
-    if not pool:
-        pool = [p for p in all_live if _quota(p)]
-    if not pool:
-        pool = [p for p in all_live if _nc(p)] or all_live
+    def _rem(p): return bowler_quota - innings.bowling_stats[p["name"]].balls_bowled // 6
+
+    # ── Smart quota management (prevents the back-to-back corner) ─────────────────────
+    # A main bowler is eligible only if, AFTER they bowl THIS over, the remaining overs can
+    # still be covered by the main attack with NO two-in-a-row (a no-consecutive schedule of
+    # n overs exists iff Σ min(remᵢ, ⌈n/2⌉) ≥ n). Stops the AI front-loading bowlers into a
+    # corner where one man is forced into consecutive death overs.
+    def _feasible_if(cand):
+        n = overs_remaining - 1
+        if n <= 0:
+            return True
+        half = (n + 1) // 2
+        tot = 0
+        for p in mains:
+            r = _rem(p) - (1 if p is cand else 0)
+            if r > 0:
+                tot += min(r, half)
+        return tot >= n
+
+    safe = [p for p in mains if _quota(p) and _feasible_if(p)]
+
+    pool = [p for p in safe if _nc(p)]
+    # Tight attack (little spare quota): drain the fullest-quota bowler first so depletion
+    # stays balanced and the weakest bowler is never stranded into back-to-back overs.
+    if pool:
+        slack = sum(_rem(p) for p in mains if _quota(p)) - overs_remaining
+        if slack <= 1 and overs_remaining > 1:
+            mx = max(_rem(p) for p in pool)
+            pool = [p for p in pool if _rem(p) == mx]
+    if not pool: pool = safe
+    if not pool: pool = [p for p in mains if _quota(p) and _nc(p)]
+    if not pool: pool = [p for p in mains if _quota(p)]
+    if not pool: pool = [p for p in all_live if _quota(p) and _nc(p)]   # part-timers
+    if not pool: pool = [p for p in all_live if _quota(p)]
+    if not pool: pool = [p for p in all_live if _nc(p)] or all_live     # absolute last resort
     if not pool:
         return None
 

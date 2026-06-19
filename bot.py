@@ -2229,6 +2229,13 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
             file=file
         )
         
+        # Reset per-innings sim controls so the 2nd innings starts FRESH at the hub.
+        # Otherwise a "Sim Innings (Verbose)" / whole-match pick from the 1st innings leaks
+        # in — e.g. "Sim 1 Over" in the 2nd innings would auto-sim the whole innings verbose.
+        if not getattr(match, 'sim_only', False):
+            match.simulation_mode = "interactive"
+            match.verbose = False
+
         # Pass channel directly — no more DummyInteraction needed
         if getattr(match, 'sim_only', False):
             await channel.send("*Simulating 2nd Innings... ⚙️*")
