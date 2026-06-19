@@ -638,20 +638,24 @@ def execute_ball_math_odi(match):
         if striker["archetype"] == "Aggressor":
             boundary_weight *= 1.15; wicket_weight *= 1.15
         elif striker["archetype"] == "Anchor":
+            # ODI anchor: a LONG, slow build — safety is paid for with tempo (more dots,
+            # fewer boundaries early) so the run gap to a Standard mirrors the wicket gap.
+            # He only truly accelerates once set and the ask climbs (ODI ramps gentler than T20).
             if _set and _lift:
-                boundary_weight *= 1.25; wicket_weight *= 1.05   # set anchor cuts loose as the RRR rises
+                boundary_weight *= 1.25; wicket_weight *= 1.00   # cuts loose as the RRR rises — finds gaps, stays secure
             elif _set:
-                boundary_weight *= 1.10                            # set anchor keeps the score ticking, not blocking
+                boundary_weight *= 1.10; wicket_weight *= 0.88    # keeps the score ticking, not blocking
             else:
-                dot_weight *= 1.10; wicket_weight *= 0.80          # still playing himself in
+                dot_weight *= 1.14; boundary_weight *= 0.85; wicket_weight *= 0.76   # still playing himself in
         elif striker["archetype"] == "Standard":
-            # The common middle-ground: more positive than an Anchor, safer than an Aggressor.
+            # The middle-ground: a touch quicker than the Anchor but a touch less secure at
+            # EVERY stage — the difference shows up in runs AND in risk, not just risk.
             if _set and _lift:
-                boundary_weight *= 1.15; wicket_weight *= 1.08
+                boundary_weight *= 1.15; wicket_weight *= 1.06
             elif _set:
-                boundary_weight *= 1.05
+                boundary_weight *= 1.06; wicket_weight *= 0.96
             else:
-                dot_weight *= 1.05; wicket_weight *= 0.90
+                dot_weight *= 1.04; boundary_weight *= 0.95; wicket_weight *= 0.88
         elif striker["archetype"] == "Finisher" and is_death_overs:
             boundary_weight *= 1.25
 

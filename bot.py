@@ -509,6 +509,11 @@ def _bowler_is_bot(match):
     except Exception:
         return False
 
+def _is_career_match(match):
+    """Career-mode match (club / debut / scenario) — fully interactive, no Auto-Ball / Sim."""
+    return bool(getattr(match, "is_club", False) or getattr(match, "is_debut", False)
+                or getattr(match, "is_scenario", False))
+
 # ==========================================
 # 🧠 3. SIMULATION ROUTING ENGINE
 # ==========================================
@@ -693,8 +698,9 @@ def _run_full_match_sync(match: CricketMatch):
                 if not bowler:
                     break
                 innings.current_bowler = bowler
+            tb_before = innings.total_balls
             execute_ball_math(match)
-            if innings.total_balls % 6 == 0 and innings.total_balls > 0:
+            if innings.total_balls > tb_before and innings.total_balls % 6 == 0:
                 innings.over_log.clear()
                 innings.bouncers_in_over = 0
                 innings.cutters_in_over = 0
@@ -2070,9 +2076,14 @@ async def loop_current_innings_simulation(interaction, match: CricketMatch):
                 return
             innings.current_bowler = new_bowler
 
+        tb_before = innings.total_balls
         execute_ball_math(match)
 
-        if innings.total_balls % 6 == 0 and innings.total_balls > 0:
+        # Only run over-end housekeeping when a LEGAL ball actually completed the over.
+        # A wide/no-ball leaves total_balls on the over boundary (6N); without this guard
+        # the clear would wipe over_log mid-over and the next bowler-pick would re-select
+        # a NEW bowler — the "verbose sim hands the over to a different bowler" bug.
+        if innings.total_balls > tb_before and innings.total_balls % 6 == 0:
             if getattr(match, 'verbose', False):
                 await channel.send(embed=render_embed_scoreboard(match))
                 await asyncio.sleep(0.5)
@@ -2104,11 +2115,14 @@ async def loop_entire_match_simulation(interaction, match: CricketMatch):
                 return
             innings.current_bowler = new_bowler
 
+        tb_before = innings.total_balls
         execute_ball_math(match)
 
-        # After each completed over (6 legal balls), reset over-specific state so the
+        # After each completed over (6 LEGAL balls), reset over-specific state so the
         # next iteration's bowler-selection guard (not over_log) triggers correctly.
-        if innings.total_balls % 6 == 0 and innings.total_balls > 0:
+        # Gating on total_balls increasing stops a wide/no-ball on the over boundary
+        # from wiping over_log mid-over (which re-picks a different bowler).
+        if innings.total_balls > tb_before and innings.total_balls % 6 == 0:
             # Send verbose scoreboard BEFORE clearing over_log so the timeline is visible
             if getattr(match, 'verbose', False):
                 await channel.send(embed=render_embed_scoreboard(match))
@@ -2311,6 +2325,29 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
 # 🏏 6. OVER HUB & INTERACTIVE MENUS
 # ==========================================
 
+def _insert_next_batter(innings, match, sel_idx):
+    """Bring the chosen batter (currently at sel_idx) into the next batting slot and put
+    them at the OUT batter's crease end.
+
+    Why not just `current_striker_idx = next_batter_idx`: if the wicket fell on the LAST
+    ball of an over, the engine has already done its end-of-over strike swap using the
+    dismissed batter's index — so the out batter (prev_striker_idx) is now sitting at the
+    NON-striker index and the surviving partner is the striker. Blindly overwriting the
+    striker would orphan the survivor (he shows as a 3rd batter on the card and the
+    non-striker pointer keeps pointing at a dismissed man, which also makes _solo_batting
+    read True forever and kills all further strike rotation). So we replace whichever
+    crease end currently points at the out batter."""
+    players = innings.batting_team["players"]
+    nb = innings.next_batter_idx
+    players[nb], players[sel_idx] = players[sel_idx], players[nb]
+    innings.next_batter_idx += 1
+    out_idx = getattr(match, "prev_striker_idx", innings.current_striker_idx)
+    if innings.current_non_striker_idx == out_idx:
+        innings.current_non_striker_idx = nb     # over-end wicket: new man to the non-striker end
+    else:
+        innings.current_striker_idx = nb         # normal wicket: new man takes strike
+
+
 async def prompt_next_batter(interaction, match: CricketMatch):
     channel = interaction.channel if hasattr(interaction, 'channel') else interaction
     uid = match.get_striker_user_id()
@@ -2353,10 +2390,7 @@ async def prompt_next_batter(interaction, match: CricketMatch):
         # Bot captain sends in the best available batsman.
         best = max(available, key=lambda p: p["bat"])
         idx = next(i for i, p in enumerate(innings.batting_team["players"]) if p["name"] == best["name"])
-        innings.batting_team["players"][innings.next_batter_idx], innings.batting_team["players"][idx] = \
-            innings.batting_team["players"][idx], innings.batting_team["players"][innings.next_batter_idx]
-        innings.current_striker_idx = innings.next_batter_idx
-        innings.next_batter_idx += 1
+        _insert_next_batter(innings, match, idx)
         await channel.send(f"🤖 **{innings.batting_team['name']}** (bot) sends in **{best['name']}**.")
         await run_interactive_delivery_sequence(interaction, match)
         return
@@ -2380,12 +2414,12 @@ async def prompt_next_batter(interaction, match: CricketMatch):
     view.interaction_check = interaction_check
 
     async def cb(inter: discord.Interaction):
+        if getattr(view, "_picked", False):     # guard against a double-tap selecting two batters
+            return await inter.response.defer()
+        view._picked = True
         sel_name = select.values[0]
         idx = next(i for i, p in enumerate(innings.batting_team["players"]) if p["name"] == sel_name)
-        innings.batting_team["players"][innings.next_batter_idx], innings.batting_team["players"][idx] = \
-            innings.batting_team["players"][idx], innings.batting_team["players"][innings.next_batter_idx]
-        innings.current_striker_idx = innings.next_batter_idx
-        innings.next_batter_idx += 1
+        _insert_next_batter(innings, match, idx)
         await inter.response.defer()
         await inter.message.edit(view=None)
         await run_interactive_delivery_sequence(inter, match)
@@ -2767,8 +2801,10 @@ class PaceBowlingView(discord.ui.View):
         for cutter in ["Off Cutter", "Leg Cutter", "Knuckle"]:
             self.add_item(ActionButton(cutter, discord.ButtonStyle.secondary, 2, "cutter"))
 
-        self.add_item(ActionButton("🎲 Auto Ball", discord.ButtonStyle.secondary, 3, "auto"))
-            
+        # No Auto Ball in career mode — every delivery is picked by hand.
+        if not _is_career_match(match):
+            self.add_item(ActionButton("🎲 Auto Ball", discord.ButtonStyle.secondary, 3, "auto"))
+
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.channel.id not in active_games or active_games[interaction.channel.id] != self.match:
             await interaction.response.send_message("❌ This match has been ended.", ephemeral=True)
@@ -2828,7 +2864,9 @@ class SpinBowlingView(discord.ui.View):
             disabled = (spin == "Mystery" and mystery_used)
             self.add_item(ActionButton(spin, discord.ButtonStyle.primary, row, "spin", disabled=disabled))
 
-        self.add_item(ActionButton("🎲 Auto Ball", discord.ButtonStyle.secondary, 2, "auto"))
+        # No Auto Ball in career mode — every delivery is picked by hand.
+        if not _is_career_match(match):
+            self.add_item(ActionButton("🎲 Auto Ball", discord.ButtonStyle.secondary, 2, "auto"))
             
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.channel.id not in active_games or active_games[interaction.channel.id] != self.match:
@@ -3017,7 +3055,12 @@ async def _send_career_commentary(channel, match):
     if not (getattr(match, "is_club", False) or getattr(match, "is_debut", False) or getattr(match, "is_scenario", False)):
         return
     comm = getattr(match, "last_commentary", "") or ""
+    # Dedupe: this is called once before the bowling prompt and once before the shot
+    # prompt of the SAME ball — only post a given line once (fixes double commentary).
+    if comm and comm == getattr(match, "_last_shown_commentary", None):
+        return
     if comm and "initial" not in comm.lower():
+        match._last_shown_commentary = comm
         try:
             await channel.send(f"🎙️ {comm}")
         except Exception:
@@ -3112,11 +3155,21 @@ async def prompt_batter_shot(channel, match: CricketMatch, prev=None):
                 await channel.send("🚶 AI Batter accepts the decision and walks off.")
             
         await channel.send(embed=render_embed_scoreboard(match))
-        
+
         class Dummy: pass
         d = Dummy()
         d.channel = channel
-        
+
+        # A BOT batter can be dismissed too. In club matches (is_ai_game False) the engine
+        # sets pending_next_batter instead of auto-advancing, so we MUST hand off to the
+        # next-batter flow here — otherwise the dismissed bot keeps facing balls and the
+        # captain is never asked to send a replacement.
+        if getattr(match, "pending_next_batter", False):
+            match.pending_next_batter = False
+            await channel.send(embed=render_wicket_summary(match))
+            await prompt_next_batter(d, match)
+            return
+
         await run_interactive_delivery_sequence(d, match)
     else:
         # Failsafe clamp to prevent IndexError edge cases
@@ -3273,9 +3326,9 @@ def _scenario_player_team(career, pname, roles_are_field=False):
     return {"name": f"{pname}'s XI", "players": [you] + rest, "subs": [], "color": "#3BA55D"}
 
 
-def _challenge_attack(lvl):
+def _challenge_attack(lvl, rlo=8, rhi=16):
     def bw(name, role):
-        return _academy_player(name, 24, min(95, lvl + random.randint(8, 16)), role, "Standard")
+        return _academy_player(name, 24, min(95, lvl + random.randint(rlo, rhi)), role, "Standard")
     a = [bw("Pace Ace", "Bowler_Pace"), bw("New-Ball Quick", "Bowler_Pace"),
          bw("Off-Spinner", "Bowler_Spin_Off"), bw("Leg-Spinner", "Bowler_Spin_Leg"),
          bw("Seamer", "All-Rounder_Pace"), _academy_player("Keeper", 44, 18, "Batter_WK", "Standard")]
@@ -3284,9 +3337,9 @@ def _challenge_attack(lvl):
     return {"name": "Challenge XI", "players": a, "subs": [], "color": "#ED4245"}
 
 
-def _challenge_batting(lvl):
+def _challenge_batting(lvl, rlo=8, rhi=16):
     def bt(name, role="Batter"):
-        return _academy_player(name, min(95, lvl + random.randint(8, 16)), 24, role, "Aggressor")
+        return _academy_player(name, min(95, lvl + random.randint(rlo, rhi)), 24, role, "Aggressor")
     b = [bt("C. Opener"), bt("S. Opener"), bt("T. No.3"), bt("M. No.4"),
          bt("F. Finisher", "Batter"), bt("WK Bat", "Batter_WK")]
     while len(b) < 11:
@@ -3294,17 +3347,21 @@ def _challenge_batting(lvl):
     return {"name": "Challenge XI", "players": b, "subs": [], "color": "#ED4245"}
 
 
-async def start_scenario_match(channel, author, career, mode="bat"):
+async def start_scenario_match(channel, author, career, mode="bat", difficulty="medium"):
     if channel.id in active_games or channel.id in active_setups:
         return await channel.send("❌ A match or setup is already running here. Finish it (or `cv endmatch`) first.")
     pname = career.get("username", author.display_name)
     eng = CM.career_to_engine(career)
     title, overs = random.choice(_SCENARIO_DEFS)
     pitch = random.choice(["Flat", "Hard", "Green", "Dry", "Bouncy"])
+    diff = CM.SCENARIO_DIFFS.get(difficulty, CM.SCENARIO_DIFFS["medium"])
+    rlo, rhi = diff["rlo"], diff["rhi"]
+    dlabel = diff["label"]
+    opp_desc = "matched" if difficulty == "easy" else ("strong" if difficulty == "medium" else "elite")
 
     if mode == "bowl":
         you_team = _scenario_player_team(career, pname, roles_are_field=True)
-        opp = _challenge_batting(eng["bowl"])
+        opp = _challenge_batting(eng["bowl"], rlo, rhi)
         wkt_target = 2 if overs <= 3 else 3
         # team1 = your (bowling) side, team2 = Challenge XI (bats) — AI bats, you bowl.
         match = CricketMatch(pname, "Challenge XI", author.id, None, you_team, opp,
@@ -3313,12 +3370,12 @@ async def start_scenario_match(channel, author, career, mode="bat"):
         match.bowling_first_id = author.id      # you bowl
         match.innings1 = InningsState(opp, you_team)
         match.scenario_wkt_target = wkt_target
-        intro = (f"🎳 **SCENARIO — {title}**  ({overs} overs · BOWLING)\n"
-                 f"🎯 Take **{wkt_target}** wickets vs a strong **Challenge XI**  ·  🏟️ {pitch}\n"
+        intro = (f"🎳 **SCENARIO — {title}**  ({overs} overs · BOWLING · **{dlabel}**)\n"
+                 f"🎯 Take **{wkt_target}** wickets vs a {opp_desc} **Challenge XI**  ·  🏟️ {pitch}\n"
                  f"You bowl every over — pick your deliveries. Strike!")
     else:
         you_team = _scenario_player_team(career, pname)
-        opp = _challenge_attack(eng["bat"])
+        opp = _challenge_attack(eng["bat"], rlo, rhi)
         target = max(overs * 8, round(overs * (9 + max(0, eng["bat"] - 60) / 15.0)))
         match = CricketMatch(pname, "Challenge XI", author.id, None, you_team, opp,
                              format_overs=overs, pitch=pitch, weather="Clear")
@@ -3326,12 +3383,13 @@ async def start_scenario_match(channel, author, career, mode="bat"):
         match.bowling_first_id = None           # AI bowls
         match.innings1 = InningsState(you_team, opp)
         match.scenario_target = target
-        intro = (f"🏏 **SCENARIO — {title}**  ({overs} overs · BATTING)\n"
-                 f"🎯 Chase **{target}** vs a tough **Challenge XI**  ·  🏟️ {pitch}\n"
+        intro = (f"🏏 **SCENARIO — {title}**  ({overs} overs · BATTING · **{dlabel}**)\n"
+                 f"🎯 Chase **{target}** vs a {opp_desc} **Challenge XI**  ·  🏟️ {pitch}\n"
                  f"One innings — ends when you're out, the overs run out, or you reach the target.")
 
     match.is_scenario = True
     match.scenario_mode = mode
+    match.scenario_difficulty = difficulty
     match.scenario_user_id = author.id
     match.scenario_player_name = pname
     match.scenario_title = title
@@ -3357,7 +3415,8 @@ async def handle_scenario_end(interaction_context, match: CricketMatch):
         conceded = ws.runs_conceded if ws else 0
         tgt = match.scenario_wkt_target
         passed = wkts >= tgt
-        coins, capped, remaining = CM.scenario_complete(career, wickets=wkts, passed=passed, mode="bowl")
+        coins, capped, remaining = CM.scenario_complete(career, wickets=wkts, passed=passed, mode="bowl",
+                                                        difficulty=getattr(match, "scenario_difficulty", "medium"))
         line = (f"Challenge XI **{innings.total_runs}/{innings.wickets}** in {ov} ov.\n"
                 f"Your figures: **{wkts}/{conceded}** — needed **{tgt}** wickets.")
         title = (f"✅ SCENARIO CLEARED — {match.scenario_title}!" if passed
@@ -3370,7 +3429,8 @@ async def handle_scenario_end(interaction_context, match: CricketMatch):
         sixes = bs.sixes if bs else 0
         target = match.scenario_target
         passed = innings.total_runs >= target
-        coins, capped, remaining = CM.scenario_complete(career, runs=runs, fours=fours, sixes=sixes, passed=passed, mode="bat")
+        coins, capped, remaining = CM.scenario_complete(career, runs=runs, fours=fours, sixes=sixes, passed=passed, mode="bat",
+                                                        difficulty=getattr(match, "scenario_difficulty", "medium"))
         line = (f"**Team {innings.total_runs}/{innings.wickets}** in {ov} ov (target {target}).\n"
                 f"Your knock: **{runs}** ({balls}b · {fours}×4 · {sixes}×6).")
         title = (f"✅ SCENARIO CLEARED — {match.scenario_title}!" if passed
@@ -3384,11 +3444,32 @@ async def handle_scenario_end(interaction_context, match: CricketMatch):
     await channel.send(embed=e)
 
 
+class _ScenarioDiffSelect(discord.ui.Select):
+    def __init__(self, owner):
+        self._owner = owner                       # NOTE: `parent` is reserved by discord.ui
+        opts = [
+            discord.SelectOption(label="Medium", description="A strong Challenge XI", value="medium", emoji="🟡", default=True),
+            discord.SelectOption(label="Easy", description="A matched, beatable Challenge XI", value="easy", emoji="🟢"),
+            discord.SelectOption(label="Hard", description="An elite Challenge XI", value="hard", emoji="🔴"),
+        ]
+        super().__init__(placeholder="Difficulty: Medium", options=opts, row=0)
+
+    async def callback(self, interaction):
+        self._owner.difficulty = self.values[0]
+        lbl = CM.SCENARIO_DIFFS[self.values[0]]["label"]
+        self.placeholder = f"Difficulty: {lbl}"
+        for o in self.options:
+            o.default = (o.value == self.values[0])
+        await interaction.response.edit_message(view=self._owner)
+
+
 class ScenarioConfirmView(discord.ui.View):
-    """Pick Batting or Bowling and pay the entry fee to launch an interactive scenario."""
+    """Pick difficulty + Batting or Bowling, pay the entry fee, launch an interactive scenario."""
     def __init__(self, user_id):
         super().__init__(timeout=60)
         self.uid = user_id
+        self.difficulty = "medium"
+        self.add_item(_ScenarioDiffSelect(self))
 
     async def interaction_check(self, interaction):
         if interaction.user.id != self.uid:
@@ -3408,18 +3489,21 @@ class ScenarioConfirmView(discord.ui.View):
                 content=f"❌ Not enough coins — entry fee is **{fee}** 🪙 (you have {career['coins']:,}).", view=None)
         career["coins"] -= fee
         CM.async_save_career(career)
-        await interaction.response.edit_message(content=f"🎟️ Entry fee paid (−{fee} 🪙). Starting your **{'bowling' if mode=='bowl' else 'batting'}** scenario…", view=None)
-        await start_scenario_match(interaction.channel, interaction.user, career, mode)
+        dlabel = CM.SCENARIO_DIFFS.get(self.difficulty, CM.SCENARIO_DIFFS["medium"])["label"]
+        await interaction.response.edit_message(
+            content=f"🎟️ Entry fee paid (−{fee} 🪙). Starting your **{dlabel}** "
+                    f"**{'bowling' if mode=='bowl' else 'batting'}** scenario…", view=None)
+        await start_scenario_match(interaction.channel, interaction.user, career, mode, self.difficulty)
 
-    @discord.ui.button(label="Bat", style=discord.ButtonStyle.success, emoji="🏏")
+    @discord.ui.button(label="Bat", style=discord.ButtonStyle.success, emoji="🏏", row=1)
     async def bat(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._start(interaction, "bat")
 
-    @discord.ui.button(label="Bowl", style=discord.ButtonStyle.primary, emoji="🎳")
+    @discord.ui.button(label="Bowl", style=discord.ButtonStyle.primary, emoji="🎳", row=1)
     async def bowl(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._start(interaction, "bowl")
 
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=1)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(content="🚫 Scenario cancelled — no fee charged.", view=None)
 
@@ -3556,13 +3640,122 @@ async def start_club_match(channel, lobby, host):
     # Everyone's an all-rounder, so all can bowl — give each enough overs to cover the
     # innings (ceil(overs / squad)), else short sides run out of bowlers.
     match.bowler_quota = max(1, -(-lobby.overs // len(team1["players"])))
+    match._cap_a_id = cap_a["id"]
+    match._cap_b_id = cap_b["id"]
+    match._club_per_side = lobby.per_side()
     active_games[channel.id] = match
+
+    # Both captains name their team first; the toss starts once both names are in.
+    nview = ClubNameView(match, cap_a, cap_b)
+    nview.message = await channel.send(
+        f"🏟️ **CLUB MATCH** · 🌱 {pitch} · ⏱️ {lobby.overs} overs · {lobby.per_side()}-a-side\n"
+        f"🧢 Captains <@{cap_a['id']}> & <@{cap_b['id']}> — tap **Name Your Team** to begin.\n"
+        f"-# <@{cap_a['id']}>: ⌛   ·   <@{cap_b['id']}>: ⌛",
+        view=nview)
+    await nview.kickoff(channel)
+
+
+def _apply_club_names(match, name_a, name_b):
+    """Rename both club teams and rebuild the name→captain map (_cap_of keys on team name)."""
+    name_a = " ".join(str(name_a or "").split()).strip()[:24] or "Team A"
+    name_b = " ".join(str(name_b or "").split()).strip()[:24] or "Team B"
+    if name_a.lower() == name_b.lower():
+        name_b = (name_b + " B")[:24]
+    match.team1["name"] = name_a
+    match.team2["name"] = name_b
+    match._caps = {name_a: match._cap_a_id, name_b: match._cap_b_id}
+
+
+async def _club_begin_toss(channel, match):
     await channel.send(
-        f"🏟️ **CLUB MATCH — {team1['name']} vs {team2['name']}**\n"
-        f"🌱 Pitch: **{pitch}**  ·  ⏱️ **{lobby.overs} overs**  ·  {lobby.per_side()}-a-side\n"
-        f"🧢 Captains: <@{cap_a['id']}> vs <@{cap_b['id']}>. Each player bats & bowls their own turn.\n"
-        f"🪙 **Toss!** <@{cap_b['id']}>, call the coin:",
+        f"🏟️ **CLUB MATCH — {match.team1['name']} vs {match.team2['name']}**\n"
+        f"🌱 Pitch: **{match.pitch}**  ·  ⏱️ **{match.format_overs} overs**  ·  "
+        f"{getattr(match, '_club_per_side', '')}-a-side\n"
+        f"🧢 Captains: <@{match._cap_a_id}> vs <@{match._cap_b_id}>. Each player bats & bowls their own turn.\n"
+        f"🪙 **Toss!** <@{match._cap_b_id}>, call the coin:",
         view=TossCallView(match))
+
+
+class ClubNameModal(discord.ui.Modal, title="Name Your Team"):
+    tname = discord.ui.TextInput(label="Team Name", placeholder="e.g. Mumbai Strikers",
+                                 min_length=2, max_length=24, required=True)
+
+    def __init__(self, view, uid, default):
+        super().__init__()
+        self._view = view
+        self._uid = uid
+        if default:
+            self.tname.default = str(default)[:24]
+
+    async def on_submit(self, interaction):
+        name = " ".join(str(self.tname.value).split()).strip()[:24] or "XI"
+        await self._view.record(interaction, self._uid, name)
+
+
+class ClubNameView(discord.ui.View):
+    """After `cv startmatch`: both captains name their team, then the toss begins."""
+    def __init__(self, match, cap_a, cap_b):
+        super().__init__(timeout=300)
+        self.match = match
+        self.cap_a_id = cap_a["id"]
+        self.cap_b_id = cap_b["id"]
+        self.default_a = f"{cap_a['name']}'s XI"
+        self.default_b = f"{cap_b['name']}'s XI"
+        self.names = {}
+        self.message = None
+        self.done = False
+        # Bots can't type — auto-name them with the default.
+        if _is_bot_uid(self.cap_a_id): self.names[self.cap_a_id] = self.default_a
+        if _is_bot_uid(self.cap_b_id): self.names[self.cap_b_id] = self.default_b
+
+    async def kickoff(self, channel):
+        if self.cap_a_id in self.names and self.cap_b_id in self.names:
+            await self._finish(channel)     # both captains are bots → straight to toss
+
+    @discord.ui.button(label="🏷️ Name Your Team", style=discord.ButtonStyle.primary)
+    async def name_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        uid = interaction.user.id
+        if uid not in (self.cap_a_id, self.cap_b_id):
+            return await interaction.response.send_message("❌ Only the two captains can name their teams.", ephemeral=True)
+        default = self.default_a if uid == self.cap_a_id else self.default_b
+        await interaction.response.send_modal(ClubNameModal(self, uid, self.names.get(uid, default)))
+
+    async def record(self, interaction, uid, name):
+        self.names[uid] = name
+        await interaction.response.send_message(f"✅ Your team is **{name}**.", ephemeral=True)
+        try:
+            a_mark = f"**{self.names[self.cap_a_id]}**" if self.cap_a_id in self.names else "⌛"
+            b_mark = f"**{self.names[self.cap_b_id]}**" if self.cap_b_id in self.names else "⌛"
+            await self.message.edit(content=(
+                f"🏟️ **CLUB MATCH** — name your teams!\n"
+                f"-# <@{self.cap_a_id}>: {a_mark}   ·   <@{self.cap_b_id}>: {b_mark}"))
+        except Exception:
+            pass
+        if self.cap_a_id in self.names and self.cap_b_id in self.names:
+            await self._finish(self.message.channel if self.message else interaction.channel)
+
+    async def _finish(self, channel):
+        if self.done:
+            return
+        self.done = True
+        self.stop()
+        _apply_club_names(self.match, self.names.get(self.cap_a_id, self.default_a),
+                          self.names.get(self.cap_b_id, self.default_b))
+        try:
+            if self.message:
+                await self.message.edit(view=None)
+        except Exception:
+            pass
+        await _club_begin_toss(channel, self.match)
+
+    async def on_timeout(self):
+        if self.done or not self.message:
+            return
+        try:
+            await self.message.channel.send("⌛ Team-naming timed out — using default names.")
+        except Exception:
+            pass
+        await self._finish(self.message.channel)
 
 
 async def prompt_club_openers(interaction, match):
@@ -4381,7 +4574,7 @@ def render_test_embed(match: TestMatchObj) -> discord.Embed:
         else:
             score_str = " & ".join(_sc(i) for i in team_inns)
 
-        ball   = "<a:ball:1510370830163640320> " if is_batting else ""
+        ball   = "<a:live:1510367738684641463> " if is_batting else ""
         prefix = "### "
         desc  += f"{prefix}{ball}**{tnm}**  {score_str}\n"
 
@@ -7188,7 +7381,7 @@ class PrefixCog(commands.Cog):
             return await ctx.send("❌ Matches are **disabled** in this channel.")
         await start_debut_match(ctx.channel, ctx.author, career)
 
-    @commands.command(name="daily", help="Claim your daily coins (24h).\nUsage: daily")
+    @commands.command(name="daily", aliases=["d"], help="Claim your daily coins (24h).\nUsage: daily  (alias: cv d)")
     async def daily(self, ctx):
         if not _can_use_career(ctx):
             return await ctx.send(_CAREER_SOON)
@@ -7246,11 +7439,12 @@ class PrefixCog(commands.Cog):
                     if capped else f"📊 **{CM.SCENARIO_DAILY_CAP - done}** paid scenarios left today\n")
         e = discord.Embed(
             title="🎯 Play a Scenario?",
-            description=(f"A **difficult** solo challenge vs a strong AI — beat it to **profit**.\n"
+            description=(f"A solo challenge vs an AI Challenge XI — beat it to **profit**.\n"
+                         f"🎚️ **Pick a difficulty** below, then **Bat** or **Bowl**.\n"
                          f"🏏 **Bat:** chase a target before you're out.\n"
                          f"🎳 **Bowl:** take the required wickets in your overs.\n\n"
                          f"🎟️ **Entry fee:** {fee} 🪙   (you have {career['coins']:,})\n"
-                         f"🪙 **Reward:** scaled to your performance — clear it to beat the fee; a poor effort forfeits it.\n"
+                         f"🪙 **Reward:** scaled to your performance & difficulty — clear it to beat the fee; a poor effort forfeits it.\n"
                          f"{cap_line}"
                          f"📜 Feeds your daily quests. *(Scenario stats stay separate from `cv stats`.)*"),
             color=discord.Color.blurple())
@@ -7389,8 +7583,8 @@ class PrefixCog(commands.Cog):
             f"They can now claim `cv weekly` & `cv monthly`.")
 
     # ===================== CAREER CLUB MATCHES (Phase 4) =====================
-    @commands.command(name="create_match", aliases=["creatematch", "cmatch", "hostmatch"],
-                      help="Create a club-match lobby (PvP).\nUsage: create_match [overs]")
+    @commands.command(name="create_match", aliases=["creatematch", "cmatch", "hostmatch", "cm"],
+                      help="Create a club-match lobby (PvP).\nUsage: create_match [overs]  (alias: cv cm)")
     async def create_match(self, ctx, overs: int = career_match.DEFAULT_OVERS if _CAREER_OK else 5):
         if not _can_use_career(ctx):
             return await ctx.send(_CAREER_SOON)
@@ -7407,8 +7601,8 @@ class PrefixCog(commands.Cog):
         career_match.LOBBIES[ctx.channel.id] = lobby
         await ctx.send(embed=_lobby_embed(lobby, "🏟️ Club Match — Lobby Open!"))
 
-    @commands.command(name="joinmatch", aliases=["jm", "joinclub"],
-                      help="Join the club-match lobby in this channel.\nUsage: joinmatch")
+    @commands.command(name="joinmatch", aliases=["jm", "joinclub", "j", "join"],
+                      help="Join the club-match lobby in this channel.\nUsage: joinmatch  (alias: cv j)")
     async def joinmatch(self, ctx):
         if not _can_use_career(ctx):
             return await ctx.send(_CAREER_SOON)
@@ -7426,8 +7620,8 @@ class PrefixCog(commands.Cog):
                                   else "❌ The lobby is full (22 players max).")
         await ctx.send(embed=_lobby_embed(lobby, f"✅ {career['username']} joined the lobby!"))
 
-    @commands.command(name="leavematch", aliases=["leaveclub"],
-                      help="Leave the club-match lobby.\nUsage: leavematch")
+    @commands.command(name="leavematch", aliases=["leaveclub", "lm", "leave"],
+                      help="Leave the club-match lobby.\nUsage: leavematch  (alias: cv lm)")
     async def leavematch(self, ctx):
         if not _can_use_career(ctx):
             return await ctx.send(_CAREER_SOON)
@@ -7444,8 +7638,8 @@ class PrefixCog(commands.Cog):
             return await ctx.send("❌ You're not in this lobby.")
         await ctx.send(embed=_lobby_embed(lobby, f"👋 {ctx.author.display_name} left the lobby."))
 
-    @commands.command(name="lobby", aliases=["viewmatch", "mlobby"],
-                      help="Show the current club-match lobby.\nUsage: lobby")
+    @commands.command(name="lobby", aliases=["viewmatch", "mlobby", "l"],
+                      help="Show the current club-match lobby.\nUsage: lobby  (alias: cv l)")
     async def lobby_view(self, ctx):
         if not _can_use_career(ctx):
             return await ctx.send(_CAREER_SOON)
@@ -7454,8 +7648,8 @@ class PrefixCog(commands.Cog):
             return await ctx.send("❌ No lobby here. Create one with `cv create_match`.")
         await ctx.send(embed=_lobby_embed(lobby, "🏟️ Club Match — Lobby"))
 
-    @commands.command(name="addbot", aliases=["addai"],
-                      help="Add an AI bot (avg of joined players) to the lobby (host).\nUsage: addbot")
+    @commands.command(name="addbot", aliases=["addai", "ab", "bot"],
+                      help="Add an AI bot (avg of joined players) to the lobby (host).\nUsage: addbot  (alias: cv ab)")
     async def addbot(self, ctx):
         if not _can_use_career(ctx):
             return await ctx.send(_CAREER_SOON)
@@ -7472,8 +7666,8 @@ class PrefixCog(commands.Cog):
             return await ctx.send("❌ The lobby is full (22 max)." if info == "full" else f"❌ {info}")
         await ctx.send(embed=_lobby_embed(lobby, f"🤖 **{info}** added (avg of joined players)"))
 
-    @commands.command(name="swap", aliases=["swapplayer"],
-                      help="Swap two players by their lobby number (host).\nUsage: swap <num1> <num2>")
+    @commands.command(name="swap", aliases=["swapplayer", "sw"],
+                      help="Swap two players by their lobby number (host).\nUsage: swap <num1> <num2>  (alias: cv sw)")
     async def swap(self, ctx, a: int = None, b: int = None):
         if not _can_use_career(ctx):
             return await ctx.send(_CAREER_SOON)
@@ -7492,8 +7686,8 @@ class PrefixCog(commands.Cog):
             return await ctx.send(f"❌ {err}")
         await ctx.send(embed=_lobby_embed(lobby, f"🔁 Swapped #{a} ↔ #{b}"))
 
-    @commands.command(name="cancelmatch", aliases=["endlobby"],
-                      help="Cancel the club-match lobby (host/admin).\nUsage: cancelmatch")
+    @commands.command(name="cancelmatch", aliases=["endlobby", "cancel"],
+                      help="Cancel the club-match lobby (host/admin).\nUsage: cancelmatch  (alias: cv cancel)")
     async def cancelmatch(self, ctx):
         if not _can_use_career(ctx):
             return await ctx.send(_CAREER_SOON)
@@ -7506,8 +7700,8 @@ class PrefixCog(commands.Cog):
         career_match.LOBBIES.pop(ctx.channel.id, None)
         await ctx.send("🛑 Club-match lobby cancelled.")
 
-    @commands.command(name="startmatch", aliases=["beginmatch"],
-                      help="Start the club match — locks the teams (host).\nUsage: startmatch")
+    @commands.command(name="startmatch", aliases=["beginmatch", "sm"],
+                      help="Start the club match — locks the teams (host).\nUsage: startmatch  (alias: cv sm)")
     async def startmatch(self, ctx):
         if not _can_use_career(ctx):
             return await ctx.send(_CAREER_SOON)

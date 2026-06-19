@@ -630,20 +630,24 @@ def execute_ball_math_t20(match):
         if striker["archetype"] == "Aggressor":
             boundary_weight *= 1.2; wicket_weight *= 1.15
         elif striker["archetype"] == "Anchor":
+            # Safety is BOUGHT with tempo: while building he's slow (more dots, few
+            # boundaries) AND very hard to dislodge; once set he opens up; set + a rising
+            # ask, he explodes with control. The run gap mirrors the wicket gap at each stage.
             if _set and _lift:
-                boundary_weight *= 1.30; wicket_weight *= 0.90   # set anchor cuts loose as the RRR rises — finds gaps, stays secure
+                boundary_weight *= 1.30; wicket_weight *= 0.96   # cuts loose — finds gaps, stays secure
             elif _set:
-                boundary_weight *= 1.12; wicket_weight *= 0.85    # set anchor keeps the score ticking, not blocking
+                boundary_weight *= 1.12; wicket_weight *= 0.86    # keeps the score ticking, not blocking
             else:
-                dot_weight *= 1.10; wicket_weight *= 0.72          # still playing himself in
+                dot_weight *= 1.16; boundary_weight *= 0.82; wicket_weight *= 0.76   # still playing himself in
         elif striker["archetype"] == "Standard":
-            # The common middle-ground: more positive than an Anchor, safer than an Aggressor.
+            # The middle-ground: scores a touch quicker than the Anchor but is a touch
+            # less secure at EVERY stage — the difference shows up in runs AND in risk.
             if _set and _lift:
-                boundary_weight *= 1.20; wicket_weight *= 1.08
+                boundary_weight *= 1.20; wicket_weight *= 1.06
             elif _set:
-                boundary_weight *= 1.06
+                boundary_weight *= 1.08; wicket_weight *= 0.95
             else:
-                dot_weight *= 1.05; wicket_weight *= 0.88
+                dot_weight *= 1.04; boundary_weight *= 0.94; wicket_weight *= 0.86
         elif striker["archetype"] == "Finisher" and is_death_overs:
             boundary_weight *= 1.3
 

@@ -468,19 +468,30 @@ def quest_status(career):
 SCENARIO_DAILY_CAP = 6   # paid scenarios per day; extras still feed quests, pay 0
 SCENARIO_ENTRY_FEE = 10  # coins to enter a scenario (skill bet — beat it to profit)
 
+# Difficulty tiers. `rlo`/`rhi` = how many rating points ABOVE the player the Challenge XI
+# is (Easy = same rating as you). `mult` scales the performance coins; `pass_bonus` is the
+# clear bonus — Easy's clear bonus is deliberately > the entry fee so beating Easy profits.
+SCENARIO_DIFFS = {
+    "easy":   {"label": "Easy",   "rlo": 0, "rhi": 0, "mult": 0.8, "pass_bonus": 14},
+    "medium": {"label": "Medium", "rlo": 4, "rhi": 6, "mult": 1.0, "pass_bonus": 22},
+    "hard":   {"label": "Hard",   "rlo": 7, "rhi": 9, "mult": 1.7, "pass_bonus": 40},
+}
+
 
 def scenarios_done_today(career):
     return _ensure_quests(career)["progress"].get("scenarios", 0)
 
 
-def scenario_complete(career, runs=0, fours=0, sixes=0, wickets=0, passed=False, mode="bat"):
+def scenario_complete(career, runs=0, fours=0, sixes=0, wickets=0, passed=False, mode="bat", difficulty="medium"):
     """Settle a finished interactive scenario (batting OR bowling). Reward is tied to
-    PERFORMANCE — no flat freebie, so a poor loss pays ~0 and you forfeit the entry
-    fee. Stats are SEPARATE from cv stats; quests are fed. Returns (coins, capped, left)."""
+    PERFORMANCE and DIFFICULTY — no flat freebie, so a poor loss pays ~0 and you forfeit
+    the entry fee. Stats are SEPARATE from cv stats; quests are fed. Returns (coins, capped, left)."""
     done = scenarios_done_today(career)
     capped = done >= SCENARIO_DAILY_CAP
+    d = SCENARIO_DIFFS.get(difficulty, SCENARIO_DIFFS["medium"])
     perf = (wickets * 6) if mode == "bowl" else (runs // 5)
-    coins = 0 if capped else max(0, int(perf + (16 if passed else 0)))
+    raw  = perf * d["mult"] + (d["pass_bonus"] if passed else 0)
+    coins = 0 if capped else max(0, int(round(raw)))
     if coins:
         career["coins"] += coins
 
