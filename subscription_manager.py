@@ -1,5 +1,6 @@
 import os
 import re
+import copy
 import datetime
 import certifi
 from threading import Thread
@@ -115,13 +116,16 @@ def save_data_to_bin():
         print(f"❌ MongoDB Save Error: {e}")
         return False
 
-def save_tournament_data_to_bin():
+def save_tournament_data_to_bin(snapshot=None):
     if not MONGO_URI:
         return None
     try:
+        # Serialize a point-in-time snapshot (taken on the caller's thread) so the
+        # background writer never encodes a dict the event loop is mutating mid-save.
+        data = snapshot if snapshot is not None else copy.deepcopy(DB_CACHE["tournaments"])
         _get_db()["tournaments"].replace_one(
             {"_id": "tournament_data"},
-            {"_id": "tournament_data", "tournaments": DB_CACHE["tournaments"]},
+            {"_id": "tournament_data", "tournaments": data},
             upsert=True
         )
         print("✅ MongoDB Save OK (tournaments)")
@@ -134,7 +138,11 @@ def async_save_to_bin():
     Thread(target=save_data_to_bin).start()
 
 def async_save_tournament_to_bin():
-    Thread(target=save_tournament_data_to_bin).start()
+    # Deep-copy on THIS (event-loop) thread to capture a consistent snapshot, then hand
+    # the immutable copy to the background writer. Prevents "dict changed size during
+    # iteration" / lost updates when several tournament matches finish near-simultaneously.
+    snapshot = copy.deepcopy(DB_CACHE.get("tournaments", []))
+    Thread(target=save_tournament_data_to_bin, args=(snapshot,)).start()
 
 def get_today_str():
     return datetime.date.today().isoformat()

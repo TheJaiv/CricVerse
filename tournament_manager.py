@@ -582,7 +582,11 @@ def _build_status_embed(tourney, page_info):
             t2b = f"**{m['team2']}**" if w == m["team2"] else m["team2"]
             lines.append(f"`#{m['match_id']}` {tag}{t1b} {r['t1_runs']}/{r['t1_wickets']} vs {t2b} {r['t2_runs']}/{r['t2_wickets']} ✅")
         else:
-            lines.append(f"`#{m['match_id']}` {tag}{m['team1']} vs {m['team2']} ⏳")
+            # ACL playoff slots may be unresolved (None) — show their TBD source label
+            a = m.get("team1") or f"*{m.get('team1_src', 'TBD')}*"
+            b = m.get("team2") or f"*{m.get('team2_src', 'TBD')}*"
+            icon = "🔒" if m["status"] == "locked" else "⏳"
+            lines.append(f"`#{m['match_id']}` {tag}{a} vs {b} {icon}")
     # Split into multiple fields if content exceeds Discord's 1024-char limit
     chunks, current = [], []
     current_len = 0
@@ -611,8 +615,10 @@ def _build_status_embed(tourney, page_info):
             embed.add_field(name=label, value="\n".join(rows), inline=False)
 
     pending = sum(1 for m in matches if m["status"] == "pending")
-    done = len(matches) - pending
-    embed.set_footer(text=f"✅ {done} completed  ·  ⏳ {pending} remaining  ·  {tourney.get('format_overs', 20)} overs")
+    done = sum(1 for m in matches if m["status"] == "completed")
+    locked = sum(1 for m in matches if m["status"] == "locked")
+    foot = f"✅ {done} completed  ·  ⏳ {pending} ready" + (f"  ·  🔒 {locked} locked" if locked else "") + f"  ·  {tourney.get('format_overs', 20)} overs"
+    embed.set_footer(text=foot)
     return embed
 
 
@@ -717,6 +723,299 @@ class T20StandingsView(discord.ui.View):
             attachments=[discord.File(fp=buf, filename=fname)], view=self)
 
 
+# ══════════════════════════════════════════════════════════════════════════
+#  ACL — Akatsuki Cricket League: playoff + Super Cup engine
+#  League (91) → Top-6 Playoffs (6 matches) → Akatsuki Super Cup.
+#  Structure note: the moment the league ends, the #1 (League Shield) is
+#  already locked into the Super Cup — so the Super Cup is created up front
+#  with one finalist known and the other (ACL Trophy Winner) as TBD.
+# ══════════════════════════════════════════════════════════════════════════
+ACL_PLAYOFF_STAGE  = "acl_playoff"
+ACL_SUPERCUP_STAGE = "acl_supercup"
+ACL_KO_STAGES      = (ACL_PLAYOFF_STAGE, ACL_SUPERCUP_STAGE)
+# Logical render order of the bracket rounds
+ACL_PLAYOFF_ORDER  = ["Qualifier", "Eliminator 1", "Eliminator 2", "Eliminator Final", "Semi-Final", "Grand Final"]
+
+
+def _acl_next_mid(tourney):
+    """Next contiguous match_id (preserves the id == schedule-index+1 invariant)."""
+    return max((m["match_id"] for m in tourney.get("schedule", [])), default=0) + 1
+
+
+def _acl_get(tourney, round_name):
+    return next((m for m in tourney.get("schedule", [])
+                 if m.get("stage") in ACL_KO_STAGES and m.get("round") == round_name), None)
+
+
+def _acl_winner_loser(m):
+    """(winner, loser) team names for a completed knockout match, else (None, None)."""
+    if not m or m.get("status") != "completed":
+        return None, None
+    res = m.get("result") or {}
+    w = res.get("winner")
+    if not w or w == "TIE":
+        return None, None
+    l = res.get("loser") or (m["team2"] if w == m["team1"] else m["team1"])
+    return w, l
+
+
+def _acl_fill(m, slot, team):
+    """Fill a TBD slot on a locked match; flip it to 'pending' once both teams are known."""
+    if not m or not team:
+        return
+    if m.get(slot) is None:
+        m[slot] = team
+    if m.get("team1") and m.get("team2") and m.get("status") == "locked":
+        m["status"] = "pending"
+
+
+def acl_generate_playoffs(tourney):
+    """Build the Top-6 playoff bracket + Super Cup. Returns (ok: bool, message: str).
+    Idempotent: refuses if already generated or the league isn't finished."""
+    if tourney.get("tournament_type") != "acl":
+        return False, "This isn't an ACL tournament."
+    league = [m for m in tourney.get("schedule", []) if m.get("stage") == "league"]
+    if not league:
+        return False, "No league schedule found. Start the tournament first."
+    remaining = sum(1 for m in league if m.get("status") != "completed")
+    if remaining:
+        return False, f"❌ Cannot start the Playoffs yet — **{remaining}** league match(es) still pending."
+    if any(m.get("stage") in ACL_KO_STAGES for m in tourney["schedule"]):
+        return False, "❌ ACL Playoffs have already been generated."
+
+    standings = get_tournament_standings(tourney)
+    seeds = [n for n, _ in standings if n != "BYE"]
+    if len(seeds) < 6:
+        return False, "❌ Need at least 6 teams to run the Playoffs."
+    s1, s2, s3, s4, s5, s6 = seeds[:6]
+    tourney["league_shield"] = s1            # #1 → direct Super Cup spot
+    tourney["playoff_seeds"] = seeds[:6]
+
+    mid = _acl_next_mid(tourney)
+    def mk(rnd, stage, t1, t2, t1s, t2s, status):
+        nonlocal mid
+        tourney["schedule"].append({
+            "match_id": mid, "round": rnd, "stage": stage,
+            "team1": t1, "team2": t2, "team1_src": t1s, "team2_src": t2s,
+            "status": status, "result": None,
+        })
+        mid += 1
+
+    # Round 1 — teams known, ready to play (any order / in parallel)
+    mk("Qualifier",        ACL_PLAYOFF_STAGE,  s1, s2,   "1st · League", "2nd · League", "pending")
+    mk("Eliminator 1",     ACL_PLAYOFF_STAGE,  s3, s6,   "3rd · League", "6th · League", "pending")
+    mk("Eliminator 2",     ACL_PLAYOFF_STAGE,  s4, s5,   "4th · League", "5th · League", "pending")
+    # Knockouts — locked until feeders resolve
+    mk("Eliminator Final", ACL_PLAYOFF_STAGE,  None, None, "Winner · Eliminator 1", "Winner · Eliminator 2", "locked")
+    mk("Semi-Final",       ACL_PLAYOFF_STAGE,  None, None, "Loser · Qualifier",     "Winner · Eliminator Final", "locked")
+    mk("Grand Final",      ACL_PLAYOFF_STAGE,  None, None, "Winner · Qualifier",    "Winner · Semi-Final", "locked")
+    # Super Cup apex — Shield finalist locked in already; opponent = ACL Trophy Winner (TBD)
+    mk("Super Cup",        ACL_SUPERCUP_STAGE, s1, None,  "League Shield",          "ACL Trophy Winner", "locked")
+
+    save_tournament(tourney)
+    return True, "ok"
+
+
+def _acl_try_advance(tourney):
+    """Resolve TBD slots as feeder matches complete; branch the Super Cup on a Domestic Double.
+    Safe to call after every match completion (idempotent)."""
+    if tourney.get("tournament_type") != "acl":
+        return
+    q  = _acl_get(tourney, "Qualifier")
+    if not q:
+        return  # playoffs not generated yet
+    e1 = _acl_get(tourney, "Eliminator 1")
+    e2 = _acl_get(tourney, "Eliminator 2")
+    ef = _acl_get(tourney, "Eliminator Final")
+    sf = _acl_get(tourney, "Semi-Final")
+    gf = _acl_get(tourney, "Grand Final")
+    sc = _acl_get(tourney, "Super Cup")
+
+    # Qualifier → winner to Grand Final, loser to Semi-Final
+    qw, ql = _acl_winner_loser(q)
+    if qw:
+        _acl_fill(gf, "team1", qw)
+        _acl_fill(sf, "team1", ql)
+    # Eliminators → Eliminator Final
+    e1w, _ = _acl_winner_loser(e1)
+    e2w, _ = _acl_winner_loser(e2)
+    if e1w: _acl_fill(ef, "team1", e1w)
+    if e2w: _acl_fill(ef, "team2", e2w)
+    # Eliminator Final → Semi-Final (slot 2)
+    efw, _ = _acl_winner_loser(ef)
+    if efw: _acl_fill(sf, "team2", efw)
+    # Semi-Final → Grand Final (slot 2)
+    sfw, _ = _acl_winner_loser(sf)
+    if sfw: _acl_fill(gf, "team2", sfw)
+
+    # Grand Final → ACL Trophy Winner, then Super Cup branch
+    trophy, runner_up = _acl_winner_loser(gf)
+    if trophy:
+        tourney["acl_trophy_winner"] = trophy
+        tourney["acl_runner_up"] = runner_up
+        shield = tourney.get("league_shield")
+        slq = _acl_get(tourney, "Super League Qualifier")
+        if trophy == shield:
+            # DOMESTIC DOUBLE → Super League Qualifier decides the Super Cup challenger
+            if not slq:
+                seeds = tourney.get("playoff_seeds", [])
+                second = seeds[1] if len(seeds) > 1 else None
+                # if #2 league team IS the playoffs runner-up, fall back to #3
+                entrant = second if (second and second != runner_up) else (seeds[2] if len(seeds) > 2 else None)
+                tourney["schedule"].append({
+                    "match_id": _acl_next_mid(tourney), "round": "Super League Qualifier",
+                    "stage": ACL_SUPERCUP_STAGE, "team1": entrant, "team2": runner_up,
+                    "team1_src": "2nd · League", "team2_src": "Playoffs Runner-Up",
+                    "status": "pending" if (entrant and runner_up) else "locked", "result": None,
+                })
+                if sc:
+                    sc["team2_src"] = "Winner · Super League Qualifier"
+        else:
+            _acl_fill(sc, "team2", trophy)
+
+    # Super League Qualifier → Super Cup challenger
+    slqw, _ = _acl_winner_loser(_acl_get(tourney, "Super League Qualifier"))
+    if slqw:
+        _acl_fill(sc, "team2", slqw)
+
+    # Super Cup complete → crown the champion
+    champ, _ = _acl_winner_loser(sc)
+    if champ:
+        tourney["acl_champion"] = champ
+        if tourney.get("status") != "completed":
+            tourney["status"] = "completed"
+
+
+def _acl_side(m, slot):
+    """Display string for one side of a bracket match: team name if known, else its TBD source."""
+    team = m.get(slot)
+    if team:
+        return team
+    return f"*{m.get(slot + '_src', 'TBD')}*"
+
+
+def _acl_match_line(m):
+    icon = {"locked": "🔒", "pending": "🟢", "completed": "✅"}.get(m.get("status"), "•")
+    a, b = _acl_side(m, "team1"), _acl_side(m, "team2")
+    line = f"{icon} **{m['round']}**  ·  #{m['match_id']}\n    {a}  🆚  {b}"
+    if m.get("status") == "completed" and m.get("result"):
+        line += f"  →  🏆 **{m['result']['winner']}**"
+    return line
+
+
+def acl_bracket_embed(tourney):
+    """One combined view: Super Cup apex (Shield finalist already in) + the full playoff tree."""
+    shield = tourney.get("league_shield")
+    champ  = tourney.get("acl_champion")
+    color  = discord.Color.from_rgb(200, 30, 40)
+    title  = f"🔴 {tourney.get('name', 'ACL')} — Road to the Super Cup"
+    e = discord.Embed(title=title, color=color)
+
+    sc  = _acl_get(tourney, "Super Cup")
+    slq = _acl_get(tourney, "Super League Qualifier")
+
+    # Apex: the Super Cup
+    if sc:
+        apex = _acl_match_line(sc)
+        if slq:
+            apex += "\n\n🔥 *Domestic Double!* — challenger decided by the Super League Qualifier:\n" + _acl_match_line(slq)
+        e.add_field(name="👑 AKATSUKI SUPER CUP", value=apex, inline=False)
+
+    if shield:
+        e.description = f"🛡️ **League Shield:** {shield}  ·  *direct Super Cup finalist*" + (
+            f"\n🏆 **ACL Champion:** {champ}" if champ else "")
+
+    # Playoff tree
+    r1 = [_acl_get(tourney, r) for r in ["Qualifier", "Eliminator 1", "Eliminator 2"]]
+    r2 = [_acl_get(tourney, r) for r in ["Eliminator Final", "Semi-Final", "Grand Final"]]
+    if any(r1):
+        e.add_field(name="🏏 Playoffs — Openers", value="\n".join(_acl_match_line(m) for m in r1 if m), inline=False)
+    if any(r2):
+        e.add_field(name="🏆 Playoffs — Knockouts → ACL Trophy",
+                    value="\n".join(_acl_match_line(m) for m in r2 if m), inline=False)
+
+    e.set_footer(text="🔒 locked (awaiting feeders) · 🟢 ready to play · ✅ done")
+    return e
+
+
+# ── Fixtures & owner-launch (shared by slash + prefix) ───────────────────────
+def _tm_round_label(m):
+    rnd = m.get("round")
+    if isinstance(rnd, int):
+        return f"Round {rnd}"
+    return str(rnd) if rnd else "Match"
+
+
+def match_owner_ids(tourney, match):
+    """Owner user-ids (as strings) of the two teams currently in a scheduled match."""
+    ids = set()
+    for tname in (match.get("team1"), match.get("team2")):
+        if not tname:
+            continue
+        tm = next((t for t in tourney.get("teams", []) if t["name"] == tname), None)
+        if tm and tm.get("owner_id"):
+            ids.add(str(tm["owner_id"]))
+    return ids
+
+
+def owner_can_launch(tourney, match, user_id, is_manager=False):
+    """A match may be launched by a manager (any match) or by an owner of either team in it."""
+    return bool(is_manager) or str(user_id) in match_owner_ids(tourney, match)
+
+
+def build_team_fixtures_embed(tourney, team_name):
+    """Embed of one team's fixtures: Upcoming (with launchable hint) + Results."""
+    sched = tourney.get("schedule", [])
+    mine = [m for m in sched if m.get("team1") == team_name or m.get("team2") == team_name]
+    is_acl = tourney.get("tournament_type") == "acl"
+    color = discord.Color.from_rgb(200, 30, 40) if is_acl else discord.Color.blurple()
+    e = discord.Embed(title=f"📋 {team_name} — Fixtures", color=color)
+
+    upcoming, results = [], []
+    won = lost = tied = 0
+    for m in sched:
+        if m.get("team1") != team_name and m.get("team2") != team_name:
+            continue
+        is_t1 = (m.get("team1") == team_name)
+        opp = m.get("team2") if is_t1 else m.get("team1")
+        opp_src = (m.get("team2_src") if is_t1 else m.get("team1_src"))
+        rlabel = _tm_round_label(m)
+        if m["status"] == "completed" and m.get("result"):
+            r = m["result"]; w = r.get("winner")
+            if is_t1:
+                my_r, my_w, op_r, op_w = r["t1_runs"], r["t1_wickets"], r["t2_runs"], r["t2_wickets"]
+            else:
+                my_r, my_w, op_r, op_w = r["t2_runs"], r["t2_wickets"], r["t1_runs"], r["t1_wickets"]
+            if w == "TIE": outcome = "🟰 Tie"; tied += 1
+            elif w == team_name: outcome = "✅ Won"; won += 1
+            else: outcome = "❌ Lost"; lost += 1
+            results.append(f"`#{m['match_id']}` {rlabel} · vs **{opp}**  {my_r}/{my_w} : {op_r}/{op_w}  {outcome}")
+        elif m["status"] == "locked":
+            upcoming.append(f"`#{m['match_id']}` {rlabel} · vs *{opp_src or 'TBD'}*  🔒 awaiting earlier results")
+        else:  # pending → launchable
+            upcoming.append(f"`#{m['match_id']}` {rlabel} · vs **{opp}**  🟢 ready — `cvt play {m['match_id']}`")
+
+    def _add(title, lines):
+        if not lines:
+            return
+        chunk, cur = [], 0
+        first = True
+        for ln in lines:
+            if cur + len(ln) + 1 > 1000 and chunk:
+                e.add_field(name=title if first else "​", value="\n".join(chunk), inline=False)
+                chunk, cur, first = [], 0, False
+            chunk.append(ln); cur += len(ln) + 1
+        if chunk:
+            e.add_field(name=title if first else "​", value="\n".join(chunk), inline=False)
+
+    _add(f"🟢 Upcoming ({len(upcoming)})", upcoming or ["—"])
+    _add(f"📕 Results ({won}W·{lost}L{'·' + str(tied) + 'T' if tied else ''})", results)
+    if not mine:
+        e.description = "No fixtures yet for this team."
+    e.set_footer(text="Owners can launch any of their own 🟢 matches with  cvt play <id>")
+    return e
+
+
 class TournamentCog(commands.GroupCog, group_name="tournament"):
     def __init__(self, bot):
         self.bot = bot
@@ -736,6 +1035,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
     @app_commands.choices(event_type=[
         app_commands.Choice(name="Round Robin", value="round_robin"),
         app_commands.Choice(name="T20 World Cup (4 Groups → Super 8 → Final)", value="t20_world_cup"),
+        app_commands.Choice(name="ACL (14 Teams → League → Playoffs → Super Cup)", value="acl"),
     ])
     async def create(self, interaction: discord.Interaction, name: str, format: app_commands.Choice[str], event_type: app_commands.Choice[str] = None, min_squad: int = 11, max_squad: int = 15, impact_player: bool = False, injuries: bool = False, custom_overs: int = None):
         if not interaction.user.guild_permissions.administrator and interaction.user.id != 1087369198801526836:
@@ -759,7 +1059,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         if max_squad < min_squad: return await interaction.response.send_message("❌ Max squad size cannot be less than Min squad size.", ephemeral=True)
 
         t_type = event_type.value if event_type else "round_robin"
-        type_label = "T20 World Cup" if t_type == "t20_world_cup" else "Round Robin"
+        type_label = {"t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League"}.get(t_type, "Round Robin")
 
         t_data = {
             "server_id": server_id,
@@ -779,7 +1079,11 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         }
         save_tournament(t_data)
 
-        extra = "\n⚠️ **T20 World Cup requires exactly 16 teams (4 groups of 4). Assign each team a group (A/B/C/D) when using `/tournament add_team`.**" if t_type == "t20_world_cup" else ""
+        extra = ""
+        if t_type == "t20_world_cup":
+            extra = "\n⚠️ **T20 World Cup requires exactly 16 teams (4 groups of 4). Assign each team a group (A/B/C/D) when using `/tournament add_team`.**"
+        elif t_type == "acl":
+            extra = "\n🔴 **ACL requires exactly 14 teams.** Each plays every other once (91 league matches) → Top 6 Playoffs → Super Cup. No groups needed — just `/tournament add_team` for all 14."
         await interaction.response.send_message(
             f"🏆 **Tournament Created:** `{name}`  ·  {type_label}\nYou have been automatically assigned as a Manager.\nUse `/tournament add_manager` or `/tournament add_team` to get started!{extra}"
         )
@@ -844,54 +1148,8 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         save_tournament(tourney)
         await interaction.response.send_message(f"✅ Team **{team_name}** has been successfully removed from the tournament.")
 
-    @app_commands.command(name="transfer_team", description="[MANAGER] Transfer ownership of a team to a new Discord user.")
-    async def transfer_team(self, interaction: discord.Interaction, team_name: str, new_owner: discord.Member):
-        server_id = str(interaction.guild.id)
-        tourney = get_server_tournament(server_id)
-        if not tourney:
-            return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
-        if not self.is_manager(interaction, tourney):
-            return await interaction.response.send_message("❌ Managers only.", ephemeral=True)
-        team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.lower()), None)
-        if not team:
-            return await interaction.response.send_message(f"❌ Team **{team_name}** not found.", ephemeral=True)
-        if str(new_owner.id) == team.get("owner_id"):
-            return await interaction.response.send_message(f"❌ {new_owner.mention} already owns **{team['name']}**.", ephemeral=True)
-        old_owner_id = team.get("owner_id")
-        team["owner_id"] = str(new_owner.id)
-        save_tournament(tourney)
-        old_mention = f"<@{old_owner_id}>" if old_owner_id else "*(no previous owner)*"
-        await interaction.response.send_message(
-            f"✅ **{team['name']}** ownership transferred from {old_mention} → {new_owner.mention}."
-        )
-
-    @app_commands.command(name="replace_player", description="[MANAGER] Replace a player in a team's squad.")
-    async def replace_player(self, interaction: discord.Interaction, team_name: str, out_player: str, in_player: str):
-        server_id = str(interaction.guild.id)
-        tourney = get_server_tournament(server_id)
-        if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
-        if not self.is_manager(interaction, tourney): return await interaction.response.send_message("❌ Managers only.", ephemeral=True)
-        team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.lower()), None)
-        if not team: return await interaction.response.send_message(f"❌ Team '{team_name}' not found.", ephemeral=True)
-        if not team.get("squad"):
-            return await interaction.response.send_message(f"❌ Team '{team_name}' has no squad submitted yet.", ephemeral=True)
-        old_p = next((p for p in team["squad"] if p["name"].lower() == out_player.lower()), None)
-        if not old_p:
-            close = difflib.get_close_matches(out_player, [p["name"] for p in team["squad"]], n=1, cutoff=0.5)
-            if close: old_p = next(p for p in team["squad"] if p["name"] == close[0])
-            else: return await interaction.response.send_message(f"❌ Player '{out_player}' not found in team '{team_name}'.", ephemeral=True)
-        db_players = get_all_players()
-        new_p = next((p for p in db_players if p["name"].lower() == in_player.lower()), None)
-        if not new_p:
-            close = difflib.get_close_matches(in_player, [p["name"] for p in db_players], n=1, cutoff=0.6)
-            if close: new_p = next(p for p in db_players if p["name"] == close[0])
-            else: return await interaction.response.send_message(f"❌ Player '{in_player}' not found in the global database.", ephemeral=True)
-        if any(p["name"] == new_p["name"] for p in team["squad"]):
-            return await interaction.response.send_message(f"❌ '{new_p['name']}' is already in the squad.", ephemeral=True)
-        idx = team["squad"].index(old_p)
-        team["squad"][idx] = new_p
-        save_tournament(tourney)
-        await interaction.response.send_message(f"✅ **Squad Updated for {team['name']}:**\n🔴 OUT: {old_p['name']}\n🟢 IN: {new_p['name']}")
+    # NOTE: transfer_team & replace_player are prefix-only (cvt transfer_team / cvt replace_player)
+    # to stay under Discord's 25-subcommand limit on the /tournament group.
 
     @app_commands.command(name="submit_squad", description="[OWNER/MANAGER] Submit a tournament squad (15 players).")
     async def submit_squad(self, interaction: discord.Interaction, team_name: str = None):
@@ -955,7 +1213,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         # Registration phase — no schedule yet
         if tourney["status"] == "registration":
             t_type = tourney.get("tournament_type", "round_robin")
-            type_label = "T20 World Cup" if t_type == "t20_world_cup" else "Round Robin"
+            type_label = {"t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League"}.get(t_type, "Round Robin")
             embed = discord.Embed(title=f"🏆 {tourney['name']}", color=discord.Color.gold())
             embed.description = f"📝 **Registration Phase** · {type_label}"
             team_lines = []
@@ -1000,6 +1258,8 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
 
         if tourney.get("tournament_type") == "t20_world_cup":
             return await interaction.response.send_message("❌ This is a T20 World Cup tournament. Use `/tournament generate_super8` instead.", ephemeral=True)
+        if tourney.get("tournament_type") == "acl":
+            return await interaction.response.send_message("❌ This is an ACL tournament. Use `/tournament generate_playoffs` instead.", ephemeral=True)
 
         gs_matches = [m for m in tourney["schedule"] if isinstance(m.get("round"), int)]
         if any(m["status"] == "pending" for m in gs_matches):
@@ -1026,7 +1286,8 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         if not self.is_manager(interaction, tourney): return await interaction.response.send_message("❌ Managers only.", ephemeral=True)
         if tourney["status"] != "active": return await interaction.response.send_message("❌ Tournament is not active.", ephemeral=True)
         if tourney.get("tournament_type") != "t20_world_cup":
-            return await interaction.response.send_message("❌ This command is for T20 World Cup tournaments only. Use `/tournament generate_knockouts` for Round Robin.", ephemeral=True)
+            alt = "generate_playoffs" if tourney.get("tournament_type") == "acl" else "generate_knockouts"
+            return await interaction.response.send_message(f"❌ This command is for T20 World Cup tournaments only. Use `/tournament {alt}` for this event.", ephemeral=True)
 
         group_matches = [m for m in tourney["schedule"] if m.get("stage") == "group"]
         if any(m["status"] == "pending" for m in group_matches):
@@ -1076,28 +1337,37 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             f"Use `/tournament play_next` to begin!"
         )
 
-    @app_commands.command(name="force_delete", description="[OWNER] Forcefully delete a server's tournament.")
-    async def force_delete(self, interaction: discord.Interaction):
-        if interaction.user.id != 1087369198801526836:
-            return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
-        server_id = str(interaction.guild.id)
-        if not get_server_tournament(server_id):
-            return await interaction.response.send_message("❌ No tournament exists in this server.", ephemeral=True)
-        DB_CACHE["tournaments"] = [t for t in DB_CACHE["tournaments"] if t.get("server_id") != server_id]
-        async_save_tournament_to_bin()
-        await interaction.response.send_message("🗑️ **Tournament Successfully Deleted.** You can now create a new one.")
-
-    @app_commands.command(name="set_theme", description="[OWNER] Set a custom image theme for this server's tournament.")
-    async def set_theme(self, interaction: discord.Interaction, theme_name: str):
-        if interaction.user.id != 1087369198801526836:
-            return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
+    @app_commands.command(name="generate_playoffs", description="[MANAGER] Generate the ACL Top-6 Playoffs + Super Cup. (ACL only)")
+    async def generate_playoffs(self, interaction: discord.Interaction):
         server_id = str(interaction.guild.id)
         tourney = get_server_tournament(server_id)
-        if not tourney:
-            return await interaction.response.send_message("❌ No tournament exists in this server.", ephemeral=True)
-        tourney["theme"] = theme_name
-        save_tournament(tourney)
-        await interaction.response.send_message(f"✅ Tournament theme set to `{theme_name}` for this server.", ephemeral=True)
+        if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
+        if not self.is_manager(interaction, tourney): return await interaction.response.send_message("❌ Managers only.", ephemeral=True)
+        if tourney.get("tournament_type") != "acl":
+            return await interaction.response.send_message("❌ This command is for **ACL** tournaments only.", ephemeral=True)
+        if tourney["status"] != "active": return await interaction.response.send_message("❌ Tournament is not active.", ephemeral=True)
+
+        ok, msg = acl_generate_playoffs(tourney)
+        if not ok:
+            return await interaction.response.send_message(msg, ephemeral=True)
+        shield = tourney.get("league_shield")
+        await interaction.response.send_message(
+            content=f"🏆 **ACL PLAYOFFS ARE SET!**\n🛡️ **{shield}** finished #1 — League Shield Winner, straight into the **Super Cup**.\nThe Top 6 now fight for the ACL Trophy. Owners: `/tournament fixtures` to find your match.",
+            embed=acl_bracket_embed(tourney),
+        )
+
+    @app_commands.command(name="bracket", description="View the full ACL Playoffs + Super Cup bracket.")
+    async def bracket(self, interaction: discord.Interaction):
+        server_id = str(interaction.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
+        if tourney.get("tournament_type") != "acl":
+            return await interaction.response.send_message("❌ The bracket view is for **ACL** tournaments. Use `/tournament standings` or `/tournament status`.", ephemeral=True)
+        if not _acl_get(tourney, "Qualifier"):
+            return await interaction.response.send_message("ℹ️ The Playoffs haven't been generated yet. A Manager runs `/tournament generate_playoffs` once all 91 league games are done.", ephemeral=True)
+        await interaction.response.send_message(embed=acl_bracket_embed(tourney))
+
+    # NOTE: force_delete & set_theme are prefix-only (cvt force_delete / cvt set_theme) — 25-subcommand limit.
 
     @app_commands.command(name="set_team_color", description="[MANAGER] Set a team's color for the scorecard. Works anytime, even mid-tournament.")
     async def set_team_color(self, interaction: discord.Interaction, team_name: str, color: str):
@@ -1173,45 +1443,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             return await interaction.response.send_message(f"✅ {label} logo for **{team['name']}** set to {raw} — used in {where}.")
         await interaction.response.send_message("❌ Provide an emoji, a URL, or upload an image.", ephemeral=True)
 
-    @app_commands.command(name="set_injury_channel", description="[MANAGER] Set the channel where injury reports are posted. Run this inside the target channel.")
-    async def set_injury_channel(self, interaction: discord.Interaction):
-        server_id = str(interaction.guild.id)
-        tourney = get_server_tournament(server_id)
-        if not tourney:
-            return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
-        if not self.is_manager(interaction, tourney):
-            return await interaction.response.send_message("❌ Managers only.", ephemeral=True)
-        tourney["injury_channel_id"] = str(interaction.channel.id)
-        save_tournament(tourney)
-        await interaction.response.send_message(f"✅ Injury reports will now be posted in {interaction.channel.mention}.")
-
-    @app_commands.command(name="remove_injury", description="[MANAGER] Manually clear a player's injury status.")
-    @app_commands.describe(team_name="Team the player belongs to", player_name="Player's name")
-    async def remove_injury(self, interaction: discord.Interaction, team_name: str, player_name: str):
-        server_id = str(interaction.guild.id)
-        tourney = get_server_tournament(server_id)
-        if not tourney:
-            return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
-        if not self.is_manager(interaction, tourney):
-            return await interaction.response.send_message("❌ Managers only.", ephemeral=True)
-        team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.lower()), None)
-        if not team:
-            return await interaction.response.send_message(f"❌ Team **{team_name}** not found.", ephemeral=True)
-        player = next((p for p in team.get("squad", []) if p["name"].lower() == player_name.lower()), None)
-        if not player:
-            return await interaction.response.send_message(f"❌ Player **{player_name}** not found in **{team['name']}**.", ephemeral=True)
-        if not player.get("injured"):
-            return await interaction.response.send_message(f"ℹ️ **{player['name']}** is not currently injured.", ephemeral=True)
-        player.pop("injured", None)
-        player.pop("injury_until_match", None)
-        player.pop("injury_severity", None)
-        # also clear any pending news for this player
-        tourney["pending_injury_news"] = [
-            n for n in tourney.get("pending_injury_news", [])
-            if not (n["team"] == team["name"] and n["player"] == player["name"])
-        ]
-        save_tournament(tourney)
-        await interaction.response.send_message(f"✅ Injury cleared for **{player['name']}** ({team['name']}).")
+    # NOTE: set_injury_channel & remove_injury are prefix-only (cvt set_injury_channel / cvt remove_injury) — 25-subcommand limit.
 
     @app_commands.command(name="match_scorecard", description="View the scorecard image for a completed tournament match.")
     async def match_scorecard(self, interaction: discord.Interaction, match_id: int):
@@ -1268,21 +1500,40 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         await interaction.response.send_message(f"🚀 **Launching {r_label} — Match {pending['match_id']}...**")
         self.bot.dispatch("start_tournament_match", interaction.channel, interaction.user.id, tourney, pending)
 
-    @app_commands.command(name="play", description="[MANAGER] Launch a specific tournament match by its ID.")
+    @app_commands.command(name="play", description="[MANAGER/OWNER] Launch a match by ID — owners can launch any of their own.")
     async def play_match(self, interaction: discord.Interaction, match_id: int):
         server_id = str(interaction.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
-        if not self.is_manager(interaction, tourney): return await interaction.response.send_message("❌ Managers only.", ephemeral=True)
         if tourney["status"] != "active": return await interaction.response.send_message("❌ Tournament is not active.", ephemeral=True)
         match = next((m for m in tourney.get("schedule", []) if m["match_id"] == match_id), None)
         if not match:
             return await interaction.response.send_message(f"❌ Match ID {match_id} does not exist.", ephemeral=True)
+        # Managers can launch any match; owners can launch any match they're playing in.
+        if not owner_can_launch(tourney, match, interaction.user.id, self.is_manager(interaction, tourney)):
+            return await interaction.response.send_message("❌ You can only launch matches **your team** is playing in. (Managers can launch any.)", ephemeral=True)
+        if match["status"] == "locked":
+            return await interaction.response.send_message(f"❌ Match {match_id} isn't ready — its teams depend on earlier results.", ephemeral=True)
         if match["status"] != "pending":
             return await interaction.response.send_message(f"❌ Match {match_id} is already completed.", ephemeral=True)
-        r_label = f"Round {match['round']}" if isinstance(match['round'], int) else match['round']
-        await interaction.response.send_message(f"🚀 **Manually Launching Match {match['match_id']} ({r_label})...**")
+        r_label = _tm_round_label(match)
+        await interaction.response.send_message(f"🚀 **Launching Match {match['match_id']} ({r_label})...**\n<@{interaction.user.id}> — make sure your opponent is here to pick their XI.")
         self.bot.dispatch("start_tournament_match", interaction.channel, interaction.user.id, tourney, match)
+
+    @app_commands.command(name="fixtures", description="View a team's fixtures & results (defaults to your own team).")
+    async def fixtures(self, interaction: discord.Interaction, team_name: str = None):
+        server_id = str(interaction.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
+        if team_name:
+            team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.lower()), None)
+            if not team:
+                return await interaction.response.send_message(f"❌ Team **{team_name}** not found.", ephemeral=True)
+        else:
+            team = next((t for t in tourney["teams"] if t.get("owner_id") == str(interaction.user.id)), None)
+            if not team:
+                return await interaction.response.send_message("❌ You don't own a team here. Specify a team name: `/tournament fixtures <team>`.", ephemeral=True)
+        await interaction.response.send_message(embed=build_team_fixtures_embed(tourney, team["name"]))
 
     @app_commands.command(name="next_match", description="[OWNER] Automatically launch your team's next pending match.")
     async def next_match(self, interaction: discord.Interaction):
@@ -1348,12 +1599,18 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         elif match.innings2.total_runs >= target: winner = match.innings2.batting_team["name"]
         else: winner = match.innings1.batting_team["name"]
 
-        if winner == "TIE" and not isinstance(m_data.get("round"), int) and m_data.get("stage") in ("knockout", None):
+        # Knockouts can't end in a draw — break a tie toward team1 (the higher seed / home slot)
+        if winner == "TIE" and not isinstance(m_data.get("round"), int) and m_data.get("stage") in ("knockout", None, "acl_playoff", "acl_supercup"):
             winner = m_data["team1"]
+
+        # Loser is meaningful for knockout progression (e.g. ACL Semi = Qualifier loser)
+        loser = None
+        if winner not in ("TIE", None):
+            loser = m_data["team2"] if winner == m_data["team1"] else m_data["team1"]
 
         m_data["status"] = "completed"
         m_data["result"] = {
-            "winner": winner, "format_overs": match.format_overs,
+            "winner": winner, "loser": loser, "format_overs": match.format_overs,
             "t1_runs": t1_inn.total_runs, "t1_wickets": t1_inn.wickets, "t1_balls": t1_inn.total_balls,
             "t2_runs": t2_inn.total_runs, "t2_wickets": t2_inn.wickets, "t2_balls": t2_inn.total_balls,
             "scorecard_players": getattr(match, "_scorecard_players", None),
@@ -1427,6 +1684,12 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
 
         # --- KNOCKOUTS AUTO-PROGRESSION ---
         t_type = tourney.get("tournament_type", "round_robin")
+
+        if t_type == "acl":
+            # ACL: resolve playoff bracket + Super Cup as feeder results come in
+            _acl_try_advance(tourney)
+            save_tournament(tourney)
+            return
 
         if t_type == "t20_world_cup":
             # Super 8 complete → auto-generate Semi-Finals
@@ -1644,7 +1907,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             bat += s["fifties"] * 15 + s["hundreds"] * 40
             bat += s["sixes"] * 2 + s["fours"] * 0.5
             econ = (s["runs_conceded"] / s["balls_bowled"] * 6) if s["balls_bowled"] > 0 else 9.0
-            bowl = float(s["wickets"] * 35)
+            bowl = float(s["wickets"] * 40)
             if s["balls_bowled"] >= 12:
                 bowl += max(-25.0, min(25.0, (8.0 - econ) * 5))
             return bat + bowl
@@ -1671,7 +1934,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         embed = discord.Embed(title=f"🏆 Tournament Leaderboard: {category.name}", color=discord.Color.gold())
         if c_val == "mvp":
             embed.description = (
-                "-# *MVP = Runs (×SR multiplier) + Boundaries bonus + Milestone bonus + Wickets×25 + Economy bonus*\n"
+                "-# *MVP = Runs (×SR multiplier) + Boundaries bonus + Milestone bonus + Wickets×40 + Economy bonus*\n"
             )
         lines = []
         for i, p in enumerate(sorted_players[:10], 1):
@@ -1767,25 +2030,44 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
 
     @app_commands.command(name="help", description="Show the Tournament module help guide.")
     async def tournament_help(self, interaction: discord.Interaction):
-        embed = discord.Embed(title="🏆 Tournament Commands & Guide", color=discord.Color.gold())
-        setup = ("`/tournament create` — [ADMIN] Create tournament. Choose **Round Robin** or **T20 World Cup** as the event type.\n"
-                 "`/tournament add_manager` — [MANAGER] Assign a co-manager.\n"
-                 "`/tournament add_team` — [MANAGER] Add a team. For T20 WC, specify the **group** (A/B/C/D).\n"
-                 "`/tournament submit_squad` — [OWNER] Submit your squad.\n"
-                 "`/tournament start` — [MANAGER] Lock registration & generate schedule.")
-        embed.add_field(name="🛠️ 1. Setup & Registration", value=setup, inline=False)
-        play = ("`/tournament next_match` — [OWNER] Launch your team's next match.\n"
-                "`/tournament play` — [MANAGER] Force-start a specific Match ID.\n"
-                "`/tournament play_next` — [MANAGER] Launch the next sequential match.")
-        embed.add_field(name="🏏 2. Playing Matches", value=play, inline=False)
-        stats = ("`/tournament status` — Live schedule with ◀ ▶ navigation per round/group.\n"
-                 "`/tournament standings` — Points table (image for RR · group embed for T20 WC).\n"
-                 "`/tournament leaderboard` — Top Runs, Wickets, Strike Rates, etc.\n"
-                 "`/tournament player_stats` — A specific player's exact stats.\n"
-                 "`/tournament squad` — Full roster of any team.")
-        embed.add_field(name="📊 3. Stats & Standings", value=stats, inline=False)
-        ko = ("`/tournament generate_knockouts` — [MANAGER] **Round Robin:** Semi-Finals for Top 4.\n"
-              "`/tournament generate_super8` — [MANAGER] **T20 World Cup:** Super 8 after Group Stage.\n"
-              "`/tournament force_delete` — [OWNER] Delete the tournament.")
-        embed.add_field(name="🔥 4. Knockouts & Admin", value=ko, inline=False)
+        embed = discord.Embed(
+            title="🏆 Tournament Guide",
+            description="Three event types: **Round Robin**, **T20 World Cup**, and **ACL** (14 teams → League → Playoffs → Super Cup).\nEvery command works as both `/tournament …` and the shorter `cvt …`.",
+            color=discord.Color.gold(),
+        )
+        embed.add_field(
+            name="🔴 ACL Quickstart",
+            value=("**1.** `/tournament create` → pick **ACL** event type\n"
+                   "**2.** `cvt add_team` ×**14** (assign each an owner)\n"
+                   "**3.** each owner `cvt submit_squad` (alias `ss`)\n"
+                   "**4.** `cvt start` → generates 91 league matches\n"
+                   "**5.** owners `cvt fixtures` (`fx`) → `cvt play <id>` your games\n"
+                   "**6.** after all 91, a Manager `cvt generate_playoffs` (`gp`)\n"
+                   "**7.** `cvt bracket` (`br`) tracks Playoffs → **Super Cup**"),
+            inline=False,
+        )
+        embed.add_field(
+            name="🛠️ Setup",
+            value="`create` · `add_team` · `add_manager` · `submit_squad`/`ss` · `start` · `set_team_logo` · `set_team_color`",
+            inline=False,
+        )
+        embed.add_field(
+            name="🏏 Play your matches",
+            value=("`fixtures`/`fx` `[team]` — your upcoming + results\n"
+                   "`play <id>` — **owners launch any of their own matches**; managers any\n"
+                   "`next_match`/`nm` — launch your earliest pending · `play_next`/`pn` — [MGR] next in order"),
+            inline=False,
+        )
+        embed.add_field(
+            name="📊 Stats & standings",
+            value=("`standings`/`st` · `status`/`sched` · `bracket`/`br` (ACL)\n"
+                   "`leaderboard`/`lb <runs|wickets|sr|mvp|…>` · `player_stats` · `squad` · `match_scorecard <id>`"),
+            inline=False,
+        )
+        embed.add_field(
+            name="🔥 Knockouts (Managers)",
+            value=("**ACL:** `generate_playoffs`/`gp`  ·  **Round Robin:** `generate_knockouts`  ·  **T20 WC:** `generate_super8`"),
+            inline=False,
+        )
+        embed.set_footer(text="More admin tools are prefix-only: cvt transfer_team · replace_player · force_delete · set_theme · remove_injury · simulate_all")
         await interaction.response.send_message(embed=embed, ephemeral=True)

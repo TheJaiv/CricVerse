@@ -34,7 +34,7 @@ from test_image import (
     generate_test_summary_image as _ti_summary,
     generate_test_scorecard_image as _ti_scorecard,
 )
-from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner
+from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, owner_can_launch, build_team_fixtures_embed
 from subscription_manager import (
     load_data_from_bin, load_tournament_data_from_bin,
     save_data_to_bin, save_tournament_data_to_bin,
@@ -715,6 +715,58 @@ def _run_full_match_sync(match: CricketMatch):
     match.current_innings = match.innings2
     match.current_innings_num = 2
     _sim_innings(match.innings2)
+
+    # ACL has no ties — a tied ACL sim is decided by a Super Over. Other formats keep their
+    # existing behavior (round-robin league ties share a point; knockouts fall back to team1),
+    # so round-robin is completely unaffected.
+    if (getattr(match, "tournament_type", None) == "acl"
+            and match.innings2.total_runs == match.innings1.total_runs
+            and not getattr(match, "is_super_over", False)):
+        try:
+            _sim_super_over(match)
+        except Exception as _so_err:
+            print(f"⚠️ Sim super over failed, leaving tie for fallback: {_so_err}")
+
+
+def _sim_super_over(match: CricketMatch):
+    """Headless: break a tie via simulated super over(s); sets match.tiebreak_winner_name.
+    Team that batted 2nd bats first; max 2 wickets / 6 balls; replays (swapping order) if tied again."""
+    bat_team = match.innings2.batting_team   # batted 2nd in the main match → bats first in the SO
+    bowl_team = match.innings1.batting_team
+    for _ in range(25):  # safety cap against pathological repeated ties
+        so = CricketMatch(match.p1, match.p2, match.p1_id, match.p2_id,
+                          match.team1, match.team2, format_overs=1,
+                          pitch=match.pitch, weather=match.weather)
+        so.is_super_over = True
+        so.sim_only = True
+        so.max_balls = 6
+
+        def _so_innings(inn, chasing):
+            so.current_innings = inn
+            attempts = 0
+            while inn.wickets < 2 and inn.total_balls < 6 and attempts < 120:
+                attempts += 1  # hard cap guards against a pathological run of wides/no-balls
+                if chasing and inn.total_runs >= so.target:
+                    break
+                if inn.total_balls % 6 == 0 and not inn.over_log:
+                    b = get_smart_ai_bowler(inn, so.pitch, so.weather, so.format_overs)
+                    if b:
+                        inn.current_bowler = b
+                execute_ball_math(so)
+
+        so.innings1 = InningsState(bat_team, bowl_team)
+        so.current_innings_num = 1
+        _so_innings(so.innings1, False)
+        so.target = so.innings1.total_runs + 1
+        so.innings2 = InningsState(bowl_team, bat_team)
+        so.current_innings_num = 2
+        _so_innings(so.innings2, True)
+
+        r1, r2 = so.innings1.total_runs, so.innings2.total_runs
+        if r1 != r2:
+            match.tiebreak_winner_name = bat_team["name"] if r1 > r2 else bowl_team["name"]
+            return
+        bat_team, bowl_team = bowl_team, bat_team  # still tied — swap who bats first and replay
 
 # ==========================================
 # 🖼️ 4. EMBED SCOREBOARDS & PIL GRAPHICS
@@ -2158,7 +2210,10 @@ class ODISuperOverPrompt(discord.ui.View):
 async def trigger_super_over(channel, match: CricketMatch):
     so_match = CricketMatch(match.p1, match.p2, match.p1_id, match.p2_id, match.team1, match.team2, format_overs=1, pitch=match.pitch, weather=match.weather)
     so_match.is_super_over = True
-    so_match.original_match_object = match
+    # Chain every super over back to the ORIGINAL match (not the previous super over),
+    # so repeated super overs still finalize the main match and image the decisive result.
+    so_match.original_match_object = getattr(match, "original_match_object", match)
+    so_match.super_over_number = getattr(match, "super_over_number", 0) + 1
     so_match.sim_only = getattr(match, 'sim_only', False)
     so_match.verbose = getattr(match, 'verbose', True)
     so_match.batting_first_id = match.bowling_first_id
@@ -2253,6 +2308,15 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
         
         if is_tied and not getattr(match, "tie_accepted", False) and not getattr(match, 'is_super_over', False):
             if match.format_overs != 50:
+                # Show the completed (tied) scoreboard before the Super Over begins.
+                try:
+                    _tie_img = generate_tournament_score_image(match) if getattr(match, "tournament_server_id", None) else generate_final_score_image(match)
+                    await channel.send(
+                        "🤝 **SCORES LEVEL — THE MATCH IS TIED!** Final scoreboard before the Super Over:",
+                        file=discord.File(fp=_tie_img, filename="tied_scoreboard.png"),
+                    )
+                except Exception as _tie_err:
+                    print(f"⚠️ Tied scoreboard render failed: {_tie_err}")
                 await trigger_super_over(channel, match)
                 return
 
@@ -2260,7 +2324,8 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
                 await channel.send("🏆 **The Match has TIED!** Do you want to play a Super Over?", view=ODISuperOverPrompt(match))
                 return
         if is_tied and getattr(match, 'is_super_over', False):
-            await channel.send("🤯 **THE SUPER OVER IS TIED!** We are going to ANOTHER Super Over!")
+            _son = getattr(match, "super_over_number", 1)
+            await channel.send(f"🤯 **SUPER OVER #{_son} IS TIED TOO!** On to **Super Over #{_son + 1}**!")
             await trigger_super_over(channel, match)
             return
 
@@ -7736,14 +7801,25 @@ class PrefixCog(commands.Cog):
     async def tournament(self, ctx):
         await ctx.send_help(ctx.command)
 
-    @tournament.command(name="create", help="[ADMIN] Create a new tournament.\nUsage: tournament create \"<name>\" <format> [impact_player=true/false] [injuries=true/false]")
+    @tournament.command(name="create", help="[ADMIN] Create a new tournament.\nUsage: tournament create \"<name>\" <format> [event=roundrobin/t20wc/acl] [impact_player=true/false] [injuries=true/false]")
     async def t_create(self, ctx, name: str, format_str: str, *options: str):
         kwargs = { 'impact_player': False, 'injuries': False }
+        event_map = {
+            "roundrobin": "round_robin", "round_robin": "round_robin", "rr": "round_robin",
+            "t20wc": "t20_world_cup", "t20_world_cup": "t20_world_cup", "worldcup": "t20_world_cup", "wc": "t20_world_cup",
+            "acl": "acl",
+        }
+        t_type = "round_robin"
         for opt in options:
             try:
                 key, value = opt.split('=', 1)
                 if key == 'impact_player': kwargs['impact_player'] = to_bool(value)
                 elif key == 'injuries': kwargs['injuries'] = to_bool(value)
+                elif key in ('event', 'event_type', 'type'):
+                    et = event_map.get(value.strip().lower())
+                    if not et:
+                        return await ctx.send(f"❌ Invalid event `{value}`. Use `roundrobin`, `t20wc`, or `acl`.")
+                    t_type = et
             except ValueError:
                 return await ctx.send(f"❌ Invalid option format: `{opt}`. Must be `key=value`.")
 
@@ -7768,9 +7844,16 @@ class PrefixCog(commands.Cog):
             "status": "registration", "schedule": [], "current_match_idx": 0, "stats": {},
             "format_overs": format_overs, "min_squad": 11, "max_squad": 15,
             "impact_player": kwargs['impact_player'], "injuries_enabled": kwargs['injuries'],
+            "tournament_type": t_type,
         }
         save_tournament(t_data)
-        await ctx.send(f"🏆 **Tournament Created:** `{name}`\nUse `cv tournament add_team` to get started!")
+        type_label = {"t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League"}.get(t_type, "Round Robin")
+        extra = ""
+        if t_type == "acl":
+            extra = "\n🔴 **ACL needs exactly 14 teams** — each plays every other once (91 matches) → Top 6 Playoffs → Super Cup."
+        elif t_type == "t20_world_cup":
+            extra = "\n⚠️ **T20 World Cup needs exactly 16 teams** in 4 groups of 4."
+        await ctx.send(f"🏆 **Tournament Created:** `{name}`  ·  {type_label}\nUse `cv tournament add_team` to get started!{extra}")
 
     @tournament.command(name="add_team", help="[MANAGER] Add a team and assign an Owner.\nUsage: tournament add_team \"<team_name>\" <@owner>")
     async def t_add_team(self, ctx, team_name: str, owner: discord.Member):
@@ -7827,7 +7910,7 @@ class PrefixCog(commands.Cog):
         save_tournament(tourney)
         await ctx.send(f"✅ **Squad Updated for {team['name']}:**\n🔴 OUT: {old_p['name']}\n🟢 IN: {new_p['name']}")
 
-    @tournament.command(name="submit_squad", help="[OWNER/MANAGER] Submit a tournament squad (15 players).\nUsage: tournament submit_squad [team_name]")
+    @tournament.command(name="submit_squad", aliases=["ss"], help="[OWNER/MANAGER] Submit a tournament squad (15 players).\nUsage: tournament submit_squad [team_name]")
     async def t_submit_squad(self, ctx, *, team_name: str = None):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
@@ -7996,6 +8079,40 @@ class PrefixCog(commands.Cog):
             groups_txt = "\n".join(f"**Group {g}:** {' · '.join(teams_by_group[g])}" for g in "ABCD")
             return await ctx.send(f"🏆 **TOURNAMENT STARTED: {tourney['name']}!** — T20 World Cup\n{groups_txt}\nGenerated **{len(schedule)} group stage matches** (interleaved). Use `cv tournament status` to view fixtures!")
 
+        # ACL — Akatsuki Cricket League (14-team single round robin → Playoffs → Super Cup)
+        if t_type == "acl":
+            if len(tourney["teams"]) != 14:
+                return await ctx.send(f"❌ **ACL requires exactly 14 teams** (currently {len(tourney['teams'])}). Add or remove teams before starting.")
+            for t in tourney["teams"]:
+                if len(t.get("squad", [])) < min_s:
+                    return await ctx.send(f"❌ Team **{t['name']}** does not have a valid squad yet.")
+
+            teams = [t["name"] for t in tourney["teams"]]
+            n = len(teams)  # 14, even — no BYE needed
+            matchups = []
+            for r in range(n - 1):  # 13 rounds
+                round_matches = []
+                for i in range(n // 2):  # 7 matches/round
+                    t1, t2 = teams[i], teams[n - 1 - i]
+                    round_matches.append((t1, t2) if r % 2 == 0 else (t2, t1))
+                random.shuffle(round_matches)
+                for m in round_matches:
+                    matchups.append({"round": r + 1, "team1": m[0], "team2": m[1]})
+                teams.insert(1, teams.pop())
+            schedule = [{"match_id": i + 1, "round": m["round"], "stage": "league",
+                         "team1": m["team1"], "team2": m["team2"], "status": "pending", "result": None}
+                        for i, m in enumerate(matchups)]
+            tourney["schedule"] = schedule
+            tourney["status"] = "active"
+            tourney["current_match_idx"] = 0
+            save_tournament(tourney)
+            return await ctx.send(
+                f"🔴 **AKATSUKI CRICKET LEAGUE — {tourney['name']} HAS BEGUN!**\n"
+                f"Generated **{len(schedule)} league matches** ({n} teams, single round robin).\n"
+                f"📋 Owners: use `cv tournament fixtures` to see your matches · `cv tournament standings` for the table.\n"
+                f"🏆 After all 91 league games, a Manager runs `cv tournament generate_playoffs` to start the Top-6 Playoffs."
+            )
+
         # Round Robin
         if len(tourney["teams"]) < 2:
             return await ctx.send("❌ Need at least 2 teams.")
@@ -8025,7 +8142,7 @@ class PrefixCog(commands.Cog):
         save_tournament(tourney)
         await ctx.send(f"🏆 **TOURNAMENT STARTED: {tourney['name']}!**\nGenerated **{len(schedule)} matches** in the Round Robin stage.\nUse `cv tournament status` to view it!")
 
-    @tournament.command(name="status", help="View the current tournament schedule and standings.\nUsage: tournament status")
+    @tournament.command(name="status", aliases=["sched"], help="View the current tournament schedule and standings.\nUsage: tournament status")
     async def t_status(self, ctx):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
@@ -8034,7 +8151,7 @@ class PrefixCog(commands.Cog):
 
         if tourney["status"] == "registration":
             t_type = tourney.get("tournament_type", "round_robin")
-            type_label = "T20 World Cup" if t_type == "t20_world_cup" else "Round Robin"
+            type_label = {"t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League"}.get(t_type, "Round Robin")
             embed = discord.Embed(title=f"🏆 {tourney['name']}", color=discord.Color.gold())
             embed.description = f"📝 **Registration Phase** · {type_label}"
             team_lines = []
@@ -8221,7 +8338,7 @@ class PrefixCog(commands.Cog):
             conf.append(f"_…and {len(new_schedule) - 15} more_")
         await ctx.send(f"✅ **Schedule updated!** ({len(ordered)} reordered · {len(remainder)} appended)\n" + "\n".join(conf))
 
-    @tournament.command(name="play_next", help="[MANAGER] Launch the next pending tournament match.\nUsage: tournament play_next")
+    @tournament.command(name="play_next", aliases=["pn"], help="[MANAGER] Launch the next pending tournament match.\nUsage: tournament play_next")
     async def t_play_next(self, ctx):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
@@ -8242,25 +8359,48 @@ class PrefixCog(commands.Cog):
         await ctx.send(f"🚀 **Launching {r_label} — Match {pending['match_id']}...**")
         self.bot.dispatch("start_tournament_match", ctx.channel, ctx.author.id, tourney, pending)
 
-    @tournament.command(name="play", help="[MANAGER] Launch a specific tournament match by its ID.\nUsage: tournament play <match_id>")
+    @tournament.command(name="play", help="[MANAGER/OWNER] Launch a match by ID. Owners can launch any of their own matches.\nUsage: tournament play <match_id>")
     async def t_play_match(self, ctx, match_id: int):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
-        
-        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (tourney and str(ctx.author.id) in tourney.get("managers", []))
         if not tourney: return await ctx.send("❌ No tournament exists.")
-        if not is_mgr: return await ctx.send("❌ Managers only.")
         if tourney["status"] != "active": return await ctx.send("❌ Tournament is not active.")
-        
+
         match = next((m for m in tourney.get("schedule", []) if m["match_id"] == match_id), None)
         if not match:
             return await ctx.send(f"❌ Match ID {match_id} does not exist.")
+
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (str(ctx.author.id) in tourney.get("managers", []))
+        # Managers launch any match; owners launch any match their team is in.
+        if not owner_can_launch(tourney, match, ctx.author.id, is_mgr):
+            return await ctx.send("❌ You can only launch matches **your team** is playing in. (Managers can launch any.)")
+        if match["status"] == "locked":
+            return await ctx.send(f"❌ Match {match_id} isn't ready — its teams depend on earlier results. Try `cvt bracket`.")
         if match["status"] != "pending":
             return await ctx.send(f"❌ Match {match_id} is already completed.")
-            
+
         r_label = f"Round {match['round']}" if isinstance(match['round'], int) else match['round']
-        await ctx.send(f"🚀 **Manually Launching Match {match['match_id']} ({r_label})...**")
+        await ctx.send(f"🚀 **Launching Match {match['match_id']} ({r_label})...**\n<@{ctx.author.id}> — make sure your opponent is here to pick their XI.")
         self.bot.dispatch("start_tournament_match", ctx.channel, ctx.author.id, tourney, match)
+
+    @tournament.command(name="fixtures", aliases=["fx"], help="View a team's fixtures & results (defaults to your own team).\nUsage: tournament fixtures [team name]")
+    async def t_fixtures(self, ctx, *, team_name: str = None):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        if team_name:
+            team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.lower()), None)
+            if not team:
+                import difflib as _dl
+                close = _dl.get_close_matches(team_name, [t["name"] for t in tourney["teams"]], n=1, cutoff=0.5)
+                team = next((t for t in tourney["teams"] if t["name"] == close[0]), None) if close else None
+            if not team:
+                return await ctx.send(f"❌ Team **{team_name}** not found.")
+        else:
+            team = next((t for t in tourney["teams"] if t.get("owner_id") == str(ctx.author.id)), None)
+            if not team:
+                return await ctx.send("❌ You don't own a team here. Specify a team: `cvt fixtures <team name>`.")
+        await ctx.send(embed=build_team_fixtures_embed(tourney, team["name"]))
 
     @tournament.command(name="force_result", help="[MANAGER] Manually set match result.\nUsage: tournament force_result <id> <winner> <t1_r> <t1_w> <t1_b> <t2_r> <t2_w> <t2_b>")
     async def t_force_result(self, ctx, match_id: int, winner_team: str, t1_runs: int, t1_wkts: int, t1_balls: int, t2_runs: int, t2_wkts: int, t2_balls: int):
@@ -8274,17 +8414,33 @@ class PrefixCog(commands.Cog):
         match_data = next((m for m in tourney.get("schedule", []) if m["match_id"] == match_id), None)
         if not match_data: return await ctx.send(f"❌ Match ID {match_id} does not exist.")
         if match_data["status"] == "completed": return await ctx.send(f"❌ Match {match_id} is already completed.")
-            
+        if match_data["status"] == "locked":
+            return await ctx.send(f"❌ Match {match_id} is **locked** — its teams aren't decided yet (waiting on earlier results).")
+
+        # Normalize winner to the actual team name (or TIE) so bracket progression matches reliably
+        w_in = (winner_team or "").strip().lower()
+        if w_in == "tie":
+            winner_team, loser_team = "TIE", None
+        elif w_in in (str(match_data.get("team1", "")).lower(), str(match_data.get("team2", "")).lower()):
+            winner_team = match_data["team1"] if w_in == str(match_data["team1"]).lower() else match_data["team2"]
+            loser_team = match_data["team2"] if winner_team == match_data["team1"] else match_data["team1"]
+        else:
+            return await ctx.send(f"❌ Winner must be **{match_data['team1']}**, **{match_data['team2']}**, or **TIE**.")
+
         match_data["status"] = "completed"
         match_data["result"] = {
-            "winner": winner_team,
+            "winner": winner_team, "loser": loser_team,
             "format_overs": tourney.get("format_overs", 20),
             "t1_runs": t1_runs, "t1_wickets": t1_wkts, "t1_balls": t1_balls,
             "t2_runs": t2_runs, "t2_wickets": t2_wkts, "t2_balls": t2_balls
         }
         tourney["current_match_idx"] += 1
+        # Advance the ACL bracket / Super Cup if applicable
+        if tourney.get("tournament_type") == "acl":
+            _acl_try_advance(tourney)
         save_tournament(tourney)
-        await ctx.send(f"✅ **Match {match_id} forcefully completed!**\nWinner: **{winner_team}**\nPoints Table and NRR updated.")
+        extra = "\n🏆 Bracket updated — `cv tournament bracket` to view." if tourney.get("tournament_type") == "acl" else "\nPoints Table and NRR updated."
+        await ctx.send(f"✅ **Match {match_id} forcefully completed!**\nWinner: **{winner_team}**{extra}")
 
     @tournament.command(name="generate_knockouts", help="[MANAGER] Generate Knockouts (Semi-Finals) for Top 4 teams.\nUsage: tournament generate_knockouts")
     async def t_generate_knockouts(self, ctx):
@@ -8294,7 +8450,9 @@ class PrefixCog(commands.Cog):
         if not tourney: return await ctx.send("❌ No tournament exists.")
         if not is_mgr: return await ctx.send("❌ Managers only.")
         if tourney["status"] != "active": return await ctx.send("❌ Tournament is not active.")
-        
+        if tourney.get("tournament_type") == "acl":
+            return await ctx.send("❌ This is an ACL tournament. Use `cv tournament generate_playoffs` (alias `gp`) instead.")
+
         gs_matches = [m for m in tourney["schedule"] if isinstance(m.get("round"), int)]
         if any(m["status"] == "pending" for m in gs_matches):
             return await ctx.send("❌ Cannot generate knockouts until all Group Stage matches are completed.")
@@ -8318,6 +8476,37 @@ class PrefixCog(commands.Cog):
         
         await ctx.send(f"🔥 **Knockout Stage Set!**\n**Semi-Final 1:** {top4[0]} vs {top4[3]}\n**Semi-Final 2:** {top4[1]} vs {top4[2]}\n\nUse `cv tournament play_next` to begin!")
 
+    @tournament.command(name="generate_playoffs", aliases=["gp", "playoffs"], help="[MANAGER] Generate the ACL Top-6 Playoffs + Super Cup. (ACL only)\nUsage: tournament generate_playoffs")
+    async def t_generate_playoffs(self, ctx):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (tourney and str(ctx.author.id) in tourney.get("managers", []))
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        if tourney.get("tournament_type") != "acl":
+            return await ctx.send("❌ This command is for **ACL** tournaments only.")
+        if tourney["status"] != "active": return await ctx.send("❌ Tournament is not active.")
+
+        ok, msg = acl_generate_playoffs(tourney)
+        if not ok:
+            return await ctx.send(msg)
+        shield = tourney.get("league_shield")
+        await ctx.send(
+            content=f"🏆 **ACL PLAYOFFS ARE SET!**\n🛡️ **{shield}** finished #1 — League Shield Winner, straight into the **Super Cup**.\nThe Top 6 now fight for the ACL Trophy. Owners: `cv tournament fixtures` to find your match.",
+            embed=acl_bracket_embed(tourney),
+        )
+
+    @tournament.command(name="bracket", aliases=["br"], help="View the full ACL Playoffs + Super Cup bracket.\nUsage: tournament bracket")
+    async def t_bracket(self, ctx):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        if tourney.get("tournament_type") != "acl":
+            return await ctx.send("❌ The bracket view is for **ACL** tournaments. Use `cv tournament standings` or `cv tournament status`.")
+        if not _acl_get(tourney, "Qualifier"):
+            return await ctx.send("ℹ️ The Playoffs haven't been generated yet. A Manager runs `cv tournament generate_playoffs` once all 91 league games are done.")
+        await ctx.send(embed=acl_bracket_embed(tourney))
+
     @tournament.command(name="simulate_all", aliases=["simall"], help="[OWNER] Instantly simulate all pending tournament matches.\nUsage: tournament simulate_all")
     async def t_simulate_all(self, ctx):
         if ctx.author.id != ADMIN_DISCORD_ID:
@@ -8329,25 +8518,35 @@ class PrefixCog(commands.Cog):
         if tourney["status"] != "active":
             return await ctx.send("❌ Tournament is not active.")
 
-        pending = [m for m in tourney.get("schedule", []) if m["status"] == "pending"]
-        if not pending:
+        if not any(m["status"] == "pending" for m in tourney.get("schedule", [])):
             return await ctx.send("✅ No pending matches — tournament is fully simulated!")
 
         _PITCHES = ["Flat", "Green Seamer", "Dry", "Dusty", "Spin-Friendly", "Bouncy", "Hard"]
-        status_msg = await ctx.send(f"⚡ **Simulating {len(pending)} pending match(es)...**")
+        status_msg = await ctx.send("⚡ **Simulating all pending matches...** (playoff matches are auto-included as they unlock)")
         results = []
+        errored = set()
 
-        for m_data in pending:
+        # Re-scan after every match so newly-unlocked knockout matches (ACL playoffs, T20WC semis/final) get played too
+        def _next_pending():
+            return next((m for m in tourney.get("schedule", [])
+                         if m["status"] == "pending" and m["match_id"] not in errored), None)
+
+        while True:
+            m_data = _next_pending()
+            if m_data is None:
+                break
             t1_data = next((t for t in tourney["teams"] if t["name"] == m_data["team1"]), None)
             t2_data = next((t for t in tourney["teams"] if t["name"] == m_data["team2"]), None)
             r_label = f"R{m_data['round']}" if isinstance(m_data['round'], int) else m_data['round']
 
             if not t1_data or not t2_data:
+                errored.add(m_data["match_id"])
                 results.append(f"M{m_data['match_id']} ({r_label}): ❌ Team not found")
                 continue
             s1 = t1_data.get("squad", [])
             s2 = t2_data.get("squad", [])
             if len(s1) < 2 or len(s2) < 2:
+                errored.add(m_data["match_id"])
                 results.append(f"M{m_data['match_id']} ({r_label}): ❌ Squad not set")
                 continue
 
@@ -8360,6 +8559,7 @@ class PrefixCog(commands.Cog):
             match = CricketMatch(None, None, 0, 0, t1, t2, tourney.get("format_overs", 20), pitch, "Clear")
             match.tournament_server_id = tourney["server_id"]
             match.tournament_match_id = m_data["match_id"]
+            match.tournament_type = tourney.get("tournament_type", "round_robin")
             match.manager_id = ctx.author.id
             match.tournament_name = tourney["name"]
             match.sim_only = True
@@ -8371,6 +8571,7 @@ class PrefixCog(commands.Cog):
             try:
                 await asyncio.to_thread(_run_full_match_sync, match)
             except Exception as e:
+                errored.add(m_data["match_id"])
                 results.append(f"M{m_data['match_id']} ({r_label}): ❌ Error: {e}")
                 continue
 
@@ -8404,8 +8605,20 @@ class PrefixCog(commands.Cog):
                 f"— **{win_str}**"
             )
 
+        header = f"✅ **Simulation Complete! ({len(results)} matches)**\n"
         lines = "\n".join(results)
-        await status_msg.edit(content=f"✅ **Simulation Complete! ({len(results)} matches)**\n{lines}")
+        if len(header) + len(lines) <= 1990:
+            await status_msg.edit(content=header + lines)
+        else:
+            # too long for one message — show a tail and post the rest in follow-ups
+            await status_msg.edit(content=header + f"*(showing last results; {len(results)} total)*")
+            chunk, buf = [], 0
+            for ln in results:
+                if buf + len(ln) + 1 > 1900:
+                    await ctx.send("\n".join(chunk)); chunk, buf = [], 0
+                chunk.append(ln); buf += len(ln) + 1
+            if chunk:
+                await ctx.send("\n".join(chunk))
 
     @tournament.command(name="add_manager", help="[MANAGER] Assign a tournament manager.\nUsage: tournament add_manager <@user>")
     async def t_add_manager(self, ctx, user: discord.Member):
@@ -8638,6 +8851,14 @@ class PrefixCog(commands.Cog):
                 ("Bangladesh", "C"), ("Afghanistan", "C"), ("Zimbabwe", "C"), ("Ireland", "C"),
                 ("Scotland", "D"), ("Netherlands", "D"), ("Namibia", "D"), ("Uganda", "D"),
             ]
+        elif t_type == "acl":
+            team_config = [
+                ("Bangalore Knights", None), ("Mumbai Marathas", None), ("Karachi Supernovas", None),
+                ("Rome Gladiators", None), ("London Sovereigns", None), ("Paris Vanguard", None),
+                ("Sydney Skyhawks", None), ("Tokyo Ninjas", None), ("Dhaka Dynamites", None),
+                ("New York Empires", None), ("Los Angeles Vipers", None), ("Cape Town Cobalts", None),
+                ("Kingston Calypso", None), ("Cairo Pharaohs", None),
+            ]
         else:
             team_config = [
                 ("Thunder Kings", None), ("Lightning Bolts", None), ("Storm Riders", None),
@@ -8688,6 +8909,31 @@ class PrefixCog(commands.Cog):
                 f"**D:** Scotland · Netherlands · Namibia · Uganda\n"
                 f"Generated **{len(schedule)} group stage matches**. Use `cv tournament play_next` to begin!"
             )
+        elif t_type == "acl":
+            teams = [t["name"] for t in tourney["teams"]]
+            n = len(teams)  # 14, even
+            matchups = []
+            for r in range(n - 1):
+                round_matches = []
+                for i in range(n // 2):
+                    t1, t2 = teams[i], teams[n - 1 - i]
+                    round_matches.append((t1, t2) if r % 2 == 0 else (t2, t1))
+                random.shuffle(round_matches)
+                for m in round_matches:
+                    matchups.append({"round": r + 1, "team1": m[0], "team2": m[1]})
+                teams.insert(1, teams.pop())
+            schedule = [{"match_id": i + 1, "round": m["round"], "stage": "league",
+                         "team1": m["team1"], "team2": m["team2"], "status": "pending", "result": None}
+                        for i, m in enumerate(matchups)]
+            tourney["schedule"] = schedule
+            tourney["status"] = "active"
+            tourney["current_match_idx"] = 0
+            save_tournament(tourney)
+            await ctx.send(
+                f"⚡ **Dev Setup + Auto-Start!** — 🔴 AKATSUKI CRICKET LEAGUE\n"
+                f"Added all **14** teams · Generated **{len(schedule)} league matches**.\n"
+                f"Use `cvt simall` to sim the league, then `cvt gp` for Playoffs → `cvt simall` again → `cvt br`."
+            )
         else:
             teams = [t["name"] for t in tourney["teams"]]
             if len(teams) % 2 != 0:
@@ -8715,7 +8961,7 @@ class PrefixCog(commands.Cog):
                 f"Generated **{len(schedule)} matches**. Use `cv tournament play_next` to begin!"
             )
 
-    @tournament.command(name="next_match", help="[OWNER] Launch your team's next pending match.\nUsage: tournament next_match")
+    @tournament.command(name="next_match", aliases=["nm"], help="[OWNER] Launch your team's next pending match.\nUsage: tournament next_match")
     async def t_next_match(self, ctx):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
@@ -8741,25 +8987,33 @@ class PrefixCog(commands.Cog):
         m_data = next((m for m in tourney.get("schedule", []) if m["match_id"] == match_id), None)
         if not m_data: return await ctx.send(f"❌ Match ID {match_id} not found.")
         if m_data["status"] == "completed": return await ctx.send(f"❌ Match {match_id} already completed.")
+        if m_data["status"] == "locked":
+            return await ctx.send(f"❌ Match {match_id} is **locked** — its teams aren't decided yet (waiting on earlier results).")
         t1_name, t2_name = m_data["team1"], m_data["team2"]
         winner_clean = winner.strip()
         if winner_clean not in (t1_name, t2_name, "TIE"):
             return await ctx.send(f"❌ Winner must be **{t1_name}**, **{t2_name}**, or **TIE**.")
+        loser_clean = None
+        if winner_clean in (t1_name, t2_name):
+            loser_clean = t2_name if winner_clean == t1_name else t1_name
         m_data["status"] = "completed"
         m_data["result"] = {
-            "winner": winner_clean, "format_overs": tourney.get("format_overs", 20),
+            "winner": winner_clean, "loser": loser_clean, "format_overs": tourney.get("format_overs", 20),
             "t1_runs": t1_runs, "t1_wickets": t1_wickets, "t1_balls": t1_balls,
             "t2_runs": t2_runs, "t2_wickets": t2_wickets, "t2_balls": t2_balls,
         }
         tourney["current_match_idx"] = tourney.get("current_match_idx", 0) + 1
-        sf1 = next((m for m in tourney["schedule"] if m["round"] == "Semi-Final 1"), None)
-        sf2 = next((m for m in tourney["schedule"] if m["round"] == "Semi-Final 2"), None)
-        if sf1 and sf2 and sf1["status"] == "completed" and sf2["status"] == "completed":
-            if not any(m["round"] == "Final" for m in tourney["schedule"]):
-                tourney["schedule"].append({"match_id": len(tourney["schedule"]) + 1, "round": "Final", "stage": "knockout", "team1": sf1["result"]["winner"], "team2": sf2["result"]["winner"], "status": "pending", "result": None})
-        final_m = next((m for m in tourney["schedule"] if m["round"] == "Final"), None)
-        if final_m and final_m["status"] == "completed":
-            tourney["status"] = "completed"
+        if tourney.get("tournament_type") == "acl":
+            _acl_try_advance(tourney)
+        else:
+            sf1 = next((m for m in tourney["schedule"] if m["round"] == "Semi-Final 1"), None)
+            sf2 = next((m for m in tourney["schedule"] if m["round"] == "Semi-Final 2"), None)
+            if sf1 and sf2 and sf1["status"] == "completed" and sf2["status"] == "completed":
+                if not any(m["round"] == "Final" for m in tourney["schedule"]):
+                    tourney["schedule"].append({"match_id": len(tourney["schedule"]) + 1, "round": "Final", "stage": "knockout", "team1": sf1["result"]["winner"], "team2": sf2["result"]["winner"], "status": "pending", "result": None})
+            final_m = next((m for m in tourney["schedule"] if m["round"] == "Final"), None)
+            if final_m and final_m["status"] == "completed":
+                tourney["status"] = "completed"
         save_tournament(tourney)
         overs1 = f"{t1_balls//6}.{t1_balls%6}"; overs2 = f"{t2_balls//6}.{t2_balls%6}"
         r_label = f"Round {m_data['round']}" if isinstance(m_data['round'], int) else m_data['round']
@@ -8804,17 +9058,31 @@ class PrefixCog(commands.Cog):
         preview = "**Round 1:**\n" + "\n".join(f"  Match {m['match_id']}: {m['team1']} vs {m['team2']}" for m in r1)
         await ctx.send(embed=discord.Embed(title=f"✅ Schedule Restored — {tourney['name']}", description=preview, color=discord.Color.green()))
 
-    @tournament.command(name="leaderboard", help="View the tournament leaderboard.\nUsage: tournament leaderboard <runs|wickets|sr|bat_avg|fours|sixes|fifties|hundreds|econ|bowl_avg>")
+    @tournament.command(name="leaderboard", aliases=["lb"], help="View the tournament leaderboard.\nUsage: tournament lb <runs|wickets|sr|bat_avg|fours|sixes|fifties|hundreds|econ|bowl_avg|mvp>")
     async def t_leaderboard(self, ctx, category: str = "runs"):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney: return await ctx.send("❌ No tournament exists.")
-        valid_cats = {"runs", "wickets", "sr", "bat_avg", "fours", "sixes", "fifties", "hundreds", "econ", "bowl_avg"}
+        valid_cats = {"runs", "wickets", "sr", "bat_avg", "fours", "sixes", "fifties", "hundreds", "econ", "bowl_avg", "mvp"}
         c_val = category.lower()
         if c_val not in valid_cats:
             return await ctx.send(f"❌ Invalid category. Choose from: {', '.join(sorted(valid_cats))}")
         all_players = [{"name": p_name, "team": t_name, "stats": stats} for t_name, players in tourney.get("stats", {}).items() for p_name, stats in players.items()]
         if not all_players: return await ctx.send("❌ No stats yet. Complete a match first!")
+
+        def _mvp(s):
+            sr = (s["runs"] / s["balls_faced"] * 100) if s["balls_faced"] > 0 else 0
+            bat = float(s["runs"])
+            if sr >= 150: bat *= 1.30
+            elif sr >= 130: bat *= 1.20
+            elif sr >= 110: bat *= 1.10
+            elif sr < 80 and s["balls_faced"] >= 20: bat *= 0.85
+            bat += s["fifties"] * 15 + s["hundreds"] * 40 + s["sixes"] * 2 + s["fours"] * 0.5
+            econ = (s["runs_conceded"] / s["balls_bowled"] * 6) if s["balls_bowled"] > 0 else 9.0
+            bowl = float(s["wickets"] * 40)
+            if s["balls_bowled"] >= 12: bowl += max(-25.0, min(25.0, (8.0 - econ) * 5))
+            return bat + bowl
+
         if c_val == "runs": sp = sorted(all_players, key=lambda x: x["stats"]["runs"], reverse=True)
         elif c_val == "wickets": sp = sorted(all_players, key=lambda x: x["stats"]["wickets"], reverse=True)
         elif c_val == "sr": sp = sorted([p for p in all_players if p["stats"]["runs"] >= 50], key=lambda x: (x["stats"]["runs"]/x["stats"]["balls_faced"]*100) if x["stats"]["balls_faced"] > 0 else 0, reverse=True)
@@ -8822,8 +9090,9 @@ class PrefixCog(commands.Cog):
         elif c_val in {"fours", "sixes", "fifties", "hundreds"}: sp = sorted(all_players, key=lambda x: x["stats"][c_val], reverse=True)
         elif c_val == "econ": sp = sorted([p for p in all_players if p["stats"]["balls_bowled"] >= 30], key=lambda x: (x["stats"]["runs_conceded"]/x["stats"]["balls_bowled"]*6) if x["stats"]["balls_bowled"] > 0 else 999)
         elif c_val == "bowl_avg": sp = sorted([p for p in all_players if p["stats"]["wickets"] >= 3], key=lambda x: x["stats"]["runs_conceded"]/x["stats"]["wickets"] if x["stats"]["wickets"] > 0 else 999)
+        elif c_val == "mvp": sp = sorted(all_players, key=lambda x: _mvp(x["stats"]), reverse=True)
         else: sp = []
-        cat_labels = {"runs":"Most Runs","wickets":"Most Wickets","sr":"Best Strike Rate","bat_avg":"Best Batting Avg","fours":"Most Fours","sixes":"Most Sixes","fifties":"Most 50s","hundreds":"Most 100s","econ":"Best Economy","bowl_avg":"Best Bowling Avg"}
+        cat_labels = {"runs":"Most Runs","wickets":"Most Wickets","sr":"Best Strike Rate","bat_avg":"Best Batting Avg","fours":"Most Fours","sixes":"Most Sixes","fifties":"Most 50s","hundreds":"Most 100s","econ":"Best Economy","bowl_avg":"Best Bowling Avg","mvp":"MVP Score"}
         embed = discord.Embed(title=f"🏆 Leaderboard: {cat_labels.get(c_val, c_val)}", color=discord.Color.gold())
         lines = []
         for i, p in enumerate(sp[:10], 1):
@@ -8835,9 +9104,12 @@ class PrefixCog(commands.Cog):
             elif c_val in {"fours","sixes","fifties","hundreds"}: val = f"**{s[c_val]}**"
             elif c_val == "econ": val = f"**{(s['runs_conceded']/s['balls_bowled']*6):.1f}** econ" if s['balls_bowled'] > 0 else "N/A"
             elif c_val == "bowl_avg": val = f"**{s['runs_conceded']/s['wickets']:.1f}** avg" if s['wickets'] > 0 else "N/A"
+            elif c_val == "mvp": val = f"**{_mvp(s):.0f}** pts"
             else: val = ""
             lines.append(f"`{i:>2}.` **{p['name']}** ({p['team']}) — {val}")
         embed.description = "\n".join(lines) if lines else "No players qualify yet."
+        if c_val == "mvp":
+            embed.set_footer(text="MVP = Runs (×SR mult) + boundary/milestone bonus + Wickets×40 + economy bonus")
         await ctx.send(embed=embed)
 
     @tournament.command(name="player_stats", help="View a specific player's tournament stats.\nUsage: tournament player_stats \"<team>\" \"<player>\"")
@@ -8862,17 +9134,39 @@ class PrefixCog(commands.Cog):
         embed.add_field(name="🎯 Bowling", value=f"**Wkts:** {stats['wickets']}\n**Econ:** {econ:.1f}\n**Avg:** {bowl_avg:.1f}\n**Overs:** {stats['balls_bowled']//6}.{stats['balls_bowled']%6}", inline=True)
         await ctx.send(embed=embed)
 
-    @tournament.command(name="help_guide", help="Show the tournament commands guide.\nUsage: tournament help_guide")
+    @tournament.command(name="help_guide", aliases=["help", "commands", "guide"], help="Show the tournament commands guide.\nUsage: cvt help")
     async def t_help_guide(self, ctx):
-        embed = discord.Embed(title="🏆 Tournament Commands (cv prefix)", color=discord.Color.gold())
-        embed.add_field(name="🛠️ Setup", value="`create` `add_manager` `add_team` `remove_team` `submit_squad` `start` `force_delete`", inline=False)
-        embed.add_field(name="🏏 Playing", value="`play <id>` `play_next` `next_match`", inline=False)
-        embed.add_field(name="📊 Stats & Standings", value="`status` `standings` `leaderboard <cat>` `player_stats <team> <player>` `squad` `match_scorecard <id>`", inline=False)
-        embed.add_field(name="⚙️ Admin", value="`set_theme` `set_team_color` `replace_player` `admin_record_result` `admin_restore_schedule` `admin_force_restore_schedule` `force_result`", inline=False)
-        embed.set_footer(text="All commands start with: cv tournament ...")
+        embed = discord.Embed(
+            title="🏆 Tournament Guide  ·  `cvt …`",
+            description="Event types: **Round Robin** · **T20 World Cup** · **ACL** (14 teams → League → Playoffs → Super Cup).",
+            color=discord.Color.gold(),
+        )
+        embed.add_field(
+            name="🔴 ACL Quickstart",
+            value=("**1.** `cvt create \"ACL S1\" t20 event=acl`\n"
+                   "**2.** `cvt add_team \"<team>\" @owner` ×**14**\n"
+                   "**3.** each owner: `cvt ss` (submit_squad)\n"
+                   "**4.** `cvt start` → 91 league matches\n"
+                   "**5.** `cvt fx` (your fixtures) → `cvt play <id>` your games\n"
+                   "**6.** after all 91: Manager `cvt gp` (generate_playoffs)\n"
+                   "**7.** `cvt br` (bracket) → Playoffs → **Super Cup** 👑"),
+            inline=False,
+        )
+        embed.add_field(name="🛠️ Setup", value="`create` · `add_team` · `add_manager` · `submit_squad`/`ss` · `start` · `set_team_logo` · `set_team_color`", inline=False)
+        embed.add_field(
+            name="🏏 Play your matches",
+            value=("`fixtures`/`fx` `[team]` — your upcoming + results\n"
+                   "`play <id>` — **owners launch any of their own**; managers any\n"
+                   "`next_match`/`nm` — your earliest pending · `play_next`/`pn` — [MGR] next in order"),
+            inline=False,
+        )
+        embed.add_field(name="📊 Stats & standings", value="`standings`/`st` · `status`/`sched` · `bracket`/`br` (ACL) · `leaderboard`/`lb <cat>` · `player_stats` · `squad` · `match_scorecard <id>`", inline=False)
+        embed.add_field(name="🔥 Knockouts (Managers)", value="**ACL:** `gp`  ·  **Round Robin:** `generate_knockouts`  ·  **T20 WC:** `generate_super8`", inline=False)
+        embed.add_field(name="⚙️ Admin (prefix-only)", value="`transfer_team` · `replace_player` · `force_delete` · `set_theme` · `set_injury_channel` · `remove_injury` · `force_result` · `admin_record_result` · `simulate_all`", inline=False)
+        embed.set_footer(text="Tip: leaderboard categories — runs · wickets · sr · bat_avg · econ · bowl_avg · mvp · fours · sixes · fifties · hundreds")
         await ctx.send(embed=embed)
 
-    @tournament.command(name="standings", help="View the Tournament Points Table & NRR.\nUsage: tournament standings")
+    @tournament.command(name="standings", aliases=["st", "table"], help="View the Tournament Points Table & NRR.\nUsage: tournament standings")
     async def t_standings(self, ctx):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
