@@ -45,6 +45,7 @@ from subscription_manager import (
     is_ratings_channel, toggle_ratings_channel,
     get_match_log_channel, set_match_log_channel, clear_match_log_channel, DB_CACHE,
     get_match_counts, increment_match_count, set_match_count,
+    apply_server_overrides, set_server_override, reset_server_override, get_server_overrides,
 )
 # ── Career Mode (WORK IN PROGRESS) ────────────────────────────────────────────
 # Kept OFF by default so the live simulation engine runs undisturbed. Career code
@@ -2207,6 +2208,144 @@ class ODISuperOverPrompt(discord.ui.View):
         self.match.tie_accepted = True
         await handle_innings_end(interaction, self.match)
 
+def _so_reorder_batting(innings, opener_names):
+    """Put the two chosen openers at the crease for a Super Over innings by reordering a COPY
+    of the batting team (never the shared main-match team). Resets indices + fresh batting_stats
+    (safe: the innings hasn't started). Returns True on success, False to fall back to default order."""
+    try:
+        players = list(innings.batting_team["players"])
+        chosen, seen = [], set()
+        for nm in opener_names:
+            p = next((x for x in players if x["name"] == nm), None)
+            if p and p["name"] not in seen:
+                chosen.append(p); seen.add(p["name"])
+        if len(chosen) < 2:
+            return False
+        rest = [p for p in players if p["name"] not in seen]
+        new_players = chosen[:2] + rest + chosen[2:]
+        innings.batting_team = {**innings.batting_team, "players": new_players}
+        innings.current_striker_idx = 0
+        innings.current_non_striker_idx = 1
+        innings.next_batter_idx = 2
+        innings.batting_stats = {p["name"]: BatterStats(p) for p in new_players}
+        return True
+    except Exception as e:
+        print(f"⚠️ super over reorder failed: {e}")
+        return False
+
+
+def _so_auto_openers(innings):
+    """Auto-pick the two highest-rated batters as Super Over openers (sim / AI sides)."""
+    try:
+        top2 = sorted(innings.batting_team["players"], key=lambda p: p.get("bat", 0), reverse=True)[:2]
+        _so_reorder_batting(innings, [p["name"] for p in top2])
+    except Exception as e:
+        print(f"⚠️ super over auto-openers failed: {e}")
+
+
+class SuperOverOpenersView(discord.ui.View):
+    """Lets the batting side pick its 2 Super Over openers. Mirrors XISelectView."""
+    def __init__(self, match, batting_uid, channel):
+        super().__init__(timeout=120)
+        self.match = match
+        self.uid = batting_uid
+        self.channel = channel
+        self.picked = []          # player names, in order
+        self._done = False
+        self.update_ui()
+
+    def update_ui(self):
+        self.clear_items()
+        players = self.match.current_innings.batting_team["players"]
+        if len(self.picked) < 2:
+            opts = [discord.SelectOption(label=p["name"], description=f"bat {p.get('bat','?')} · {p['role'].split('_')[0]}", value=p["name"])
+                    for p in players if p["name"] not in self.picked][:25]
+            sel = discord.ui.Select(placeholder=f"Pick opener {len(self.picked)+1} of 2...", options=opts)
+            sel.callback = self.select_cb
+            self.add_item(sel)
+        undo = discord.ui.Button(label="Undo", style=discord.ButtonStyle.secondary, disabled=not self.picked)
+        undo.callback = self.undo_cb
+        self.add_item(undo)
+        conf = discord.ui.Button(label="Confirm Openers", style=discord.ButtonStyle.success, disabled=len(self.picked) < 2)
+        conf.callback = self.confirm_cb
+        self.add_item(conf)
+
+    async def interaction_check(self, interaction: discord.Interaction):
+        if interaction.channel.id not in active_games or active_games[interaction.channel.id] != self.match:
+            await interaction.response.send_message("❌ This match has ended.", ephemeral=True)
+            return False
+        if interaction.user.id != self.uid and interaction.user.id != getattr(self.match, "manager_id", None):
+            await interaction.response.send_message("❌ Only the batting side can pick the Super Over openers.", ephemeral=True)
+            return False
+        return True
+
+    async def select_cb(self, interaction: discord.Interaction):
+        val = interaction.data["values"][0]
+        if val not in self.picked:
+            self.picked.append(val)
+        self.update_ui()
+        await interaction.response.edit_message(view=self)
+
+    async def undo_cb(self, interaction: discord.Interaction):
+        if self.picked:
+            self.picked.pop()
+        self.update_ui()
+        await interaction.response.edit_message(view=self)
+
+    async def confirm_cb(self, interaction: discord.Interaction):
+        if self._done:
+            return
+        self._done = True
+        await interaction.response.edit_message(view=None)
+        innings = self.match.current_innings
+        if not _so_reorder_batting(innings, self.picked):
+            _so_auto_openers(innings)   # safety fallback
+        s = innings.batting_team["players"]
+        await interaction.channel.send(f"🧤 **Super Over openers — {innings.batting_team['name']}:** {s[0]['name']} & {s[1]['name']}")
+        await prompt_bowler_then_hub(interaction.channel, self.match)
+
+    async def on_timeout(self):
+        if self._done:
+            return
+        self._done = True
+        try:
+            _so_auto_openers(self.match.current_innings)   # default to top-2 and carry on
+            s = self.match.current_innings.batting_team["players"]
+            await self.channel.send(f"⏳ Openers not picked in time — defaulting to **{s[0]['name']} & {s[1]['name']}**.")
+            await prompt_bowler_then_hub(self.channel, self.match)
+        except Exception as e:
+            print(f"⚠️ super over openers timeout fallback failed: {e}")
+
+
+async def begin_super_over_innings(channel, match):
+    """Start a Super Over innings: AI/sim sides auto-pick openers; human sides pick interactively.
+    Always proceeds to bowling even if anything goes wrong (never stalls the Super Over)."""
+    innings = match.current_innings
+    batting_uid = match.batting_first_id if getattr(match, "current_innings_num", 1) == 1 else match.bowling_first_id
+    ai_bats = getattr(match, "is_ai_game", False) and batting_uid == getattr(match, "p2_id", None)
+    auto = getattr(match, "sim_only", False) or getattr(match, "is_club", False) or batting_uid is None or ai_bats
+
+    if auto:
+        _so_auto_openers(innings)
+        if getattr(match, "sim_only", False):
+            await loop_entire_match_simulation(channel, match)
+        else:
+            s = innings.batting_team["players"]
+            await channel.send(f"🤖 **Super Over openers — {innings.batting_team['name']}:** {s[0]['name']} & {s[1]['name']}")
+            await prompt_bowler_then_hub(channel, match)
+        return
+
+    try:
+        view = SuperOverOpenersView(match, batting_uid, channel)
+        view.message = await channel.send(
+            f"🧤 <@{batting_uid}> — pick your **2 Super Over openers** for **{innings.batting_team['name']}** (order = who's on strike):",
+            view=view,
+        )
+    except Exception as e:
+        print(f"⚠️ super over openers view failed, using defaults: {e}")
+        await prompt_bowler_then_hub(channel, match)
+
+
 async def trigger_super_over(channel, match: CricketMatch):
     so_match = CricketMatch(match.p1, match.p2, match.p1_id, match.p2_id, match.team1, match.team2, format_overs=1, pitch=match.pitch, weather=match.weather)
     so_match.is_super_over = True
@@ -2227,8 +2366,8 @@ async def trigger_super_over(channel, match: CricketMatch):
     active_games[channel.id] = so_match
     
     await channel.send("🚨 **SCORES ARE TIED!** 🚨\nGet ready for the **SUPER OVER!**\n*The team that batted second will bat first. Max 2 wickets.*")
-    if so_match.sim_only: await loop_entire_match_simulation(channel, so_match)
-    else: await prompt_bowler_then_hub(channel, so_match)
+    # Pick this innings' two openers (interactive) / auto-pick (sim/AI), then bowl.
+    await begin_super_over_innings(channel, so_match)
 
 async def handle_innings_end(interaction_context, match: CricketMatch):
     if getattr(match, "is_debut", False):   # Career debut: never start innings 2 — score the trial.
@@ -2292,7 +2431,10 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
             match.verbose = False
 
         # Pass channel directly — no more DummyInteraction needed
-        if getattr(match, 'sim_only', False):
+        if getattr(match, 'is_super_over', False):
+            # Super Over innings 2: pick openers (interactive) / auto (sim·AI), then bowl.
+            await begin_super_over_innings(channel, match)
+        elif getattr(match, 'sim_only', False):
             await channel.send("*Simulating 2nd Innings... ⚙️*")
             await loop_entire_match_simulation(channel, match)
         elif getattr(match, "is_club", False):
@@ -2330,7 +2472,8 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
             return
 
         match_to_finalize = match
-        if getattr(match, 'is_super_over', False) and hasattr(match, 'original_match_object'):
+        is_so_finish = getattr(match, 'is_super_over', False) and hasattr(match, 'original_match_object')
+        if is_so_finish:
             original_match = match.original_match_object
             so_winner_name = match.innings2.batting_team['name'] if match.innings2.total_runs > match.innings1.total_runs else match.innings1.batting_team['name']
             original_match.tiebreak_winner_name = so_winner_name
@@ -2342,19 +2485,28 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
             _base = getattr(match_to_finalize, 'original_format_overs', match_to_finalize.format_overs)
             _increment_match_count("odi" if _base == 50 else "t20")
 
-        if getattr(match_to_finalize, "tournament_server_id", None):
-            img_buf = generate_tournament_score_image(match_to_finalize)
-        else:
+        # At a Super Over's end, show the SUPER OVER's own summary (the main-match scoreboard was
+        # already shown when scores tied). A normal match shows itself. Result recording below
+        # always uses match_to_finalize (the main match) so stats/standings/bracket stay correct.
+        img_match = match if is_so_finish else match_to_finalize
+        try:
+            if getattr(img_match, "tournament_server_id", None):
+                img_buf = generate_tournament_score_image(img_match)
+            else:
+                img_buf = generate_final_score_image(img_match)
+            embed_full = render_full_scorecard_embed(img_match, 2)
+        except Exception as _img_err:
+            print(f"⚠️ Summary image failed ({'super over' if is_so_finish else 'match'}): {_img_err}")
             img_buf = generate_final_score_image(match_to_finalize)
+            embed_full = render_full_scorecard_embed(match_to_finalize, 2)
 
         file = discord.File(fp=img_buf, filename="final_scoreboard.png")
-        embed_full = render_full_scorecard_embed(match_to_finalize, 2)
-
-        await channel.send(
-            "🏆 **Match over! Here is the final detailed scorecard and broadcast graphic:**",
-            embed=embed_full,
-            file=file
-        )
+        if is_so_finish:
+            _son = getattr(match, "super_over_number", 1)
+            header = f"🤯 **SUPER OVER #{_son} — {match_to_finalize.tiebreak_winner_name} win it!** Super Over summary:"
+        else:
+            header = "🏆 **Match over! Here is the final detailed scorecard and broadcast graphic:**"
+        await channel.send(header, embed=embed_full, file=file)
 
         # Send scorecard to match log channel if configured for this server
         if channel.guild:
@@ -2434,6 +2586,12 @@ async def prompt_next_batter(interaction, match: CricketMatch):
         if bs and bs.dismissal != "not out":
             await handle_scenario_end(interaction, match)
             return
+    # Innings is over once the wicket cap is reached — Super Over = 2, normal = 10.
+    # (Without this, a Super Over wouldn't stop at 2 because the rest of the XI is still
+    #  "available", so it would try to send a 3rd batter and crash the flow.)
+    if innings.wickets >= _match_max_wickets(match):
+        await handle_innings_end(interaction, match)
+        return
     is_club = getattr(match, "is_club", False)
     if is_club:
         uid = match.batting_captain_id() or uid
@@ -4354,8 +4512,9 @@ async def begin_toss(channel, state):
     if state.format_overs == 90:
         return await _begin_test_match(channel, state)
 
-    t1 = {"name": state.t1_name, "players": state.t1_roster, "subs": getattr(state, 't1_subs', []), "color": getattr(state, 't1_color', '#6B7280')}
-    t2 = {"name": state.t2_name, "players": state.t2_roster, "subs": getattr(state, 't2_subs', []), "color": getattr(state, 't2_color', '#6B7280')}
+    _sid = getattr(state, "tournament_server_id", None) or (str(channel.guild.id) if getattr(channel, "guild", None) else None)
+    t1 = {"name": state.t1_name, "players": apply_server_overrides(state.t1_roster, _sid), "subs": apply_server_overrides(getattr(state, 't1_subs', []), _sid), "color": getattr(state, 't1_color', '#6B7280')}
+    t2 = {"name": state.t2_name, "players": apply_server_overrides(state.t2_roster, _sid), "subs": apply_server_overrides(getattr(state, 't2_subs', []), _sid), "color": getattr(state, 't2_color', '#6B7280')}
 
     match = CricketMatch(state.p1, state.p2, state.p1_id, state.p2_id, t1, t2, state.format_overs, state.pitch, state.weather)
     match.impact_player = state.impact_player
@@ -5949,8 +6108,9 @@ class TestTossDecisionView(discord.ui.View):
 
     async def _decide(self, interaction: discord.Interaction, choice: str):
         state = self.state
-        t1 = {"name": state.t1_name, "players": state.t1_roster, "color": getattr(state, 't1_color', '#1D4ED8')}
-        t2 = {"name": state.t2_name, "players": state.t2_roster, "color": getattr(state, 't2_color', '#DC2626')}
+        _sid = getattr(state, "tournament_server_id", None) or (str(self.channel.guild.id) if getattr(self.channel, "guild", None) else None)
+        t1 = {"name": state.t1_name, "players": apply_server_overrides(state.t1_roster, _sid), "color": getattr(state, 't1_color', '#1D4ED8')}
+        t2 = {"name": state.t2_name, "players": apply_server_overrides(state.t2_roster, _sid), "color": getattr(state, 't2_color', '#DC2626')}
         winner_is_p1 = (state._test_toss_winner == state.p1_id)
         winning_team = t1 if winner_is_p1 else t2
         losing_team  = t2 if winner_is_p1 else t1
@@ -5978,8 +6138,9 @@ class TestTossDecisionView(discord.ui.View):
 
 async def _begin_test_match(channel, state):
     """Branch from begin_toss for Test (format_overs == 90) matches."""
-    t1 = {"name": state.t1_name, "players": state.t1_roster, "color": getattr(state, 't1_color', '#1D4ED8')}
-    t2 = {"name": state.t2_name, "players": state.t2_roster, "color": getattr(state, 't2_color', '#DC2626')}
+    _sid = getattr(state, "tournament_server_id", None) or (str(channel.guild.id) if getattr(channel, "guild", None) else None)
+    t1 = {"name": state.t1_name, "players": apply_server_overrides(state.t1_roster, _sid), "color": getattr(state, 't1_color', '#1D4ED8')}
+    t2 = {"name": state.t2_name, "players": apply_server_overrides(state.t2_roster, _sid), "color": getattr(state, 't2_color', '#DC2626')}
     weather = state.weather
 
     # sim_only (/simulatematch): fully auto
@@ -6946,9 +7107,18 @@ class PrefixCog(commands.Cog):
         class FakeInteraction:
             def __init__(self): self.followup = FakeFollowup()
 
+        # Show THIS server's overridden ratings/OVR if the player has a server override.
+        _sid = str(ctx.guild.id) if ctx.guild else None
+        def _disp(p):
+            return apply_server_overrides([p], _sid)[0]
+        async def _send_profile(p):
+            await send_player_profile(FakeInteraction(), _disp(p), show_ratings)
+            if show_ratings and _sid and p["name"].lower() in get_server_overrides(_sid):
+                await ctx.send(f"-# 🎚️ Showing **{ctx.guild.name}** server-override ratings for **{p['name']}** — the global DB value is different.")
+
         exact = next((p for p in all_players if p["name"].lower() == search_query.lower()), None)
         if exact:
-            return await send_player_profile(FakeInteraction(), exact, show_ratings)
+            return await _send_profile(exact)
 
         subs = [p for p in all_players if search_query.lower() in p["name"].lower()]
         fuzz = difflib.get_close_matches(search_query, player_names, n=1, cutoff=0.2)
@@ -6957,7 +7127,7 @@ class PrefixCog(commands.Cog):
             return await ctx.send(f"❌ Player `{search_query}` not found in the database.")
 
         if len(subs) == 1 and not fuzz:
-            return await send_player_profile(FakeInteraction(), subs[0], show_ratings)
+            return await _send_profile(subs[0])
 
         best_name = fuzz[0] if fuzz else subs[0]["name"]
         other = [p["name"] for p in subs if p["name"] != best_name]
@@ -7046,6 +7216,81 @@ class PrefixCog(commands.Cog):
         update_player(cur["name"], {"name": final_name, "bat": bat, "bowl": bowl, "role": role, "archetype": archetype})
         await ctx.send(f"✅ Updated `{final_name}` in the database!")
         await log_db_update("Player Updated", final_name, ctx.author, f"Bat: {bat} | Bowl: {bowl}\nRole: {role}\nArchetype: {archetype}")
+
+    # ── Per-server rating overrides (OWNER-only, separate from the global player DB) ──────
+    @commands.command(name="srating", aliases=["serverrating", "soverride"], help="[OWNER] Override a player's ratings for THIS server only (global DB untouched).\nUsage: srating \"<player>\" bat=86 bowl=20 [role=Batter] [arch=Anchor]   ·   srating \"<player>\" reset")
+    async def srating(self, ctx, player: str, *args):
+        if ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("❌ Owner only.")
+        if not ctx.guild:
+            return await ctx.send("❌ Use this inside a server.")
+        sid = str(ctx.guild.id)
+        all_p = get_all_players()
+        cur = next((p for p in all_p if p["name"].lower() == player.strip().lower()), None)
+        if not cur:
+            close = difflib.get_close_matches(player, [p["name"] for p in all_p], n=1, cutoff=0.6)
+            cur = next((p for p in all_p if p["name"] == close[0]), None) if close else None
+        if not cur:
+            return await ctx.send(f"❌ Player '{player}' not found in the global database.")
+        name = cur["name"]
+
+        if len(args) == 1 and args[0].lower() in ("reset", "clear", "remove", "default"):
+            if reset_server_override(sid, name):
+                return await ctx.send(f"✅ Removed the override for **{name}** on this server — back to global (bat {cur['bat']} · bowl {cur['bowl']}).")
+            return await ctx.send(f"ℹ️ **{name}** has no override on this server.")
+
+        valid_roles = ["Batter", "Batter_WK", "Bowler_Pace", "Bowler_Spin_Off", "Bowler_Spin_Leg", "All-Rounder_Pace", "All-Rounder_Spin_Off", "All-Rounder_Spin_Leg"]
+        valid_archs = ["Aggressor", "Anchor", "Finisher", "Standard"]
+        fields = {}
+        for a in args:
+            if "=" not in a:
+                continue
+            k, v = a.split("=", 1); k = k.strip().lower(); v = v.strip()
+            if k in ("bat", "bowl"):
+                if not v.isdigit() or not (0 <= int(v) <= 99):
+                    return await ctx.send(f"❌ `{k}` must be a whole number 0-99.")
+                fields[k] = int(v)
+            elif k == "role":
+                if v not in valid_roles:
+                    return await ctx.send(f"❌ Invalid role. Choose from: {', '.join(valid_roles)}")
+                fields["role"] = v
+            elif k in ("arch", "archetype"):
+                if v not in valid_archs:
+                    return await ctx.send(f"❌ Invalid archetype. Choose from: {', '.join(valid_archs)}")
+                fields["archetype"] = v
+        if not fields:
+            return await ctx.send("❌ Nothing to set. Try `srating \"Virat Kohli\" bat=96 bowl=50`  or  `srating \"Virat Kohli\" reset`.")
+        set_server_override(sid, name, fields)
+        eff = {**cur, **get_server_overrides(sid).get(name.lower(), {})}
+        await ctx.send(
+            f"✅ **{name}** overridden on **this server only**:\n"
+            f"🏏 bat **{eff['bat']}** · 🎯 bowl **{eff['bowl']}** · {eff['role']} · {eff['archetype']}\n"
+            f"-# Global DB unchanged (bat {cur['bat']} · bowl {cur['bowl']}). Applies to all matches on this server."
+        )
+
+    @commands.command(name="sratings", aliases=["serverratings", "soverrides"], help="[OWNER] List this server's player rating overrides.\nUsage: sratings")
+    async def sratings(self, ctx):
+        if ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("❌ Owner only.")
+        if not ctx.guild:
+            return await ctx.send("❌ Use this inside a server.")
+        srv = get_server_overrides(str(ctx.guild.id))
+        if not srv:
+            return await ctx.send("ℹ️ No rating overrides on this server. Set one with `srating \"<player>\" bat=.. bowl=..`.")
+        base = {p["name"].lower(): p for p in get_all_players()}
+        lines = []
+        for key, o in sorted(srv.items()):
+            g = base.get(key, {})
+            nm = o.get("name", key)
+            parts = []
+            for f, lbl in (("bat", "bat"), ("bowl", "bowl"), ("role", "role"), ("archetype", "arch")):
+                if f in o:
+                    gv = g.get(f, "?")
+                    parts.append(f"{lbl} {gv}→**{o[f]}**" if gv != o[f] else f"{lbl} **{o[f]}**")
+            lines.append(f"• **{nm}** — {' · '.join(parts)}")
+        embed = discord.Embed(title=f"🎚️ Server Rating Overrides — {ctx.guild.name}", description="\n".join(lines), color=discord.Color.teal())
+        embed.set_footer(text="Owner-only · applies to all matches on THIS server · global DB unchanged")
+        await ctx.send(embed=embed)
 
     @commands.command(name="deleteplayer", aliases=["dp"], help="[ADMIN] Delete a player from DB.\nUsage: deleteplayer \"<name>\"")
     async def deleteplayer(self, ctx, *, name: str):
@@ -8550,8 +8795,8 @@ class PrefixCog(commands.Cog):
                 results.append(f"M{m_data['match_id']} ({r_label}): ❌ Squad not set")
                 continue
 
-            roster1 = s1[:11]
-            roster2 = s2[:11]
+            roster1 = apply_server_overrides(s1, tourney["server_id"])[:11]
+            roster2 = apply_server_overrides(s2, tourney["server_id"])[:11]
             pitch = random.choice(_PITCHES)
             t1 = {"name": m_data["team1"], "players": roster1, "color": t1_data.get("color", "#6B7280")}
             t2 = {"name": m_data["team2"], "players": roster2, "color": t2_data.get("color", "#6B7280")}

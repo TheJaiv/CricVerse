@@ -58,6 +58,9 @@ DB_CACHE = {
     "match_log_channels": {},
     "tournaments": [],
     "match_counts": {"t20": 0, "odi": 0, "test": 0},
+    # Per-server player rating overrides (owner-only, separate from the global `players` DB):
+    # { server_id: { "<player name lower>": {"name":.., "bat":.., "bowl":.., "role":.., "archetype":..} } }
+    "server_overrides": {},
 }
 
 def load_data_from_bin():
@@ -74,6 +77,7 @@ def load_data_from_bin():
             DB_CACHE["restricted_channels"] = doc.get("restricted_channels", [])
             DB_CACHE["ratings_channels"]    = doc.get("ratings_channels", [])
             DB_CACHE["match_log_channels"]  = doc.get("match_log_channels", {})
+            DB_CACHE["server_overrides"]    = doc.get("server_overrides", {})
             raw_mc = doc.get("match_counts", {})
             DB_CACHE["match_counts"] = {
                 "t20":  int(raw_mc.get("t20",  0)),
@@ -304,6 +308,53 @@ def toggle_auth_admin(admin_id: str):
 
 def get_all_players():
     return DB_CACHE["players"]
+
+# ── Per-server player rating overrides (owner-only; global `players` DB untouched) ──────
+_OVERRIDE_FIELDS = ("bat", "bowl", "role", "archetype")
+
+def get_server_overrides(server_id):
+    """All overrides for one server: { '<name lower>': {name, bat?, bowl?, role?, archetype?} }."""
+    return DB_CACHE.get("server_overrides", {}).get(str(server_id), {})
+
+def set_server_override(server_id, name, fields):
+    """Merge `fields` (any of bat/bowl/role/archetype) into a player's override for this server."""
+    sid = str(server_id); key = name.lower()
+    srv = DB_CACHE.setdefault("server_overrides", {}).setdefault(sid, {})
+    cur = srv.setdefault(key, {"name": name})
+    cur.update({k: v for k, v in fields.items() if k in _OVERRIDE_FIELDS})
+    cur["name"] = name
+    async_save_to_bin()
+    return cur
+
+def reset_server_override(server_id, name):
+    """Remove a player's override on this server. Returns True if one existed."""
+    sid = str(server_id); key = name.lower()
+    srv = DB_CACHE.get("server_overrides", {}).get(sid, {})
+    if key in srv:
+        del srv[key]
+        if not srv:
+            DB_CACHE["server_overrides"].pop(sid, None)
+        async_save_to_bin()
+        return True
+    return False
+
+def apply_server_overrides(players, server_id):
+    """Return players with this server's rating overrides merged in (by name).
+    Never mutates the input/global dicts — overridden players are fresh copies.
+    Returns the original list unchanged when the server has no overrides (cheap no-op)."""
+    if not server_id:
+        return players
+    srv = DB_CACHE.get("server_overrides", {}).get(str(server_id))
+    if not srv:
+        return players
+    out = []
+    for p in players:
+        o = srv.get(str(p.get("name", "")).lower())
+        if o:
+            out.append({**p, **{k: v for k, v in o.items() if k in _OVERRIDE_FIELDS}})
+        else:
+            out.append(p)
+    return out
 
 def add_player(player_dict):
     global DB_CACHE

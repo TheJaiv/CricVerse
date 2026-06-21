@@ -734,7 +734,7 @@ ACL_PLAYOFF_STAGE  = "acl_playoff"
 ACL_SUPERCUP_STAGE = "acl_supercup"
 ACL_KO_STAGES      = (ACL_PLAYOFF_STAGE, ACL_SUPERCUP_STAGE)
 # Logical render order of the bracket rounds
-ACL_PLAYOFF_ORDER  = ["Qualifier", "Eliminator 1", "Eliminator 2", "Eliminator Final", "Semi-Final", "Grand Final"]
+ACL_PLAYOFF_ORDER  = ["Qualifier", "Eliminator 1", "Eliminator 2", "The Knockout", "Qualifier 2", "Grand Final"]
 
 
 def _acl_next_mid(tourney):
@@ -806,9 +806,9 @@ def acl_generate_playoffs(tourney):
     mk("Eliminator 1",     ACL_PLAYOFF_STAGE,  s3, s6,   "3rd · League", "6th · League", "pending")
     mk("Eliminator 2",     ACL_PLAYOFF_STAGE,  s4, s5,   "4th · League", "5th · League", "pending")
     # Knockouts — locked until feeders resolve
-    mk("Eliminator Final", ACL_PLAYOFF_STAGE,  None, None, "Winner · Eliminator 1", "Winner · Eliminator 2", "locked")
-    mk("Semi-Final",       ACL_PLAYOFF_STAGE,  None, None, "Loser · Qualifier",     "Winner · Eliminator Final", "locked")
-    mk("Grand Final",      ACL_PLAYOFF_STAGE,  None, None, "Winner · Qualifier",    "Winner · Semi-Final", "locked")
+    mk("The Knockout", ACL_PLAYOFF_STAGE,  None, None, "Winner · Eliminator 1", "Winner · Eliminator 2", "locked")
+    mk("Qualifier 2",      ACL_PLAYOFF_STAGE,  None, None, "Loser · Qualifier",     "Winner · The Knockout", "locked")
+    mk("Grand Final",      ACL_PLAYOFF_STAGE,  None, None, "Winner · Qualifier",    "Winner · Qualifier 2", "locked")
     # Super Cup apex — Shield finalist locked in already; opponent = ACL Trophy Winner (TBD)
     mk("Super Cup",        ACL_SUPERCUP_STAGE, s1, None,  "League Shield",          "ACL Trophy Winner", "locked")
 
@@ -826,25 +826,25 @@ def _acl_try_advance(tourney):
         return  # playoffs not generated yet
     e1 = _acl_get(tourney, "Eliminator 1")
     e2 = _acl_get(tourney, "Eliminator 2")
-    ef = _acl_get(tourney, "Eliminator Final")
-    sf = _acl_get(tourney, "Semi-Final")
+    ef = _acl_get(tourney, "The Knockout")
+    sf = _acl_get(tourney, "Qualifier 2")
     gf = _acl_get(tourney, "Grand Final")
     sc = _acl_get(tourney, "Super Cup")
 
-    # Qualifier → winner to Grand Final, loser to Semi-Final
+    # Qualifier → winner to Grand Final, loser to Qualifier 2
     qw, ql = _acl_winner_loser(q)
     if qw:
         _acl_fill(gf, "team1", qw)
         _acl_fill(sf, "team1", ql)
-    # Eliminators → Eliminator Final
+    # Eliminators → The Knockout
     e1w, _ = _acl_winner_loser(e1)
     e2w, _ = _acl_winner_loser(e2)
     if e1w: _acl_fill(ef, "team1", e1w)
     if e2w: _acl_fill(ef, "team2", e2w)
-    # Eliminator Final → Semi-Final (slot 2)
+    # The Knockout → Qualifier 2 (slot 2)
     efw, _ = _acl_winner_loser(ef)
     if efw: _acl_fill(sf, "team2", efw)
-    # Semi-Final → Grand Final (slot 2)
+    # Qualifier 2 → Grand Final (slot 2)
     sfw, _ = _acl_winner_loser(sf)
     if sfw: _acl_fill(gf, "team2", sfw)
 
@@ -927,7 +927,7 @@ def acl_bracket_embed(tourney):
 
     # Playoff tree
     r1 = [_acl_get(tourney, r) for r in ["Qualifier", "Eliminator 1", "Eliminator 2"]]
-    r2 = [_acl_get(tourney, r) for r in ["Eliminator Final", "Semi-Final", "Grand Final"]]
+    r2 = [_acl_get(tourney, r) for r in ["The Knockout", "Qualifier 2", "Grand Final"]]
     if any(r1):
         e.add_field(name="🏏 Playoffs — Openers", value="\n".join(_acl_match_line(m) for m in r1 if m), inline=False)
     if any(r2):
