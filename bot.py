@@ -4453,6 +4453,24 @@ class PitchWeatherView(discord.ui.View):
         self.channel = channel
         self.s_pitch = None
         self.s_weather = None
+        # Test only: pick Red (day) or Pink (day-night) ball. None = not yet chosen (gates proceed).
+        self._is_test = getattr(state, "format_overs", 20) == 90
+        self.s_pink = None if self._is_test else False
+        if self._is_test:
+            ball_sel = discord.ui.Select(placeholder="🏏 Ball Type (Day or Day-Night)...", row=2, options=[
+                discord.SelectOption(label="Red Ball — Day Test", value="red", emoji="🔴"),
+                discord.SelectOption(label="Pink Ball — Day-Night Test", value="pink", emoji="🩷",
+                                     description="Swings & seams under lights — twilight is lethal for pace"),
+            ])
+            ball_sel.callback = self._ball_cb
+            self.add_item(ball_sel)
+
+    async def _ball_cb(self, interaction):
+        if interaction.user.id != self.state.home_team_id and interaction.user.id != getattr(self.state, "manager_id", None):
+            return
+        self.s_pink = (interaction.data["values"][0] == "pink")
+        await interaction.response.defer()
+        await self.check_proceed(interaction)
 
     @discord.ui.select(placeholder="🏏 Select Pitch Type...", row=0, options=[
         discord.SelectOption(label="Flat — Batting Paradise", value="Flat", emoji="🟩"),
@@ -4496,13 +4514,18 @@ class PitchWeatherView(discord.ui.View):
         await self.check_proceed(interaction)
 
     async def check_proceed(self, interaction):
-        if self.s_pitch and self.s_weather:
-            self.state.pitch = self.s_pitch
-            self.state.weather = self.s_weather
-            await interaction.message.edit(view=None)
-            note = " *(DLS rules active)*" if self.state.weather == "Rain Threat" else ""
-            await self.channel.send(f"✅ Pitch: **{self.s_pitch}** | Weather: **{self.s_weather}**{note}\n\nProceeding to the **toss**...")
-            await begin_toss(self.channel, self.state)
+        if not (self.s_pitch and self.s_weather):
+            return
+        if self._is_test and self.s_pink is None:
+            return  # wait until the Red/Pink ball is chosen
+        self.state.pitch = self.s_pitch
+        self.state.weather = self.s_weather
+        self.state.pink_ball = bool(self.s_pink)
+        await interaction.message.edit(view=None)
+        note = " *(DLS rules active)*" if self.state.weather == "Rain Threat" else ""
+        ball_txt = "  ·  🩷 **Pink Ball (Day-Night)**" if self.s_pink else ("  ·  🔴 Red Ball" if self._is_test else "")
+        await self.channel.send(f"✅ Pitch: **{self.s_pitch}** | Weather: **{self.s_weather}**{ball_txt}{note}\n\nProceeding to the **toss**...")
+        await begin_toss(self.channel, self.state)
 
 
 # --- Step 5: Toss Engine ---
@@ -4766,6 +4789,12 @@ async def match_cmd(interaction: discord.Interaction, opponent: discord.Member =
 # ==========================================
 
 _TEST_SESSION_NAMES = {1: "Morning", 2: "Afternoon", 3: "Evening"}
+_TEST_SESSION_NAMES_PINK = {1: "Afternoon", 2: "Twilight", 3: "Night"}   # day-night Test
+
+def _test_session_name(match, session=None):
+    s = match.session if session is None else session
+    names = _TEST_SESSION_NAMES_PINK if getattr(match, "pink_ball", False) else _TEST_SESSION_NAMES
+    return names.get(s, "Morning")
 
 # Rain weather types aren't in the test engine — map them to closest equivalent
 
@@ -4775,7 +4804,9 @@ def render_test_embed(match: TestMatchObj) -> discord.Embed:
     innings = match.current_innings
     embed   = discord.Embed(color=0xFFFFFF)
 
-    sess  = _TEST_SESSION_NAMES.get(match.session, "Morning")
+    sess  = _test_session_name(match)
+    if getattr(match, "pink_ball", False):
+        sess = f"🩷 {sess}"
     inns  = match.innings_list
 
     overs_done_today = (match.session - 1) * 30 + match.overs_in_session
@@ -5052,8 +5083,9 @@ def _test_session_commentary(
 def _render_test_session_embed(match: TestMatchObj, snap: dict) -> discord.Embed:
     """Session summary embed — replaces the old ASCII code-block output."""
     embed    = discord.Embed(color=0xFFFFFF)
-    sess_nm  = _TEST_SESSION_NAMES.get(snap["session"], "Morning")
-    embed.title = f"🏏 Day {snap['day']} · {sess_nm} Session"
+    sess_nm  = _test_session_name(match, snap["session"])
+    pink_tag = "🩷 " if getattr(match, "pink_ball", False) else ""
+    embed.title = f"🏏 {pink_tag}Day {snap['day']} · {sess_nm} Session"
 
     desc       = ""
     curr_inns  = match.innings_list
@@ -6117,7 +6149,7 @@ class TestTossDecisionView(discord.ui.View):
         t_bat  = winning_team if choice == "Bat" else losing_team
         t_bowl = losing_team  if choice == "Bat" else winning_team
 
-        match          = TestMatchObj(t_bat, t_bowl, state.pitch, state.weather)
+        match          = TestMatchObj(t_bat, t_bowl, state.pitch, state.weather, pink_ball=getattr(state, "pink_ball", False))
         match.host_id  = state.p1_id
         match.p2_id    = getattr(state, "p2_id", None)
         match.host_team = t1            # team identity → owner (NOT bat/bowl order)
@@ -6153,7 +6185,7 @@ async def _begin_test_match(channel, state):
         await channel.send(
             f"🪙 **Toss!** **{winner_team['name']}** wins and elects to **{decision}** first!\n"
             f"*Simulating 5-day Test... ⚙️*")
-        match = TestMatchObj(t_bat, t_bowl, state.pitch, weather)
+        match = TestMatchObj(t_bat, t_bowl, state.pitch, weather, pink_ball=getattr(state, "pink_ball", False))
         active_test_matches[channel.id] = match
         await asyncio.to_thread(_test_sim_match, match)
         await _test_finish_match(match, channel.id, channel)

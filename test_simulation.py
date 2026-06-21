@@ -122,11 +122,14 @@ class TestInnings:
         return f"{self.total_balls // 6}.{self.total_balls % 6}"
 
 class TestMatch:
-    def __init__(self, team1: dict, team2: dict, pitch: str = "Flat", weather: str = "Clear"):
+    def __init__(self, team1: dict, team2: dict, pitch: str = "Flat", weather: str = "Clear", pink_ball: bool = False):
         self.team1   = team1
         self.team2   = team2
         self.pitch   = pitch
         self.weather = weather
+        # Day-night Test: the pink ball swings/seams under lights — twilight (session 2)
+        # is the danger period and it stays lively into the night (session 3).
+        self.pink_ball = pink_ball
 
         self.innings_list: List[TestInnings] = []
         self.current_innings_idx = 0
@@ -470,6 +473,10 @@ def get_smart_test_bowler(innings: TestInnings, match: TestMatch) -> Optional[di
         elif match.weather == "Dry Heat" and _spin(p) and ball_age > 180:
             base *= 1.4
 
+        # Pink ball under lights — captains turn to pace at twilight / night
+        if getattr(match, "pink_ball", False) and _pace(p) and match.session >= 2:
+            base *= (1.6 if match.session == 2 else 1.35)
+
         # Economy reward
         if ovb >= 5:
             eco = st.economy
@@ -589,6 +596,18 @@ def execute_test_ball(match: TestMatch) -> bool:
     elif match.weather == "Thunderstorm" and "Pace" in bowler["role"]:
         bowl_r += (11 if new_ball_period else 6); bat_r -= 4
 
+    # ── Pink ball (day-night Test): swings & seams under lights for PACE. Twilight
+    # (session 2) is the famous danger session; it stays lively at night (session 3).
+    # A fresh pink ball is lethal; once it scuffs (lacquer gone) the movement calms. ──
+    if getattr(match, "pink_ball", False) and "Pace" in bowler["role"] and match.session >= 2:
+        _fresh = innings.ball_age < 240   # roughly the first 40 overs of the ball
+        if match.session == 2:            # twilight — the danger period
+            bowl_r += 8 if _fresh else 4
+            bat_r  -= 4 if _fresh else 2
+        else:                             # session 3 — under lights at night
+            bowl_r += 5 if _fresh else 2
+            bat_r  -= 2 if _fresh else 1
+
     # ── Cap total condition bonus — raised to 18 to let extremes show through ─
     raw_bowl_bonus = bowl_r - float(bowler["bowl"])
     if raw_bowl_bonus > 18:
@@ -627,6 +646,11 @@ def execute_test_ball(match: TestMatch) -> bool:
         if   match.pitch == "Hard":   wkt_w *= 1.06   # true carry — a few extra edges, still bats well
         elif match.pitch == "Bouncy": wkt_w *= 1.15
         elif match.pitch == "Green":  wkt_w *= 1.08   # seam movement finds the edge
+        # Pink ball under lights — extra edges carry to slip/keeper (twilight worst)
+        if getattr(match, "pink_ball", False) and match.session >= 2:
+            _fresh = innings.ball_age < 240
+            if match.session == 2:   wkt_w *= (1.20 if _fresh else 1.10)
+            else:                    wkt_w *= (1.12 if _fresh else 1.05)
 
     # ── Per-batter intent: pitch/chase baseline × the striker's batting STYLE ──
     # This is what syncs Test with the other formats — an Aggressor on a road goes
