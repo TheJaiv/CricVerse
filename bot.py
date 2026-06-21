@@ -6709,6 +6709,100 @@ async def playerlist_cmd(interaction: discord.Interaction):
     )
 
 
+@bot.tree.command(name="srating", description="[OWNER] Override a player's ratings for THIS server only (blank player = list · reset = clear).")
+@app_commands.describe(
+    player="Player name. Leave blank to LIST all overrides on this server.",
+    bat="Batting rating 0-99 (this server only)",
+    bowl="Bowling rating 0-99 (this server only)",
+    role="Role override (this server only)",
+    archetype="Archetype override (this server only)",
+    reset="Remove this player's override on this server (back to global).",
+)
+@app_commands.choices(
+    role=[
+        app_commands.Choice(name="Batter", value="Batter"),
+        app_commands.Choice(name="Wicket-Keeper", value="Batter_WK"),
+        app_commands.Choice(name="Pace Bowler", value="Bowler_Pace"),
+        app_commands.Choice(name="Off-Spin Bowler", value="Bowler_Spin_Off"),
+        app_commands.Choice(name="Leg-Spin Bowler", value="Bowler_Spin_Leg"),
+        app_commands.Choice(name="Pace All-Rounder", value="All-Rounder_Pace"),
+        app_commands.Choice(name="Off-Spin All-Rounder", value="All-Rounder_Spin_Off"),
+        app_commands.Choice(name="Leg-Spin All-Rounder", value="All-Rounder_Spin_Leg"),
+    ],
+    archetype=[
+        app_commands.Choice(name="Aggressor", value="Aggressor"),
+        app_commands.Choice(name="Anchor", value="Anchor"),
+        app_commands.Choice(name="Finisher", value="Finisher"),
+        app_commands.Choice(name="Standard", value="Standard"),
+    ],
+)
+async def srating_slash(interaction: discord.Interaction, player: str = None, bat: int = None, bowl: int = None,
+                        role: app_commands.Choice[str] = None, archetype: app_commands.Choice[str] = None, reset: bool = False):
+    if interaction.user.id != ADMIN_DISCORD_ID:
+        return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
+    if not interaction.guild:
+        return await interaction.response.send_message("❌ Use this inside a server.", ephemeral=True)
+    sid = str(interaction.guild.id)
+    all_p = get_all_players()
+
+    # No player → list this server's overrides
+    if not player:
+        srv = get_server_overrides(sid)
+        if not srv:
+            return await interaction.response.send_message("ℹ️ No rating overrides on this server. Set one with `/srating player:<name> bat:.. bowl:..`.", ephemeral=True)
+        base = {p["name"].lower(): p for p in all_p}
+        lines = []
+        for key, o in sorted(srv.items()):
+            g = base.get(key, {})
+            parts = []
+            for f, lbl in (("bat", "bat"), ("bowl", "bowl"), ("role", "role"), ("archetype", "arch")):
+                if f in o:
+                    gv = g.get(f, "?")
+                    parts.append(f"{lbl} {gv}→**{o[f]}**" if gv != o[f] else f"{lbl} **{o[f]}**")
+            lines.append(f"• **{o.get('name', key)}** — {' · '.join(parts)}")
+        embed = discord.Embed(title=f"🎚️ Server Rating Overrides — {interaction.guild.name}", description="\n".join(lines), color=discord.Color.teal())
+        embed.set_footer(text="Owner-only · applies to all matches on THIS server · global DB unchanged")
+        return await interaction.response.send_message(embed=embed)
+
+    # Resolve the player against the global DB
+    cur = next((p for p in all_p if p["name"].lower() == player.strip().lower()), None)
+    if not cur:
+        close = difflib.get_close_matches(player, [p["name"] for p in all_p], n=1, cutoff=0.6)
+        cur = next((p for p in all_p if p["name"] == close[0]), None) if close else None
+    if not cur:
+        return await interaction.response.send_message(f"❌ Player '{player}' not found in the global database.", ephemeral=True)
+    name = cur["name"]
+
+    if reset:
+        if reset_server_override(sid, name):
+            return await interaction.response.send_message(f"✅ Removed the override for **{name}** on this server — back to global (bat {cur['bat']} · bowl {cur['bowl']}).")
+        return await interaction.response.send_message(f"ℹ️ **{name}** has no override on this server.", ephemeral=True)
+
+    fields = {}
+    if bat is not None:
+        if not (0 <= bat <= 99):
+            return await interaction.response.send_message("❌ `bat` must be 0-99.", ephemeral=True)
+        fields["bat"] = bat
+    if bowl is not None:
+        if not (0 <= bowl <= 99):
+            return await interaction.response.send_message("❌ `bowl` must be 0-99.", ephemeral=True)
+        fields["bowl"] = bowl
+    if role is not None:
+        fields["role"] = role.value
+    if archetype is not None:
+        fields["archetype"] = archetype.value
+    if not fields:
+        return await interaction.response.send_message("❌ Provide bat/bowl/role/archetype to set, `reset:True` to clear, or leave **player** blank to list.", ephemeral=True)
+
+    set_server_override(sid, name, fields)
+    eff = {**cur, **get_server_overrides(sid).get(name.lower(), {})}
+    await interaction.response.send_message(
+        f"✅ **{name}** overridden on **this server only**:\n"
+        f"🏏 bat **{eff['bat']}** · 🎯 bowl **{eff['bowl']}** · {eff['role']} · {eff['archetype']}\n"
+        f"-# Global DB unchanged (bat {cur['bat']} · bowl {cur['bowl']}). Applies to all matches on this server."
+    )
+
+
 _ROLE_OPTIONS = [
     discord.SelectOption(label="Batter",                value="Batter"),
     discord.SelectOption(label="Wicket-Keeper",         value="Batter_WK"),
