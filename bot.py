@@ -4459,7 +4459,7 @@ class PitchWeatherView(discord.ui.View):
         if self._is_test:
             ball_sel = discord.ui.Select(placeholder="🏏 Ball Type (Day or Day-Night)...", row=2, options=[
                 discord.SelectOption(label="Red Ball — Day Test", value="red", emoji="🔴"),
-                discord.SelectOption(label="Pink Ball — Day-Night Test", value="pink", emoji="🩷",
+                discord.SelectOption(label="Pink Ball — Day-Night Test", value="pink", emoji="<:pink:1518481735266996255>",
                                      description="Swings & seams under lights — twilight is lethal for pace"),
             ])
             ball_sel.callback = self._ball_cb
@@ -4523,7 +4523,7 @@ class PitchWeatherView(discord.ui.View):
         self.state.pink_ball = bool(self.s_pink)
         await interaction.message.edit(view=None)
         note = " *(DLS rules active)*" if self.state.weather == "Rain Threat" else ""
-        ball_txt = "  ·  🩷 **Pink Ball (Day-Night)**" if self.s_pink else ("  ·  🔴 Red Ball" if self._is_test else "")
+        ball_txt = "  ·  <:pink:1518481735266996255> **Pink Ball (Day-Night)**" if self.s_pink else ("  ·  🔴 Red Ball" if self._is_test else "")
         await self.channel.send(f"✅ Pitch: **{self.s_pitch}** | Weather: **{self.s_weather}**{ball_txt}{note}\n\nProceeding to the **toss**...")
         await begin_toss(self.channel, self.state)
 
@@ -4806,7 +4806,7 @@ def render_test_embed(match: TestMatchObj) -> discord.Embed:
 
     sess  = _test_session_name(match)
     if getattr(match, "pink_ball", False):
-        sess = f"🩷 {sess}"
+        sess = f"<:pink:1518481735266996255> {sess}"
     inns  = match.innings_list
 
     overs_done_today = (match.session - 1) * 30 + match.overs_in_session
@@ -5084,7 +5084,7 @@ def _render_test_session_embed(match: TestMatchObj, snap: dict) -> discord.Embed
     """Session summary embed — replaces the old ASCII code-block output."""
     embed    = discord.Embed(color=0xFFFFFF)
     sess_nm  = _test_session_name(match, snap["session"])
-    pink_tag = "🩷 " if getattr(match, "pink_ball", False) else ""
+    pink_tag = "<:pink:1518481735266996255> " if getattr(match, "pink_ball", False) else ""
     embed.title = f"🏏 {pink_tag}Day {snap['day']} · {sess_nm} Session"
 
     desc       = ""
@@ -6726,6 +6726,29 @@ def _build_playerlist_txt(players: list) -> str:
     return "\n".join(lines)
 
 
+def _build_playerlist_ratings_txt(players: list) -> str:
+    """[OWNER] Full database WITH ratings — sorted by OVR. Separate from the ratings-hidden cv pl."""
+    rows = sorted(players, key=lambda p: _player_overall(p), reverse=True)
+    lines = [
+        "═" * 70,
+        f"  CricVerse Player Database — RATINGS  ·  {len(players)} players",
+        "═" * 70,
+        f"  {'#':>3}  {'NAME':<26}{'BAT':>4}{'BOWL':>5}{'OVR':>5}   {'ROLE':<22}{'ARCHETYPE'}",
+        "─" * 70,
+    ]
+    for i, p in enumerate(rows, 1):
+        lines.append(
+            f"  {i:>3}  {str(p.get('name',''))[:25]:<26}"
+            f"{int(p.get('bat',0)):>4}{int(p.get('bowl',0)):>5}{int(_player_overall(p)):>5}   "
+            f"{str(p.get('role',''))[:21]:<22}{p.get('archetype','')}"
+        )
+    lines.append("═" * 70)
+    from datetime import datetime, timezone
+    lines.append(f"  Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+    lines.append("═" * 70)
+    return "\n".join(lines)
+
+
 @bot.tree.command(name="playerlist", description="Download the full player database grouped by tier (no ratings shown).")
 async def playerlist_cmd(interaction: discord.Interaction):
     await interaction.response.defer()
@@ -7183,6 +7206,21 @@ class PrefixCog(commands.Cog):
         await ctx.send(
             f"📋 **Player Database** — {len(players)} players across 4 tiers.\nRatings are hidden. Players within each tier are shuffled.",
             file=discord.File(fp=buf, filename="cricverse_players.txt")
+        )
+
+    @commands.command(name="playerlistratings", aliases=["plr", "plratings"], help="[OWNER] Download the full player database WITH ratings.\nUsage: plr")
+    async def playerlistratings(self, ctx):
+        if ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("❌ Owner only.")
+        players = get_all_players()
+        if not players:
+            return await ctx.send("❌ Player database is empty.")
+        txt = _build_playerlist_ratings_txt(players)
+        buf = io.BytesIO(txt.encode("utf-8"))
+        buf.seek(0)
+        await ctx.send(
+            f"📊 **Player Database — WITH RATINGS** ({len(players)} players, sorted by OVR).\n-# Owner-only · global DB ratings.",
+            file=discord.File(fp=buf, filename="cricverse_players_ratings.txt")
         )
 
     @commands.command(name="counts", aliases=["matchcounts"], help="Show the total number of matches played per format.\nUsage: counts")

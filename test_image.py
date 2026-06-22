@@ -92,8 +92,9 @@ def generate_test_summary_image(match, match_no_label="", potm="") -> io.BytesIO
         d.ellipse([(558, 14), (642, 98)], fill="#FFFFFF", outline=c_div, width=3)
 
     d.rectangle([(0, HEAD_H - 30), (W, HEAD_H)], fill=c_accent)
-    bar = "SIMULATION MATCH    •    TEST MATCH"
-    d.text((W // 2 - tw(bar, f_med) // 2, HEAD_H - 27), bar, fill=c_navy, font=f_med)
+    _pink = getattr(match, "pink_ball", False)
+    bar = "SIMULATION MATCH    •    DAY-NIGHT TEST    •    PINK BALL" if _pink else "SIMULATION MATCH    •    TEST MATCH"
+    d.text((W // 2 - tw(bar, f_med) // 2, HEAD_H - 27), bar, fill=("#C2185B" if _pink else c_navy), font=f_med)
 
     # ── Innings bands ──
     BAT_X, BOWL_X = 392, 800
@@ -187,9 +188,9 @@ def generate_test_scorecard_image(match, match_no_label="", potm="") -> io.Bytes
 
     for x in range(W):
         d.line([(x, 0), (x, HDR_H)], fill=lerp(C_GRAD_L, C_GRAD_R, x / (W - 1)))
-    d.text((M, 20), "TEST MATCH", font=f_huge, fill=C_HEAD)
+    d.text((M, 20), "DAY-NIGHT TEST" if getattr(match, "pink_ball", False) else "TEST MATCH", font=f_huge, fill=C_HEAD)
     d.text((M + 2, 70), f"{match.team1['name']}  vs  {match.team2['name']}", font=f_sub, fill=C_SUB)
-    meta = f"{match.pitch} · {match.weather}" + (f" · {match_no_label}" if match_no_label else "")
+    meta = f"{match.pitch} · {match.weather}" + (" · PINK BALL" if getattr(match, "pink_ball", False) else "") + (f" · {match_no_label}" if match_no_label else "")
     rt(W - M, 24, meta, f_meta, (200, 210, 224))
 
     d.rectangle([(0, HDR_H), (W, HDR_H + RES_H)], fill=C_RESBAR)
