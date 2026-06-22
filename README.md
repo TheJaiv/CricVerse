@@ -54,7 +54,7 @@ CricVerse simulates cricket at the **per-ball** level — every delivery is a co
 
 ```bash
 # 1. Clone
-git clone https://github.com/JaivTheCoder/CricVerse.git
+git clone https://github.com/TheJaiv/CricVerse.git
 cd CricVerse
 
 # 2. Install dependencies

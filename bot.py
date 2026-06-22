@@ -7328,8 +7328,9 @@ class PrefixCog(commands.Cog):
         embed.set_footer(text="Only 1v1 drafts count toward the leaderboard · vs-AI is tracked separately")
         await ctx.send(embed=embed)
 
-    async def _draft_get_pick(self, channel, uid, uname, question, pool, taken, ri, tag):
+    async def _draft_get_pick(self, channel, uid, uname, question, pool, taken, ri, tag, base_pool, mode):
         """Collect one human pick: 3 tries, then a 78-OVR net filler for the slot."""
+        mode_label = dm.TIER_LABELS.get(mode, mode.title())
         for attempt in range(3):
             left = 3 - attempt
             await channel.send(f"<@{uid}> — type a player's name  *({left} {'try' if left == 1 else 'tries'} left)*")
@@ -7340,7 +7341,7 @@ class PrefixCog(commands.Cog):
             except asyncio.TimeoutError:
                 await channel.send("⏳ **Time up.**")
                 break
-            player, reason = dm.verify_answer(msg.content, question, pool, taken)
+            player, reason = dm.verify_answer(msg.content, question, pool, taken, full_pool=base_pool, ovr_of=_player_overall)
             if reason == "ok":
                 await channel.send(f"✅ **{player['name']}** → **{uname}**")
                 return player
@@ -7353,6 +7354,10 @@ class PrefixCog(commands.Cog):
                 await channel.send("❌ Already drafted — pick someone else.")
             elif reason == "wrong_type":
                 await channel.send(f"❌ That player doesn't fit **{question['q']}** — try again.")
+            elif reason == "out_of_tier":
+                tier = dm.player_tier(_player_overall(player))
+                tier_one = {"Legends": "Legend", "Greats": "Great", "Youngsters": "Youngster"}.get(tier, tier)
+                await channel.send(f"🚫 **{player['name']}** is a **{tier_one}** — this draft only allows the **{mode_label}** pool. Pick a {mode_label} player.")
         filler = dm.make_filler(ri, tag)
         await channel.send(f"🪹 No valid pick — **{uname}** gets a net player: **{filler['name']}**.")
         return filler
@@ -7412,14 +7417,14 @@ class PrefixCog(commands.Cog):
                 order = ["host", "opp"] if host_first else ["opp", "host"]
                 for who in order:
                     if who == "host":
-                        pick = await self._draft_get_pick(channel, host.id, host_team, q, pool, taken, ri, f"H{ri+1}")
+                        pick = await self._draft_get_pick(channel, host.id, host_team, q, pool, taken, ri, f"H{ri+1}", base_pool, mode)
                         host_xi.append(pick); taken.add(pick["name"])
                     elif vs_ai:
                         pick = dm.ai_pick(pool, taken, q, _player_overall) or dm.make_filler(ri, f"AI{ri+1}")
                         await channel.send(f"🤖 **{opp_team}** picks **{pick['name']}**.")
                         opp_xi.append(pick); taken.add(pick["name"])
                     else:
-                        pick = await self._draft_get_pick(channel, opponent.id, opp_team, q, pool, taken, ri, f"O{ri+1}")
+                        pick = await self._draft_get_pick(channel, opponent.id, opp_team, q, pool, taken, ri, f"O{ri+1}", base_pool, mode)
                         opp_xi.append(pick); taken.add(pick["name"])
 
             await channel.send(

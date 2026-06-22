@@ -121,6 +121,7 @@ NUM_ROUNDS = len(DRAFT_SLOTS)   # 11
 # Player-pool tiers. OVR caps are BACKEND ONLY — never shown to players.
 #   legends   = everyone · greats = OVR <= 92 (all-time untouchables excluded) · youngsters = OVR <= 85
 POOL_CAPS = {"legends": None, "greats": 92, "youngsters": 85}
+TIER_LABELS = {"legends": "Legends", "greats": "Greats", "youngsters": "Youngsters"}
 
 
 def filter_pool(players, mode, ovr_of):
@@ -129,6 +130,15 @@ def filter_pool(players, mode, ovr_of):
     if cap is None:
         return list(players)
     return [p for p in players if ovr_of(p) <= cap]
+
+
+def player_tier(ovr):
+    """The *minimal* pool a player belongs to — used to explain an out-of-range pick (no OVR shown)."""
+    if ovr > POOL_CAPS["greats"]:       # > 92 → only in Legends
+        return "Legends"
+    if ovr > POOL_CAPS["youngsters"]:   # 86-92 → Legends + Greats
+        return "Greats"
+    return "Youngsters"                 # <= 85 → every pool
 
 
 def slot_label(round_idx):
@@ -188,20 +198,30 @@ def resolve_candidates(text, players, limit=6):
     return [p["name"] for p in players if t in p["name"].lower()][:limit]
 
 
-def verify_answer(text, question, players, taken_names):
-    """Full verification of one typed answer.
+def verify_answer(text, question, players, taken_names, full_pool=None, ovr_of=None):
+    """Full verification of one typed answer against the (tier-filtered) `players` pool.
+    `full_pool` (all players) + `ovr_of` let us distinguish a genuinely unknown name from a
+    real player who's been excluded by the chosen tier.
     Returns (player|None, reason): reason in
-      'ok' · 'unknown' · 'ambiguous' · 'taken' · 'wrong_type'."""
+      'ok' · 'unknown' · 'ambiguous' · 'taken' · 'wrong_type' · 'out_of_tier'.
+    For 'out_of_tier' the returned player is the full-pool match (so the caller can name its tier)."""
     player, status = resolve_name(text, players)
     if status == "ambiguous":
         return None, "ambiguous"
-    if player is None:
-        return None, "unknown"
-    if player["name"] in taken_names:
-        return None, "taken"
-    if not question_matches(player, question):
-        return None, "wrong_type"
-    return player, "ok"
+    if player is not None:
+        if player["name"] in taken_names:
+            return None, "taken"
+        if not question_matches(player, question):
+            return None, "wrong_type"
+        return player, "ok"
+    # Not in the tier-filtered pool — is it a real player excluded by the tier, or truly unknown?
+    if full_pool is not None:
+        fp, fstatus = resolve_name(text, full_pool)
+        if fstatus == "ambiguous":
+            return None, "ambiguous"
+        if fp is not None:
+            return fp, "out_of_tier"   # exists in the DB but above the chosen pool's cap
+    return None, "unknown"
 
 
 # ── AI captain ──────────────────────────────────────────────────────────────
