@@ -3,15 +3,18 @@
 Reuses subscription_manager's EXACT connection + save path (same code the bot uses),
 so it works even when MONGO_URI contains special characters in the password.
 
-Run on the host (where MONGO_URI is set):
-    python restore_tournament.py
+Run on the host (where MONGO_URI is set), from the repo root:
+    python tools/restore_tournament.py
 Then in Discord IMMEDIATELY:
     cv force_load
 """
 import json
+import os, sys
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _ROOT)   # import root modules + find the backup regardless of working directory
 import subscription_manager as sm
 
-ccpl = json.load(open("ccpl_backup.json"))["tournaments"][0]
+ccpl = json.load(open(os.path.join(_ROOT, "ccpl_backup.json")))["tournaments"][0]
 sid, name = ccpl["server_id"], ccpl["name"]
 
 # 1. Pull whatever tournaments currently exist (using the bot's own connection)

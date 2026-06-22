@@ -118,6 +118,18 @@ DRAFT_SLOTS = [
 
 NUM_ROUNDS = len(DRAFT_SLOTS)   # 11
 
+# Player-pool tiers. OVR caps are BACKEND ONLY — never shown to players.
+#   legends   = everyone · greats = OVR <= 92 (all-time untouchables excluded) · youngsters = OVR <= 85
+POOL_CAPS = {"legends": None, "greats": 92, "youngsters": 85}
+
+
+def filter_pool(players, mode, ovr_of):
+    """Filter the draft pool by tier. `ovr_of` is a player->OVR function (kept out of this pure module)."""
+    cap = POOL_CAPS.get(mode)
+    if cap is None:
+        return list(players)
+    return [p for p in players if ovr_of(p) <= cap]
+
 
 def slot_label(round_idx):
     return DRAFT_SLOTS[round_idx][0]

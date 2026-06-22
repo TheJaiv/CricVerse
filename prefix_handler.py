@@ -463,7 +463,7 @@ class PrefixCog(commands.Cog):
         
         if theme == "Crimson Cricket":
             try:
-                img = Image.open("points_table_crimson.png").convert("RGB")
+                img = Image.open("assets/points_table_crimson.png").convert("RGB")
                 d = ImageDraw.Draw(img)
                 font_row = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 26)
                 def get_tw(text, font): return font.getbbox(text)[2] if hasattr(font, 'getbbox') else len(text) * 12

@@ -148,7 +148,7 @@ def get_group_standings(tourney, stage: str, group: str):
 
 def generate_t20wc_points_table(tourney) -> io.BytesIO:
     """Fill super16_table.png template with live group standings for T20 WC group stage."""
-    img = Image.open("super16_table.png").convert("RGBA")
+    img = Image.open("assets/super16_table.png").convert("RGBA")
     d   = ImageDraw.Draw(img)
     W, H = img.size  # 1508 × 1043
 
@@ -242,7 +242,7 @@ def generate_t20wc_points_table(tourney) -> io.BytesIO:
 
 def generate_t20wc_super8_table(tourney) -> io.BytesIO:
     """Fill super8_table.png template with live Super 8 group standings."""
-    img = Image.open("super8_table.png").convert("RGBA")
+    img = Image.open("assets/super8_table.png").convert("RGBA")
     d   = ImageDraw.Draw(img)
     W, H = img.size  # 1484 × 1060
 
@@ -347,7 +347,7 @@ def generate_t20wc_knockouts_image(tourney: dict):
     sf2   = next((m for m in ko_matches if m.get("round") == "Semi-Final 2"), None)
     final_m = next((m for m in ko_matches if m.get("round") == "Final"), None)
 
-    img = Image.open("t20_knockouts.png").convert("RGBA")
+    img = Image.open("assets/t20_knockouts.png").convert("RGBA")
     d   = ImageDraw.Draw(img)
     W, H = img.size  # 1535 × 1024
 
@@ -432,7 +432,7 @@ def generate_t20wc_match_banner(tourney: dict, match_data: dict) -> io.BytesIO:
     t2 = match_data.get("team2", "TBD")
     team_logos = {t["name"]: t.get("logo_standings") or t.get("logo_match") for t in tourney.get("teams", [])}
 
-    img = Image.open("t20_match.png").convert("RGBA")
+    img = Image.open("assets/t20_match.png").convert("RGBA")
     d   = ImageDraw.Draw(img)
     W, H = img.size  # 1536 × 1024
 
@@ -659,7 +659,7 @@ class TournamentStatusView(discord.ui.View):
         if self.show_banner:
             await interaction.response.edit_message(
                 embed=self._make_embed(),
-                attachments=[discord.File("t20_banner.png")],
+                attachments=[discord.File("assets/t20_banner.png")],
                 view=self)
         else:
             await interaction.response.edit_message(embed=self._make_embed(), view=self)
@@ -675,7 +675,7 @@ class TournamentStatusView(discord.ui.View):
         if self.show_banner:
             await interaction.response.edit_message(
                 embed=self._make_embed(),
-                attachments=[discord.File("t20_banner.png")],
+                attachments=[discord.File("assets/t20_banner.png")],
                 view=self)
         else:
             await interaction.response.edit_message(embed=self._make_embed(), view=self)
@@ -1804,7 +1804,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
 
         if theme == "Crimson Cricket":
             try:
-                img = Image.open("points_table_crimson.png").convert("RGB")
+                img = Image.open("assets/points_table_crimson.png").convert("RGB")
                 d = ImageDraw.Draw(img)
                 start_y = 275
                 row_height = 40

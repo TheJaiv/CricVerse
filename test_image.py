@@ -83,7 +83,7 @@ def generate_test_summary_image(match, match_no_label="", potm="") -> io.BytesIO
     if match_no_label:
         d.text((W - 12 - tw(match_no_label, f_micro), 8), match_no_label, fill=c_grey, font=f_micro)
     try:
-        logo_path = "logo.png" if os.path.exists("logo.png") else "logo.jpg"
+        logo_path = "assets/logo.png" if os.path.exists("assets/logo.png") else "assets/logo.jpg"
         logo = Image.open(logo_path).convert("RGBA").resize((84, 84), Image.Resampling.LANCZOS)
         mask = Image.new("L", (84, 84), 0); ImageDraw.Draw(mask).ellipse((0, 0, 84, 84), fill=255)
         img.paste(logo, (558, 14), mask)

@@ -1121,7 +1121,7 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
 
     # Center Custom Logo (or Placeholder)
     try:
-        logo_path = "logo.png" if os.path.exists("logo.png") else "logo.jpg"
+        logo_path = "assets/logo.png" if os.path.exists("assets/logo.png") else "assets/logo.jpg"
         logo_img = Image.open(logo_path).convert("RGBA")
         logo_img = logo_img.resize((90, 90), Image.Resampling.LANCZOS)
         
@@ -1555,7 +1555,7 @@ def generate_t20wc_scorecard(data: dict) -> io.BytesIO:
 
     # ── Background ──────────────────────────────────────────────
     try:
-        bg = Image.open("t20_scoreboard.png").convert("RGBA")
+        bg = Image.open("assets/t20_scoreboard.png").convert("RGBA")
     except FileNotFoundError:
         bg = Image.new("RGBA", (975, 634), (15, 15, 40, 255))
     W, H = bg.size
@@ -2890,7 +2890,7 @@ async def prompt_over_pacing_hub(interaction, match: CricketMatch):
 
     if _t20wc_hub:
         embed.set_thumbnail(url="attachment://t20_logo.png")
-        await channel.send(msg, embed=embed, view=view, file=discord.File("t20_logo.png"))
+        await channel.send(msg, embed=embed, view=view, file=discord.File("assets/t20_logo.png"))
     else:
         await channel.send(msg, embed=embed, view=view)
 
@@ -7150,6 +7150,39 @@ class CustomHelpCommand(commands.HelpCommand):
         await self.get_destination().send(embed=embed)
 
 
+_AI_TEAM_NAMES = ["The Machines", "Cyber XI", "Bot Brigade", "Neural Knights", "Silicon Stars", "Algo Allstars"]
+
+class DraftModeView(discord.ui.View):
+    """Host picks the player pool tier before a draft. OVR caps are never shown."""
+    def __init__(self, host_id):
+        super().__init__(timeout=60)
+        self.host_id = host_id
+        self.mode = None
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.host_id:
+            await interaction.response.send_message("Only the host picks the pool.", ephemeral=True)
+            return False
+        return True
+
+    async def _choose(self, interaction, mode, label):
+        self.mode = mode
+        await interaction.response.edit_message(content=f"🎚️ Pool locked: **{label}**.", view=None)
+        self.stop()
+
+    @discord.ui.button(label="Legends", style=discord.ButtonStyle.success, emoji="👑")
+    async def legends(self, interaction, button):
+        await self._choose(interaction, "legends", "Legends")
+
+    @discord.ui.button(label="Greats", style=discord.ButtonStyle.primary, emoji="⭐")
+    async def greats(self, interaction, button):
+        await self._choose(interaction, "greats", "Greats")
+
+    @discord.ui.button(label="Youngsters", style=discord.ButtonStyle.secondary, emoji="🌱")
+    async def youngsters(self, interaction, button):
+        await self._choose(interaction, "youngsters", "Youngsters")
+
+
 async def _record_draft_result(channel, match):
     """On a draft match's finish, record the win — PvP to the leaderboard, vs-AI separately."""
     inn1, inn2 = match.innings1, match.innings2
@@ -7324,21 +7357,50 @@ class PrefixCog(commands.Cog):
         await channel.send(f"🪹 No valid pick — **{uname}** gets a net player: **{filler['name']}**.")
         return filler
 
+    async def _ask_team_name(self, channel, uid, default):
+        await channel.send(f"<@{uid}> — type your **team name**  *(or `skip` for “{default}”)*")
+        def check(m):
+            return m.author.id == uid and m.channel.id == channel.id and m.content.strip()
+        try:
+            msg = await self.bot.wait_for("message", timeout=60.0, check=check)
+            name = msg.content.strip()
+            return default if name.lower() == "skip" else name[:28]
+        except asyncio.TimeoutError:
+            return default
+
     async def _run_draft(self, ctx, host, opponent):
         channel = ctx.channel
         active_drafts.add(channel.id)
         try:
-            pool = apply_server_overrides(get_all_players(), str(ctx.guild.id))
-            if len(pool) < 60:
+            base_pool = apply_server_overrides(get_all_players(), str(ctx.guild.id))
+            if len(base_pool) < 60:
                 return await ctx.send("❌ Not enough players in the database to draft.")
             vs_ai = opponent is None
             host_name = host.display_name
             opp_name = "AI" if vs_ai else opponent.display_name
 
-            host_first = random.random() < 0.5
+            # 1) Host picks the player pool (OVR caps are backend-only — never shown).
+            mv = DraftModeView(host.id)
             await channel.send(
-                f"🎲 **DRAFT — {host_name} vs {opp_name}**\n"
-                f"🪙 Toss won by **{host_name if host_first else opp_name}** — they answer first each round.\n"
+                f"🎚️ **{host_name}, choose the player pool:**\n"
+                f"👑 **Legends** — everyone, all-time greats included\n"
+                f"⭐ **Greats** — top stars only (the handful of all-time untouchables are out)\n"
+                f"🌱 **Youngsters** — emerging & squad players only (no superstars)",
+                view=mv,
+            )
+            await mv.wait()
+            mode = mv.mode or "legends"
+            pool = dm.filter_pool(base_pool, mode, _player_overall)
+
+            # 2) Team names.
+            host_team = await self._ask_team_name(channel, host.id, f"{host_name}'s XI")
+            opp_team = random.choice(_AI_TEAM_NAMES) if vs_ai else await self._ask_team_name(channel, opponent.id, f"{opp_name}'s XI")
+
+            host_first = random.random() < 0.5
+            first_team = host_team if host_first else opp_team
+            await channel.send(
+                f"🎲 **DRAFT — {host_team} vs {opp_team}**\n"
+                f"🪙 Toss won by **{first_team}** — they answer first each round.\n"
                 f"📋 **{dm.NUM_ROUNDS} rounds**, same question both answer · pick by **typing a player's name** · "
                 f"**ratings hidden** — pure cricket knowledge. Build a balanced XI!"
             )
@@ -7350,36 +7412,36 @@ class PrefixCog(commands.Cog):
                 order = ["host", "opp"] if host_first else ["opp", "host"]
                 for who in order:
                     if who == "host":
-                        pick = await self._draft_get_pick(channel, host.id, host_name, q, pool, taken, ri, f"H{ri+1}")
+                        pick = await self._draft_get_pick(channel, host.id, host_team, q, pool, taken, ri, f"H{ri+1}")
                         host_xi.append(pick); taken.add(pick["name"])
                     elif vs_ai:
                         pick = dm.ai_pick(pool, taken, q, _player_overall) or dm.make_filler(ri, f"AI{ri+1}")
-                        await channel.send(f"🤖 **AI** picks **{pick['name']}**.")
+                        await channel.send(f"🤖 **{opp_team}** picks **{pick['name']}**.")
                         opp_xi.append(pick); taken.add(pick["name"])
                     else:
-                        pick = await self._draft_get_pick(channel, opponent.id, opp_name, q, pool, taken, ri, f"O{ri+1}")
+                        pick = await self._draft_get_pick(channel, opponent.id, opp_team, q, pool, taken, ri, f"O{ri+1}")
                         opp_xi.append(pick); taken.add(pick["name"])
 
             await channel.send(
                 "✅ **Draft complete!**\n\n"
-                f"**{host_name}'s XI**\n" + "\n".join(f"`{i+1:>2}.` {p['name']}" for i, p in enumerate(host_xi)) +
-                f"\n\n**{opp_name}'s XI**\n" + "\n".join(f"`{i+1:>2}.` {p['name']}" for i, p in enumerate(opp_xi)) +
+                f"**{host_team}**\n" + "\n".join(f"`{i+1:>2}.` {p['name']}" for i, p in enumerate(host_xi)) +
+                f"\n\n**{opp_team}**\n" + "\n".join(f"`{i+1:>2}.` {p['name']}" for i, p in enumerate(opp_xi)) +
                 "\n\n🏏 Now play it out — same as a normal match. Pick conditions below…"
             )
 
             # Hand off to the EXACT normal-match flow from the point both XIs are set.
             state = MatchSetupState(host, (None if vs_ai else opponent), host.id, (None if vs_ai else opponent.id))
             state.format_overs = 20
-            state.t1_name = f"{host_name}'s XI"[:28]
-            state.t2_name = f"{opp_name}'s XI"[:28]
+            state.t1_name = host_team[:28]
+            state.t2_name = opp_team[:28]
             state.t1_roster = host_xi
             state.t2_roster = opp_xi
             state.home_team_id = host.id
             state.is_draft = True
             state.draft_host_id = host.id
-            state.draft_host_name = host_name
+            state.draft_host_name = host_name        # PERSON name → leaderboard
             state.draft_opp_id = (None if vs_ai else opponent.id)
-            state.draft_opp_name = opp_name
+            state.draft_opp_name = opp_name          # PERSON name → leaderboard
             active_drafts.discard(channel.id)
             await ask_pitch_and_weather(channel, state)
         except Exception as e:
@@ -8627,7 +8689,7 @@ class PrefixCog(commands.Cog):
 
         if tourney.get("tournament_type") == "t20_world_cup":
             embed.set_image(url="attachment://t20_banner.png")
-            await ctx.send(embed=embed, file=discord.File("t20_banner.png"))
+            await ctx.send(embed=embed, file=discord.File("assets/t20_banner.png"))
         else:
             await ctx.send(embed=embed)
 
@@ -8774,7 +8836,7 @@ class PrefixCog(commands.Cog):
             embed.set_footer(text=f"Format: {tourney.get('format_overs', 20)} overs · Squad: {tourney.get('min_squad', 11)}–{tourney.get('max_squad', 15)} players")
             if t_type == "t20_world_cup":
                 embed.set_image(url="attachment://t20_banner.png")
-                return await ctx.send(embed=embed, file=discord.File("t20_banner.png"))
+                return await ctx.send(embed=embed, file=discord.File("assets/t20_banner.png"))
             return await ctx.send(embed=embed)
 
         t_type = tourney.get("tournament_type", "round_robin")
@@ -8800,7 +8862,7 @@ class PrefixCog(commands.Cog):
 
         if t_type == "t20_world_cup":
             embed.set_image(url="attachment://t20_banner.png")
-            await ctx.send(embed=embed, view=view, file=discord.File("t20_banner.png"))
+            await ctx.send(embed=embed, view=view, file=discord.File("assets/t20_banner.png"))
         else:
             await ctx.send(embed=embed, view=view)
 
@@ -8833,7 +8895,7 @@ class PrefixCog(commands.Cog):
             embed.description = f"👑 **Champions: {winner}**"
 
         embed.set_image(url="attachment://t20_banner.png")
-        await ctx.send(embed=embed, view=view, file=discord.File("t20_banner.png"))
+        await ctx.send(embed=embed, view=view, file=discord.File("assets/t20_banner.png"))
 
     @tournament.command(name="set_schedule", help="[OWNER] Set a custom fixture order for the tournament.\nUsage: tournament set_schedule")
     async def t_set_schedule(self, ctx):
@@ -9839,7 +9901,7 @@ class PrefixCog(commands.Cog):
         
         if theme == "Crimson Cricket":
             try:
-                img = Image.open("points_table_crimson.png").convert("RGB")
+                img = Image.open("assets/points_table_crimson.png").convert("RGB")
                 d = ImageDraw.Draw(img)
                 font_row = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 26)
                 def get_tw(text, font): return font.getbbox(text)[2] if hasattr(font, 'getbbox') else len(text) * 12

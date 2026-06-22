@@ -1,0 +1,46 @@
+# ── OS / editor junk ───────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# ── Python ─────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.Python
+build/
+dist/
+venv/
+.venv/
+env/
+ENV/
+
+# ── Secrets / config (NEVER commit real tokens or DB URIs) ─────────
+.env
+*.env
+!.env.example
+
+# ── Runtime data & local backups (the source of truth is MongoDB) ──
+ccpl_backup.json
+match_counts.json
+*.bin
+
+# ── Throwaway preview renders (the bot builds images in-memory; ─────
+#    these only appear if a local test/preview script writes them) ──
+summary.png
+scorecard.png
+final_scoreboard.png
+innings1_score.png
+tied_scoreboard.png
+points_table.png
+standings.png
+crimson_standings.png
+knockouts.png
+match_banner.png
+test_full.png
+test_summary.png
+preview_*.png
+_*.py

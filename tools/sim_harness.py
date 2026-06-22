@@ -6,6 +6,9 @@ and measure win-rates / score distributions for calibration.
 """
 import random
 import statistics
+import sys, os
+# Allow running from the repo root (e.g. `python tools/sim_harness.py`) — add root to the import path.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from t20_simulation import execute_ball_math_t20, get_smart_ai_bowler_t20
 from odi_simulation import execute_ball_math_odi, get_smart_ai_bowler_odi
 
