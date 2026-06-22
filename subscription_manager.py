@@ -61,6 +61,9 @@ DB_CACHE = {
     # Per-server player rating overrides (owner-only, separate from the global `players` DB):
     # { server_id: { "<player name lower>": {"name":.., "bat":.., "bowl":.., "role":.., "archetype":..} } }
     "server_overrides": {},
+    # Draft-mode lifetime record per user (PvP wins are the leaderboard; vs-AI kept separate):
+    # { user_id: {"name":.., "wins":int, "losses":int, "ai_wins":int, "ai_losses":int} }
+    "draft_stats": {},
 }
 
 def load_data_from_bin():
@@ -78,6 +81,7 @@ def load_data_from_bin():
             DB_CACHE["ratings_channels"]    = doc.get("ratings_channels", [])
             DB_CACHE["match_log_channels"]  = doc.get("match_log_channels", {})
             DB_CACHE["server_overrides"]    = doc.get("server_overrides", {})
+            DB_CACHE["draft_stats"]         = doc.get("draft_stats", {})
             raw_mc = doc.get("match_counts", {})
             DB_CACHE["match_counts"] = {
                 "t20":  int(raw_mc.get("t20",  0)),
@@ -355,6 +359,30 @@ def apply_server_overrides(players, server_id):
         else:
             out.append(p)
     return out
+
+
+# ── Draft-mode lifetime stats (PvP leaderboard; vs-AI kept separate) ────────
+def _draft_row(user_id, name=None):
+    s = DB_CACHE.setdefault("draft_stats", {})
+    r = s.setdefault(str(user_id), {"name": name or str(user_id), "wins": 0, "losses": 0, "ai_wins": 0, "ai_losses": 0})
+    if name:
+        r["name"] = name
+    return r
+
+def record_draft_pvp(winner_id, winner_name, loser_id, loser_name):
+    """Record a 1v1 draft result (counts toward the leaderboard)."""
+    _draft_row(winner_id, winner_name)["wins"] += 1
+    _draft_row(loser_id, loser_name)["losses"] += 1
+    async_save_to_bin()
+
+def record_draft_ai(user_id, user_name, won):
+    """Record a vs-AI draft result — kept SEPARATE from the PvP leaderboard."""
+    r = _draft_row(user_id, user_name)
+    r["ai_wins" if won else "ai_losses"] += 1
+    async_save_to_bin()
+
+def get_draft_stats():
+    return DB_CACHE.get("draft_stats", {})
 
 def add_player(player_dict):
     global DB_CACHE

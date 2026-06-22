@@ -46,7 +46,9 @@ from subscription_manager import (
     get_match_log_channel, set_match_log_channel, clear_match_log_channel, DB_CACHE,
     get_match_counts, increment_match_count, set_match_count,
     apply_server_overrides, set_server_override, reset_server_override, get_server_overrides,
+    record_draft_pvp, record_draft_ai, get_draft_stats,
 )
+import draft_mode as dm
 # ── Career Mode (WORK IN PROGRESS) ────────────────────────────────────────────
 # Kept OFF by default so the live simulation engine runs undisturbed. Career code
 # loads defensively: any failure here can NEVER crash bot startup. Flip the env
@@ -297,6 +299,7 @@ bot = CricketBot()
 active_games = {}
 active_setups = {}
 active_test_matches = {}   # channel_id → TestMatchObj
+active_drafts = set()       # channel_ids with a draft pick-phase in progress
 
 # ==========================================
 # 🗄️ 1.5 CLOUD DATABASE & SECURITY
@@ -2539,6 +2542,12 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
             except Exception as _e:
                 print(f"⚠️ Club match payout failed: {_e}")
 
+        if getattr(match_to_finalize, "is_draft", False):
+            try:
+                await _record_draft_result(channel, match_to_finalize)
+            except Exception as _e:
+                print(f"⚠️ Draft result record failed: {_e}")
+
         if channel.id in active_games:
             del active_games[channel.id]
 
@@ -4545,6 +4554,14 @@ async def begin_toss(channel, state):
     match.tournament_match_id = getattr(state, "tournament_match_id", None)
     match.manager_id = getattr(state, "manager_id", None)
     match.tournament_name = getattr(state, "tournament_name", "TOURNAMENT")
+    # Draft mode: carry the result-recording info so the leaderboard updates on finish
+    if getattr(state, "is_draft", False):
+        match.is_draft = True
+        match.draft_host_id = state.draft_host_id
+        match.draft_host_name = state.draft_host_name
+        match.draft_opp_id = state.draft_opp_id      # None == vs AI
+        match.draft_opp_name = state.draft_opp_name
+        match.draft_host_team = state.t1_name        # team1 is always the host
     active_games[channel.id] = match
 
     if getattr(state, 'sim_only', False):
@@ -4655,6 +4672,10 @@ async def on_message(message: discord.Message):
         message.content = "cv tournament " + content[4:]
     elif content.startswith("cv t "):
         message.content = "cv tournament " + content[5:]
+    elif content.startswith("cvd "):
+        message.content = "cv draft " + content[4:]
+    elif content.strip() == "cvd":
+        message.content = "cv draft"
 
     channel_id = message.channel.id
     if channel_id not in active_setups:
@@ -6730,22 +6751,22 @@ def _build_playerlist_ratings_txt(players: list) -> str:
     """[OWNER] Full database WITH ratings — sorted by OVR. Separate from the ratings-hidden cv pl."""
     rows = sorted(players, key=lambda p: _player_overall(p), reverse=True)
     lines = [
-        "═" * 70,
+        "═" * 88,
         f"  CricVerse Player Database — RATINGS  ·  {len(players)} players",
-        "═" * 70,
-        f"  {'#':>3}  {'NAME':<26}{'BAT':>4}{'BOWL':>5}{'OVR':>5}   {'ROLE':<22}{'ARCHETYPE'}",
-        "─" * 70,
+        "═" * 88,
+        f"  {'#':>4}  {'NAME':<26}{'BAT':>4}{'BOWL':>5}{'OVR':>5}   {'ROLE':<28}{'ARCHETYPE'}",
+        "─" * 88,
     ]
     for i, p in enumerate(rows, 1):
         lines.append(
-            f"  {i:>3}  {str(p.get('name',''))[:25]:<26}"
+            f"  {i:>4}  {str(p.get('name',''))[:25]:<26}"
             f"{int(p.get('bat',0)):>4}{int(p.get('bowl',0)):>5}{int(_player_overall(p)):>5}   "
-            f"{str(p.get('role',''))[:21]:<22}{p.get('archetype','')}"
+            f"{str(p.get('role','')):<28}{p.get('archetype','')}"
         )
-    lines.append("═" * 70)
+    lines.append("═" * 88)
     from datetime import datetime, timezone
     lines.append(f"  Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
-    lines.append("═" * 70)
+    lines.append("═" * 88)
     return "\n".join(lines)
 
 
@@ -7128,6 +7149,44 @@ class CustomHelpCommand(commands.HelpCommand):
             embed.add_field(name="Subcommands", value="\n".join(sub_cmds), inline=False)
         await self.get_destination().send(embed=embed)
 
+
+async def _record_draft_result(channel, match):
+    """On a draft match's finish, record the win — PvP to the leaderboard, vs-AI separately."""
+    inn1, inn2 = match.innings1, match.innings2
+    target = getattr(match, "target", inn1.total_runs + 1)
+    if getattr(match, "tiebreak_winner_name", None):
+        win_name = match.tiebreak_winner_name
+    elif inn2.total_runs >= target:
+        win_name = inn2.batting_team["name"]
+    elif inn2.total_runs == target - 1:
+        win_name = None   # tie — but tournament/draft ties go to a Super Over, so rare
+    else:
+        win_name = inn1.batting_team["name"]
+    if win_name is None:
+        return
+
+    host_id   = match.draft_host_id
+    host_name = match.draft_host_name
+    opp_id    = match.draft_opp_id        # None == vs AI
+    opp_name  = match.draft_opp_name
+    host_won  = (win_name == match.draft_host_team)
+
+    if opp_id is None:
+        record_draft_ai(host_id, host_name, host_won)
+        verdict = (f"🏆 **{host_name}** beat the AI — vs-AI record updated."
+                   if host_won else f"🤖 The **AI** won — {host_name}'s vs-AI record updated.")
+    else:
+        if host_won:
+            record_draft_pvp(host_id, host_name, opp_id, opp_name); winner = host_name
+        else:
+            record_draft_pvp(opp_id, opp_name, host_id, host_name); winner = opp_name
+        verdict = f"🏆 Draft win recorded for **{winner}**!"
+    try:
+        await channel.send(f"📋 **Draft Match Complete** — {verdict}\n-# See the table with `cvd lb`.")
+    except Exception:
+        pass
+
+
 class PrefixCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -7190,10 +7249,144 @@ class PrefixCog(commands.Cog):
         if channel_id in active_test_matches:
             del active_test_matches[channel_id]
             cleared = True
+        if channel_id in active_drafts:
+            active_drafts.discard(channel_id)
+            cleared = True
         if cleared:
             await ctx.send("🛑 **Match and setup forcefully terminated.** Memory cleared.")
         else:
             await ctx.send("⚠️ There is no active match or setup running in this channel.")
+
+    # ── DRAFT MODE (blind, knowledge-based) ──────────────────────────────────
+    @commands.group(name="draft", invoke_without_command=True,
+                    help="Blind player draft → interactive match. Ratings hidden; answer by typing a name.\nUsage: draft [@opponent]   (no opponent = vs AI)   ·   draft lb")
+    async def draft(self, ctx, opponent: discord.Member = None):
+        if not ctx.guild:
+            return await ctx.send("❌ Use draft inside a server.")
+        if ctx.channel.id in active_games or ctx.channel.id in active_setups or ctx.channel.id in active_drafts:
+            return await ctx.send("❌ A match or draft is already running here. Use `cv endmatch` first.")
+        if opponent:
+            if opponent.bot:
+                return await ctx.send("❌ Can't draft against a bot account. Leave blank to play **vs AI**.")
+            if opponent.id == ctx.author.id:
+                return await ctx.send("❌ You can't draft against yourself.")
+        await self._run_draft(ctx, ctx.author, opponent)
+
+    @draft.command(name="lb", aliases=["leaderboard", "wins"], help="Draft win leaderboard (vs-AI tracked separately).\nUsage: cvd lb")
+    async def draft_lb(self, ctx):
+        stats = get_draft_stats()
+        if not stats:
+            return await ctx.send("📋 No drafts played yet. Start one with `cvd @opponent` (or `cvd` vs AI).")
+        rows = sorted(stats.items(), key=lambda kv: (kv[1].get("wins", 0), -kv[1].get("losses", 0)), reverse=True)
+        rows = [r for r in rows if (r[1].get("wins", 0) or r[1].get("losses", 0))]   # PvP players only
+        lines = []
+        for i, (uid, r) in enumerate(rows[:15], 1):
+            w, l = r.get("wins", 0), r.get("losses", 0)
+            tot = w + l
+            pct = f"{(w / tot * 100):.0f}%" if tot else "—"
+            medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"`{i:>2}`")
+            lines.append(f"{medal} **{r.get('name', '?')}** — {w}W / {l}L · {pct}")
+        embed = discord.Embed(title="🏆 Draft Leaderboard — PvP Wins",
+                              description="\n".join(lines) or "No PvP drafts yet.", color=discord.Color.gold())
+        me = stats.get(str(ctx.author.id))
+        if me and (me.get("ai_wins", 0) or me.get("ai_losses", 0)):
+            embed.add_field(name="Your vs-AI record (separate)",
+                            value=f"{me.get('ai_wins', 0)}W / {me.get('ai_losses', 0)}L", inline=False)
+        embed.set_footer(text="Only 1v1 drafts count toward the leaderboard · vs-AI is tracked separately")
+        await ctx.send(embed=embed)
+
+    async def _draft_get_pick(self, channel, uid, uname, question, pool, taken, ri, tag):
+        """Collect one human pick: 3 tries, then a 78-OVR net filler for the slot."""
+        for attempt in range(3):
+            left = 3 - attempt
+            await channel.send(f"<@{uid}> — type a player's name  *({left} {'try' if left == 1 else 'tries'} left)*")
+            def check(m):
+                return m.author.id == uid and m.channel.id == channel.id and m.content.strip()
+            try:
+                msg = await self.bot.wait_for("message", timeout=60.0, check=check)
+            except asyncio.TimeoutError:
+                await channel.send("⏳ **Time up.**")
+                break
+            player, reason = dm.verify_answer(msg.content, question, pool, taken)
+            if reason == "ok":
+                await channel.send(f"✅ **{player['name']}** → **{uname}**")
+                return player
+            if reason == "unknown":
+                await channel.send("❌ Player not found — check the spelling.")
+            elif reason == "ambiguous":
+                cands = dm.resolve_candidates(msg.content, pool)
+                await channel.send("❓ Too many matches — be more specific: " + ", ".join(cands))
+            elif reason == "taken":
+                await channel.send("❌ Already drafted — pick someone else.")
+            elif reason == "wrong_type":
+                await channel.send(f"❌ That player doesn't fit **{question['q']}** — try again.")
+        filler = dm.make_filler(ri, tag)
+        await channel.send(f"🪹 No valid pick — **{uname}** gets a net player: **{filler['name']}**.")
+        return filler
+
+    async def _run_draft(self, ctx, host, opponent):
+        channel = ctx.channel
+        active_drafts.add(channel.id)
+        try:
+            pool = apply_server_overrides(get_all_players(), str(ctx.guild.id))
+            if len(pool) < 60:
+                return await ctx.send("❌ Not enough players in the database to draft.")
+            vs_ai = opponent is None
+            host_name = host.display_name
+            opp_name = "AI" if vs_ai else opponent.display_name
+
+            host_first = random.random() < 0.5
+            await channel.send(
+                f"🎲 **DRAFT — {host_name} vs {opp_name}**\n"
+                f"🪙 Toss won by **{host_name if host_first else opp_name}** — they answer first each round.\n"
+                f"📋 **{dm.NUM_ROUNDS} rounds**, same question both answer · pick by **typing a player's name** · "
+                f"**ratings hidden** — pure cricket knowledge. Build a balanced XI!"
+            )
+
+            taken, host_xi, opp_xi = set(), [], []
+            for ri in range(dm.NUM_ROUNDS):
+                q = dm.pick_question(ri)
+                await channel.send(f"━━━━━━━━━━━━━━━\n**Round {ri+1}/{dm.NUM_ROUNDS} · {dm.slot_label(ri)}**\n🎯 Name **{q['q']}**")
+                order = ["host", "opp"] if host_first else ["opp", "host"]
+                for who in order:
+                    if who == "host":
+                        pick = await self._draft_get_pick(channel, host.id, host_name, q, pool, taken, ri, f"H{ri+1}")
+                        host_xi.append(pick); taken.add(pick["name"])
+                    elif vs_ai:
+                        pick = dm.ai_pick(pool, taken, q, _player_overall) or dm.make_filler(ri, f"AI{ri+1}")
+                        await channel.send(f"🤖 **AI** picks **{pick['name']}**.")
+                        opp_xi.append(pick); taken.add(pick["name"])
+                    else:
+                        pick = await self._draft_get_pick(channel, opponent.id, opp_name, q, pool, taken, ri, f"O{ri+1}")
+                        opp_xi.append(pick); taken.add(pick["name"])
+
+            await channel.send(
+                "✅ **Draft complete!**\n\n"
+                f"**{host_name}'s XI**\n" + "\n".join(f"`{i+1:>2}.` {p['name']}" for i, p in enumerate(host_xi)) +
+                f"\n\n**{opp_name}'s XI**\n" + "\n".join(f"`{i+1:>2}.` {p['name']}" for i, p in enumerate(opp_xi)) +
+                "\n\n🏏 Now play it out — same as a normal match. Pick conditions below…"
+            )
+
+            # Hand off to the EXACT normal-match flow from the point both XIs are set.
+            state = MatchSetupState(host, (None if vs_ai else opponent), host.id, (None if vs_ai else opponent.id))
+            state.format_overs = 20
+            state.t1_name = f"{host_name}'s XI"[:28]
+            state.t2_name = f"{opp_name}'s XI"[:28]
+            state.t1_roster = host_xi
+            state.t2_roster = opp_xi
+            state.home_team_id = host.id
+            state.is_draft = True
+            state.draft_host_id = host.id
+            state.draft_host_name = host_name
+            state.draft_opp_id = (None if vs_ai else opponent.id)
+            state.draft_opp_name = opp_name
+            active_drafts.discard(channel.id)
+            await ask_pitch_and_weather(channel, state)
+        except Exception as e:
+            print(f"⚠️ draft error: {e}")
+            await channel.send(f"❌ Draft error: {e}")
+        finally:
+            active_drafts.discard(channel.id)
 
     @commands.command(name="playerlist", aliases=["pl"], help="Download full player database grouped by tier (no ratings).\nUsage: playerlist")
     async def playerlist(self, ctx):
