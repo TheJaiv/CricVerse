@@ -47,6 +47,7 @@ from subscription_manager import (
     get_match_counts, increment_match_count, set_match_count,
     apply_server_overrides, set_server_override, reset_server_override, get_server_overrides,
     record_draft_pvp, record_draft_ai, get_draft_stats,
+    save_custom_team, get_custom_team, delete_custom_team, list_custom_teams,
 )
 import draft_mode as dm
 # ── Career Mode (WORK IN PROGRESS) ────────────────────────────────────────────
@@ -4694,13 +4695,20 @@ async def on_message(message: discord.Message):
         if message.author.id != state.p1_id: return
         
         req_length = 11
-        if message.content.strip().lower() == "default":
+        typed = message.content.strip()
+        _ct = get_custom_team(message.guild.id, typed) if message.guild else None
+        if typed.lower() == "default":
             players = list(TEAMS_DATA["Team 1"]["players"])
             if state.impact_player:
                 state.t1_subs = [{"name": "Faf du Plessis", "bat": 85, "bowl": 10, "archetype": "Aggressor", "role": "Batter"}, {"name": "Lockie Ferguson", "bat": 10, "bowl": 85, "archetype": "Standard", "role": "Bowler_Pace"}]
             else:
                 state.t1_subs = []
             missing = []
+        elif _ct:
+            _dbmap = {p["name"].lower(): p for p in get_all_players()}
+            players = [_dbmap[nm.lower()] for nm in _ct["players"] if nm.lower() in _dbmap][:11]
+            missing = [nm for nm in _ct["players"] if nm.lower() not in _dbmap]
+            state.t1_subs = []
         else:
             db = get_all_players()
             parsed_players, missing = parse_pasted_roster(message.content, db)
@@ -4743,13 +4751,20 @@ async def on_message(message: discord.Message):
         if message.author.id != target_id: return
         
         req_length = 11
-        if message.content.strip().lower() == "default":
+        typed = message.content.strip()
+        _ct = get_custom_team(message.guild.id, typed) if message.guild else None
+        if typed.lower() == "default":
             players = list(TEAMS_DATA["Team 2"]["players"])
             if state.impact_player:
                 state.t2_subs = [{"name": "Devon Conway", "bat": 85, "bowl": 10, "archetype": "Aggressor", "role": "Batter"}, {"name": "Anrich Nortje", "bat": 10, "bowl": 85, "archetype": "Standard", "role": "Bowler_Pace"}]
             else:
                 state.t2_subs = []
             missing = []
+        elif _ct:
+            _dbmap = {p["name"].lower(): p for p in get_all_players()}
+            players = [_dbmap[nm.lower()] for nm in _ct["players"] if nm.lower() in _dbmap][:11]
+            missing = [nm for nm in _ct["players"] if nm.lower() not in _dbmap]
+            state.t2_subs = []
         else:
             db = get_all_players()
             parsed_players, missing = parse_pasted_roster(message.content, db)
@@ -7467,6 +7482,65 @@ class PrefixCog(commands.Cog):
             f"📋 **Player Database** — {len(players)} players across 4 tiers.\nRatings are hidden. Players within each tier are shuffled.",
             file=discord.File(fp=buf, filename="cricverse_players.txt")
         )
+
+    # ── Custom saved teams (server-shared XI presets) ────────────────────────
+    @commands.command(name="saveteam", aliases=["setteam", "customteam"], help="Save a custom XI preset for this server (loadable by name at the XI step).\nUsage: saveteam \"<name>\"  then paste 11 player names")
+    async def saveteam(self, ctx, *, name: str = None):
+        if not ctx.guild:
+            return await ctx.send("❌ Use this inside a server.")
+        name = (name or "").strip()[:24]
+        if not name:
+            return await ctx.send("❌ Give it a name, e.g. `cv saveteam \"RCB\"`.")
+        if name.lower() == "default":
+            return await ctx.send("❌ `default` is reserved — pick another name.")
+        await ctx.send(f"📋 Reply with the **11 player names** for **{name}** (one per line). You have 3 minutes.")
+        def check(m):
+            return m.author.id == ctx.author.id and m.channel.id == ctx.channel.id and m.content.strip()
+        try:
+            msg = await self.bot.wait_for("message", timeout=180.0, check=check)
+        except asyncio.TimeoutError:
+            return await ctx.send("⏳ Timed out — run `cv saveteam` again.")
+        parsed, missing = parse_pasted_roster(msg.content, get_all_players())
+        players = parsed[:11]
+        if missing or len(players) < 11:
+            err = f"❌ Need **11 valid players** ({len(players)}/11 found).\n"
+            if missing:
+                err += f"Not in DB: {', '.join(missing)}\n"
+            return await msg.reply(err + "Fix the names and run `cv saveteam` again.")
+        save_custom_team(ctx.guild.id, name, [p["name"] for p in players])
+        await msg.reply(f"✅ Saved team **{name}**! Load it in any match by typing **{name}** at the XI step.\n\n{format_xi_display(players)}")
+
+    @commands.command(name="teams", aliases=["customteams", "myteams"], help="List this server's saved custom teams.\nUsage: teams")
+    async def teams(self, ctx):
+        if not ctx.guild:
+            return await ctx.send("❌ Use this inside a server.")
+        t = list_custom_teams(ctx.guild.id)
+        if not t:
+            return await ctx.send("📋 No saved teams yet. Create one with `cv saveteam \"<name>\"`.")
+        names = " · ".join(f"**{v['name']}**" for v in sorted(t.values(), key=lambda x: x["name"].lower()))
+        await ctx.send(f"📋 **Saved teams ({len(t)}):** {names}\n-# Type a name at the XI step to load it · `cv team \"<name>\"` to view one.")
+
+    @commands.command(name="team", aliases=["viewteam"], help="View a saved custom team's XI.\nUsage: team \"<name>\"")
+    async def team(self, ctx, *, name: str = None):
+        if not ctx.guild:
+            return await ctx.send("❌ Use this inside a server.")
+        ct = get_custom_team(ctx.guild.id, name or "")
+        if not ct:
+            return await ctx.send(f"❌ No saved team named **{name}**. See `cv teams`.")
+        dbmap = {p["name"].lower(): p for p in get_all_players()}
+        players = [dbmap[nm.lower()] for nm in ct["players"] if nm.lower() in dbmap]
+        gone = [nm for nm in ct["players"] if nm.lower() not in dbmap]
+        note = f"\n⚠️ No longer in DB: {', '.join(gone)}" if gone else ""
+        await ctx.send(f"📋 **{ct['name']}**\n{format_xi_display(players)}{note}")
+
+    @commands.command(name="deleteteam", aliases=["delteam", "removeteam"], help="Delete a saved custom team.\nUsage: deleteteam \"<name>\"")
+    async def deleteteam(self, ctx, *, name: str = None):
+        if not ctx.guild:
+            return await ctx.send("❌ Use this inside a server.")
+        if delete_custom_team(ctx.guild.id, name or ""):
+            await ctx.send(f"🗑️ Deleted saved team **{name}**.")
+        else:
+            await ctx.send(f"❌ No saved team named **{name}**.")
 
     @commands.command(name="playerlistratings", aliases=["plr", "plratings"], help="[OWNER] Download the full player database WITH ratings.\nUsage: plr")
     async def playerlistratings(self, ctx):

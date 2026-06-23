@@ -64,6 +64,9 @@ DB_CACHE = {
     # Draft-mode lifetime record per user (PvP wins are the leaderboard; vs-AI kept separate):
     # { user_id: {"name":.., "wins":int, "losses":int, "ai_wins":int, "ai_losses":int} }
     "draft_stats": {},
+    # Saved custom XI presets per server (player NAMES — re-resolved against the live DB on load):
+    # { server_id: { "<name lower>": {"name": "RCB", "players": ["Virat Kohli", ...]} } }
+    "custom_teams": {},
 }
 
 def load_data_from_bin():
@@ -82,6 +85,7 @@ def load_data_from_bin():
             DB_CACHE["match_log_channels"]  = doc.get("match_log_channels", {})
             DB_CACHE["server_overrides"]    = doc.get("server_overrides", {})
             DB_CACHE["draft_stats"]         = doc.get("draft_stats", {})
+            DB_CACHE["custom_teams"]        = doc.get("custom_teams", {})
             raw_mc = doc.get("match_counts", {})
             DB_CACHE["match_counts"] = {
                 "t20":  int(raw_mc.get("t20",  0)),
@@ -383,6 +387,34 @@ def record_draft_ai(user_id, user_name, won):
 
 def get_draft_stats():
     return DB_CACHE.get("draft_stats", {})
+
+
+# ── Saved custom XI presets (per server) ────────────────────────────────────
+def save_custom_team(server_id, name, player_names):
+    """Save a named XI for a server as a list of player NAMES (re-resolved live on load)."""
+    sid = str(server_id)
+    DB_CACHE.setdefault("custom_teams", {}).setdefault(sid, {})[name.strip().lower()] = {
+        "name": name.strip(), "players": list(player_names),
+    }
+    async_save_to_bin()
+
+def get_custom_team(server_id, name):
+    """Return {'name', 'players':[names]} for a saved team (case-insensitive), or None."""
+    if not name:
+        return None
+    return DB_CACHE.get("custom_teams", {}).get(str(server_id), {}).get(name.strip().lower())
+
+def delete_custom_team(server_id, name):
+    srv = DB_CACHE.get("custom_teams", {}).get(str(server_id), {})
+    key = (name or "").strip().lower()
+    if key in srv:
+        del srv[key]
+        async_save_to_bin()
+        return True
+    return False
+
+def list_custom_teams(server_id):
+    return DB_CACHE.get("custom_teams", {}).get(str(server_id), {})
 
 def add_player(player_dict):
     global DB_CACHE
