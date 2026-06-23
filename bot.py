@@ -7554,9 +7554,29 @@ class PrefixCog(commands.Cog):
             return await ctx.send("❌ Use this inside a server.")
         t = list_custom_teams(ctx.guild.id)
         if not t:
-            return await ctx.send("📋 No saved teams yet. Create one with `cv saveteam \"<name>\"`.")
-        names = " · ".join(f"**{v['name']}**" for v in sorted(t.values(), key=lambda x: x["name"].lower()))
-        await ctx.send(f"📋 **Saved teams ({len(t)}):** {names}\n-# Type a name at the XI step to load it · `cv team \"<name>\"` to view one.")
+            embed = discord.Embed(
+                title="📋 Saved Teams",
+                description="No saved teams yet.\nAn admin can create one with `cv saveteam \"<name>\"`.",
+                color=0x5865F2,
+            )
+            return await ctx.send(embed=embed)
+
+        teams_sorted = sorted(t.values(), key=lambda x: x["name"].lower())
+        lines = []
+        for i, v in enumerate(teams_sorted, 1):
+            n_xi = len(v.get("players", []))
+            n_imp = len(v.get("impact", []))
+            badge = f" · ⚡ {n_imp} impact" if n_imp else ""
+            warn = " ⚠️" if n_xi < 11 else ""
+            lines.append(f"`{i:>2}.` **{v['name']}** — {n_xi}/11 players{badge}{warn}")
+
+        embed = discord.Embed(
+            title=f"📋 Saved Teams — {ctx.guild.name}",
+            description="\n".join(lines),
+            color=0x5865F2,
+        )
+        embed.set_footer(text="Type a team's name at the XI step to load it · cv team \"<name>\" to view the full XI")
+        await ctx.send(embed=embed)
 
     @commands.command(name="team", aliases=["viewteam"], help="View a saved custom team's XI.\nUsage: team \"<name>\"")
     async def team(self, ctx, *, name: str = None):
