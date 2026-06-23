@@ -390,11 +390,12 @@ def get_draft_stats():
 
 
 # ── Saved custom XI presets (per server) ────────────────────────────────────
-def save_custom_team(server_id, name, player_names):
-    """Save a named XI for a server as a list of player NAMES (re-resolved live on load)."""
+def save_custom_team(server_id, name, player_names, impact_names=None):
+    """Save a named XI for a server as a list of player NAMES (re-resolved live on load).
+    `impact_names` are optional impact-player substitutes (used only in impact-mode matches)."""
     sid = str(server_id)
     DB_CACHE.setdefault("custom_teams", {}).setdefault(sid, {})[name.strip().lower()] = {
-        "name": name.strip(), "players": list(player_names),
+        "name": name.strip(), "players": list(player_names), "impact": list(impact_names or []),
     }
     async_save_to_bin()
 

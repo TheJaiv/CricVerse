@@ -4220,11 +4220,22 @@ async def ask_team1_name(channel, state):
     await channel.send(f"🏏 <@{state.p1_id}> — Type your **team name** (e.g. `India`):\n*(Reply directly in this channel)*")
     active_setups[channel.id] = ("awaiting_team1_name", state)
 
+def _saved_teams_hint(channel):
+    """A one-line hint listing this server's saved custom teams (loadable at the XI step)."""
+    guild = getattr(channel, "guild", None)
+    if not guild:
+        return ""
+    saved = list_custom_teams(guild.id)
+    if not saved:
+        return "\n-# 💡 Tip: save a lineup with `cv saveteam \"<name>\"`, then just type its name here to load it."
+    names = ", ".join(f"**{v['name']}**" for v in sorted(saved.values(), key=lambda x: x["name"].lower())[:15])
+    return f"\n-# 💡 Or type a **saved team** name to load it instantly: {names}  ·  manage with `cv teams`."
+
 async def ask_team1_xi(channel, state):
     if state.impact_player:
-        await channel.send(f"📋 <@{state.p1_id}> — Type your **Playing XI + up to 5 Subs** (one per line, 11-16 total) OR type `default`:\n```text\nPlayer 1\n...\nPlayer 11\nSub 1\n...```")
+        await channel.send(f"📋 <@{state.p1_id}> — Type your **Playing XI + up to 5 Subs** (one per line, 11-16 total) OR type `default`:\n```text\nPlayer 1\n...\nPlayer 11\nSub 1\n...```" + _saved_teams_hint(channel))
     else:
-        await channel.send(f"📋 <@{state.p1_id}> — Type your **Playing XI** (one per line) OR type `default` for a built-in team:\n```text\nVirat Kohli\nRohit Sharma\n...```")
+        await channel.send(f"📋 <@{state.p1_id}> — Type your **Playing XI** (one per line) OR type `default` for a built-in team:\n```text\nVirat Kohli\nRohit Sharma\n...```" + _saved_teams_hint(channel))
     active_setups[channel.id] = ("awaiting_team1_xi", state)
 
 async def ask_team2_name(channel, state):
@@ -4235,9 +4246,9 @@ async def ask_team2_name(channel, state):
 async def ask_team2_xi(channel, state):
     target_id = state.p2_id if state.p2_id else state.p1_id
     if state.impact_player:
-        await channel.send(f"📋 <@{target_id}> — Type **Team 2's Playing XI + up to 5 Subs** (one per line, 11-16 total) OR type `default`:\n```text\nPlayer 1\n...\nPlayer 11\nSub 1\n...```")
+        await channel.send(f"📋 <@{target_id}> — Type **Team 2's Playing XI + up to 5 Subs** (one per line, 11-16 total) OR type `default`:\n```text\nPlayer 1\n...\nPlayer 11\nSub 1\n...```" + _saved_teams_hint(channel))
     else:
-        await channel.send(f"📋 <@{target_id}> — Type **Team 2's Playing XI** (one per line) OR type `default` for a built-in team:\n```text\nPlayer Name\n...```")
+        await channel.send(f"📋 <@{target_id}> — Type **Team 2's Playing XI** (one per line) OR type `default` for a built-in team:\n```text\nPlayer Name\n...```" + _saved_teams_hint(channel))
     active_setups[channel.id] = ("awaiting_team2_xi", state)
 
 
@@ -4708,7 +4719,11 @@ async def on_message(message: discord.Message):
             _dbmap = {p["name"].lower(): p for p in get_all_players()}
             players = [_dbmap[nm.lower()] for nm in _ct["players"] if nm.lower() in _dbmap][:11]
             missing = [nm for nm in _ct["players"] if nm.lower() not in _dbmap]
-            state.t1_subs = []
+            # Impact subs only matter in impact-mode matches; ignored otherwise.
+            if state.impact_player:
+                state.t1_subs = [_dbmap[nm.lower()] for nm in _ct.get("impact", []) if nm.lower() in _dbmap][:5]
+            else:
+                state.t1_subs = []
         else:
             db = get_all_players()
             parsed_players, missing = parse_pasted_roster(message.content, db)
@@ -4764,7 +4779,11 @@ async def on_message(message: discord.Message):
             _dbmap = {p["name"].lower(): p for p in get_all_players()}
             players = [_dbmap[nm.lower()] for nm in _ct["players"] if nm.lower() in _dbmap][:11]
             missing = [nm for nm in _ct["players"] if nm.lower() not in _dbmap]
-            state.t2_subs = []
+            # Impact subs only matter in impact-mode matches; ignored otherwise.
+            if state.impact_player:
+                state.t2_subs = [_dbmap[nm.lower()] for nm in _ct.get("impact", []) if nm.lower() in _dbmap][:5]
+            else:
+                state.t2_subs = []
         else:
             db = get_all_players()
             parsed_players, missing = parse_pasted_roster(message.content, db)
@@ -7484,16 +7503,31 @@ class PrefixCog(commands.Cog):
         )
 
     # ── Custom saved teams (server-shared XI presets) ────────────────────────
-    @commands.command(name="saveteam", aliases=["setteam", "customteam"], help="Save a custom XI preset for this server (loadable by name at the XI step).\nUsage: saveteam \"<name>\"  then paste 11 player names")
+    @staticmethod
+    def _team_admin(ctx):
+        """Saving/editing/deleting teams is admin-only; anyone can view & use them."""
+        try:
+            return (ctx.author.id == ADMIN_DISCORD_ID
+                    or (ctx.guild and ctx.author.guild_permissions.administrator)
+                    or str(ctx.author.id) in get_auth_admins())
+        except Exception:
+            return False
+
+    @commands.command(name="saveteam", aliases=["setteam", "customteam"], help="[Admin] Save a custom XI preset for this server (loadable by name at the XI step).\nUsage: saveteam \"<name>\"  then paste 11 player names (optionally up to 5 more as impact players)")
     async def saveteam(self, ctx, *, name: str = None):
         if not ctx.guild:
             return await ctx.send("❌ Use this inside a server.")
+        if not self._team_admin(ctx):
+            return await ctx.send("🔒 Only **server admins** can save teams. Anyone can view them with `cv teams` and load them at the XI step.")
         name = (name or "").strip()[:24]
         if not name:
             return await ctx.send("❌ Give it a name, e.g. `cv saveteam \"RCB\"`.")
         if name.lower() == "default":
             return await ctx.send("❌ `default` is reserved — pick another name.")
-        await ctx.send(f"📋 Reply with the **11 player names** for **{name}** (one per line). You have 3 minutes.")
+        await ctx.send(
+            f"📋 Reply with the **11 player names** for **{name}** (one per line). You have 3 minutes.\n"
+            f"-# 💡 Optional: add up to **5 more names** after the 11 as **impact players** — they're only used in impact-mode matches and ignored otherwise."
+        )
         def check(m):
             return m.author.id == ctx.author.id and m.channel.id == ctx.channel.id and m.content.strip()
         try:
@@ -7502,13 +7536,17 @@ class PrefixCog(commands.Cog):
             return await ctx.send("⏳ Timed out — run `cv saveteam` again.")
         parsed, missing = parse_pasted_roster(msg.content, get_all_players())
         players = parsed[:11]
+        impact = parsed[11:16]
         if missing or len(players) < 11:
             err = f"❌ Need **11 valid players** ({len(players)}/11 found).\n"
             if missing:
                 err += f"Not in DB: {', '.join(missing)}\n"
             return await msg.reply(err + "Fix the names and run `cv saveteam` again.")
-        save_custom_team(ctx.guild.id, name, [p["name"] for p in players])
-        await msg.reply(f"✅ Saved team **{name}**! Load it in any match by typing **{name}** at the XI step.\n\n{format_xi_display(players)}")
+        save_custom_team(ctx.guild.id, name, [p["name"] for p in players], [p["name"] for p in impact])
+        out = f"✅ Saved team **{name}**! Load it in any match by typing **{name}** at the XI step.\n\n{format_xi_display(players)}"
+        if impact:
+            out += "\n\n**Impact players:**\n" + format_xi_display(impact)
+        await msg.reply(out)
 
     @commands.command(name="teams", aliases=["customteams", "myteams"], help="List this server's saved custom teams.\nUsage: teams")
     async def teams(self, ctx):
@@ -7529,18 +7567,62 @@ class PrefixCog(commands.Cog):
             return await ctx.send(f"❌ No saved team named **{name}**. See `cv teams`.")
         dbmap = {p["name"].lower(): p for p in get_all_players()}
         players = [dbmap[nm.lower()] for nm in ct["players"] if nm.lower() in dbmap]
-        gone = [nm for nm in ct["players"] if nm.lower() not in dbmap]
+        impact = [dbmap[nm.lower()] for nm in ct.get("impact", []) if nm.lower() in dbmap]
+        gone = [nm for nm in ct["players"] + ct.get("impact", []) if nm.lower() not in dbmap]
         note = f"\n⚠️ No longer in DB: {', '.join(gone)}" if gone else ""
-        await ctx.send(f"📋 **{ct['name']}**\n{format_xi_display(players)}{note}")
+        out = f"📋 **{ct['name']}**\n{format_xi_display(players)}"
+        if impact:
+            out += "\n\n**Impact players:**\n" + format_xi_display(impact)
+        await ctx.send(out + note)
 
-    @commands.command(name="deleteteam", aliases=["delteam", "removeteam"], help="Delete a saved custom team.\nUsage: deleteteam \"<name>\"")
+    @commands.command(name="deleteteam", aliases=["delteam", "removeteam"], help="[Admin] Delete a saved custom team.\nUsage: deleteteam \"<name>\"")
     async def deleteteam(self, ctx, *, name: str = None):
         if not ctx.guild:
             return await ctx.send("❌ Use this inside a server.")
+        if not self._team_admin(ctx):
+            return await ctx.send("🔒 Only **server admins** can delete teams.")
         if delete_custom_team(ctx.guild.id, name or ""):
             await ctx.send(f"🗑️ Deleted saved team **{name}**.")
         else:
             await ctx.send(f"❌ No saved team named **{name}**.")
+
+    @commands.command(name="editteam", aliases=["updateteam"], help="[Admin] Replace a saved team's XI with a fresh 11.\nUsage: editteam \"<name>\"  then paste the new 11 player names")
+    async def editteam(self, ctx, *, name: str = None):
+        if not ctx.guild:
+            return await ctx.send("❌ Use this inside a server.")
+        if not self._team_admin(ctx):
+            return await ctx.send("🔒 Only **server admins** can edit teams.")
+        ct = get_custom_team(ctx.guild.id, name or "")
+        if not ct:
+            return await ctx.send(f"❌ No saved team named **{name}**. See `cv teams`, or create one with `cv saveteam`.")
+        dbmap = {p["name"].lower(): p for p in get_all_players()}
+        cur = [dbmap[nm.lower()] for nm in ct["players"] if nm.lower() in dbmap]
+        await ctx.send(
+            f"✏️ Editing **{ct['name']}** — current XI:\n{format_xi_display(cur)}\n\n"
+            f"Reply with the **new 11 player names** (one per line). You have 3 minutes. Type `cancel` to abort.\n"
+            f"-# 💡 Optional: add up to **5 more names** after the 11 as **impact players** (used only in impact-mode matches)."
+        )
+        def check(m):
+            return m.author.id == ctx.author.id and m.channel.id == ctx.channel.id and m.content.strip()
+        try:
+            msg = await self.bot.wait_for("message", timeout=180.0, check=check)
+        except asyncio.TimeoutError:
+            return await ctx.send("⏳ Timed out — `cv editteam` again. Team unchanged.")
+        if msg.content.strip().lower() == "cancel":
+            return await msg.reply("❎ Cancelled — team unchanged.")
+        parsed, missing = parse_pasted_roster(msg.content, get_all_players())
+        players = parsed[:11]
+        impact = parsed[11:16]
+        if missing or len(players) < 11:
+            err = f"❌ Need **11 valid players** ({len(players)}/11 found). Team unchanged.\n"
+            if missing:
+                err += f"Not in DB: {', '.join(missing)}\n"
+            return await msg.reply(err + "Fix the names and run `cv editteam` again.")
+        save_custom_team(ctx.guild.id, ct["name"], [p["name"] for p in players], [p["name"] for p in impact])
+        out = f"✅ Updated **{ct['name']}**!\n\n{format_xi_display(players)}"
+        if impact:
+            out += "\n\n**Impact players:**\n" + format_xi_display(impact)
+        await msg.reply(out)
 
     @commands.command(name="playerlistratings", aliases=["plr", "plratings"], help="[OWNER] Download the full player database WITH ratings.\nUsage: plr")
     async def playerlistratings(self, ctx):
