@@ -7503,6 +7503,35 @@ class PrefixCog(commands.Cog):
         )
 
     # ── Custom saved teams (server-shared XI presets) ────────────────────────
+    async def _log_team_action(self, ctx, action, team_name, players, impact):
+        """Mirror saveteam/editteam to the server's match-log channel (if one is set)."""
+        if not ctx.guild:
+            return
+        try:
+            log_id = get_match_log_channel(str(ctx.guild.id))
+            if not log_id:
+                return
+            ch = self.bot.get_channel(int(log_id))
+            if not ch:
+                return
+            from datetime import datetime, timezone
+            embed = discord.Embed(
+                title=f"📋 Team {action}: {team_name}",
+                color=0x57F287 if action == "Saved" else 0xFEE75C,
+                timestamp=datetime.now(timezone.utc),
+            )
+            embed.add_field(name=f"Playing XI ({len(players)})",
+                            value="\n".join(f"{i}. {p['name']}" for i, p in enumerate(players, 1)) or "—",
+                            inline=False)
+            if impact:
+                embed.add_field(name=f"Impact Players ({len(impact)})",
+                                value="\n".join(f"• {p['name']}" for p in impact),
+                                inline=False)
+            embed.set_footer(text=f"By {ctx.author} · #{ctx.channel.name}")
+            await ch.send(embed=embed)
+        except Exception as _e:
+            print(f"⚠️ Team action log send failed: {_e}")
+
     @staticmethod
     def _team_admin(ctx):
         """Saving/editing/deleting teams is admin-only; anyone can view & use them."""
@@ -7547,6 +7576,7 @@ class PrefixCog(commands.Cog):
         if impact:
             out += "\n\n**Impact players:**\n" + format_xi_display(impact)
         await msg.reply(out)
+        await self._log_team_action(ctx, "Saved", name, players, impact)
 
     @commands.command(name="teams", aliases=["customteams", "myteams"], help="List this server's saved custom teams.\nUsage: teams")
     async def teams(self, ctx):
@@ -7643,6 +7673,7 @@ class PrefixCog(commands.Cog):
         if impact:
             out += "\n\n**Impact players:**\n" + format_xi_display(impact)
         await msg.reply(out)
+        await self._log_team_action(ctx, "Edited", ct["name"], players, impact)
 
     @commands.command(name="playerlistratings", aliases=["plr", "plratings"], help="[OWNER] Download the full player database WITH ratings.\nUsage: plr")
     async def playerlistratings(self, ctx):
