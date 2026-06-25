@@ -301,6 +301,10 @@ active_games = {}
 active_setups = {}
 active_test_matches = {}   # channel_id → TestMatchObj
 active_drafts = set()       # channel_ids with a draft pick-phase in progress
+setup_states = {}           # channel_id → MatchSetupState, kept ALIVE through the whole
+                            #  pre-match setup (format→impact→names→XI→verify→pitch) so
+                            #  endmatch can mark state.cancelled and the setup views bail.
+draft_tasks = {}            # channel_id → asyncio.Task for the running draft (cancellable)
 
 # ==========================================
 # 🗄️ 1.5 CLOUD DATABASE & SECURITY
@@ -1322,6 +1326,10 @@ def extract_scoreboard_data(match: CricketMatch) -> dict:
 
     return {
         "theme": theme,
+        "tournament_type": tourney.get("tournament_type") if tourney else None,
+        "toss_team": (match.team1["name"].upper() if getattr(match, "toss_winner", None) == match.p1_id
+                      else match.team2["name"].upper() if getattr(match, "toss_winner", None) == match.p2_id
+                      else None),
         "match_id": str(getattr(match, "tournament_match_id", "?")),
         "round_label": _round_label,
         "tourn_name": getattr(match, "tournament_name", "TOURNAMENT").upper(),
@@ -1749,8 +1757,139 @@ def generate_t20wc_scorecard(data: dict) -> io.BytesIO:
     return buf
 
 
+def _acl_font(size):
+    for p in ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",      # Linux deploy host
+              "/System/Library/Fonts/Supplemental/Arial Bold.ttf",         # macOS
+              "C:/Windows/Fonts/arialbd.ttf"):                             # Windows
+        try:
+            return ImageFont.truetype(p, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def generate_acl_match_summary(data: dict) -> io.BytesIO:
+    """Render the ACL 'MATCH SUMMARY' card by filling assets/acl_scoreboard.png with live
+    match data: per-team logo (from the tournament logo command) + colour, score in the dark
+    cap, batter runs/balls in the colour block, bowler figures in the BOWLING team's colour,
+    and the result on the trophy bar. Text colour auto-contrasts against the template."""
+    DARK, WHITE = (12, 28, 68), (255, 255, 255)
+    img = Image.open("assets/acl_scoreboard.png").convert("RGBA")
+    # Flatten the baked green "best bowler" strip AND its diagonal notch in both bowler
+    # panels → clean uniform white box. Restricted to the safe interior so the panel's
+    # outer rounded border is preserved.
+    _ip = img.load()
+    for (x0, x1, y0, y1) in ((948, 1398, 360, 436), (948, 1398, 592, 672)):
+        for yy in range(y0, y1):
+            for xx in range(x0, x1):
+                r, g, b, a = _ip[xx, yy]
+                is_green = g > r + 8 and g > b + 5 and g > 70
+                is_line  = abs(r - g) < 20 and abs(g - b) < 20 and 150 < r < 249
+                if is_green or is_line:
+                    _ip[xx, yy] = (252, 252, 252, 255)
+    d = ImageDraw.Draw(img)
+    px = img.convert("RGB").load()
+
+    f_name, f_score, f_overs, f_toss = _acl_font(50), _acl_font(56), _acl_font(27), _acl_font(24)
+    f_bname, f_runs, f_balls = _acl_font(31), _acl_font(37), _acl_font(25)
+    f_title, f_troph = _acl_font(32), _acl_font(52)
+
+    def tw(t, f): return d.textbbox((0, 0), t, font=f)[2]
+    def th(f):    bb = d.textbbox((0, 0), "Ag", f); return bb[3] - bb[1], bb[1]
+    def fit(s, max_w, base):
+        sz = base; f = _acl_font(sz)
+        while tw(s, f) > max_w and sz > 17:
+            sz -= 1; f = _acl_font(sz)
+        return f
+    def _dark_bg(x, y):
+        try:
+            r, g, b = px[max(0, min(img.width-1, int(x))), max(0, min(img.height-1, int(y)))]
+            return (0.299*r + 0.587*g + 0.114*b) < 140
+        except Exception:
+            return True
+    def text(x, y, s, f, anchor="lm", color=None):
+        s = str(s); w = tw(s, f); h, off = th(f)
+        dx = x - w/2 if anchor[0] == "m" else (x - w if anchor[0] == "r" else x)
+        d.text((dx, y - h/2 - off), s, fill=(color or (WHITE if _dark_bg(x, y) else DARK)), font=f)
+    def _hex(c):
+        try:
+            c = (c or "").lstrip("#"); return tuple(int(c[i:i+2], 16) for i in (0, 2, 4))
+        except Exception:
+            return (107, 114, 128)
+    def paste_logo(emoji, cx, cy, size, fb):
+        logo = _fetch_emoji_img(emoji, size) if emoji else None
+        if logo is None:
+            logo = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+            ImageDraw.Draw(logo).ellipse([2, 2, size-2, size-2], fill=fb)
+        img.paste(logo, (int(cx - size/2), int(cy - size/2)), logo)
+    def _overs(b): return str(b // 6) if b % 6 == 0 else f"{b//6}.{b%6}"
+    def _score(t):
+        if t.get("yet_to_bat"): return "—"
+        w = t.get("wickets", 0)
+        return str(t.get("runs", 0)) if w >= 10 else f"{t.get('runs', 0)}-{w}"
+
+    rl = (data.get("round_label") or data.get("tourn_name") or "").upper()
+    if rl:
+        text(865, 200, rl[:40], f_title, "mm")
+
+    rows = {
+        "t1": dict(hy=320, logo_cy=415, scap=(1414, 320), rows_y=[383, 432, 481], other="t2"),
+        "t2": dict(hy=568, logo_cy=663, scap=(1412, 566), rows_y=[627, 676, 725], other="t1"),
+    }
+    NAME_X, OVERS_R = 272, 1258
+    BAT_NAME_X, RUNS_X, BALLS_R = 270, 722, 898
+    # Bowling mirrors batting: NAME (wide) | PERFORMANCE (big, = runs) | OVERS (small, = balls).
+    BOWL_NAME_X, BOWL_PERF_X, BOWL_OV_R = 967, 1372, 1528
+
+    for key in ("t1", "t2"):
+        t = data.get(key) or {}; cfg = rows[key]
+        col = _hex(t.get("color")); bowl_col = _hex((data.get(cfg["other"]) or {}).get("color"))
+        paste_logo(t.get("logo_emoji"), 172, cfg["logo_cy"], 120, col)
+
+        nm = (t.get("name") or "")[:16]
+        text(NAME_X, cfg["hy"], nm, f_name, "lm", WHITE)
+        if data.get("toss_team") and data["toss_team"] == t.get("name"):
+            text(NAME_X + tw(nm, f_name) + 22, cfg["hy"], "TOSS", f_toss, "lm", WHITE)
+        text(OVERS_R, cfg["hy"], f"{_overs(t.get('balls', 0))} OVERS", f_overs, "rm", WHITE)
+        text(cfg["scap"][0], cfg["scap"][1], _score(t), f_score, "mm", WHITE)
+
+        # Names take the team's colour (white fallback only where they sit on a dark strip).
+        def name_col(x, y, base): return WHITE if _dark_bg(x, y) else base
+        for i, b in enumerate((t.get("batters") or [])[:3]):
+            y = cfg["rows_y"][i]; star = "*" if b.get("not_out") else ""
+            nm = b["name"].upper()
+            text(BAT_NAME_X, y, nm, fit(nm, 400, 31), "lm", name_col(BAT_NAME_X, y, col))
+            text(RUNS_X, y, f"{b['runs']}{star}", f_runs, "lm", WHITE)
+            text(BALLS_R, y, str(b["balls"]), f_balls, "rm", WHITE)
+
+        for i, bw in enumerate((t.get("bowlers") or [])[:3]):
+            y = cfg["rows_y"][i]; nm = bw["name"].upper()
+            text(BOWL_NAME_X, y, nm, fit(nm, 380, 31), "lm", name_col(BOWL_NAME_X, y, bowl_col))
+            figcol = WHITE if _dark_bg(BOWL_PERF_X + 30, y) else bowl_col
+            text(BOWL_PERF_X, y, f"{bw['wickets']}-{bw['runs']}", f_runs, "lm", figcol)
+            text(BOWL_OV_R, y, str(bw.get("overs", "")).split(".")[0], f_balls, "rm")
+
+    res = (data.get("result_str") or "").upper()
+    potm = data.get("potm")
+    if potm:
+        text(910, 810, res[:46], _acl_font(42), "mm", WHITE)
+        text(910, 849, f"PLAYER OF THE MATCH  —  {str(potm).upper()}", _acl_font(23), "mm", WHITE)
+    else:
+        text(910, 828, res[:46], f_troph, "mm", WHITE)
+
+    out = Image.new("RGB", img.size, (255, 255, 255))
+    out.paste(img, mask=img.split()[3])
+    buf = io.BytesIO(); out.save(buf, format="PNG"); buf.seek(0)
+    return buf
+
+
 def generate_scorecard_from_data(data: dict) -> io.BytesIO:
     """Generate a scorecard image from pre-serialized match display data."""
+    if data.get("tournament_type") == "acl":
+        try:
+            return generate_acl_match_summary(data)
+        except Exception as e:
+            print(f"⚠️ ACL match-summary render failed, using default scorecard: {e}")
     if data.get("tournament_type") == "t20_world_cup" or data.get("theme") == "T20 World Cup":
         try:
             return generate_t20wc_scorecard(data)
@@ -2117,6 +2256,10 @@ async def loop_current_innings_simulation(interaction, match: CricketMatch):
         if innings.wickets >= max_w or innings.total_balls >= match.max_balls or (
                 match.current_innings_num == 2 and
                 innings.total_runs >= getattr(match, "target", match.innings1.total_runs + 1)):
+            # Verbose: render the final partial over's card if the innings ended mid-over.
+            if getattr(match, 'verbose', False) and innings.over_log:
+                await channel.send(embed=render_embed_scoreboard(match))
+                await asyncio.sleep(0.5)
             orig_sim_only = getattr(match, 'sim_only', False)
             match.sim_only = False   # always return to hub after this innings
             await handle_innings_end(interaction, match)
@@ -2149,6 +2292,70 @@ async def loop_current_innings_simulation(interaction, match: CricketMatch):
             innings.mystery_bowled_this_over = False
 
 
+async def loop_current_innings_bbb(interaction, match: CricketMatch):
+    """Ball-by-ball verbose: post ONE live scoreboard per over and EDIT it after each
+    delivery (at a readable pace), with a fresh card for every new over. Then hand back
+    to the Over Hub for the next innings — same end-of-innings handling as the other sims."""
+    channel = interaction.channel if hasattr(interaction, 'channel') else interaction
+    BALL_DELAY = 1.3   # seconds between deliveries — fast enough to follow, slow enough to read
+
+    def _innings_over(inn):
+        mw = _match_max_wickets(match)
+        if inn.wickets >= mw or inn.total_balls >= match.max_balls:
+            return True
+        if match.current_innings_num == 2 and inn.total_runs >= getattr(match, "target", match.innings1.total_runs + 1):
+            return True
+        return False
+
+    while True:
+        innings = match.current_innings
+
+        if _innings_over(innings):
+            orig_sim_only = getattr(match, 'sim_only', False)
+            match.sim_only = False   # return to the hub for the next innings
+            await handle_innings_end(interaction, match)
+            match.sim_only = orig_sim_only
+            break
+
+        # Pick the over's bowler at a true over start (over_log empty so wides don't re-pick).
+        if innings.total_balls % 6 == 0 and not innings.over_log:
+            try_ai_impact_player(match, innings)
+            new_bowler = get_smart_ai_bowler(innings, match.pitch, match.weather, match.format_overs)
+            if not new_bowler:
+                await channel.send("🚨 **CRITICAL ERROR:** Could not find a valid bowler. Match stopped.")
+                if channel.id in active_games:
+                    del active_games[channel.id]
+                return
+            innings.current_bowler = new_bowler
+
+        # Fresh scoreboard card for this over.
+        try:
+            over_msg = await channel.send(embed=render_embed_scoreboard(match))
+        except Exception:
+            over_msg = None
+
+        # Bowl the over, one legal delivery at a time, editing the card after each.
+        while True:
+            if _innings_over(innings):
+                break   # outer loop renders the final state + ends the innings cleanly
+            tb_before = innings.total_balls
+            execute_ball_math(match)
+            await asyncio.sleep(BALL_DELAY)
+            if over_msg is not None:
+                try:
+                    await over_msg.edit(embed=render_embed_scoreboard(match))
+                except Exception:
+                    pass
+            # Over complete only when a LEGAL ball lands on the 6-ball boundary.
+            if innings.total_balls > tb_before and innings.total_balls % 6 == 0:
+                break
+
+        # Reset per-over state for the next over's fresh card.
+        innings.over_log.clear()
+        innings.bouncers_in_over = 0; innings.cutters_in_over = 0
+        innings.mystery_bowled_this_over = False
+
+
 async def loop_entire_match_simulation(interaction, match: CricketMatch):
     channel = interaction.channel if hasattr(interaction, 'channel') else interaction
     
@@ -2156,9 +2363,15 @@ async def loop_entire_match_simulation(interaction, match: CricketMatch):
         innings = match.current_innings
         max_w = _match_max_wickets(match)
         if innings.wickets >= max_w or innings.total_balls >= match.max_balls or (match.current_innings_num == 2 and innings.total_runs >= getattr(match, "target", match.innings1.total_runs + 1)):
+            # Verbose: if the innings ended MID-over (winning run / last wicket on a non-6th
+            # ball), that final partial over's card was never shown — render it before the
+            # scorecard so the last over isn't skipped.
+            if getattr(match, 'verbose', False) and innings.over_log:
+                await channel.send(embed=render_embed_scoreboard(match))
+                await asyncio.sleep(0.5)
             await handle_innings_end(interaction, match)
             break
-            
+
         # Only select a new bowler at the TRUE start of a new over (over_log empty = no
         # deliveries yet this over, including wides). This prevents wides from triggering
         # a mid-over bowler swap when total_balls % 6 == 0.
@@ -3005,7 +3218,20 @@ class OverControlHubView(discord.ui.View):
         innings.bouncers_in_over = 0; innings.cutters_in_over = 0
         innings.mystery_bowled_this_over = False
         await loop_current_innings_simulation(interaction, self.match)
-        
+
+    @discord.ui.button(label="🎬 Ball-by-Ball", style=discord.ButtonStyle.secondary, row=2)
+    async def sim_innings_bbb(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await interaction.message.edit(view=None)
+        self.match.simulation_mode = "whole_match"
+        self.match.verbose = False              # bbb does its own per-ball rendering
+        self.match._pending_bowler = None
+        innings = self.match.current_innings
+        innings.over_log.clear()
+        innings.bouncers_in_over = 0; innings.cutters_in_over = 0
+        innings.mystery_bowled_this_over = False
+        await loop_current_innings_bbb(interaction, self.match)
+
     async def impact_btn(self, interaction: discord.Interaction):
         team_id = 1 if interaction.user.id == self.match.p1_id else (2 if interaction.user.id == self.match.p2_id else None)
         if not team_id: return await interaction.response.send_message("❌ You are not playing in this match.", ephemeral=True)
@@ -4127,11 +4353,27 @@ def format_xi_display(players):
 # --- Step 1: Format & Impact Player ---
 # --- Step 1: Format & Impact Player ---
 
+def _setup_cancelled_check(view):
+    """Fail-open guard for pre-match setup views: only blocks if endmatch explicitly
+    marked this setup cancelled. Leaves tournament/other flows (no flag) untouched."""
+    async def interaction_check(interaction: discord.Interaction) -> bool:
+        if getattr(getattr(view, "state", None), "cancelled", False):
+            try:
+                await interaction.response.send_message(
+                    "🛑 This setup was ended. Start again with `cv match`.", ephemeral=True)
+            except Exception:
+                pass
+            return False
+        return True
+    return interaction_check
+
 class FormatSelectView(discord.ui.View):
     def __init__(self, state: MatchSetupState, channel):
         super().__init__(timeout=120)
         self.state = state
         self.channel = channel
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await _setup_cancelled_check(self)(interaction)
 
     @discord.ui.select(placeholder="Select Match Format...", options=[
         discord.SelectOption(label="T20 (20 Overs)", value="20", emoji="⚡"),
@@ -4197,6 +4439,8 @@ class ImpactPlayerView(discord.ui.View):
         super().__init__()
         self.state = state
         self.channel = channel
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await _setup_cancelled_check(self)(interaction)
     @discord.ui.button(label="Yes (Impact Player)", style=discord.ButtonStyle.success)
     async def btn_yes(self, interaction, button):
         if interaction.user.id != self.state.p1_id and interaction.user.id != getattr(self.state, "manager_id", None): return
@@ -4260,6 +4504,8 @@ class Team1VerifyView(discord.ui.View):
         self.state = state
         self.channel = channel
         self.players = players
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await _setup_cancelled_check(self)(interaction)
     @discord.ui.button(label="✅ Confirm XI", style=discord.ButtonStyle.success)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.state.p1_id: return await interaction.response.send_message("Only Team 1 can confirm.", ephemeral=True)
@@ -4281,6 +4527,8 @@ class Team2VerifyView(discord.ui.View):
         self.state = state
         self.channel = channel
         self.players = players
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await _setup_cancelled_check(self)(interaction)
     @discord.ui.button(label="✅ Confirm XI", style=discord.ButtonStyle.success)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         target_id = self.state.p2_id if self.state.p2_id else self.state.p1_id
@@ -4474,6 +4722,8 @@ class PitchWeatherView(discord.ui.View):
         self.channel = channel
         self.s_pitch = None
         self.s_weather = None
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await _setup_cancelled_check(self)(interaction)
         # Test only: pick Red (day) or Pink (day-night) ball. None = not yet chosen (gates proceed).
         self._is_test = getattr(state, "format_overs", 20) == 90
         self.s_pink = None if self._is_test else False
@@ -4575,6 +4825,8 @@ async def begin_toss(channel, state):
         match.draft_opp_name = state.draft_opp_name
         match.draft_host_team = state.t1_name        # team1 is always the host
     active_games[channel.id] = match
+    # Setup is done — hand the cancellation baton to active_games (toss views guard on it).
+    setup_states.pop(channel.id, None)
 
     if getattr(state, 'sim_only', False):
         match.sim_only = True
@@ -4834,6 +5086,7 @@ async def match_cmd(interaction: discord.Interaction, opponent: discord.Member =
     
     # 🚨 FIX: Register the setup immediately so /endmatch works instantly!
     active_setups[interaction.channel.id] = ("format_selection", state)
+    setup_states[interaction.channel.id] = state
     
     opp_str = opponent.mention if opponent else "🤖 AI"
     
@@ -6291,7 +6544,8 @@ async def simulatematch_cmd(interaction: discord.Interaction):
     state.sim_only = True
     
     active_setups[interaction.channel.id] = ("format_selection", state)
-    
+    setup_states[interaction.channel.id] = state
+
     await interaction.edit_original_response(content=f"⚙️ **Custom Simulation Setup**\n**Host:** {interaction.user.mention}\n\nYou will be prompted to provide the Playing XI for *both* teams.\nStep 1: Select Format below:", view=FormatSelectView(state, interaction.channel))
 
 @bot.event
@@ -6373,23 +6627,32 @@ async def on_start_tournament_match(channel, manager_id, tourney, match_data):
 
     await prompt_tournament_xi(channel, state, 1)
 
+def _force_end_channel(channel_id) -> bool:
+    """Tear down EVERY kind of activity in a channel (match / setup / test / draft).
+    Returns True if anything was actually cleared. Shared by slash + prefix endmatch."""
+    cleared = False
+    if channel_id in active_games:
+        del active_games[channel_id]; cleared = True
+    if channel_id in active_setups:
+        del active_setups[channel_id]; cleared = True
+    if channel_id in active_test_matches:
+        del active_test_matches[channel_id]; cleared = True
+    # Pre-match setup (format→pitch select): flag it cancelled so the live setup views bail.
+    st = setup_states.pop(channel_id, None)
+    if st is not None:
+        st.cancelled = True; cleared = True
+    # Running draft: cancel its asyncio task so the wait_for loop aborts immediately.
+    if channel_id in active_drafts:
+        active_drafts.discard(channel_id); cleared = True
+    task = draft_tasks.pop(channel_id, None)
+    if task is not None and not task.done():
+        task.cancel(); cleared = True
+    return cleared
+
 @bot.tree.command(name="endmatch", description="Force cancel the current match or setup in this channel.")
 async def endmatch_cmd(interaction: discord.Interaction):
     channel_id = interaction.channel.id
-    cleared = False
-    
-    if channel_id in active_games:
-        del active_games[channel_id]
-        cleared = True
-
-    if channel_id in active_setups:
-        del active_setups[channel_id]
-        cleared = True
-
-    if channel_id in active_test_matches:
-        del active_test_matches[channel_id]
-        cleared = True
-
+    cleared = _force_end_channel(channel_id)
     if cleared:
         await interaction.response.send_message("🛑 **Match and setup forcefully terminated.** Memory cleared.")
     else:
@@ -7300,25 +7563,13 @@ class PrefixCog(commands.Cog):
 
         state = MatchSetupState(ctx.author, opponent, ctx.author.id, opponent.id if opponent else None)
         active_setups[ctx.channel.id] = ("format_selection", state)
+        setup_states[ctx.channel.id] = state
         opp_str = opponent.mention if opponent else "🤖 AI"
         await ctx.send(f"🏏 **Match Setup**\n**Host:** {ctx.author.mention}\n**Opponent:** {opp_str}\n\nStep 1: Select Format below:", view=FormatSelectView(state, ctx.channel))
 
     @commands.command(name="endmatch", aliases=["em"], help="Force cancel the current match or setup in this channel.\nUsage: endmatch")
     async def endmatch(self, ctx):
-        channel_id = ctx.channel.id
-        cleared = False
-        if channel_id in active_games:
-            del active_games[channel_id]
-            cleared = True
-        if channel_id in active_setups:
-            del active_setups[channel_id]
-            cleared = True
-        if channel_id in active_test_matches:
-            del active_test_matches[channel_id]
-            cleared = True
-        if channel_id in active_drafts:
-            active_drafts.discard(channel_id)
-            cleared = True
+        cleared = _force_end_channel(ctx.channel.id)
         if cleared:
             await ctx.send("🛑 **Match and setup forcefully terminated.** Memory cleared.")
         else:
@@ -7369,7 +7620,8 @@ class PrefixCog(commands.Cog):
             left = 3 - attempt
             await channel.send(f"<@{uid}> — type a player's name  *({left} {'try' if left == 1 else 'tries'} left)*")
             def check(m):
-                return m.author.id == uid and m.channel.id == channel.id and m.content.strip()
+                return (m.author.id == uid and m.channel.id == channel.id and m.content.strip()
+                        and not m.content.lower().startswith("cv"))   # let cv-commands (endmatch) through
             try:
                 msg = await self.bot.wait_for("message", timeout=60.0, check=check)
             except asyncio.TimeoutError:
@@ -7410,6 +7662,7 @@ class PrefixCog(commands.Cog):
     async def _run_draft(self, ctx, host, opponent):
         channel = ctx.channel
         active_drafts.add(channel.id)
+        draft_tasks[channel.id] = asyncio.current_task()
         try:
             base_pool = apply_server_overrides(get_all_players(), str(ctx.guild.id))
             if len(base_pool) < 60:
@@ -7482,12 +7735,22 @@ class PrefixCog(commands.Cog):
             state.draft_opp_id = (None if vs_ai else opponent.id)
             state.draft_opp_name = opp_name          # PERSON name → leaderboard
             active_drafts.discard(channel.id)
+            # Pick phase done — hand the cancellation baton to the setup flow so endmatch
+            # still works while choosing pitch/weather for the drafted match.
+            setup_states[channel.id] = state
             await ask_pitch_and_weather(channel, state)
+        except asyncio.CancelledError:
+            try:
+                await channel.send("🛑 **Draft ended.** Use `cv draft` to start a new one.")
+            except Exception:
+                pass
+            return
         except Exception as e:
             print(f"⚠️ draft error: {e}")
             await channel.send(f"❌ Draft error: {e}")
         finally:
             active_drafts.discard(channel.id)
+            draft_tasks.pop(channel.id, None)
 
     @commands.command(name="playerlist", aliases=["pl"], help="Download full player database grouped by tier (no ratings).\nUsage: playerlist")
     async def playerlist(self, ctx):

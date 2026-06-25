@@ -863,5 +863,10 @@ def execute_ball_math_odi(match):
         match.free_hit = False
         if innings.total_balls % 6 == 0:
             match.over_completed = True
-            
+            # End-of-over strike rotation: the ends switch, so the non-striker takes
+            # strike for the next over — UNLESS the last ball was a 1/3 (already swapped
+            # mid-ball above, which nets back to the same batter keeping strike).
+            if outcome == "wicket" or runs not in [1, 3]:
+                innings.current_striker_idx, innings.current_non_striker_idx = innings.current_non_striker_idx, innings.current_striker_idx
+
     match.last_commentary = prefix + f"**{bowler['name']}** bowled a **{deliv}**\n**{striker['name']}** played: **{shot}**\n💥 **Result:** {outcome_text}"

@@ -1015,7 +1015,11 @@ def _check_result(match: TestMatch) -> Optional[str]:
                 )
         return None
 
-    if n == 3:
+    if n == 3 and len(inns) == 3:
+        # Guard len(inns)==3: once the 4th innings is appended, t1/t2 include its
+        # in-progress runs — so a chase drawing LEVEL (aggregate equal) would
+        # falsely return "Match Tied" and stop a live 4th innings that still has
+        # wickets/overs in hand. Let it fall through to None until inn4 completes.
         if match.follow_on_enforced:
             if t1 > t2:
                 return f"{match.team1['name']} won by an innings and {t1 - t2} runs"
