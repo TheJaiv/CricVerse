@@ -9793,7 +9793,7 @@ class PrefixCog(commands.Cog):
         tourney = get_server_tournament(server_id)
         if not tourney: return await ctx.send("❌ No tournament exists.")
         from subscription_manager import DB_CACHE
-        DB_CACHE["tournaments"].pop(server_id, None)
+        DB_CACHE["tournaments"] = [t for t in DB_CACHE.get("tournaments", []) if t.get("server_id") != server_id]
         save_tournament_data_to_bin()
         await ctx.send("🗑️ Tournament deleted.")
 
