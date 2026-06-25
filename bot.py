@@ -4722,8 +4722,6 @@ class PitchWeatherView(discord.ui.View):
         self.channel = channel
         self.s_pitch = None
         self.s_weather = None
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return await _setup_cancelled_check(self)(interaction)
         # Test only: pick Red (day) or Pink (day-night) ball. None = not yet chosen (gates proceed).
         self._is_test = getattr(state, "format_overs", 20) == 90
         self.s_pink = None if self._is_test else False
@@ -4735,6 +4733,9 @@ class PitchWeatherView(discord.ui.View):
             ])
             ball_sel.callback = self._ball_cb
             self.add_item(ball_sel)
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await _setup_cancelled_check(self)(interaction)
+        
 
     async def _ball_cb(self, interaction):
         if interaction.user.id != self.state.home_team_id and interaction.user.id != getattr(self.state, "manager_id", None):
