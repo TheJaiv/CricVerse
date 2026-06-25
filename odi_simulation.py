@@ -36,6 +36,27 @@ WEAR_SUSCEPT = {
 # Run-out share of all dismissals (slightly higher than T20 — more running).
 ODI_RUNOUT_SHARE = 0.075
 
+# ── RATING-SCALED CONSISTENCY (all matches) ──────────────────────────────────
+# Same intent as the T20 engine: cut a HIGH-rated player's match-to-match swing so
+# their season aggregate is reliable, while LOW-rated players (cons=0) keep their
+# full variance and upsets survive. ODI ignores form_factor, so only the wicket-
+# timing levers apply. Thresholds are ODI-scaled (longer to get set, higher
+# milestone). cons(r): 0 ≤ LOW (no change) → 1 ≥ HIGH (max steadiness).
+ODI_CONS_LOW  = 68.0
+ODI_CONS_HIGH = 88.0
+ODI_CONS_SET_BALLS    = 16     # protected "getting set" window (balls)
+ODI_CONS_EARLY_PROTECT = 0.42  # gentler than T20 — ODI innings are long, so a little goes far
+ODI_CONS_EARLY_BND_DAMP = 0.34  # protected stars score watchfully early → keeps par flat
+ODI_CONS_BIG_SCORE    = 34      # past this, wicket risk ESCALATES with the score so a star
+ODI_CONS_LATE_SLOPE   = 0.020   #   gets out near his expected total → par flat, spread tighter
+
+def odi_cons(rating: float) -> float:
+    if rating <= ODI_CONS_LOW:
+        return 0.0
+    if rating >= ODI_CONS_HIGH:
+        return 1.0
+    return (rating - ODI_CONS_LOW) / (ODI_CONS_HIGH - ODI_CONS_LOW)
+
 SPIN_SHOT_MATRIX = {
     "Off spin": ["Sweep", "Drive", "Flick"],
     "Carrom": ["Cut", "Drive", "Loft"],
@@ -227,8 +248,12 @@ def execute_ball_math_odi(match):
     b_stats = innings.batting_stats[striker["name"]]
     bow_stats = innings.bowling_stats[bowler["name"]]
 
-    bat_rating = striker["bat"] * b_stats.form_factor
-    bowl_rating = bowler["bowl"] * bow_stats.form_factor
+    # No random match-start form variance in ODI (form_factor intentionally ignored).
+    bat_rating = striker["bat"]
+    bowl_rating = bowler["bowl"]
+
+    # Rating-scaled consistency applies to every match (high-rated steadier, low-rated full variance).
+    _cons_bat = odi_cons(striker["bat"])
 
     # ── 2.0 PITCH DETERIORATION ──
     # Surface roughens across the match (innings 2 inherits innings 1's wear),
@@ -621,6 +646,17 @@ def execute_ball_math_odi(match):
         boundary_weight *= (0.80 + _bf * 0.020)
     elif _bf >= 25:
         boundary_weight *= 1.10                  # well set — cashing in
+
+    # ── RATING-SCALED CONSISTENCY (tournament only; high-rated → steadier) ──
+    # Protect elite batters through the set phase (fewer freak cheap dismissals)
+    # and nudge their risk up once past a big score (fewer freak 150s) → their
+    # innings cluster, so tournament aggregates stay reliable. Low-rated: no change.
+    if _cons_bat > 0.0:
+        if _bf < ODI_CONS_SET_BALLS:
+            wicket_weight *= (1.0 - _cons_bat * ODI_CONS_EARLY_PROTECT)
+            boundary_weight *= (1.0 - _cons_bat * ODI_CONS_EARLY_BND_DAMP)
+        if b_stats.runs_scored > ODI_CONS_BIG_SCORE:
+            wicket_weight *= (1.0 + _cons_bat * ODI_CONS_LATE_SLOPE * (b_stats.runs_scored - ODI_CONS_BIG_SCORE))
 
     bad_shot_selection = False
     perfect_shot_selection = False

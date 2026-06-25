@@ -34,6 +34,30 @@ T20_BAT_PITCH_WKT_CAP = 8.5
 T20_BOWL_PITCH_WKT_CAP = 12.0
 T20_BOWL_DECKS = ("Cracked", "Sticky", "Turning", "Worn", "Dusty", "Dry", "Green", "Damp", "Bouncy")
 
+# ── RATING-SCALED CONSISTENCY (all matches) ──────────────────────────────────
+# HIGH-rated players sim more consistently game-to-game (a star reliably delivers
+# across a season), while LOW-rated players keep their full variance (still erratic
+# → upsets/feel survive). Applies everywhere — casual and every tournament type.
+# cons(r): 0 at/below CONS_LOW (no change) → 1 at/above CONS_HIGH (max steadiness).
+T20_CONS_LOW  = 68.0
+T20_CONS_HIGH = 88.0
+T20_CONS_SET_BALLS    = 16     # protected "getting set" window (balls)
+T20_CONS_EARLY_PROTECT = 0.62  # set-phase wicket-risk cut at cons=1 (×0.38) — kills cheap 0/15s
+T20_CONS_EARLY_BND_DAMP = 0.34  # protected stars bat watchfully early (fewer boundaries)
+T20_CONS_BIG_SCORE    = 35      # past this, wicket risk ESCALATES with the score so a
+T20_CONS_LATE_SLOPE   = 0.030   #   protected star reliably gets out near his expected total
+                                #   (×(1+slope·(runs-BIG))) — removes the runs floor-protection
+                                #   added, so the MEAN/par stays flat and only the SPREAD shrinks.
+T20_CONS_FORM_DAMP    = 0.60    # shrink the ±4% form wobble for top players
+
+def t20_cons(rating: float) -> float:
+    """0 → no change (rating ≤ LOW, current variance); 1 → max consistency (rating ≥ HIGH)."""
+    if rating <= T20_CONS_LOW:
+        return 0.0
+    if rating >= T20_CONS_HIGH:
+        return 1.0
+    return (rating - T20_CONS_LOW) / (T20_CONS_HIGH - T20_CONS_LOW)
+
 # ── 2.0: PITCH DETERIORATION ──
 # How fast each surface wears over the match. Dust bowls / worn / cracked decks
 # roughen fast (spin becomes lethal late); roads & dead decks barely change, so a
@@ -247,8 +271,17 @@ def execute_ball_math_t20(match):
     b_stats = innings.batting_stats[striker["name"]]
     bow_stats = innings.bowling_stats[bowler["name"]]
 
-    bat_rating = striker["bat"] * b_stats.form_factor
-    bowl_rating = bowler["bowl"] * bow_stats.form_factor
+    # Rating-scaled consistency applies to EVERY match (casual + all tournaments):
+    # high-rated players sim more consistently, low-rated keep their full variance.
+    _cons_bat  = t20_cons(striker["bat"])
+    _cons_bowl = t20_cons(bowler["bowl"])
+
+    # Form wobble: shrink the ±4% random form toward ±2% for high-rated players
+    # (low-rated keep the full wobble). Mean-neutral; just steadies a star's rating.
+    _bat_form  = 1.0 + (b_stats.form_factor - 1.0) * (1.0 - T20_CONS_FORM_DAMP * _cons_bat)
+    _bowl_form = 1.0 + (bow_stats.form_factor - 1.0) * (1.0 - T20_CONS_FORM_DAMP * _cons_bowl)
+    bat_rating = striker["bat"] * _bat_form
+    bowl_rating = bowler["bowl"] * _bowl_form
 
     # ── 2.0 PITCH DETERIORATION ──
     # Surface roughens across the match: 0 at the first ball → ~1 by the last,
@@ -725,6 +758,25 @@ def execute_ball_math_t20(match):
     elif "Outswing" in deliv and shot in ["Drive", "Cut"]: wicket_weight *= 1.4; four_weight *= 1.2
     elif "Inswing" in deliv and shot in ["Drive", "Flick", "Sweep"]: wicket_weight *= 1.4
     elif is_cutter and shot in ["Drive", "Cut"]: wicket_weight *= 1.25; four_weight *= 0.85
+
+    # ── RATING-SCALED CONSISTENCY (tournament only; high-rated → steadier) ──
+    # Cuts a star's match-to-match swing (no more 100,15,0,20,30) so their
+    # tournament aggregate is reliable — WITHOUT touching low-rated players
+    # (cons=0), so weak sides stay erratic and upsets/feel survive.
+    if _cons_bat > 0.0:
+        # Set-phase protection: elite batters far less likely to fall cheaply →
+        # they reliably get a start (the main driver of freak low scores). Paired
+        # with an early-boundary damp so surviving longer doesn't inflate par —
+        # the star just plays himself in, then cashes in once set.
+        if b_stats.balls_faced < T20_CONS_SET_BALLS:
+            wicket_weight *= (1.0 - _cons_bat * T20_CONS_EARLY_PROTECT)
+            four_weight   *= (1.0 - _cons_bat * T20_CONS_EARLY_BND_DAMP)
+            six_weight    *= (1.0 - _cons_bat * T20_CONS_EARLY_BND_DAMP)
+        # Top-end taming: wicket risk escalates with the score past the milestone, so
+        # a protected star gets out near his expected total instead of running to 130.
+        # This removes the runs the floor-protection added → par flat, spread tighter.
+        if b_stats.runs_scored > T20_CONS_BIG_SCORE:
+            wicket_weight *= (1.0 + _cons_bat * T20_CONS_LATE_SLOPE * (b_stats.runs_scored - T20_CONS_BIG_SCORE))
 
     # ── VARIANCE COMPRESSORS ──────────────────────────────────────────────
     # Skill should decide matches, not luck. Per-ball weight spikes (from stacked

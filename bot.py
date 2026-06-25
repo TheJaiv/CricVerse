@@ -1779,7 +1779,7 @@ def generate_acl_match_summary(data: dict) -> io.BytesIO:
     # panels → clean uniform white box. Restricted to the safe interior so the panel's
     # outer rounded border is preserved.
     _ip = img.load()
-    for (x0, x1, y0, y1) in ((948, 1398, 360, 436), (948, 1398, 592, 672)):
+    for (x0, x1, y0, y1) in ((948, 1543, 362, 503), (948, 1543, 605, 747)):
         for yy in range(y0, y1):
             for xx in range(x0, x1):
                 r, g, b, a = _ip[xx, yy]
@@ -1788,6 +1788,9 @@ def generate_acl_match_summary(data: dict) -> io.BytesIO:
                 if is_green or is_line:
                     _ip[xx, yy] = (252, 252, 252, 255)
     d = ImageDraw.Draw(img)
+    # Redraw a 3-row grid in the bowling box identical to the batting section.
+    for gy in (406, 452, 650, 696):
+        d.line([(952, gy), (1543, gy)], fill=(229, 229, 233), width=2)
     px = img.convert("RGB").load()
 
     f_name, f_score, f_overs, f_toss = _acl_font(50), _acl_font(56), _acl_font(27), _acl_font(24)
@@ -4465,15 +4468,11 @@ async def ask_team1_name(channel, state):
     active_setups[channel.id] = ("awaiting_team1_name", state)
 
 def _saved_teams_hint(channel):
-    """A one-line hint listing this server's saved custom teams (loadable at the XI step)."""
-    guild = getattr(channel, "guild", None)
-    if not guild:
-        return ""
-    saved = list_custom_teams(guild.id)
-    if not saved:
+    """A one-line hint about loading saved custom teams at the XI step (no name list — the
+    global pool can be large, so we just point to `cv teams` to browse)."""
+    if not list_custom_teams():
         return "\n-# 💡 Tip: save a lineup with `cv saveteam \"<name>\"`, then just type its name here to load it."
-    names = ", ".join(f"**{v['name']}**" for v in sorted(saved.values(), key=lambda x: x["name"].lower())[:15])
-    return f"\n-# 💡 Or type a **saved team** name to load it instantly: {names}  ·  manage with `cv teams`."
+    return "\n-# 💡 Or type a **saved team** name to load it instantly  ·  browse them with `cv teams`."
 
 async def ask_team1_xi(channel, state):
     if state.impact_player:
@@ -4960,7 +4959,7 @@ async def on_message(message: discord.Message):
         
         req_length = 11
         typed = message.content.strip()
-        _ct = get_custom_team(message.guild.id, typed) if message.guild else None
+        _ct = get_custom_team(typed)
         if typed.lower() == "default":
             players = list(TEAMS_DATA["Team 1"]["players"])
             if state.impact_player:
@@ -5020,7 +5019,7 @@ async def on_message(message: discord.Message):
         
         req_length = 11
         typed = message.content.strip()
-        _ct = get_custom_team(message.guild.id, typed) if message.guild else None
+        _ct = get_custom_team(typed)
         if typed.lower() == "default":
             players = list(TEAMS_DATA["Team 2"]["players"])
             if state.impact_player:
@@ -7768,31 +7767,14 @@ class PrefixCog(commands.Cog):
 
     # ── Custom saved teams (server-shared XI presets) ────────────────────────
     async def _log_team_action(self, ctx, action, team_name, players, impact):
-        """Mirror saveteam/editteam to the server's match-log channel (if one is set)."""
-        if not ctx.guild:
-            return
+        """Log saveteam/editteam to the global player-database update channel (teams are global)."""
         try:
-            log_id = get_match_log_channel(str(ctx.guild.id))
-            if not log_id:
-                return
-            ch = self.bot.get_channel(int(log_id))
-            if not ch:
-                return
-            from datetime import datetime, timezone
-            embed = discord.Embed(
-                title=f"📋 Team {action}: {team_name}",
-                color=0x57F287 if action == "Saved" else 0xFEE75C,
-                timestamp=datetime.now(timezone.utc),
-            )
-            embed.add_field(name=f"Playing XI ({len(players)})",
-                            value="\n".join(f"{i}. {p['name']}" for i, p in enumerate(players, 1)) or "—",
-                            inline=False)
+            xi = "\n".join(f"{i}. {p['name']}" for i, p in enumerate(players, 1)) or "—"
+            details = f"Playing XI ({len(players)}):\n{xi}"
             if impact:
-                embed.add_field(name=f"Impact Players ({len(impact)})",
-                                value="\n".join(f"• {p['name']}" for p in impact),
-                                inline=False)
-            embed.set_footer(text=f"By {ctx.author} · #{ctx.channel.name}")
-            await ch.send(embed=embed)
+                details += f"\n\nImpact ({len(impact)}): " + ", ".join(p["name"] for p in impact)
+            details += f"\n\nBy {ctx.author}"
+            await log_db_update(f"Team {action}", team_name, ctx.author, details)
         except Exception as _e:
             print(f"⚠️ Team action log send failed: {_e}")
 
@@ -7806,7 +7788,7 @@ class PrefixCog(commands.Cog):
         except Exception:
             return False
 
-    @commands.command(name="saveteam", aliases=["setteam", "customteam"], help="[Admin] Save a custom XI preset for this server (loadable by name at the XI step).\nUsage: saveteam \"<name>\"  then paste 11 player names (optionally up to 5 more as impact players)")
+    @commands.command(name="saveteam", aliases=["setteam", "customteam"], help="[Admin] Save a custom XI preset globally (loadable by name at the XI step in any server).\nUsage: saveteam \"<name>\"  then paste 11 player names (optionally up to 5 more as impact players)")
     async def saveteam(self, ctx, *, name: str = None):
         if not ctx.guild:
             return await ctx.send("❌ Use this inside a server.")
@@ -7835,18 +7817,16 @@ class PrefixCog(commands.Cog):
             if missing:
                 err += f"Not in DB: {', '.join(missing)}\n"
             return await msg.reply(err + "Fix the names and run `cv saveteam` again.")
-        save_custom_team(ctx.guild.id, name, [p["name"] for p in players], [p["name"] for p in impact])
+        save_custom_team(name, [p["name"] for p in players], [p["name"] for p in impact])
         out = f"✅ Saved team **{name}**! Load it in any match by typing **{name}** at the XI step.\n\n{format_xi_display(players)}"
         if impact:
             out += "\n\n**Impact players:**\n" + format_xi_display(impact)
         await msg.reply(out)
         await self._log_team_action(ctx, "Saved", name, players, impact)
 
-    @commands.command(name="teams", aliases=["customteams", "myteams"], help="List this server's saved custom teams.\nUsage: teams")
+    @commands.command(name="teams", aliases=["customteams", "myteams"], help="List all saved custom teams (shared globally across servers).\nUsage: teams")
     async def teams(self, ctx):
-        if not ctx.guild:
-            return await ctx.send("❌ Use this inside a server.")
-        t = list_custom_teams(ctx.guild.id)
+        t = list_custom_teams()
         if not t:
             embed = discord.Embed(
                 title="📋 Saved Teams",
@@ -7874,9 +7854,7 @@ class PrefixCog(commands.Cog):
 
     @commands.command(name="team", aliases=["viewteam"], help="View a saved custom team's XI.\nUsage: team \"<name>\"")
     async def team(self, ctx, *, name: str = None):
-        if not ctx.guild:
-            return await ctx.send("❌ Use this inside a server.")
-        ct = get_custom_team(ctx.guild.id, name or "")
+        ct = get_custom_team(name or "")
         if not ct:
             return await ctx.send(f"❌ No saved team named **{name}**. See `cv teams`.")
         dbmap = {p["name"].lower(): p for p in get_all_players()}
@@ -7895,7 +7873,7 @@ class PrefixCog(commands.Cog):
             return await ctx.send("❌ Use this inside a server.")
         if not self._team_admin(ctx):
             return await ctx.send("🔒 Only **server admins** can delete teams.")
-        if delete_custom_team(ctx.guild.id, name or ""):
+        if delete_custom_team(name or ""):
             await ctx.send(f"🗑️ Deleted saved team **{name}**.")
         else:
             await ctx.send(f"❌ No saved team named **{name}**.")
@@ -7906,7 +7884,7 @@ class PrefixCog(commands.Cog):
             return await ctx.send("❌ Use this inside a server.")
         if not self._team_admin(ctx):
             return await ctx.send("🔒 Only **server admins** can edit teams.")
-        ct = get_custom_team(ctx.guild.id, name or "")
+        ct = get_custom_team(name or "")
         if not ct:
             return await ctx.send(f"❌ No saved team named **{name}**. See `cv teams`, or create one with `cv saveteam`.")
         dbmap = {p["name"].lower(): p for p in get_all_players()}
@@ -7932,7 +7910,7 @@ class PrefixCog(commands.Cog):
             if missing:
                 err += f"Not in DB: {', '.join(missing)}\n"
             return await msg.reply(err + "Fix the names and run `cv editteam` again.")
-        save_custom_team(ctx.guild.id, ct["name"], [p["name"] for p in players], [p["name"] for p in impact])
+        save_custom_team(ct["name"], [p["name"] for p in players], [p["name"] for p in impact])
         out = f"✅ Updated **{ct['name']}**!\n\n{format_xi_display(players)}"
         if impact:
             out += "\n\n**Impact players:**\n" + format_xi_display(impact)

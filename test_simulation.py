@@ -619,9 +619,7 @@ def execute_test_ball(match: TestMatch) -> bool:
     if raw_bat_penalty > 18:
         bat_r = float(striker["bat"]) - 18
 
-    # ── ±2 rating randomness (Test format: smaller variance than T20/ODI ±4) ──
-    bat_r  += random.uniform(-2.0, 2.0)
-    bowl_r += random.uniform(-2.0, 2.0)
+    # No random match-start rating variance in Test format.
 
     diff = bat_r - bowl_r   # positive = batter advantage
 
@@ -750,6 +748,22 @@ def execute_test_ball(match: TestMatch) -> bool:
     elif "Inswing" in deliv and shot in ["Drive","Flick"]: wkt_w *= 1.40
     elif "Seam"    in deliv and shot in ["Drive","Cut","Flick"]: wkt_w *= 1.20
     elif deliv in ("Off Cutter", "Leg Cutter", "Knuckle") and shot in ["Drive","Cut"]: wkt_w *= 1.25; four_w *= 0.85
+
+    # ── Modern-Test strike rotation ─────────────────────────────────────────
+    # Real Test batters milk singles rather than soak up dot after dot, so even
+    # bowler-friendly decks tick along at 2-3 an over (and a road nearer 3.5)
+    # instead of crawling at 1.5-2.0. Rotate a slice of the remaining DOT weight
+    # into SINGLES — this lifts the run-rate and trims the overs an innings eats —
+    # and bump the WICKET weight in lock-step so runs-per-wicket (hence the innings
+    # TOTAL) barely moves: same score, fewer overs. Deliberately skipped on
+    # defensive shots and during collapses/survival so a real wobble still grinds
+    # (a sub-2 run-rate stays justified ONLY while wickets are actually tumbling).
+    if _MODERN_ROTATION and intent >= 0.5 and not is_collapse and shot not in ("Block", "Defensive", "Leave", "Duck"):
+        rot       = 0.27
+        shifted   = dot_w * rot
+        dot_w    -= shifted
+        sing_w   += shifted
+        wkt_w    *= 1.0 + rot * 1.15   # hold runs-per-wicket → totals steady, overs fall
 
     # Hard caps
     four_w = max(0.1, min(four_w, 18.0))
@@ -1066,6 +1080,10 @@ def _start_next_innings(match: TestMatch):
 # DECLARATION LOGIC
 
 # Typical runs-per-over on each pitch type (used by both declaration and intent)
+# Modern-Test strike rotation (see execute_test_ball). On by default; flip off only
+# to reproduce the legacy slow-tempo engine for A/B calibration runs.
+_MODERN_ROTATION = True
+
 _PITCH_SCORING_RATE: dict = {
     "Dead": 3.8, "Flat": 3.6, "Slow": 3.1, "Hard": 3.3, "Bouncy": 3.1,
     "Green": 2.7, "Damp": 2.7, "Turning": 2.6, "Cracked": 2.5, "Sticky": 2.5,

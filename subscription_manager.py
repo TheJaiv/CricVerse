@@ -86,6 +86,7 @@ def load_data_from_bin():
             DB_CACHE["server_overrides"]    = doc.get("server_overrides", {})
             DB_CACHE["draft_stats"]         = doc.get("draft_stats", {})
             DB_CACHE["custom_teams"]        = doc.get("custom_teams", {})
+            _migrate_custom_teams()  # flatten any legacy per-server teams into one global pool
             raw_mc = doc.get("match_counts", {})
             DB_CACHE["match_counts"] = {
                 "t20":  int(raw_mc.get("t20",  0)),
@@ -389,33 +390,49 @@ def get_draft_stats():
     return DB_CACHE.get("draft_stats", {})
 
 
-# ── Saved custom XI presets (per server) ────────────────────────────────────
-def save_custom_team(server_id, name, player_names, impact_names=None):
-    """Save a named XI for a server as a list of player NAMES (re-resolved live on load).
+# ── Saved custom XI presets (global — usable in every server) ────────────────
+def _migrate_custom_teams():
+    """Flatten any legacy per-server custom_teams ({server_id: {name: team}}) into a
+    single global namespace ({name: team}). Safe to call repeatedly / on already-flat data."""
+    ct = DB_CACHE.get("custom_teams") or {}
+    flat = {}
+    legacy = False
+    for k, v in ct.items():
+        if isinstance(v, dict) and "players" in v:
+            flat[k] = v                       # already a flat team entry
+        elif isinstance(v, dict):
+            legacy = True                     # k is a server_id bucket
+            for nm, team in v.items():
+                flat[nm] = team               # name collisions: last server wins
+    DB_CACHE["custom_teams"] = flat
+    if legacy:
+        async_save_to_bin()
+
+def save_custom_team(name, player_names, impact_names=None):
+    """Save a named XI globally as a list of player NAMES (re-resolved live on load).
     `impact_names` are optional impact-player substitutes (used only in impact-mode matches)."""
-    sid = str(server_id)
-    DB_CACHE.setdefault("custom_teams", {}).setdefault(sid, {})[name.strip().lower()] = {
+    DB_CACHE.setdefault("custom_teams", {})[name.strip().lower()] = {
         "name": name.strip(), "players": list(player_names), "impact": list(impact_names or []),
     }
     async_save_to_bin()
 
-def get_custom_team(server_id, name):
+def get_custom_team(name):
     """Return {'name', 'players':[names]} for a saved team (case-insensitive), or None."""
     if not name:
         return None
-    return DB_CACHE.get("custom_teams", {}).get(str(server_id), {}).get(name.strip().lower())
+    return DB_CACHE.get("custom_teams", {}).get(name.strip().lower())
 
-def delete_custom_team(server_id, name):
-    srv = DB_CACHE.get("custom_teams", {}).get(str(server_id), {})
+def delete_custom_team(name):
+    teams = DB_CACHE.get("custom_teams", {})
     key = (name or "").strip().lower()
-    if key in srv:
-        del srv[key]
+    if key in teams:
+        del teams[key]
         async_save_to_bin()
         return True
     return False
 
-def list_custom_teams(server_id):
-    return DB_CACHE.get("custom_teams", {}).get(str(server_id), {})
+def list_custom_teams():
+    return DB_CACHE.get("custom_teams", {})
 
 def add_player(player_dict):
     global DB_CACHE
