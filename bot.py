@@ -1787,6 +1787,32 @@ def generate_acl_match_summary(data: dict) -> io.BytesIO:
                 is_line  = abs(r - g) < 20 and abs(g - b) < 20 and 150 < r < 249
                 if is_green or is_line:
                     _ip[xx, yy] = (252, 252, 252, 255)
+
+    # Recolor each team-row's coloured frame (header bar + logo cap + score cap +
+    # run/over block) to that team's colour — swap only Hue/Saturation in HSV and keep
+    # Value, so the brightness gradient is preserved. White panels / grey grid (low
+    # saturation) are untouched by the mask.
+    from colorsys import rgb_to_hsv as _r2h
+    def _rc_hex(c):
+        try:
+            c = (c or "").lstrip("#"); return tuple(int(c[i:i+2], 16) for i in (0, 2, 4))
+        except Exception:
+            return (107, 114, 128)
+    def _recolor(box, rgb):
+        th, ts, _tv = _r2h(rgb[0]/255, rgb[1]/255, rgb[2]/255)
+        H = int(th*255); S = int(ts*255)
+        reg = img.crop(box).convert("RGB")
+        h, s, v = reg.convert("HSV").split()
+        mask = s.point(lambda x: 255 if x > 70 else 0)
+        h.paste(Image.new("L", reg.size, H), (0, 0), mask)
+        s.paste(Image.new("L", reg.size, S), (0, 0), mask)
+        img.paste(Image.merge("HSV", (h, s, v)).convert("RGB"), (box[0], box[1]))
+    try:
+        _recolor((88, 278, 1556, 515), _rc_hex((data.get("t1") or {}).get("color")))
+        _recolor((88, 525, 1556, 760), _rc_hex((data.get("t2") or {}).get("color")))
+    except Exception as _rc_err:
+        print(f"⚠️ ACL team-colour recolor skipped: {_rc_err}")
+
     d = ImageDraw.Draw(img)
     # Redraw a 3-row grid in the bowling box identical to the batting section.
     for gy in (406, 452, 650, 696):
@@ -9790,12 +9816,15 @@ class PrefixCog(commands.Cog):
         if not ctx.author.guild_permissions.administrator and ctx.author.id != ADMIN_DISCORD_ID:
             return await ctx.send("❌ Server Admins only.")
         server_id = str(ctx.guild.id)
-        tourney = get_server_tournament(server_id)
-        if not tourney: return await ctx.send("❌ No tournament exists.")
         from subscription_manager import DB_CACHE
-        DB_CACHE["tournaments"] = [t for t in DB_CACHE.get("tournaments", []) if t.get("server_id") != server_id]
+        before = DB_CACHE.get("tournaments", []) or []
+        # Match on str() of both sides so an entry saved with an int server_id still gets cleaned.
+        DB_CACHE["tournaments"] = [t for t in before if str(t.get("server_id")) != server_id]
+        removed = len(before) - len(DB_CACHE["tournaments"])
+        if removed == 0:
+            return await ctx.send("❌ No tournament exists for this server.")
         save_tournament_data_to_bin()
-        await ctx.send("🗑️ Tournament deleted.")
+        await ctx.send(f"🗑️ Tournament deleted ({removed} removed).")
 
     @tournament.command(name="set_theme", help="[ADMIN] Set the scorecard theme.\nUsage: tournament set_theme <Default|Crimson Cricket>")
     async def t_set_theme(self, ctx, *, theme_name: str):
