@@ -10,6 +10,63 @@ from PIL import Image, ImageDraw, ImageFont
 import asyncio
 from subscription_manager import DB_CACHE, async_save_tournament_to_bin, get_all_players, get_tier_status
 
+# ── Tournament pitch & weather conditions ────────────────────────────────────
+# Canonical engine lists (mirror the PitchWeatherView dropdowns in bot.py).
+ALL_PITCHES = ["Flat", "Green", "Dry", "Dusty", "Hard", "Soft", "Cracked", "Damp",
+               "Dead", "Worn", "Turning", "Two-Paced", "Slow", "Bouncy", "Sticky"]
+ALL_WEATHER = ["Clear", "Cloudy", "Overcast", "Humid", "Dry Heat", "Windy",
+               "Light Rain", "Drizzle", "Heavy Rain", "Thunderstorm"]
+# "Nice"/standard pools — group stages draw from these 90% of the time, knockouts 100%.
+GROUP_PITCHES = ["Flat", "Dead", "Hard", "Green", "Dusty"]
+GROUP_WEATHER = ["Clear", "Cloudy"]
+_OTHER_PITCHES = [p for p in ALL_PITCHES if p not in GROUP_PITCHES]
+_OTHER_WEATHER = [w for w in ALL_WEATHER if w not in GROUP_WEATHER]
+
+def canonical_pitch(name):
+    """Return the canonical pitch name for case-insensitive input, or None if invalid."""
+    if not name: return None
+    return next((p for p in ALL_PITCHES if p.lower() == name.strip().lower()), None)
+
+def canonical_weather(name):
+    if not name: return None
+    return next((w for w in ALL_WEATHER if w.lower() == name.strip().lower()), None)
+
+def _match_is_knockout(m):
+    """Group/league rounds are integer; everything else (playoffs/knockouts/super8) is a knockout."""
+    if isinstance(m.get("round"), int):
+        return False
+    return m.get("stage") not in ("group",)
+
+def pick_conditions(is_knockout: bool):
+    """Weighted pitch+weather: 90% from the standard pools in group stages, 100% in knockouts."""
+    p_chance = 1.0 if is_knockout else 0.9
+    pitch = random.choice(GROUP_PITCHES) if (random.random() < p_chance or not _OTHER_PITCHES) else random.choice(_OTHER_PITCHES)
+    weather = random.choice(GROUP_WEATHER) if (random.random() < p_chance or not _OTHER_WEATHER) else random.choice(_OTHER_WEATHER)
+    return pitch, weather
+
+def assign_tournament_conditions(tourney):
+    """Idempotently fill pitch/weather on every scheduled match per the tournament's
+    conditions_mode. Safe to call repeatedly — only fills matches missing conditions.
+      manual → leave unset (each match asks interactively)
+      auto   → weighted pools (group 90% / knockout 100%)
+      home   → pitch = home team's (team1) home_pitch; weather = pooled
+    """
+    mode = tourney.get("conditions_mode", "manual")
+    if mode == "manual":
+        return
+    homes = {t["name"]: t.get("home_pitch") for t in tourney.get("teams", [])}
+    for m in tourney.get("schedule", []):
+        if m.get("pitch") and m.get("weather"):
+            continue
+        ko = _match_is_knockout(m)
+        if mode == "home":
+            hp = canonical_pitch(homes.get(m.get("team1"))) or random.choice(GROUP_PITCHES)
+            _, w = pick_conditions(ko)
+            m["pitch"], m["weather"] = hp, w
+        else:  # auto
+            m["pitch"], m["weather"] = pick_conditions(ko)
+
+
 def _fetch_emoji_img(emoji_str: str, size: int = 40):
     if not emoji_str:
         return None
@@ -236,6 +293,88 @@ def generate_t20wc_points_table(tourney) -> io.BytesIO:
     final = final.resize((out_w, out_h), Image.LANCZOS)
     buf = io.BytesIO()
     final.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
+def _acl_pt_font(size):
+    for p in ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+              "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+              "C:/Windows/Fonts/arialbd.ttf"):
+        try:
+            return ImageFont.truetype(p, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def generate_acl_points_table(tourney) -> io.BytesIO:
+    """Fill assets/acl_pointstable.png with the live 14-team ACL standings.
+    Highlights: #1 = League Shield (gold), #2-6 = Playoffs zone (green)."""
+    DARK = (16, 28, 70)
+    ROW_BOUNDS = [305, 344, 383, 420, 457, 493, 530, 567, 604, 642, 680, 718, 756, 794, 842]
+    ROW_Y = [(ROW_BOUNDS[i] + ROW_BOUNDS[i + 1]) // 2 for i in range(14)]
+    LOGO_CX, LOGO_SZ, NAME_X = 235, 30, 272
+    TINT_X0, TINT_X1 = 200, 1576
+    PLAYED_X, WON_X, LOST_X, NRR_X, POINTS_X = 787, 955, 1123, 1290, 1474
+
+    standings = get_tournament_standings(tourney)[:14]
+    team_logos = {t["name"]: (t.get("logo_match") or t.get("logo_standings")) for t in tourney.get("teams", [])}
+
+    img = Image.open("assets/acl_pointstable.png").convert("RGBA")
+    # zone highlights (under the text): #1 Shield = gold, #2-6 playoffs = green
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    od = ImageDraw.Draw(overlay)
+    for i in range(len(standings)):
+        if i == 0:
+            col = (255, 196, 0, 70)
+        elif i <= 5:
+            col = (32, 170, 90, 55)
+        else:
+            continue
+        od.rectangle([TINT_X0, ROW_BOUNDS[i] + 1, TINT_X1, ROW_BOUNDS[i + 1] - 1], fill=col)
+    img = Image.alpha_composite(img, overlay)
+    d = ImageDraw.Draw(img)
+
+    f_name, f_stat = _acl_pt_font(26), _acl_pt_font(25)
+
+    def tw(t, f):
+        return d.textbbox((0, 0), str(t), font=f)[2]
+
+    def th(f):
+        bb = d.textbbox((0, 0), "Ag", f)
+        return bb[3] - bb[1], bb[1]
+
+    def ctext(cx, y, s, f):
+        w = tw(s, f); h, off = th(f)
+        d.text((cx - w / 2, y - h / 2 - off), str(s), fill=DARK, font=f)
+
+    def fit(s, max_w, base):
+        sz = base; f = _acl_pt_font(sz)
+        while tw(s, f) > max_w and sz > 14:
+            sz -= 1; f = _acl_pt_font(sz)
+        return f
+
+    for i, (name, st) in enumerate(standings):
+        y = ROW_Y[i]
+        logo = _fetch_emoji_img(team_logos.get(name), LOGO_SZ)
+        if logo is not None:
+            img.paste(logo, (int(LOGO_CX - LOGO_SZ / 2), int(y - LOGO_SZ / 2)), logo)
+            d = ImageDraw.Draw(img)
+        nm = name[:24].upper()
+        fnm = fit(nm, 700 - NAME_X - 12, 26)
+        hh, off = th(fnm)
+        d.text((NAME_X, y - hh / 2 - off), nm, fill=DARK, font=fnm)
+        ctext(PLAYED_X, y, st["P"], f_stat)
+        ctext(WON_X, y, st["W"], f_stat)
+        ctext(LOST_X, y, st["L"], f_stat)
+        ctext(NRR_X, y, f"{st['NRR']:+.2f}", f_stat)
+        ctext(POINTS_X, y, st["Pts"], f_stat)
+
+    out = Image.new("RGB", img.size, (255, 255, 255))
+    out.paste(img, mask=img.split()[3])
+    buf = io.BytesIO()
+    out.save(buf, format="PNG")
     buf.seek(0)
     return buf
 
@@ -550,6 +689,14 @@ def _build_flat_pages(tourney):
     return pages
 
 
+def _conditions_label(m):
+    """Short pitch · weather tag for a scheduled match (manual matches show 'at match')."""
+    p, w = m.get("pitch"), m.get("weather")
+    if p and w:
+        return f"🏟️ {p} · 🌤️ {w}"
+    return "🏟️ *picked at match*"
+
+
 def _build_status_embed(tourney, page_info):
     """Build the embed for one status page."""
     title, stage_type, group_key, matches = page_info
@@ -586,7 +733,7 @@ def _build_status_embed(tourney, page_info):
             a = m.get("team1") or f"*{m.get('team1_src', 'TBD')}*"
             b = m.get("team2") or f"*{m.get('team2_src', 'TBD')}*"
             icon = "🔒" if m["status"] == "locked" else "⏳"
-            lines.append(f"`#{m['match_id']}` {tag}{a} vs {b} {icon}")
+            lines.append(f"`#{m['match_id']}` {tag}{a} vs {b} {icon}\n     └ {_conditions_label(m)}")
     # Split into multiple fields if content exceeds Discord's 1024-char limit
     chunks, current = [], []
     current_len = 0
@@ -812,6 +959,7 @@ def acl_generate_playoffs(tourney):
     # Super Cup apex — Shield finalist locked in already; opponent = ACL Trophy Winner (TBD)
     mk("Super Cup",        ACL_SUPERCUP_STAGE, s1, None,  "League Shield",          "ACL Trophy Winner", "locked")
 
+    assign_tournament_conditions(tourney)   # knockouts get 100%-pool conditions up front
     save_tournament(tourney)
     return True, "ok"
 
@@ -991,9 +1139,9 @@ def build_team_fixtures_embed(tourney, team_name):
             else: outcome = "❌ Lost"; lost += 1
             results.append(f"`#{m['match_id']}` {rlabel} · vs **{opp}**  {my_r}/{my_w} : {op_r}/{op_w}  {outcome}")
         elif m["status"] == "locked":
-            upcoming.append(f"`#{m['match_id']}` {rlabel} · vs *{opp_src or 'TBD'}*  🔒 awaiting earlier results")
+            upcoming.append(f"`#{m['match_id']}` {rlabel} · vs *{opp_src or 'TBD'}*  🔒 awaiting earlier results\n     └ {_conditions_label(m)}")
         else:  # pending → launchable
-            upcoming.append(f"`#{m['match_id']}` {rlabel} · vs **{opp}**  🟢 ready — `cvt play {m['match_id']}`")
+            upcoming.append(f"`#{m['match_id']}` {rlabel} · vs **{opp}**  🟢 ready — `cvt play {m['match_id']}`\n     └ {_conditions_label(m)}")
 
     def _add(title, lines):
         if not lines:
@@ -1037,7 +1185,12 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         app_commands.Choice(name="T20 World Cup (4 Groups → Super 8 → Final)", value="t20_world_cup"),
         app_commands.Choice(name="ACL (14 Teams → League → Playoffs → Super Cup)", value="acl"),
     ])
-    async def create(self, interaction: discord.Interaction, name: str, format: app_commands.Choice[str], event_type: app_commands.Choice[str] = None, min_squad: int = 11, max_squad: int = 15, impact_player: bool = False, injuries: bool = False, custom_overs: int = None):
+    @app_commands.choices(conditions=[
+        app_commands.Choice(name="Manual — pick pitch & weather each match", value="manual"),
+        app_commands.Choice(name="Auto — random conditions per match (weighted)", value="auto"),
+        app_commands.Choice(name="Home Pitch — each match on the home team's pitch", value="home"),
+    ])
+    async def create(self, interaction: discord.Interaction, name: str, format: app_commands.Choice[str], event_type: app_commands.Choice[str] = None, min_squad: int = 11, max_squad: int = 15, impact_player: bool = False, injuries: bool = False, custom_overs: int = None, conditions: app_commands.Choice[str] = None):
         if not interaction.user.guild_permissions.administrator and interaction.user.id != 1087369198801526836:
             return await interaction.response.send_message("❌ Only Server Admins can initialize a tournament.", ephemeral=True)
 
@@ -1076,6 +1229,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             "impact_player": impact_player,
             "injuries_enabled": injuries,
             "tournament_type": t_type,
+            "conditions_mode": (conditions.value if conditions else "manual"),
         }
         save_tournament(t_data)
 
@@ -1084,6 +1238,10 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             extra = "\n⚠️ **T20 World Cup requires exactly 16 teams (4 groups of 4). Assign each team a group (A/B/C/D) when using `/tournament add_team`.**"
         elif t_type == "acl":
             extra = "\n🔴 **ACL requires exactly 14 teams.** Each plays every other once (91 league matches) → Top 6 Playoffs → Super Cup. No groups needed — just `/tournament add_team` for all 14."
+        if t_data["conditions_mode"] == "auto":
+            extra += "\n🎲 **Conditions: Auto** — pitch & weather auto-assigned per match."
+        elif t_data["conditions_mode"] == "home":
+            extra += "\n🏟️ **Conditions: Home Pitch** — set each team's home pitch with `/tournament set_home_pitch` (or `cvt set_home_pitch`). The tournament can't start until **all** teams have one."
         await interaction.response.send_message(
             f"🏆 **Tournament Created:** `{name}`  ·  {type_label}\nYou have been automatically assigned as a Manager.\nUse `/tournament add_manager` or `/tournament add_team` to get started!{extra}"
         )
@@ -1688,6 +1846,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         if t_type == "acl":
             # ACL: resolve playoff bracket + Super Cup as feeder results come in
             _acl_try_advance(tourney)
+            assign_tournament_conditions(tourney)   # fill conditions on any newly-added matches
             save_tournament(tourney)
             return
 
@@ -1710,6 +1869,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         if final_match and final_match["status"] == "completed" and tourney["status"] != "completed":
             tourney["status"] = "completed"
 
+        assign_tournament_conditions(tourney)   # fill conditions on any newly-added matches
         save_tournament(tourney)
 
     @app_commands.command(name="standings", description="View the Tournament Points Table & NRR.")
@@ -1784,6 +1944,15 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                 embed.description = "No matches completed yet."
             embed.set_footer(text="-> marks teams that advance to the next stage")
             return await interaction.followup.send(embed=embed)
+
+        # ACL: bespoke 14-team points table (Shield #1 + Top-6 playoff highlights)
+        if t_type == "acl":
+            try:
+                buf = generate_acl_points_table(tourney)
+                return await interaction.followup.send(file=discord.File(fp=buf, filename="acl_points_table.png"))
+            except Exception as e:
+                print(f"⚠️ ACL points table failed, using default: {e}")
+            # fall through to the generic renderer below on failure
 
         # Round Robin: existing image-based standings
         standings = get_tournament_standings(tourney)

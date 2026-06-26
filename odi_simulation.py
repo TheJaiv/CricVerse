@@ -446,7 +446,7 @@ def execute_ball_math_odi(match):
             if not hasattr(innings, "extras"): innings.extras = 0
             innings.extras += 1
             bow_stats.runs_conceded += 1
-            innings.over_log.append("WD")
+            innings.over_log.append("<:wide:1520119718638260334>")
             nth = {2: "2nd", 3: "3rd"}.get(innings.cutters_in_over, f"{innings.cutters_in_over}th")
             match.last_commentary = (
                 prefix +
@@ -467,7 +467,7 @@ def execute_ball_math_odi(match):
         if not hasattr(innings, 'extras'): innings.extras = 0
         innings.extras += 1
         bow_stats.runs_conceded += 1
-        innings.over_log.append("WD")
+        innings.over_log.append("<:wide:1520119718638260334>")
         match.last_commentary = prefix + f"**{bowler['name']}** bowled a **Wide!**\n💥 **Result:** 1 Extra Run"
         if free_hit_active: match.last_commentary_prefix = "🛡️ *(Free Hit continues)*\n"
         return
@@ -840,7 +840,7 @@ def execute_ball_math_odi(match):
                 b_stats.dismissal = f"c. {fielder} b. {bowler['name']}"
 
             bow_stats.wickets_taken += 1
-        innings.over_log.append("<a:wickett:1510369641959264429>")
+        innings.over_log.append("<:wicket:1520119708802875443>")
         match.prev_striker_idx = innings.current_striker_idx
         if dismissal_type in ["LBW", "Caught Behind"] and match.simulation_mode == "interactive":
             match.pending_drs = True
@@ -876,11 +876,11 @@ def execute_ball_math_odi(match):
             bow_stats.runs_conceded += runs
             outcome_text = f"{runs} Runs" if runs > 0 else "Dot Ball"
                 
-            emoji_map = {0: "<a:0run:1510601371483897896>", 1: "<a:1run:1510600760570679356>", 2: "<a:2runs:1510601044818788403>", 3: "<a:3runs:1510600945053073508>", 4: "<a:4runs:1510600613556125787>", 6: "<a:6runs:1510600650613063761>"}
+            emoji_map = {0: "<:dot:1520118655994695962>", 1: "<:single:1520118720146440312>", 2: "<:double:1520118671865942179>", 3: "<:3run:1520118615201022073>", 4: "<:four1:1520118764555866342>", 6: "<:geminisvg:1520118699720184038>"}
             log_entry = emoji_map[runs]
             
         if is_no_ball:
-            log_entry = "NB" + (log_entry if runs > 0 and not is_bye else "")
+            log_entry = "<:noball:1520119727786037249>" + (log_entry if runs > 0 and not is_bye else "")
             outcome_text += " (NO BALL)"
             
         if runs in [4, 6] and not is_bye:

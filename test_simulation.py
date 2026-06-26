@@ -38,14 +38,14 @@ WEATHER_TYPES = ["Clear", "Cloudy", "Overcast", "Humid", "Windy", "Dry Heat",
                  "Drizzle", "Light Rain", "Heavy Rain", "Thunderstorm"]
 
 # Ball-outcome emojis (shared with T20/ODI over_log convention)
-_OV_DOT = "<a:0run:1510601371483897896>"
-_OV_1   = "<a:1run:1510600760570679356>"
-_OV_2   = "<a:2runs:1510601044818788403>"
-_OV_3   = "<a:3runs:1510600945053073508>"
-_OV_4   = "<a:4runs:1510600613556125787>"
-_OV_6   = "<a:6runs:1510600650613063761>"
-_OV_W   = "<a:wickett:1510369641959264429>"
-_OV_WD  = "`Wd`"
+_OV_DOT = "<:dot:1520118655994695962>"
+_OV_1   = "<:single:1520118720146440312>"
+_OV_2   = "<:double:1520118671865942179>"
+_OV_3   = "<:3run:1520118615201022073>"
+_OV_4   = "<:four1:1520118764555866342>"
+_OV_6   = "<:geminisvg:1520118699720184038>"
+_OV_W   = "<:wicket:1520119708802875443>"
+_OV_WD  = "<:wide:1520119718638260334>"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DATA CLASSES

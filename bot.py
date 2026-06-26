@@ -34,7 +34,7 @@ from test_image import (
     generate_test_summary_image as _ti_summary,
     generate_test_scorecard_image as _ti_scorecard,
 )
-from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, owner_can_launch, build_team_fixtures_embed
+from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER
 from subscription_manager import (
     load_data_from_bin, load_tournament_data_from_bin,
     save_data_to_bin, save_tournament_data_to_bin,
@@ -3124,16 +3124,21 @@ async def prompt_over_pacing_hub(interaction, match: CricketMatch):
     if getattr(match, "impact_player", False):
         msg += "\n💡 **TIP:** Any player can use the `🔄 Impact Player` button below to make a sub!"
 
-    _t20wc_hub = False
+    # Tournament-branded over hub: show the event logo as the embed thumbnail.
+    _logo_file = None
     _tid = getattr(match, "tournament_server_id", None)
     if _tid:
         _tv = get_server_tournament(_tid)
-        if _tv and _tv.get("tournament_type") == "t20_world_cup":
-            _t20wc_hub = True
+        _tt = _tv.get("tournament_type") if _tv else None
+        if _tt == "t20_world_cup":
+            _logo_file = "assets/t20_logo.png"
+        elif _tt == "acl":
+            _logo_file = "assets/acl_logo.png"
 
-    if _t20wc_hub:
-        embed.set_thumbnail(url="attachment://t20_logo.png")
-        await channel.send(msg, embed=embed, view=view, file=discord.File("assets/t20_logo.png"))
+    if _logo_file:
+        _fname = os.path.basename(_logo_file)
+        embed.set_thumbnail(url=f"attachment://{_fname}")
+        await channel.send(msg, embed=embed, view=view, file=discord.File(_logo_file))
     else:
         await channel.send(msg, embed=embed, view=view)
 
@@ -3510,8 +3515,8 @@ class DRSView(discord.ui.View):
             innings.current_striker_idx = self.match.prev_striker_idx
             innings.batting_stats[innings.batting_team["players"][innings.current_striker_idx]["name"]].dismissal = "not out"
             innings.bowling_stats[innings.current_bowler["name"]].wickets_taken -= 1
-            if innings.over_log and innings.over_log[-1] == "<a:wickett:1510369641959264429>":
-                innings.over_log[-1] = "<a:0run:1510601371483897896>"
+            if innings.over_log and innings.over_log[-1] == "<:wicket:1520119708802875443>":
+                innings.over_log[-1] = "<:dot:1520118655994695962>"
             self.match.last_commentary += "\n📺 **DRS:** Decision Overturned (Not Out)."
         else:
             if is_caught_behind:
@@ -3579,7 +3584,7 @@ async def run_interactive_delivery_sequence(interaction, match: CricketMatch):
     channel = interaction.channel if hasattr(interaction, 'channel') else interaction
     
     if (match.is_ai_game and match.get_bowler_user_id() == match.p2_id) or _bowler_is_bot(match):
-        if getattr(innings, "total_balls", 0) % 6 == 0 or (innings.over_log and innings.over_log[-1] == "<a:wickett:1510369641959264429>"):
+        if getattr(innings, "total_balls", 0) % 6 == 0 or (innings.over_log and innings.over_log[-1] == "<:wicket:1520119708802875443>"):
             try_ai_impact_player(match, innings)
         role = innings.current_bowler["role"]
         
@@ -3613,7 +3618,7 @@ async def run_interactive_delivery_sequence(interaction, match: CricketMatch):
 
 async def prompt_batter_shot(channel, match: CricketMatch, prev=None):
     if (match.is_ai_game and match.get_striker_user_id() == match.p2_id) or _striker_is_bot(match):
-        if getattr(match.current_innings, "total_balls", 0) % 6 == 0 or (match.current_innings.over_log and match.current_innings.over_log[-1] == "<a:wickett:1510369641959264429>"):
+        if getattr(match.current_innings, "total_balls", 0) % 6 == 0 or (match.current_innings.over_log and match.current_innings.over_log[-1] == "<:wicket:1520119708802875443>"):
             try_ai_impact_player(match, match.current_innings)
         execute_ball_math(match)
             
@@ -3637,8 +3642,8 @@ async def prompt_batter_shot(channel, match: CricketMatch, prev=None):
                     innings.current_striker_idx = match.prev_striker_idx
                     innings.batting_stats[innings.batting_team["players"][innings.current_striker_idx]["name"]].dismissal = "not out"
                     innings.bowling_stats[innings.current_bowler["name"]].wickets_taken -= 1
-                    if innings.over_log and innings.over_log[-1] == "<a:wickett:1510369641959264429>":
-                        innings.over_log[-1] = "<a:0run:1510601371483897896>"
+                    if innings.over_log and innings.over_log[-1] == "<:wicket:1520119708802875443>":
+                        innings.over_log[-1] = "<:dot:1520118655994695962>"
                     match.last_commentary += "\n📺 **DRS:** Decision Overturned (Not Out)."
                 else:
                     if is_caught_behind:
@@ -4647,7 +4652,7 @@ class TournamentXIView(discord.ui.View):
                 view = TournamentSubSelectView(self.state, self.channel, 2, remaining)
                 await self.channel.send(view.get_msg_content(), view=view)
             else:
-                await ask_pitch_and_weather(self.channel, self.state)
+                await proceed_to_conditions(self.channel, self.state)
 
     def get_msg_content(self):
         t_name = self.state.t1_name if self.team_num == 1 else self.state.t2_name
@@ -4732,13 +4737,22 @@ class TournamentSubSelectView(discord.ui.View):
         else:
             self.state.t2_subs = self.selected_subs
             await interaction.response.edit_message(content=f"✅ **{t_name} Impact Subs Confirmed!** ({len(self.selected_subs)} selected)", view=None)
-            await ask_pitch_and_weather(self.channel, self.state)
+            await proceed_to_conditions(self.channel, self.state)
 
 
 # --- Step 4: Pitch & Weather Select ---
 
 async def ask_pitch_and_weather(channel, state):
     await channel.send(f"🏟️ <@{state.home_team_id}> (**{state.t1_name}** — Home Team) — Select **Pitch & Weather** conditions:", view=PitchWeatherView(state, channel))
+
+async def proceed_to_conditions(channel, state):
+    """Tournament matches in auto/home conditions mode have pitch+weather preset → skip the
+    picker and go straight to the toss. Manual mode (and casual/draft) still asks."""
+    if getattr(state, "conditions_preset", False) and getattr(state, "pitch", None) and getattr(state, "weather", None):
+        await channel.send(f"🏟️ **Pitch:** {state.pitch}  ·  🌤️ **Weather:** {state.weather}\n\nProceeding to the **toss**...")
+        await begin_toss(channel, state)
+    else:
+        await ask_pitch_and_weather(channel, state)
 
 class PitchWeatherView(discord.ui.View):
     def __init__(self, state, channel):
@@ -6634,7 +6648,19 @@ async def on_start_tournament_match(channel, manager_id, tourney, match_data):
     state.tournament_name = tourney["name"]
     state.format_overs = tourney.get("format_overs", 20)
     state.impact_player = tourney.get("impact_player", False)
-    
+
+    # Auto/home conditions mode: preset pitch+weather so this match skips the picker.
+    if tourney.get("conditions_mode", "manual") != "manual":
+        md = next((m for m in tourney.get("schedule", []) if m["match_id"] == match_data["match_id"]), match_data)
+        if not (md.get("pitch") and md.get("weather")):
+            assign_tournament_conditions(tourney)
+            save_tournament(tourney)
+            md = next((m for m in tourney.get("schedule", []) if m["match_id"] == match_data["match_id"]), md)
+        if md.get("pitch") and md.get("weather"):
+            state.pitch = md["pitch"]
+            state.weather = md["weather"]
+            state.conditions_preset = True
+
     active_setups[channel.id] = ("tournament_setup", state)
 
     if tourney.get("tournament_type") == "t20_world_cup":
@@ -6674,6 +6700,7 @@ def _force_end_channel(channel_id) -> bool:
     if task is not None and not task.done():
         task.cancel(); cleared = True
     return cleared
+
 
 @bot.tree.command(name="endmatch", description="Force cancel the current match or setup in this channel.")
 async def endmatch_cmd(interaction: discord.Interaction):
@@ -8947,18 +8974,24 @@ class PrefixCog(commands.Cog):
 
     @tournament.command(name="create", help="[ADMIN] Create a new tournament.\nUsage: tournament create \"<name>\" <format> [event=roundrobin/t20wc/acl] [impact_player=true/false] [injuries=true/false]")
     async def t_create(self, ctx, name: str, format_str: str, *options: str):
-        kwargs = { 'impact_player': False, 'injuries': False }
+        kwargs = { 'impact_player': False, 'injuries': False, 'conditions': 'manual' }
         event_map = {
             "roundrobin": "round_robin", "round_robin": "round_robin", "rr": "round_robin",
             "t20wc": "t20_world_cup", "t20_world_cup": "t20_world_cup", "worldcup": "t20_world_cup", "wc": "t20_world_cup",
             "acl": "acl",
         }
+        cond_map = {"manual": "manual", "auto": "auto", "home": "home", "home_pitch": "home", "homepitch": "home"}
         t_type = "round_robin"
         for opt in options:
             try:
                 key, value = opt.split('=', 1)
                 if key == 'impact_player': kwargs['impact_player'] = to_bool(value)
                 elif key == 'injuries': kwargs['injuries'] = to_bool(value)
+                elif key in ('conditions', 'cond'):
+                    cm = cond_map.get(value.strip().lower())
+                    if not cm:
+                        return await ctx.send(f"❌ Invalid conditions `{value}`. Use `manual`, `auto`, or `home`.")
+                    kwargs['conditions'] = cm
                 elif key in ('event', 'event_type', 'type'):
                     et = event_map.get(value.strip().lower())
                     if not et:
@@ -8989,6 +9022,7 @@ class PrefixCog(commands.Cog):
             "format_overs": format_overs, "min_squad": 11, "max_squad": 15,
             "impact_player": kwargs['impact_player'], "injuries_enabled": kwargs['injuries'],
             "tournament_type": t_type,
+            "conditions_mode": kwargs['conditions'],
         }
         save_tournament(t_data)
         type_label = {"t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League"}.get(t_type, "Round Robin")
@@ -8997,6 +9031,10 @@ class PrefixCog(commands.Cog):
             extra = "\n🔴 **ACL needs exactly 14 teams** — each plays every other once (91 matches) → Top 6 Playoffs → Super Cup."
         elif t_type == "t20_world_cup":
             extra = "\n⚠️ **T20 World Cup needs exactly 16 teams** in 4 groups of 4."
+        if kwargs['conditions'] == "auto":
+            extra += "\n🎲 **Conditions: Auto** — pitch & weather auto-assigned per match."
+        elif kwargs['conditions'] == "home":
+            extra += "\n🏟️ **Conditions: Home Pitch** — set each team's home pitch with `cvt set_home_pitch \"<team>\" <pitch>`. Can't start until **all** teams have one (`cvt homepitch` to check)."
         await ctx.send(f"🏆 **Tournament Created:** `{name}`  ·  {type_label}\nUse `cv tournament add_team` to get started!{extra}")
 
     @tournament.command(name="add_team", help="[MANAGER] Add a team and assign an Owner.\nUsage: tournament add_team \"<team_name>\" <@owner>")
@@ -9183,18 +9221,46 @@ class PrefixCog(commands.Cog):
         if not is_mgr: return await ctx.send("❌ Managers only.")
         if tourney["status"] != "registration": return await ctx.send("❌ Tournament already started.")
 
+        # Validate startability (team counts, squads, and home pitches if home mode).
+        err = self._validate_startable(tourney)
+        if err:
+            return await ctx.send(err)
+
+        # Conditions mode was chosen at create — generate straight away.
+        await self._generate_and_start(ctx.channel, tourney)
+
+    def _validate_startable(self, tourney):
+        """Return an error string if the tournament can't start yet, else None."""
         min_s = tourney.get("min_squad", 11)
+        t_type = tourney.get("tournament_type", "round_robin")
+        if t_type == "t20_world_cup":
+            for grp in ["A", "B", "C", "D"]:
+                if len([t for t in tourney["teams"] if t.get("group") == grp]) != 4:
+                    return f"❌ Group **{grp}** needs exactly 4 teams."
+        elif t_type == "acl":
+            if len(tourney["teams"]) != 14:
+                return f"❌ **ACL requires exactly 14 teams** (currently {len(tourney['teams'])})."
+        else:
+            if len(tourney["teams"]) < 2:
+                return "❌ Need at least 2 teams."
+        for t in tourney["teams"]:
+            if len(t.get("squad", [])) < min_s:
+                return f"❌ Team **{t['name']}** does not have a valid squad yet."
+        # Home-pitch mode: every team must have a home pitch set before starting.
+        if tourney.get("conditions_mode") == "home":
+            missing = [t["name"] for t in tourney["teams"] if not canonical_pitch(t.get("home_pitch"))]
+            if missing:
+                return ("❌ **Home-Pitch mode:** set a home pitch for every team before starting.\n"
+                        "Missing: " + ", ".join(f"**{m}**" for m in missing) +
+                        "\nUse `cvt set_home_pitch \"<team>\" <pitch>` · `cvt homepitch` to review.")
+        return None
+
+    async def _generate_and_start(self, channel, tourney):
+        """Generate the schedule for the tournament type, assign conditions per the chosen
+        mode, mark active, and announce. Conditions mode must already be set on `tourney`."""
         t_type = tourney.get("tournament_type", "round_robin")
 
         if t_type == "t20_world_cup":
-            for grp in ["A", "B", "C", "D"]:
-                grp_teams = [t for t in tourney["teams"] if t.get("group") == grp]
-                if len(grp_teams) != 4:
-                    return await ctx.send(f"❌ Group **{grp}** needs exactly 4 teams (currently has {len(grp_teams)}).")
-            for t in tourney["teams"]:
-                if len(t.get("squad", [])) < min_s:
-                    return await ctx.send(f"❌ Team **{t['name']}** does not have a valid squad yet.")
-
             teams_by_group = {"A": [], "B": [], "C": [], "D": []}
             for t in tourney["teams"]:
                 teams_by_group[t["group"]].append(t["name"])
@@ -9219,18 +9285,13 @@ class PrefixCog(commands.Cog):
             tourney["schedule"] = schedule
             tourney["status"] = "active"
             tourney["current_match_idx"] = 0
+            assign_tournament_conditions(tourney)
             save_tournament(tourney)
             groups_txt = "\n".join(f"**Group {g}:** {' · '.join(teams_by_group[g])}" for g in "ABCD")
-            return await ctx.send(f"🏆 **TOURNAMENT STARTED: {tourney['name']}!** — T20 World Cup\n{groups_txt}\nGenerated **{len(schedule)} group stage matches** (interleaved). Use `cv tournament status` to view fixtures!")
+            return await channel.send(f"🏆 **TOURNAMENT STARTED: {tourney['name']}!** — T20 World Cup\n{groups_txt}\nGenerated **{len(schedule)} group stage matches** (interleaved){self._cond_note(tourney)}. Use `cv tournament status` to view fixtures!")
 
         # ACL — Akatsuki Cricket League (14-team single round robin → Playoffs → Super Cup)
         if t_type == "acl":
-            if len(tourney["teams"]) != 14:
-                return await ctx.send(f"❌ **ACL requires exactly 14 teams** (currently {len(tourney['teams'])}). Add or remove teams before starting.")
-            for t in tourney["teams"]:
-                if len(t.get("squad", [])) < min_s:
-                    return await ctx.send(f"❌ Team **{t['name']}** does not have a valid squad yet.")
-
             teams = [t["name"] for t in tourney["teams"]]
             n = len(teams)  # 14, even — no BYE needed
             matchups = []
@@ -9249,21 +9310,16 @@ class PrefixCog(commands.Cog):
             tourney["schedule"] = schedule
             tourney["status"] = "active"
             tourney["current_match_idx"] = 0
+            assign_tournament_conditions(tourney)
             save_tournament(tourney)
-            return await ctx.send(
+            return await channel.send(
                 f"🔴 **AKATSUKI CRICKET LEAGUE — {tourney['name']} HAS BEGUN!**\n"
-                f"Generated **{len(schedule)} league matches** ({n} teams, single round robin).\n"
+                f"Generated **{len(schedule)} league matches** ({n} teams, single round robin){self._cond_note(tourney)}.\n"
                 f"📋 Owners: use `cv tournament fixtures` to see your matches · `cv tournament standings` for the table.\n"
                 f"🏆 After all 91 league games, a Manager runs `cv tournament generate_playoffs` to start the Top-6 Playoffs."
             )
 
         # Round Robin
-        if len(tourney["teams"]) < 2:
-            return await ctx.send("❌ Need at least 2 teams.")
-        for t in tourney["teams"]:
-            if len(t.get("squad", [])) < min_s:
-                return await ctx.send(f"❌ Team **{t['name']}** does not have a valid squad yet.")
-
         teams = [t["name"] for t in tourney["teams"]]
         if len(teams) % 2 != 0:
             teams.append("BYE")
@@ -9283,8 +9339,15 @@ class PrefixCog(commands.Cog):
         tourney["schedule"] = schedule
         tourney["status"] = "active"
         tourney["current_match_idx"] = 0
+        assign_tournament_conditions(tourney)
         save_tournament(tourney)
-        await ctx.send(f"🏆 **TOURNAMENT STARTED: {tourney['name']}!**\nGenerated **{len(schedule)} matches** in the Round Robin stage.\nUse `cv tournament status` to view it!")
+        await channel.send(f"🏆 **TOURNAMENT STARTED: {tourney['name']}!**\nGenerated **{len(schedule)} matches** in the Round Robin stage{self._cond_note(tourney)}.\nUse `cv tournament status` to view it!")
+
+    @staticmethod
+    def _cond_note(tourney):
+        m = tourney.get("conditions_mode", "manual")
+        return {"auto": " · 🎲 auto conditions", "home": " · 🏟️ home-pitch conditions",
+                "manual": " · 🎛️ manual conditions"}.get(m, "")
 
     @tournament.command(name="status", aliases=["sched"], help="View the current tournament schedule and standings.\nUsage: tournament status")
     async def t_status(self, ctx):
@@ -9297,11 +9360,21 @@ class PrefixCog(commands.Cog):
             t_type = tourney.get("tournament_type", "round_robin")
             type_label = {"t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League"}.get(t_type, "Round Robin")
             embed = discord.Embed(title=f"🏆 {tourney['name']}", color=discord.Color.gold())
-            embed.description = f"📝 **Registration Phase** · {type_label}"
+            cmode = tourney.get("conditions_mode", "manual")
+            cmode_txt = {"auto": "🎲 Auto conditions", "home": "🏟️ Home-Pitch conditions"}.get(cmode, "🎛️ Manual conditions")
+            embed.description = f"📝 **Registration Phase** · {type_label} · {cmode_txt}"
+            is_home = (cmode == "home")
             team_lines = []
             for t in tourney["teams"]:
                 grp = f" · Group **{t['group']}**" if t.get("group") else ""
-                team_lines.append(f"• **{t['name']}**{grp} (<@{t['owner_id']}>) — {len(t.get('squad', []))}/{tourney.get('max_squad', 15)} players")
+                hp = ""
+                if is_home:
+                    cp = canonical_pitch(t.get("home_pitch"))
+                    hp = f" · 🏟️ **{cp}**" if cp else " · 🏟️ ❌ *no home pitch*"
+                team_lines.append(f"• **{t['name']}**{grp} (<@{t['owner_id']}>) — {len(t.get('squad', []))}/{tourney.get('max_squad', 15)} players{hp}")
+            if is_home:
+                set_n = sum(1 for t in tourney["teams"] if canonical_pitch(t.get("home_pitch")))
+                embed.add_field(name="🏟️ Home Pitches", value=f"**{set_n}/{len(tourney['teams'])}** teams set — all required before `cvt start`. Use `cvt set_home_pitch \"<team>\" <pitch>`.", inline=False)
             if not team_lines:
                 embed.add_field(name="Registered Teams", value="No teams yet.", inline=False)
             else:
@@ -9840,6 +9913,63 @@ class PrefixCog(commands.Cog):
         save_tournament(tourney)
         await ctx.send(f"✅ Theme set to `{match_theme}`.")
 
+    @tournament.command(name="set_home_pitch", aliases=["sethome", "home_pitch"], help="[MANAGER] Set a team's home pitch (used by Home-Pitch conditions mode).\nUsage: tournament set_home_pitch \"<team>\" <pitch>")
+    async def t_set_home_pitch(self, ctx, team_name: str, *, pitch: str):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.strip().lower()), None)
+        if not team: return await ctx.send(f"❌ No team named **{team_name}** in this tournament.")
+        cp = canonical_pitch(pitch)
+        if not cp: return await ctx.send(f"❌ Invalid pitch **{pitch}**.\nOptions: {', '.join(ALL_PITCHES)}")
+        team["home_pitch"] = cp
+        save_tournament(tourney)
+        await ctx.send(f"🏟️ **{team['name']}** home pitch set to **{cp}**.")
+
+    @tournament.command(name="set_conditions", aliases=["setcond", "conditions"], help="[MANAGER] Override a pending match's pitch/weather.\nUsage: tournament set_conditions <match_id> <pitch> [weather]")
+    async def t_set_conditions(self, ctx, match_id: int, pitch: str, *, weather: str = None):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        m = next((x for x in tourney.get("schedule", []) if x["match_id"] == match_id), None)
+        if not m: return await ctx.send(f"❌ No match **#{match_id}** in this tournament.")
+        if m.get("status") == "completed": return await ctx.send(f"❌ Match #{match_id} is already completed.")
+        cp = canonical_pitch(pitch)
+        if not cp: return await ctx.send(f"❌ Invalid pitch **{pitch}**.\nOptions: {', '.join(ALL_PITCHES)}")
+        m["pitch"] = cp
+        if weather:
+            cw = canonical_weather(weather)
+            if not cw: return await ctx.send(f"❌ Invalid weather **{weather}**.\nOptions: {', '.join(ALL_WEATHER)}")
+            m["weather"] = cw
+        elif not m.get("weather"):
+            m["weather"] = "Clear"
+        save_tournament(tourney)
+        await ctx.send(f"🛠️ Match **#{match_id}** ({m['team1']} vs {m['team2']}) → 🏟️ **{m['pitch']}** · 🌤️ **{m.get('weather', 'Clear')}**")
+
+    @tournament.command(name="homepitch", aliases=["homepitches", "home_pitches"], help="List each team's home pitch.\nUsage: tournament homepitch")
+    async def t_homepitch(self, ctx):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        teams = tourney.get("teams", [])
+        if not teams: return await ctx.send("📋 No teams yet.")
+        mode = tourney.get("conditions_mode", "manual")
+        lines = []
+        for t in sorted(teams, key=lambda x: x["name"].lower()):
+            cp = canonical_pitch(t.get("home_pitch"))
+            lines.append(f"• **{t['name']}** — {('🏟️ ' + cp) if cp else '❌ *not set*'}")
+        set_n = sum(1 for t in teams if canonical_pitch(t.get("home_pitch")))
+        e = discord.Embed(title=f"🏟️ {tourney['name']} — Home Pitches",
+                          description="\n".join(lines), color=discord.Color.green())
+        foot = f"{set_n}/{len(teams)} set"
+        foot += " · all required before `cvt start`" if mode == "home" else f" · conditions mode: {mode} (home pitch used only in 'home' mode)"
+        e.set_footer(text=foot)
+        await ctx.send(embed=e)
+
     @tournament.command(name="set_team_color", help="[MANAGER] Set a team's scorecard color.\nUsage: tournament set_team_color \"<team_name>\" #RRGGBB")
     async def t_set_team_color(self, ctx, team_name: str, color: str):
         import re as _re
@@ -10022,91 +10152,16 @@ class PrefixCog(commands.Cog):
             save_tournament(tourney)
             return await ctx.send(f"✅ **Dev Setup Complete!** Added {len(tourney['teams'])} teams. Run `cv tournament start` when ready.")
 
-        if t_type == "t20_world_cup":
-            teams_by_group = {"A": [], "B": [], "C": [], "D": []}
-            for t in tourney["teams"]:
-                teams_by_group[t["group"]].append(t["name"])
-            all_matches = []
-            for group, group_teams in teams_by_group.items():
-                teams = list(group_teams)
-                random.shuffle(teams)
-                n = len(teams)
-                for r in range(n - 1):
-                    for i in range(n // 2):
-                        t1, t2 = teams[i], teams[n - 1 - i]
-                        all_matches.append({
-                            "round": f"Group {group}", "stage": "group", "group": group,
-                            "group_round": r + 1,
-                            "team1": t1 if r % 2 == 0 else t2,
-                            "team2": t2 if r % 2 == 0 else t1,
-                            "status": "pending", "result": None,
-                        })
-                    teams.insert(1, teams.pop())
-            random.shuffle(all_matches)
-            schedule = [dict(m, match_id=i + 1) for i, m in enumerate(all_matches)]
-            tourney["schedule"] = schedule
-            tourney["status"] = "active"
-            tourney["current_match_idx"] = 0
-            save_tournament(tourney)
-            await ctx.send(
-                f"⚡ **Dev Setup + Auto-Start!** — T20 World Cup\n"
-                f"**A:** India · Pakistan · Australia · England\n"
-                f"**B:** New Zealand · South Africa · West Indies · Sri Lanka\n"
-                f"**C:** Bangladesh · Afghanistan · Zimbabwe · Ireland\n"
-                f"**D:** Scotland · Netherlands · Namibia · Uganda\n"
-                f"Generated **{len(schedule)} group stage matches**. Use `cv tournament play_next` to begin!"
-            )
-        elif t_type == "acl":
-            teams = [t["name"] for t in tourney["teams"]]
-            n = len(teams)  # 14, even
-            matchups = []
-            for r in range(n - 1):
-                round_matches = []
-                for i in range(n // 2):
-                    t1, t2 = teams[i], teams[n - 1 - i]
-                    round_matches.append((t1, t2) if r % 2 == 0 else (t2, t1))
-                random.shuffle(round_matches)
-                for m in round_matches:
-                    matchups.append({"round": r + 1, "team1": m[0], "team2": m[1]})
-                teams.insert(1, teams.pop())
-            schedule = [{"match_id": i + 1, "round": m["round"], "stage": "league",
-                         "team1": m["team1"], "team2": m["team2"], "status": "pending", "result": None}
-                        for i, m in enumerate(matchups)]
-            tourney["schedule"] = schedule
-            tourney["status"] = "active"
-            tourney["current_match_idx"] = 0
-            save_tournament(tourney)
-            await ctx.send(
-                f"⚡ **Dev Setup + Auto-Start!** — 🔴 AKATSUKI CRICKET LEAGUE\n"
-                f"Added all **14** teams · Generated **{len(schedule)} league matches**.\n"
-                f"Use `cvt simall` to sim the league, then `cvt gp` for Playoffs → `cvt simall` again → `cvt br`."
-            )
-        else:
-            teams = [t["name"] for t in tourney["teams"]]
-            if len(teams) % 2 != 0:
-                teams.append("BYE")
-            n = len(teams)
-            matchups = []
-            for r in range(n - 1):
-                round_matches = []
-                for i in range(n // 2):
-                    t1, t2 = teams[i], teams[n - 1 - i]
-                    if t1 != "BYE" and t2 != "BYE":
-                        round_matches.append((t1, t2) if r % 2 == 0 else (t2, t1))
-                random.shuffle(round_matches)
-                for m in round_matches:
-                    matchups.append({"round": r + 1, "team1": m[0], "team2": m[1]})
-                teams.insert(1, teams.pop())
-            schedule = [{"match_id": i + 1, "round": m["round"], "team1": m["team1"], "team2": m["team2"], "status": "pending", "result": None} for i, m in enumerate(matchups)]
-            tourney["schedule"] = schedule
-            tourney["status"] = "active"
-            tourney["current_match_idx"] = 0
-            save_tournament(tourney)
-            await ctx.send(
-                f"⚡ **Dev Setup + Auto-Start!** — Round Robin\n"
-                f"**Teams:** {' · '.join(t['name'] for t in tourney['teams'])}\n"
-                f"Generated **{len(schedule)} matches**. Use `cv tournament play_next` to begin!"
-            )
+        # Auto-start via the shared generator (which also applies the conditions mode).
+        # For home-pitch mode, give any team without one a random standard home pitch so
+        # dev_setup remains one-shot.
+        if tourney.get("conditions_mode") == "home":
+            for _t in tourney["teams"]:
+                if not canonical_pitch(_t.get("home_pitch")):
+                    _t["home_pitch"] = random.choice(["Flat", "Dead", "Hard", "Green", "Dusty"])
+        save_tournament(tourney)
+        await ctx.send(f"⚡ **Dev Setup** — added **{len(tourney['teams'])}** teams. Generating…")
+        await self._generate_and_start(ctx.channel, tourney)
 
     @tournament.command(name="next_match", aliases=["nm"], help="[OWNER] Launch your team's next pending match.\nUsage: tournament next_match")
     async def t_next_match(self, ctx):
@@ -10379,9 +10434,17 @@ class PrefixCog(commands.Cog):
             embed.set_footer(text="-> marks teams that advance to the next stage")
             return await ctx.send(embed=embed)
 
+        # ACL: bespoke 14-team points table (Shield #1 + Top-6 playoff highlights)
+        if tourney.get("tournament_type") == "acl":
+            try:
+                buf = generate_acl_points_table(tourney)
+                return await ctx.send(file=discord.File(fp=buf, filename="acl_points_table.png"))
+            except Exception as e:
+                print(f"⚠️ ACL points table failed, using default: {e}")
+
         standings = get_tournament_standings(tourney)
         theme = tourney.get("theme", "Default")
-        
+
         if theme == "Crimson Cricket":
             try:
                 img = Image.open("assets/points_table_crimson.png").convert("RGB")
