@@ -3515,8 +3515,8 @@ class DRSView(discord.ui.View):
             innings.current_striker_idx = self.match.prev_striker_idx
             innings.batting_stats[innings.batting_team["players"][innings.current_striker_idx]["name"]].dismissal = "not out"
             innings.bowling_stats[innings.current_bowler["name"]].wickets_taken -= 1
-            if innings.over_log and innings.over_log[-1] == "<:wicket:1520119708802875443>":
-                innings.over_log[-1] = "<:dot:1520118655994695962>"
+            if innings.over_log and innings.over_log[-1] == "<:wicket:1520143043683156051>":
+                innings.over_log[-1] = "<:0run:1520141253604544633>"
             self.match.last_commentary += "\n📺 **DRS:** Decision Overturned (Not Out)."
         else:
             if is_caught_behind:
@@ -3584,7 +3584,7 @@ async def run_interactive_delivery_sequence(interaction, match: CricketMatch):
     channel = interaction.channel if hasattr(interaction, 'channel') else interaction
     
     if (match.is_ai_game and match.get_bowler_user_id() == match.p2_id) or _bowler_is_bot(match):
-        if getattr(innings, "total_balls", 0) % 6 == 0 or (innings.over_log and innings.over_log[-1] == "<:wicket:1520119708802875443>"):
+        if getattr(innings, "total_balls", 0) % 6 == 0 or (innings.over_log and innings.over_log[-1] == "<:wicket:1520143043683156051>"):
             try_ai_impact_player(match, innings)
         role = innings.current_bowler["role"]
         
@@ -3618,7 +3618,7 @@ async def run_interactive_delivery_sequence(interaction, match: CricketMatch):
 
 async def prompt_batter_shot(channel, match: CricketMatch, prev=None):
     if (match.is_ai_game and match.get_striker_user_id() == match.p2_id) or _striker_is_bot(match):
-        if getattr(match.current_innings, "total_balls", 0) % 6 == 0 or (match.current_innings.over_log and match.current_innings.over_log[-1] == "<:wicket:1520119708802875443>"):
+        if getattr(match.current_innings, "total_balls", 0) % 6 == 0 or (match.current_innings.over_log and match.current_innings.over_log[-1] == "<:wicket:1520143043683156051>"):
             try_ai_impact_player(match, match.current_innings)
         execute_ball_math(match)
             
@@ -3642,8 +3642,8 @@ async def prompt_batter_shot(channel, match: CricketMatch, prev=None):
                     innings.current_striker_idx = match.prev_striker_idx
                     innings.batting_stats[innings.batting_team["players"][innings.current_striker_idx]["name"]].dismissal = "not out"
                     innings.bowling_stats[innings.current_bowler["name"]].wickets_taken -= 1
-                    if innings.over_log and innings.over_log[-1] == "<:wicket:1520119708802875443>":
-                        innings.over_log[-1] = "<:dot:1520118655994695962>"
+                    if innings.over_log and innings.over_log[-1] == "<:wicket:1520143043683156051>":
+                        innings.over_log[-1] = "<:0run:1520141253604544633>"
                     match.last_commentary += "\n📺 **DRS:** Decision Overturned (Not Out)."
                 else:
                     if is_caught_behind:
