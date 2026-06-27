@@ -2504,7 +2504,7 @@ class SuperOverOpenersView(discord.ui.View):
         self.clear_items()
         players = self.match.current_innings.batting_team["players"]
         if len(self.picked) < 2:
-            opts = [discord.SelectOption(label=p["name"], description=f"bat {p.get('bat','?')} · {p['role'].split('_')[0]}", value=p["name"])
+            opts = [discord.SelectOption(label=p["name"], description=f"{p['role'].split('_')[0]} · {p.get('archetype','')}".strip(" ·"), value=p["name"])
                     for p in players if p["name"] not in self.picked][:25]
             sel = discord.ui.Select(placeholder=f"Pick opener {len(self.picked)+1} of 2...", options=opts)
             sel.callback = self.select_cb
@@ -2880,7 +2880,7 @@ async def prompt_next_batter(interaction, match: CricketMatch):
     options = []
     for p in available:
         role_short = p["role"].split("_")[0]
-        options.append(discord.SelectOption(label=p["name"], description=f"{role_short} · bat {p['bat']}", value=p["name"]))
+        options.append(discord.SelectOption(label=p["name"], description=f"{role_short} · {p.get('archetype','')}".strip(" ·"), value=p["name"]))
 
     view = discord.ui.View(timeout=300)
     select = discord.ui.Select(placeholder="Select the next batter…", options=options[:25])
@@ -4279,7 +4279,7 @@ async def prompt_club_openers(interaction, match):
         return
 
     view = discord.ui.View(timeout=300)
-    opts = [discord.SelectOption(label=f"{p['name']}", description=f"bat {p['bat']} · bowl {p['bowl']}",
+    opts = [discord.SelectOption(label=f"{p['name']}", description=f"{p['role'].split('_')[0]} · {p.get('archetype','')}".strip(" ·"),
                                  value=str(i)) for i, p in enumerate(players)]
     select = discord.ui.Select(placeholder="Pick your 2 opening batsmen…",
                                min_values=2, max_values=2, options=opts[:25])

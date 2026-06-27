@@ -54,39 +54,6 @@ T20_CONS_FORM_DAMP    = 0.60    # shrink the ±4% form wobble for top players
 # hard; consolidate when collapsing). Always on in play; gate exists for A/B tests.
 _T20_ACCEL = True
 
-# ── UNIFIED INTENT MODEL ─────────────────────────────────────────────────────
-# One coherent batting mentality (0 = block → 1 = all-out) replaces the scattered
-# situational multipliers. Driven by phase + resources (wickets×overs) + run-rate
-# gap + pitch difficulty + batter. Two calibrated maps turn it into outcome weights
-# and shot aggression, so attacking lifts BOTH runs and wickets organically.
-# Gated for clean A/B vs archive/t20_simulation_backup_20260628.py.
-_T20_INTENT = True
-
-# How hard each surface is to SCORE on (0 = road → 1 = unplayable). Feeds intent:
-# hard deck + wickets in hand → throw the bat; hard deck + thin wickets → consolidate.
-T20_PITCH_DIFFICULTY = {
-    "Flat": 0.00, "Dead": 0.00, "Hard": 0.15, "Bouncy": 0.30, "Two-Paced": 0.40,
-    "Dry": 0.35, "Soft": 0.42, "Green": 0.40, "Damp": 0.42, "Worn": 0.46,
-    "Dusty": 0.50, "Slow": 0.46, "Turning": 0.52, "Cracked": 0.62, "Sticky": 0.78,
-}
-# Phase baseline intent → the real T20 shape: powerplay attack (field up), a genuine
-# MIDDLE-OVERS LULL (build/consolidate, preserve wickets), then a death SURGE.
-T20_INTENT_PP   = 0.52   # powerplay (balls < 36)
-T20_INTENT_MID  = 0.33   # middle — the lull
-T20_INTENT_DEATH = 0.78  # death (last 5 overs) — the surge
-# Sensitivities (calibrated against the harness):
-T20_INTENT_RES_SENS  = 0.05   # per surplus-wicket (wkts_left − even-pace need)
-T20_INTENT_RR_SENS   = 0.04   # per run/over of run-rate gap (below par / required)
-T20_INTENT_DIFF_UP   = 0.30   # hard deck × (wickets in hand) → throw the bat
-T20_INTENT_DIFF_DOWN = 0.42   # hard deck × (thin wickets) → consolidate
-# intent → outcome-weight map (the single tuning point). Boundary-heavy on purpose:
-# throwing the bat must produce FIRE KNOCKS (quick cameos that ADD runs) as well as
-# wickets — a side bowled out on a sticky still makes ~150 off 20-ball blitzes, it
-# doesn't just collapse for 130.
-T20_INTENT_BND   = (0.72, 1.28)   # boundary mult = lo + intent*span  (0.72 → 2.00)
-T20_INTENT_WKT   = (0.74, 0.90)   # wicket   mult = lo + intent*span  (0.74 → 1.64)
-T20_INTENT_DOT   = (1.30, -0.72)  # dot      mult = lo + intent*span  (1.30 → 0.58)
-
 def t20_cons(rating: float) -> float:
     """0 → no change (rating ≤ LOW, current variance); 1 → max consistency (rating ≥ HIGH)."""
     if rating <= T20_CONS_LOW:
@@ -118,101 +85,30 @@ SPIN_SHOT_MATRIX = {
     "Flipper": ["Drive", "Flick", "Block"],
     "Drifter": ["Loft", "Drive", "Cut"],
     "Slider": ["Flick", "Drive", "Sweep"],
-    "Mystery": ["Block", "Sweep", "Drive"]
+    "Mystery": ["Block", "Sweep", "Drive"] 
 }
 
-def _t20_intent(match, innings, b_stats, archetype, total_balls, balls_left):
-    """Unified batting mentality, 0 (block) .. 1 (all-out), from the match situation:
-    phase + resources (wickets×overs) + run-rate gap + pitch difficulty + batter."""
-    max_balls = match.max_balls
-    overs_total = max_balls / 6.0
-    wkts_left = (2 if getattr(match, "is_super_over", False) else 10) - innings.wickets
-    overs_left = max(0.1, balls_left / 6.0)
-
-    if total_balls < 36:
-        intent = T20_INTENT_PP
-    elif total_balls < max_balls - 30:
-        intent = T20_INTENT_MID
-    else:
-        intent = T20_INTENT_DEATH
-
-    # Resources: wickets to spare vs an even pace → attack; thin → preserve. Scaled by
-    # phase so a side BUILDS in the middle (surplus wickets don't push hard) but CASHES
-    # them in at the death — this is what creates the real middle-lull → death-surge shape.
-    even = overs_left * (10.0 / overs_total)
-    surplus = wkts_left - even
-    if total_balls < 36:
-        _res_scale = 0.45
-    elif total_balls < max_balls - 30:
-        _res_scale = 0.60
-    else:
-        _res_scale = 1.30
-    intent += max(-0.35, min(0.40, surplus * T20_INTENT_RES_SENS * _res_scale))
-
-    # Run-rate gap (chase: required vs current; 1st inns: current vs phase par).
-    crr = innings.total_runs / total_balls * 6.0 if total_balls else 0.0
-    if match.current_innings_num == 2 and balls_left > 0:
-        target = getattr(match, "target", innings.total_runs + 1)
-        rrr = (target - innings.total_runs) / balls_left * 6.0
-        intent += max(-0.30, min(0.45, (rrr - crr) * T20_INTENT_RR_SENS))
-    else:
-        par_rr = 8.0 if total_balls < 36 else (7.8 if total_balls < max_balls - 30 else 10.5)
-        intent += max(-0.30, min(0.30, (par_rr - crr) * T20_INTENT_RR_SENS))
-
-    # Pitch difficulty: hard deck + wickets in hand → throw the bat; hard + thin → consolidate.
-    diff = T20_PITCH_DIFFICULTY.get(match.pitch, 0.20)
-    if surplus > 0:
-        intent += diff * T20_INTENT_DIFF_UP * min(1.0, surplus / 3.0)
-    else:
-        intent -= diff * T20_INTENT_DIFF_DOWN * min(1.0, -surplus / 2.0)
-
-    # Batter: archetype + how set he is.
-    intent += {"Aggressor": 0.12, "Finisher": 0.07, "Standard": 0.0, "Anchor": -0.11}.get(archetype, 0.0)
-    if b_stats.balls_faced >= 15:
-        intent += 0.08
-    elif b_stats.balls_faced < 6:
-        intent -= 0.10
-
-    return max(0.0, min(1.0, intent))
-
-
-def get_smart_ai_shot_t20(deliv, is_collapse, is_death_overs, archetype, pressure_multiplier=1.0, intent=None):
-    # rage = how hard they're throwing the bat (scales the riskiest shots Loft/Scoop/Pull
-    # UP, so wickets AND runs rise together). With the intent engine it comes straight from
-    # `intent`; otherwise it falls back to the legacy pressure_multiplier curve.
-    if intent is not None:
-        force_aggression = intent > 0.50
-        r = max(0.0, min(1.0, (intent - 0.50) / 0.45))
-    else:
-        force_aggression = pressure_multiplier > 1.12 or is_death_overs
-        r = max(0.0, min(1.0, (pressure_multiplier - 1.12) / 0.55))
-        if is_death_overs:
-            r = max(r, 0.55)
+def get_smart_ai_shot_t20(deliv, is_collapse, is_death_overs, archetype, pressure_multiplier=1.0):
+    force_aggression = pressure_multiplier > 1.2 or is_death_overs
 
     if is_collapse and not force_aggression:
         if "Yorker" in deliv: return random.choices(["Block", "Drive"], weights=[50, 50], k=1)[0]
         elif "Bouncer" in deliv: return random.choices(["Block", "Pull", "Leave"], weights=[40, 40, 20], k=1)[0]
         return random.choices(["Block", "Drive", "Flick", "Cut"], weights=[30, 30, 20, 20], k=1)[0]
-
+        
     if force_aggression:
         if "Yorker" in deliv:
-            return random.choices(["Scoop", "Drive", "Flick", "Pull", "Block"],
-                                  weights=[18 + 32 * r, 40 - 26 * r, 18, 12 + 8 * r, 12 - 9 * r], k=1)[0]
+            return random.choices(["Drive", "Block", "Flick", "Scoop", "Pull"], weights=[40, 10, 20, 20, 10], k=1)[0]
         elif "Bouncer" in deliv:
-            return random.choices(["Pull", "Loft", "Cut", "Sweep"],
-                                  weights=[40 + 12 * r, 18 + 27 * r, 32 - 27 * r, 10], k=1)[0]
+            return random.choices(["Pull", "Cut", "Loft", "Sweep"], weights=[40, 30, 20, 10], k=1)[0]
         elif "Full" in deliv:
-            return random.choices(["Loft", "Scoop", "Drive", "Sweep"],
-                                  weights=[38 + 30 * r, 14 + 16 * r, 33 - 33 * r, 15], k=1)[0]
+            return random.choices(["Loft", "Drive", "Sweep", "Scoop"], weights=[40, 30, 15, 15], k=1)[0]
         elif deliv in SPIN_SHOT_MATRIX:
-            if random.random() < 0.62 - 0.42 * r:   # high rage → loft over the safe matrix shot
-                return random.choice(SPIN_SHOT_MATRIX[deliv])
-            return random.choices(["Loft", "Sweep", "Scoop", "Drive"],
-                                  weights=[38 + 27 * r, 30 - 14 * r, 10 + 12 * r, 22 - 18 * r], k=1)[0]
+            if random.random() < 0.8: return random.choice(SPIN_SHOT_MATRIX[deliv])
+            return random.choices(["Loft", "Sweep", "Drive"], weights=[40, 40, 20], k=1)[0]
         else:
-            return random.choices(["Loft", "Scoop", "Pull", "Drive"],
-                                  weights=[28 + 37 * r, 12 + 14 * r, 30, 30 - 30 * r], k=1)[0]
-
+            return random.choices(["Loft", "Pull", "Drive", "Scoop"], weights=[30, 30, 25, 15], k=1)[0]
+            
     if "Yorker" in deliv:
         return random.choices(["Block", "Drive", "Flick", "Cut"], weights=[30, 40, 20, 10], k=1)[0]
     elif "Bouncer" in deliv:
@@ -521,7 +417,7 @@ def execute_ball_math_t20(match):
     # can otherwise leave them 120-4 with wickets unspent. So: when wickets are in hand
     # AND scoring is below par → lift the tempo (accept more risk, attack); when wickets
     # have tumbled for the overs gone → consolidate and rebuild a partnership instead.
-    if (_T20_ACCEL and not _T20_INTENT and match.current_innings_num == 1 and total_balls >= 24 and balls_left > 0
+    if (_T20_ACCEL and match.current_innings_num == 1 and total_balls >= 24 and balls_left > 0
             and not getattr(match, "is_super_over", False)):
         _frac = total_balls / match.max_balls
         _overs_left = balls_left / 6.0
@@ -540,9 +436,6 @@ def execute_ball_math_t20(match):
             pressure_multiplier = max(pressure_multiplier, _accel)
         elif _surplus < -1.0:
             is_collapse = True   # wickets thin for the overs left → consolidate, rebuild a stand
-
-    # Unified intent (replaces the scattered situational multipliers when enabled).
-    _intent = _t20_intent(match, innings, b_stats, striker["archetype"], total_balls, balls_left) if _T20_INTENT else None
 
     # Dynamic Delivery Generation based on Bowler Role (for Fast Sim)
     if match.current_delivery_selection:
@@ -564,7 +457,7 @@ def execute_ball_math_t20(match):
             else:
                 deliv = f"{random.choice(['Inswing', 'Outswing', 'Fast', 'Slow'])} {random.choice(['Bouncer', 'Full', 'Good', 'Yorker'])}"
             
-    shot = match.current_shot_selection or get_smart_ai_shot_t20(deliv, is_collapse, is_death_overs, striker["archetype"], pressure_multiplier, intent=_intent)
+    shot = match.current_shot_selection or get_smart_ai_shot_t20(deliv, is_collapse, is_death_overs, striker["archetype"], pressure_multiplier)
         
     match.current_delivery_selection = None
     match.current_shot_selection = None
@@ -814,63 +707,58 @@ def execute_ball_math_t20(match):
     else:
         if bad_shot_selection: wicket_weight *= 1.8; boundary_weight *= 0.3; dot_weight *= 1.5
         elif perfect_shot_selection: boundary_weight *= 1.4; wicket_weight *= 0.7
+        
+        # Required run rate (chase only) tells set batters when to lift the tempo.
+        _rrr_now = (runs_needed / balls_left * 6) if (match.current_innings_num == 2 and balls_left > 0) else 0.0
+        _set = b_stats.balls_faced >= 18
+        _lift = is_death_overs or _rrr_now >= 9.0   # death overs OR the ask has climbed above par
 
-        if _T20_INTENT:
-            # ── UNIFIED INTENT → OUTCOME WEIGHTS (the single situational tuning point) ──
-            # One coherent mentality drives the lot: higher intent ⇒ more boundaries AND
-            # more wickets, fewer dots. Phase, resources, run-rate gap, pitch difficulty
-            # and the batter are all already baked into `_intent`, so this replaces the
-            # old pile of archetype / collapse / wickets-in-hand / pressure multipliers.
-            boundary_weight *= (T20_INTENT_BND[0] + _intent * T20_INTENT_BND[1])
-            wicket_weight   *= (T20_INTENT_WKT[0] + _intent * T20_INTENT_WKT[1])
-            dot_weight      *= (T20_INTENT_DOT[0] + _intent * T20_INTENT_DOT[1])
-        else:
-            # Required run rate (chase only) tells set batters when to lift the tempo.
-            _rrr_now = (runs_needed / balls_left * 6) if (match.current_innings_num == 2 and balls_left > 0) else 0.0
-            _set = b_stats.balls_faced >= 18
-            _lift = is_death_overs or _rrr_now >= 9.0   # death overs OR the ask has climbed above par
+        if striker["archetype"] == "Aggressor":
+            boundary_weight *= 1.2; wicket_weight *= 1.15
+        elif striker["archetype"] == "Anchor":
+            # Safety is BOUGHT with tempo: while building he's slow (more dots, few
+            # boundaries) AND very hard to dislodge; once set he opens up; set + a rising
+            # ask, he explodes with control. The run gap mirrors the wicket gap at each stage.
+            if _set and _lift:
+                boundary_weight *= 1.30; wicket_weight *= 0.96   # cuts loose — finds gaps, stays secure
+            elif _set:
+                boundary_weight *= 1.12; wicket_weight *= 0.86    # keeps the score ticking, not blocking
+            else:
+                dot_weight *= 1.16; boundary_weight *= 0.82; wicket_weight *= 0.76   # still playing himself in
+        elif striker["archetype"] == "Standard":
+            # The middle-ground: scores a touch quicker than the Anchor but is a touch
+            # less secure at EVERY stage — the difference shows up in runs AND in risk.
+            if _set and _lift:
+                boundary_weight *= 1.20; wicket_weight *= 1.06
+            elif _set:
+                boundary_weight *= 1.08; wicket_weight *= 0.95
+            else:
+                dot_weight *= 1.04; boundary_weight *= 0.94; wicket_weight *= 0.86
+        elif striker["archetype"] == "Finisher" and is_death_overs:
+            boundary_weight *= 1.3
 
-            if striker["archetype"] == "Aggressor":
-                boundary_weight *= 1.2; wicket_weight *= 1.15
-            elif striker["archetype"] == "Anchor":
-                if _set and _lift:
-                    boundary_weight *= 1.30; wicket_weight *= 0.96
-                elif _set:
-                    boundary_weight *= 1.12; wicket_weight *= 0.86
-                else:
-                    dot_weight *= 1.16; boundary_weight *= 0.82; wicket_weight *= 0.76
-            elif striker["archetype"] == "Standard":
-                if _set and _lift:
-                    boundary_weight *= 1.20; wicket_weight *= 1.06
-                elif _set:
-                    boundary_weight *= 1.08; wicket_weight *= 0.95
-                else:
-                    dot_weight *= 1.04; boundary_weight *= 0.94; wicket_weight *= 0.86
-            elif striker["archetype"] == "Finisher" and is_death_overs:
-                boundary_weight *= 1.3
-
-            if is_collapse: boundary_weight *= 0.7; wicket_weight *= 0.65; single_weight *= 1.15
-            if is_set_partnership: wicket_weight *= 0.8
-            if has_wickets_in_hand: boundary_weight *= 1.22; wicket_weight *= 1.15; dot_weight *= 0.75
-
-            active_multiplier = pressure_multiplier
-            if is_death_overs:
-                if match.current_innings_num == 1:
+        if is_collapse: boundary_weight *= 0.7; wicket_weight *= 0.65; single_weight *= 1.15
+        if is_set_partnership: wicket_weight *= 0.8
+        if has_wickets_in_hand: boundary_weight *= 1.22; wicket_weight *= 1.15; dot_weight *= 0.75
+        
+        active_multiplier = pressure_multiplier
+        if is_death_overs:
+            if match.current_innings_num == 1:
+                active_multiplier = max(1.30, pressure_multiplier)
+            else:
+                # Chasing teams shouldn't commit suicide if they are already cruising to victory
+                if balls_left > 0 and (runs_needed / balls_left * 6) > 7.5:
                     active_multiplier = max(1.30, pressure_multiplier)
-                else:
-                    if balls_left > 0 and (runs_needed / balls_left * 6) > 7.5:
-                        active_multiplier = max(1.30, pressure_multiplier)
 
-            if active_multiplier > 1.0:
-                boundary_weight *= active_multiplier
-                if total_balls < 90:
-                    wicket_weight *= (1.0 + (active_multiplier - 1.0) * 0.6)
-                else:
-                    wicket_weight *= (1.0 + (active_multiplier - 1.0) * 0.8)
-
-        # Field-restriction / momentum effects — orthogonal to intent, apply either way.
+        if active_multiplier > 1.0:
+            boundary_weight *= active_multiplier
+            if total_balls < 90:
+                wicket_weight *= (1.0 + (active_multiplier - 1.0) * 0.6) # Dampened suicide curve
+            else:
+                wicket_weight *= (1.0 + (active_multiplier - 1.0) * 0.8) # Dampened suicide curve
+                
         if innings.last_ball_boundary: boundary_weight *= 1.15; wicket_weight *= 1.15
-        if is_powerplay: boundary_weight *= (1.18 if _T20_INTENT else 1.25); single_weight *= 0.85
+        if is_powerplay: boundary_weight *= 1.25; single_weight *= 0.85
             
     if "Mystery" in deliv:
         wicket_weight *= 1.6
@@ -934,9 +822,7 @@ def execute_ball_math_t20(match):
     if match.pitch in ("Flat", "Dead"):
         wicket_weight = min(wicket_weight, T20_BAT_PITCH_WKT_CAP)  # batting-paradise floor
     elif match.pitch in T20_BOWL_DECKS:
-        # Intent model: relax the minefield floor so a side throwing the bat on a sticky
-        # actually loses wickets (7-9 down, ~120-150 all out) instead of stranding them.
-        wicket_weight = min(wicket_weight, 17.0 if _T20_INTENT else T20_BOWL_PITCH_WKT_CAP)
+        wicket_weight = min(wicket_weight, T20_BOWL_PITCH_WKT_CAP)  # minefield floor: ~120-140 not sub-100
     wicket_weight = max(1.0, min(wicket_weight, 30.0)) # Hard cap to prevent 10/10 scenarios
     dot_weight = max(5.0, min(dot_weight, 120.0))
 

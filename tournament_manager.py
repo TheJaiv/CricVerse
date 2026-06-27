@@ -1804,16 +1804,21 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         process_team_stats(t1_name, t1_inn, t2_inn)
         process_team_stats(t2_name, t2_inn, t1_inn)
 
-        # --- INJURY ROLL (group/super8 only, not knockouts; requires injuries_enabled) ---
-        if tourney.get("injuries_enabled", False) and m_data.get("stage") in ("group", "super8"):
+        # --- INJURY ROLL (group/super8/league only, not knockouts; needs injuries_enabled) ---
+        if tourney.get("injuries_enabled", False) and m_data.get("stage") in ("group", "super8", "league"):
             import random as _rng
-            _injury_done = False
+            # ACL injuries are more frequent and RATING-SCALED — a star (high bat/bowl)
+            # gets hurt less than a journeyman — and allow one injury per TEAM per match
+            # (vs one per whole match for other formats), so the squad depth matters more.
+            _is_acl = tourney.get("tournament_type") == "acl"
+            _match_injured = False
             for team_name, bat_inn, bowl_inn in [(t1_name, t1_inn, t2_inn), (t2_name, t2_inn, t1_inn)]:
-                if _injury_done: break
+                if not _is_acl and _match_injured: break
                 team_obj = next((t for t in tourney["teams"] if t["name"] == team_name), None)
                 if not team_obj: continue
+                _team_injured = False
                 for player in team_obj["squad"]:
-                    if _injury_done: break
+                    if (_is_acl and _team_injured) or (not _is_acl and _match_injured): break
                     p_name = player["name"]
                     if player.get("injured"): continue
                     bat_stat  = bat_inn.batting_stats.get(p_name)
@@ -1823,7 +1828,15 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                     if not played: continue
                     heavy = (bat_stat and bat_stat.balls_faced >= 20) or \
                             (bowl_stat and bowl_stat.balls_bowled >= 12)
-                    if _rng.random() >= (0.03 if heavy else 0.01): continue
+                    if _is_acl:
+                        base = 0.065 if heavy else 0.028          # ~2x the other-format rate
+                        _rt = max(player.get("bat", 50), player.get("bowl", 50))
+                        # factor: 1.0 at "normal" (75) → ~0.6 for a 95-rated star, ~1.3 for a 60-rated
+                        _factor = max(0.55, min(1.35, 1.0 - (_rt - 75) * 0.02))
+                        chance = base * _factor
+                    else:
+                        chance = 0.03 if heavy else 0.01
+                    if _rng.random() >= chance: continue
                     severity = _rng.choices([1, 2, 3], weights=[60, 30, 10])[0]
                     team_pending = [m for m in tourney["schedule"]
                                     if m["status"] == "pending" and
@@ -1838,7 +1851,8 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                         "team": team_name, "player": p_name,
                         "severity": severity, "until": until_id,
                     })
-                    _injury_done = True
+                    if _is_acl: _team_injured = True
+                    else: _match_injured = True
 
         # --- KNOCKOUTS AUTO-PROGRESSION ---
         t_type = tourney.get("tournament_type", "round_robin")
