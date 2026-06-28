@@ -7056,6 +7056,22 @@ def _player_overall(p: dict) -> float:
         return bowl
     return bat   # Batter / WK-Batter
 
+def _best_xi(squad: list, n: int = 11, min_bowlers: int = 5) -> list:
+    """Pick the strongest BALANCED XI from a squad: top players by overall rating, but
+    ensure at least `min_bowlers` who can bowl (swap the weakest pure batters for the
+    best available bowlers if the top-n comes out batting-heavy)."""
+    pool = sorted(squad, key=_player_overall, reverse=True)
+    xi = list(pool[:n])
+    def _bowls(p): r = p.get("role", ""); return "Bowler" in r or "All-Rounder" in r
+    have = sum(1 for p in xi if _bowls(p))
+    if have < min_bowlers:
+        in_names = {p["name"] for p in xi}
+        spare = [p for p in pool if _bowls(p) and p["name"] not in in_names]
+        drop  = sorted([p for p in xi if not _bowls(p)], key=_player_overall)  # weakest batters first
+        for i in range(min(min_bowlers - have, len(spare), len(drop))):
+            xi.remove(drop[i]); xi.append(spare[i])
+    return xi
+
 def _build_playerlist_txt(players: list) -> str:
     tiers = {"LEGENDS": [], "ELITE": [], "GOLD": [], "SILVER": [], "BRONZE": []}
     for p in players:
@@ -9767,8 +9783,10 @@ class PrefixCog(commands.Cog):
                 results.append(f"M{m_data['match_id']} ({r_label}): ❌ Squad not set")
                 continue
 
-            roster1 = apply_server_overrides(s1, tourney["server_id"])[:11]
-            roster2 = apply_server_overrides(s2, tourney["server_id"])[:11]
+            # Play each team's BEST balanced XI (top 11 by rating, ≥5 who can bowl),
+            # not just the first 11 in squad order.
+            roster1 = _best_xi(apply_server_overrides(s1, tourney["server_id"]))
+            roster2 = _best_xi(apply_server_overrides(s2, tourney["server_id"]))
             pitch = random.choice(_PITCHES)
             t1 = {"name": m_data["team1"], "players": roster1, "color": t1_data.get("color", "#6B7280")}
             t2 = {"name": m_data["team2"], "players": roster2, "color": t2_data.get("color", "#6B7280")}
@@ -10117,9 +10135,10 @@ class PrefixCog(commands.Cog):
         max_s  = tourney.get("max_squad", 15)
 
         def make_squad():
-            shuffled = list(db_players)
-            random.shuffle(shuffled)
-            return shuffled[:min(max_s, len(shuffled))]
+            # Prioritise HIGH-RATED players (jittered overall sort) so squads are strong
+            # & varied — not a random scoop that can hand a team a bench of journeymen.
+            ranked = sorted(db_players, key=lambda p: _player_overall(p) * (0.6 + 0.7 * random.random()), reverse=True)
+            return ranked[:min(max_s, len(ranked))]
 
         if t_type == "t20_world_cup":
             team_config = [
