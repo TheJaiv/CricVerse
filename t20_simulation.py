@@ -54,31 +54,30 @@ T20_CONS_FORM_DAMP    = 0.60    # shrink the ±4% form wobble for top players
 # hard; consolidate when collapsing). Always on in play; gate exists for A/B tests.
 _T20_ACCEL = True
 
-# ── UNIFIED INTENT MODEL ─────────────────────────────────────────────────────
-# One coherent batting mentality (0 = block → 1 = all-out) replaces the scattered
-# situational multipliers. Driven by phase + resources (wickets×overs) + run-rate
-# gap + pitch difficulty + batter. Two calibrated maps turn it into outcome weights
-# and shot aggression, so attacking lifts BOTH runs and wickets organically.
-# Gated for clean A/B vs archive/t20_simulation_backup_20260628.py.
+# ── UNIFIED INTENT MODEL — a "rebuild → launch" cricket brain ─────────────────
+# One coherent mentality (0 = block → 1 = all-out). The core is LAUNCH TIMING: a
+# final assault needs ~ wickets × (balls a wicket survives attacking) balls, so as
+# balls_left falls toward that capacity the side accelerates — and before that, or
+# mid-collapse, it BUILDS. Layered with: a tough-pitch "throw the bat when stuck"
+# term, a chase required-rate, a post-collapse rebuild gate, and the batter. Two
+# calibrated maps turn intent into outcome weights + shot aggression so attacking
+# lifts BOTH runs and wickets. Gated for A/B vs archive/t20_simulation_backup_20260628.py.
 _T20_INTENT = True
 
-# How hard each surface is to SCORE on (0 = road → 1 = unplayable). Feeds intent:
-# hard deck + wickets in hand → throw the bat; hard deck + thin wickets → consolidate.
+# How hard each surface is to SCORE on (0 = road → 1 = unplayable).
 T20_PITCH_DIFFICULTY = {
     "Flat": 0.00, "Dead": 0.00, "Hard": 0.15, "Bouncy": 0.30, "Two-Paced": 0.40,
     "Dry": 0.35, "Soft": 0.42, "Green": 0.40, "Damp": 0.42, "Worn": 0.46,
     "Dusty": 0.50, "Slow": 0.46, "Turning": 0.52, "Cracked": 0.62, "Sticky": 0.78,
 }
-# Phase baseline intent → the real T20 shape: powerplay attack (field up), a genuine
-# MIDDLE-OVERS LULL (build/consolidate, preserve wickets), then a death SURGE.
-T20_INTENT_PP   = 0.52   # powerplay (balls < 36)
-T20_INTENT_MID  = 0.33   # middle — the lull
-T20_INTENT_DEATH = 0.78  # death (last 5 overs) — the surge
-# Sensitivities (calibrated against the harness):
-T20_INTENT_RES_SENS  = 0.05   # per surplus-wicket (wkts_left − even-pace need)
-T20_INTENT_RR_SENS   = 0.04   # per run/over of run-rate gap (below par / required)
-T20_INTENT_DIFF_UP   = 0.30   # hard deck × (wickets in hand) → throw the bat
-T20_INTENT_DIFF_DOWN = 0.42   # hard deck × (thin wickets) → consolidate
+# Launch-timing model:
+T20_LAUNCH_ABPW      = 8.2    # balls a wicket survives attacking, on a road
+T20_LAUNCH_ABPW_DIFF = 3.2    #   ...minus this × pitch-difficulty (hole out faster on tough decks)
+T20_LAUNCH_LEAD      = 1.25   # start the assault when balls_left ≈ 1.25 × assault-capacity
+T20_INTENT_BASE      = 0.22   # build-mode floor (pre-launch, stable)
+T20_INTENT_LAUNCH_SPAN = 0.62 # launch adds up to this on top of BASE
+T20_INTENT_REBUILD   = 0.36   # intent ×factor while a collapse is being rebuilt (dig in)
+T20_INTENT_DIFF_UP   = 0.30   # stuck on a tough deck with wickets in hand → throw the bat
 # intent → outcome-weight map (the single tuning point). Boundary-heavy on purpose:
 # throwing the bat must produce FIRE KNOCKS (quick cameos that ADD runs) as well as
 # wickets — a side bowled out on a sticky still makes ~150 off 20-ball blitzes, it
@@ -122,55 +121,55 @@ SPIN_SHOT_MATRIX = {
 }
 
 def _t20_intent(match, innings, b_stats, archetype, total_balls, balls_left):
-    """Unified batting mentality, 0 (block) .. 1 (all-out), from the match situation:
-    phase + resources (wickets×overs) + run-rate gap + pitch difficulty + batter."""
-    max_balls = match.max_balls
-    overs_total = max_balls / 6.0
-    wkts_left = (2 if getattr(match, "is_super_over", False) else 10) - innings.wickets
-    overs_left = max(0.1, balls_left / 6.0)
+    """Batting mentality 0 (block) .. 1 (all-out) — a 'rebuild → launch' brain.
 
-    if total_balls < 36:
-        intent = T20_INTENT_PP
-    elif total_balls < max_balls - 30:
-        intent = T20_INTENT_MID
-    else:
-        intent = T20_INTENT_DEATH
-
-    # Resources: wickets to spare vs an even pace → attack; thin → preserve. Scaled by
-    # phase so a side BUILDS in the middle (surplus wickets don't push hard) but CASHES
-    # them in at the death — this is what creates the real middle-lull → death-surge shape.
-    even = overs_left * (10.0 / overs_total)
-    surplus = wkts_left - even
-    if total_balls < 36:
-        _res_scale = 0.45
-    elif total_balls < max_balls - 30:
-        _res_scale = 0.60
-    else:
-        _res_scale = 1.30
-    intent += max(-0.35, min(0.40, surplus * T20_INTENT_RES_SENS * _res_scale))
-
-    # Run-rate gap (chase: required vs current; 1st inns: current vs phase par).
-    crr = innings.total_runs / total_balls * 6.0 if total_balls else 0.0
-    if match.current_innings_num == 2 and balls_left > 0:
-        target = getattr(match, "target", innings.total_runs + 1)
-        rrr = (target - innings.total_runs) / balls_left * 6.0
-        intent += max(-0.30, min(0.45, (rrr - crr) * T20_INTENT_RR_SENS))
-    else:
-        par_rr = 8.0 if total_balls < 36 else (7.8 if total_balls < max_balls - 30 else 10.5)
-        intent += max(-0.30, min(0.30, (par_rr - crr) * T20_INTENT_RR_SENS))
-
-    # Pitch difficulty: hard deck + wickets in hand → throw the bat; hard + thin → consolidate.
+    LAUNCH TIMING is the core: a full assault needs ~ wickets × (balls a wicket
+    survives attacking) deliveries, so as balls_left falls toward that capacity the
+    side accelerates; before that — and especially while rebuilding a collapse — it
+    builds. Overlaid with a tough-pitch 'throw the bat when stuck' term and the
+    chase's required rate, so the side both uses its wickets AND times the surge."""
+    B = max(0, balls_left)
+    W = (2 if getattr(match, "is_super_over", False) else 10) - innings.wickets
+    overs_left = B / 6.0
     diff = T20_PITCH_DIFFICULTY.get(match.pitch, 0.20)
-    if surplus > 0:
-        intent += diff * T20_INTENT_DIFF_UP * min(1.0, surplus / 3.0)
-    else:
-        intent -= diff * T20_INTENT_DIFF_DOWN * min(1.0, -surplus / 2.0)
+    crr = innings.total_runs / total_balls * 6.0 if total_balls else 0.0
 
-    # Batter: archetype + how set he is.
-    intent += {"Aggressor": 0.12, "Finisher": 0.07, "Standard": 0.0, "Anchor": -0.11}.get(archetype, 0.0)
-    if b_stats.balls_faced >= 15:
-        intent += 0.08
-    elif b_stats.balls_faced < 6:
+    # ── LAUNCH TIMING — the "when to go". A wicket survives ~abpw balls attacking
+    #    (fewer on a tough deck). The assault for W wickets needs ~W·abpw balls; the
+    #    side launches as balls_left approaches that capacity. Few wickets + many balls
+    #    → capacity small vs B → no launch (build); many wickets / few balls → launch.
+    abpw = T20_LAUNCH_ABPW - diff * T20_LAUNCH_ABPW_DIFF
+    capacity = max(1.0, W * abpw)
+    launch = max(0.0, min(1.0, (capacity * T20_LAUNCH_LEAD - B) / (capacity * 0.6)))
+
+    pp_floor = 0.50 if total_balls < 36 else 0.18          # powerplay field-up floor
+    intent = max(pp_floor, T20_INTENT_BASE + launch * T20_INTENT_LAUNCH_SPAN)
+
+    # ── CHASE: the required rate forces the issue regardless of launch timing. ──
+    if match.current_innings_num == 2 and B > 0:
+        target = getattr(match, "target", innings.total_runs + 1)
+        rrr = (target - innings.total_runs) / B * 6.0
+        intent = max(intent, min(1.0, 0.28 + (rrr - 7.5) * 0.055))
+
+    # ── TOUGH DECK → throw the bat to USE wickets, but only as the innings wears on.
+    #    Early, a side TRIES to bat (so it doesn't self-destruct for 60 in the powerplay);
+    #    as it realises it can't score it commits more. Scaled by wickets in hand and by
+    #    how late it is — keeps tough decks at 7-9 wickets used without freak ball-1 folds. ──
+    if W >= 3:
+        _prog = 0.35 + 0.65 * (total_balls / match.max_balls)
+        intent += diff * T20_INTENT_DIFF_UP * (1.0 + min(1.0, W / 6.0)) * _prog
+
+    # ── REBUILD AFTER A COLLAPSE: dig in until the partnership stabilises, THEN the
+    #    launch / stuck logic above resumes and they accelerate at the right time. ──
+    _recent = sum(1 for _b in getattr(innings, "wkt_balls", []) if _b >= total_balls - 18)
+    collapsing = ((innings.wickets >= 4 and innings.partnership_runs < 18 and overs_left > 4.0)
+                  or (_recent >= 2 and innings.partnership_runs < 14))
+    if collapsing:
+        intent *= T20_INTENT_REBUILD
+
+    # ── Batter: archetype + new-batsman caution. ──
+    intent += {"Aggressor": 0.10, "Finisher": 0.06, "Standard": 0.0, "Anchor": -0.10}.get(archetype, 0.0)
+    if b_stats.balls_faced < 5:
         intent -= 0.10
 
     return max(0.0, min(1.0, intent))
@@ -935,8 +934,9 @@ def execute_ball_math_t20(match):
         wicket_weight = min(wicket_weight, T20_BAT_PITCH_WKT_CAP)  # batting-paradise floor
     elif match.pitch in T20_BOWL_DECKS:
         # Intent model: relax the minefield floor so a side throwing the bat on a sticky
-        # actually loses wickets (7-9 down, ~120-150 all out) instead of stranding them.
-        wicket_weight = min(wicket_weight, 17.0 if _T20_INTENT else T20_BOWL_PITCH_WKT_CAP)
+        # actually loses wickets (7-9 down, ~120-150 all out) instead of stranding them —
+        # but not so far that strong teams routinely fold for <80 (keep that a ~1% rarity).
+        wicket_weight = min(wicket_weight, 16.0 if _T20_INTENT else T20_BOWL_PITCH_WKT_CAP)
     wicket_weight = max(1.0, min(wicket_weight, 30.0)) # Hard cap to prevent 10/10 scenarios
     dot_weight = max(5.0, min(dot_weight, 120.0))
 
