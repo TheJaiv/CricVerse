@@ -10134,12 +10134,6 @@ class PrefixCog(commands.Cog):
         min_s  = tourney.get("min_squad", 11)
         max_s  = tourney.get("max_squad", 15)
 
-        def make_squad():
-            # Prioritise HIGH-RATED players (jittered overall sort) so squads are strong
-            # & varied — not a random scoop that can hand a team a bench of journeymen.
-            ranked = sorted(db_players, key=lambda p: _player_overall(p) * (0.6 + 0.7 * random.random()), reverse=True)
-            return ranked[:min(max_s, len(ranked))]
-
         if t_type == "t20_world_cup":
             team_config = [
                 ("India", "A"), ("Pakistan", "A"), ("Australia", "A"), ("England", "A"),
@@ -10162,9 +10156,21 @@ class PrefixCog(commands.Cog):
                 ("Golden Lions", None), ("Silver Eagles", None),
             ]
 
+        # Snake draft from one ranked pool: prioritises high-rated players, balances the
+        # teams, and guarantees every player is dealt to ONLY ONE team (no shared players).
+        num_teams = len(team_config)
+        ranked = sorted(db_players, key=lambda p: _player_overall(p) * (0.6 + 0.7 * random.random()), reverse=True)
+        squads = [[] for _ in range(num_teams)]
+        _idx = 0
+        for _rnd in range(max_s):
+            order = range(num_teams) if _rnd % 2 == 0 else range(num_teams - 1, -1, -1)
+            for _t in order:
+                if _idx >= len(ranked):
+                    break
+                squads[_t].append(ranked[_idx]); _idx += 1
         tourney["teams"] = []
-        for name, grp in team_config:
-            tourney["teams"].append({"name": name, "owner_id": str(ctx.author.id), "squad": make_squad(), "group": grp})
+        for _i, (name, grp) in enumerate(team_config):
+            tourney["teams"].append({"name": name, "owner_id": str(ctx.author.id), "squad": squads[_i], "group": grp})
 
         should_start = auto_start.lower() not in ("no", "false", "0")
         if not should_start:
