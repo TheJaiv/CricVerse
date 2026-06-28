@@ -7077,15 +7077,25 @@ def _best_xi(squad: list, n: int = 11, min_bowlers: int = 5) -> list:
     return xi
 
 def _batting_order(players: list) -> list:
-    """Arrange an XI into a realistic batting order (the sim bats in roster order):
-    specialist batters / keepers first by batting rating, then all-rounders, then the
-    bowlers as the tail — so the best batters open and bowlers don't bat up top."""
-    def _bucket(p):
-        r = p.get("role", "")
-        if "Bowler" in r:       return 2   # tail
-        if "All-Rounder" in r:  return 1   # middle/lower-middle
-        return 0                           # Batter / WK-Batter → top order
-    return sorted(players, key=lambda p: (_bucket(p), -float(p.get("bat", 50))))
+    """Arrange an XI into a realistic batting order (the sim bats in roster order).
+
+    Mostly driven by batting rating (better batters bat earlier) but shaped by role and
+    archetype into a proper team sheet: aggressors/anchors open the top order, finishers
+    sit at 5-7, all-rounders in the lower-middle, and bowlers form the tail (best-batting
+    bowler first). Role weights dominate so a bowler never bats up top, but rating still
+    decides within a band — a strong specialist always out-ranks a weak one."""
+    def _pos(p):
+        role = p.get("role", "")
+        arch = p.get("archetype", "Standard")
+        bat  = float(p.get("bat", 50))
+        score = 100.0 - bat                       # better batters earlier
+        if "Bowler" in role:        score += 80   # tail, no matter the rating
+        elif "All-Rounder" in role: score += 35   # lower-middle (6-8)
+        if arch == "Aggressor":     score -= 6    # push openers up a touch
+        elif arch == "Anchor":      score -= 2    # top order
+        elif arch == "Finisher":    score += 8    # slot finishers at 5-7
+        return score
+    return sorted(players, key=_pos)
 
 def _build_playerlist_txt(players: list) -> str:
     tiers = {"LEGENDS": [], "ELITE": [], "GOLD": [], "SILVER": [], "BRONZE": []}
@@ -9776,7 +9786,6 @@ class PrefixCog(commands.Cog):
         if not any(m["status"] == "pending" for m in tourney.get("schedule", [])):
             return await ctx.send("✅ No pending matches — tournament is fully simulated!")
 
-        _PITCHES = ["Flat", "Green Seamer", "Dry", "Dusty", "Spin-Friendly", "Bouncy", "Hard"]
         status_msg = await ctx.send("⚡ **Simulating all pending matches...** (playoff matches are auto-included as they unlock)")
         results = []
         injuries_log = []
@@ -9825,11 +9834,15 @@ class PrefixCog(commands.Cog):
             # bowlers at the tail) — not just the first 11 in squad order.
             roster1 = _batting_order(_best_xi(apply_server_overrides(_available(s1), tourney["server_id"])))
             roster2 = _batting_order(_best_xi(apply_server_overrides(_available(s2), tourney["server_id"])))
-            pitch = random.choice(_PITCHES)
+            # Use the match's assigned conditions if valid; otherwise pick a fully random
+            # pitch from the FULL valid set (not a tiny flat/dead-heavy list) so sims cover
+            # every surface — green seamers, dustbowls, crackers, the lot.
+            pitch = canonical_pitch(m_data.get("pitch")) or random.choice(ALL_PITCHES)
+            weather = canonical_weather(m_data.get("weather")) or "Clear"
             t1 = {"name": m_data["team1"], "players": roster1, "color": t1_data.get("color", "#6B7280")}
             t2 = {"name": m_data["team2"], "players": roster2, "color": t2_data.get("color", "#6B7280")}
 
-            match = CricketMatch(None, None, 0, 0, t1, t2, tourney.get("format_overs", 20), pitch, "Clear")
+            match = CricketMatch(None, None, 0, 0, t1, t2, tourney.get("format_overs", 20), pitch, weather)
             match.tournament_server_id = tourney["server_id"]
             match.tournament_match_id = m_data["match_id"]
             match.tournament_type = tourney.get("tournament_type", "round_robin")
