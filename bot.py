@@ -6771,7 +6771,7 @@ def _help_tournament_embed():
     e.add_field(name="👁️ View",
         value=("`status` · `standings` · `groups` · `leaderboard <category>`\n"
                "`squad [team]`  ·  shortcut: **`cv squad`** / **`cv sq`**\n"
-               "`player_stats <team> <player>` · `match_scorecard <id>`"),
+               "`player_stats <player>` (alias `ps`) · `match_scorecard <id>`"),
         inline=False)
     e.add_field(name="🏏 Play",
         value=("`submit_squad` · `next_match` · `play <id>` · `play_next`\n"
@@ -7075,6 +7075,17 @@ def _best_xi(squad: list, n: int = 11, min_bowlers: int = 5) -> list:
         for i in range(min(min_bowlers - have, len(spare), len(drop))):
             xi.remove(drop[i]); xi.append(spare[i])
     return xi
+
+def _batting_order(players: list) -> list:
+    """Arrange an XI into a realistic batting order (the sim bats in roster order):
+    specialist batters / keepers first by batting rating, then all-rounders, then the
+    bowlers as the tail — so the best batters open and bowlers don't bat up top."""
+    def _bucket(p):
+        r = p.get("role", "")
+        if "Bowler" in r:       return 2   # tail
+        if "All-Rounder" in r:  return 1   # middle/lower-middle
+        return 0                           # Batter / WK-Batter → top order
+    return sorted(players, key=lambda p: (_bucket(p), -float(p.get("bat", 50))))
 
 def _build_playerlist_txt(players: list) -> str:
     tiers = {"LEGENDS": [], "ELITE": [], "GOLD": [], "SILVER": [], "BRONZE": []}
@@ -9810,9 +9821,10 @@ class PrefixCog(commands.Cog):
                         _p.pop("injured", None); _p.pop("injury_until_match", None); _p.pop("injury_severity", None)
 
             # Play each team's BEST balanced XI (top 11 by rating, ≥5 who can bowl) from the
-            # players still FIT — not just the first 11 in squad order.
-            roster1 = _best_xi(apply_server_overrides(_available(s1), tourney["server_id"]))
-            roster2 = _best_xi(apply_server_overrides(_available(s2), tourney["server_id"]))
+            # players still FIT, then sort into a proper batting order (best batters open,
+            # bowlers at the tail) — not just the first 11 in squad order.
+            roster1 = _batting_order(_best_xi(apply_server_overrides(_available(s1), tourney["server_id"])))
+            roster2 = _batting_order(_best_xi(apply_server_overrides(_available(s2), tourney["server_id"])))
             pitch = random.choice(_PITCHES)
             t1 = {"name": m_data["team1"], "players": roster1, "color": t1_data.get("color", "#6B7280")}
             t2 = {"name": m_data["team2"], "players": roster2, "color": t2_data.get("color", "#6B7280")}
@@ -10451,7 +10463,7 @@ class PrefixCog(commands.Cog):
             embed.description = (header + "\n" if header else "") + ("\n".join(lines) if lines else "No players qualify yet.")
             await ctx.send(embed=embed)
 
-    @tournament.command(name="player_stats", help="View a player's tournament stats — team optional.\nUsage: tournament player_stats <player>")
+    @tournament.command(name="player_stats", aliases=["ps"], help="View a player's tournament stats — team optional.\nUsage: tournament player_stats <player>")
     async def t_player_stats(self, ctx, *, player_name: str):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
