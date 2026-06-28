@@ -870,9 +870,10 @@ class T20StandingsView(discord.ui.View):
             attachments=[discord.File(fp=buf, filename=fname)], view=self)
 
 
-class LeaderboardView(discord.ui.View):
+class TournamentLeaderboardView(discord.ui.View):
     """◀ / ▶ paginated leaderboard — shows up to `len(lines)` entries, 10 per page.
-    Used by the runs / wickets / MVP leaderboards (first 50, 5 pages)."""
+    Used by the runs / wickets / MVP leaderboards (first 50, 5 pages).
+    (Named distinctly from bot.py's career `LeaderboardView` to avoid a shadow clash.)"""
 
     def __init__(self, title: str, header: str, lines: list, per_page: int = 10):
         super().__init__(timeout=180)
@@ -916,6 +917,62 @@ class LeaderboardView(discord.ui.View):
         self.idx = min(self.pages_total - 1, self.idx + 1)
         self._update_nav()
         await interaction.response.edit_message(embed=self.make_embed(), view=self)
+
+
+def build_player_stats_embed(stats, pname, tname):
+    """Shared tournament player-stats embed (slash + prefix, after the team is resolved)."""
+    sr = (stats["runs"] / stats["balls_faced"] * 100) if stats["balls_faced"] > 0 else 0.0
+    bat_avg = (stats["runs"] / stats["outs"]) if stats["outs"] > 0 else float(stats["runs"])
+    bowl_avg = (stats["runs_conceded"] / stats["wickets"]) if stats["wickets"] > 0 else 0.0
+    econ = (stats["runs_conceded"] / stats["balls_bowled"] * 6) if stats["balls_bowled"] > 0 else 0.0
+    embed = discord.Embed(title=f"📊 Tournament Stats: {pname}",
+                          description=f"**Team:** {tname} | **Matches:** {stats['matches']}",
+                          color=discord.Color.blue())
+    bat_str = (f"**Runs:** {stats['runs']}\n**Strike Rate:** {sr:.1f}\n**Average:** {bat_avg:.1f}\n"
+               f"**4s:** {stats['fours']} | **6s:** {stats['sixes']}\n**50s:** {stats['fifties']} | **100s:** {stats['hundreds']}")
+    embed.add_field(name="🏏 Batting", value=bat_str, inline=True)
+    o = stats['balls_bowled'] // 6; b = stats['balls_bowled'] % 6
+    bowl_str = f"**Wickets:** {stats['wickets']}\n**Economy:** {econ:.1f}\n**Bowling Avg:** {bowl_avg:.1f}\n**Overs:** {o}.{b}"
+    embed.add_field(name="🎯 Bowling", value=bowl_str, inline=True)
+    return embed
+
+
+def find_player_in_tournament(tourney, player_name):
+    """Every (team, player_key) whose stats hold `player_name`. Exact (case-insensitive)
+    match across all teams first; if none, one fuzzy close-match. Team need not be given."""
+    stats_map = tourney.get("stats", {})
+    pl = player_name.lower()
+    exact = [(t, p) for t, players in stats_map.items() for p in players if p.lower() == pl]
+    if exact:
+        return exact
+    all_pairs = [(t, p) for t, players in stats_map.items() for p in players]
+    close = difflib.get_close_matches(player_name, [p for _, p in all_pairs], n=1, cutoff=0.5)
+    if close:
+        return [(t, p) for t, p in all_pairs if p == close[0]]
+    return []
+
+
+class PlayerStatsTeamSelectView(discord.ui.View):
+    """Asks which team's player to show when the same name is on more than one team."""
+
+    def __init__(self, stats_map, matches):
+        super().__init__(timeout=60)
+        self.stats_map = stats_map
+        self.by_team = {t: p for t, p in matches}
+        opts = [discord.SelectOption(label=t[:100], description=f"{p}'s stats"[:100]) for t, p in matches[:25]]
+        self.sel = discord.ui.Select(placeholder="Choose a team…", options=opts)
+        self.sel.callback = self._cb
+        self.add_item(self.sel)
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+    async def _cb(self, interaction: discord.Interaction):
+        t = self.sel.values[0]
+        p = self.by_team[t]
+        await interaction.response.edit_message(
+            content=None, embed=build_player_stats_embed(self.stats_map[t][p], p, t), view=None)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -2185,7 +2242,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             lines.append(f"`{i:>2}.` **{p['name']}** ({p['team']}) — {val}")
         title = f"🏆 Tournament Leaderboard: {category.name}"
         if c_val in PAGINATED:
-            view = LeaderboardView(title, header, lines)
+            view = TournamentLeaderboardView(title, header, lines)
             await interaction.response.send_message(embed=view.make_embed(), view=view)
         else:
             embed = discord.Embed(title=title, color=discord.Color.gold())
@@ -2193,33 +2250,36 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             embed.description = (header + "\n" if header else "") + body
             await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="player_stats", description="View a specific player's tournament stats.")
-    async def player_stats(self, interaction: discord.Interaction, team_name: str, player_name: str):
+    @app_commands.command(name="player_stats", description="View a player's tournament stats (team optional).")
+    @app_commands.describe(player_name="Player to look up", team_name="Optional — only needed if the same name is on multiple teams")
+    async def player_stats(self, interaction: discord.Interaction, player_name: str, team_name: str = None):
         server_id = str(interaction.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
-        t_match = next((t for t in tourney.get("stats", {}).keys() if t.lower() == team_name.lower()), None)
-        if not t_match:
-            return await interaction.response.send_message(f"❌ Team '{team_name}' not found or hasn't played a match yet.", ephemeral=True)
-        p_match = next((p for p in tourney["stats"][t_match].keys() if p.lower() == player_name.lower()), None)
-        if not p_match:
-            close = difflib.get_close_matches(player_name, list(tourney["stats"][t_match].keys()), n=1, cutoff=0.5)
-            if close: p_match = close[0]
-            else: return await interaction.response.send_message(f"❌ Player '{player_name}' not found in team '{t_match}'.", ephemeral=True)
-        stats = tourney["stats"][t_match][p_match]
-        sr = (stats["runs"] / stats["balls_faced"] * 100) if stats["balls_faced"] > 0 else 0.0
-        bat_avg = (stats["runs"] / stats["outs"]) if stats["outs"] > 0 else float(stats["runs"])
-        bowl_avg = (stats["runs_conceded"] / stats["wickets"]) if stats["wickets"] > 0 else 0.0
-        econ = (stats["runs_conceded"] / stats["balls_bowled"] * 6) if stats["balls_bowled"] > 0 else 0.0
-        embed = discord.Embed(title=f"📊 Tournament Stats: {p_match}", description=f"**Team:** {t_match} | **Matches:** {stats['matches']}", color=discord.Color.blue())
-        bat_str = f"**Runs:** {stats['runs']}\n**Strike Rate:** {sr:.1f}\n**Average:** {bat_avg:.1f}\n"
-        bat_str += f"**4s:** {stats['fours']} | **6s:** {stats['sixes']}\n**50s:** {stats['fifties']} | **100s:** {stats['hundreds']}"
-        embed.add_field(name="🏏 Batting", value=bat_str, inline=True)
-        bowl_str = f"**Wickets:** {stats['wickets']}\n**Economy:** {econ:.1f}\n**Bowling Avg:** {bowl_avg:.1f}\n"
-        o = stats['balls_bowled'] // 6; b = stats['balls_bowled'] % 6
-        bowl_str += f"**Overs:** {o}.{b}"
-        embed.add_field(name="🎯 Bowling", value=bowl_str, inline=True)
-        await interaction.response.send_message(embed=embed)
+        stats_map = tourney.get("stats", {})
+        if not stats_map: return await interaction.response.send_message("❌ No stats available yet. Complete a match first!", ephemeral=True)
+
+        # Team given → resolve within that team (old behaviour).
+        if team_name:
+            t_match = next((t for t in stats_map if t.lower() == team_name.lower()), None)
+            if not t_match:
+                return await interaction.response.send_message(f"❌ Team '{team_name}' not found or hasn't played a match yet.", ephemeral=True)
+            p_match = next((p for p in stats_map[t_match] if p.lower() == player_name.lower()), None)
+            if not p_match:
+                close = difflib.get_close_matches(player_name, list(stats_map[t_match].keys()), n=1, cutoff=0.5)
+                if close: p_match = close[0]
+                else: return await interaction.response.send_message(f"❌ Player '{player_name}' not found in team '{t_match}'.", ephemeral=True)
+            return await interaction.response.send_message(embed=build_player_stats_embed(stats_map[t_match][p_match], p_match, t_match))
+
+        # No team → search every team; ask which one if the name is shared.
+        matches = find_player_in_tournament(tourney, player_name)
+        if not matches:
+            return await interaction.response.send_message(f"❌ Player '{player_name}' not found in any team.", ephemeral=True)
+        if len(matches) == 1:
+            t, p = matches[0]
+            return await interaction.response.send_message(embed=build_player_stats_embed(stats_map[t][p], p, t))
+        view = PlayerStatsTeamSelectView(stats_map, matches)
+        await interaction.response.send_message(f"🔎 **{matches[0][1]}** is on multiple teams — pick which one:", view=view)
 
     @app_commands.command(name="squad", description="View a team's tournament squad and player ratings.")
     async def squad(self, interaction: discord.Interaction, team_name: str = None):

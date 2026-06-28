@@ -34,7 +34,7 @@ from test_image import (
     generate_test_summary_image as _ti_summary,
     generate_test_scorecard_image as _ti_scorecard,
 )
-from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, LeaderboardView
+from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView
 from subscription_manager import (
     load_data_from_bin, load_tournament_data_from_bin,
     save_data_to_bin, save_tournament_data_to_bin,
@@ -91,6 +91,10 @@ def _can_use_career(ctx):
         if ctx.guild and ctx.author.guild_permissions.administrator:
             return True
         if str(ctx.author.id) in get_auth_admins():
+            return True
+        # Career Beta testers get in before the global launch.
+        sid = str(ctx.guild.id) if ctx.guild else ""
+        if get_tier_status(str(ctx.author.id), sid)[0] == "Career Beta":
             return True
     except Exception:
         pass
@@ -6826,7 +6830,7 @@ def _help_owner_embed():
                "`cvt dev_setup` — fill squads with random players & auto-start (testing)\n"
                "`cvt set_schedule` — set a custom fixture order"),
         inline=False)
-    e.add_field(name="User Tiers",   value="`Basic` · `Standard` · `Single` · `Server Pro` · `None`", inline=True)
+    e.add_field(name="User Tiers",   value="`Basic` · `Standard` · `Single` · `Server Pro` · `Career Beta` · `None`", inline=True)
     e.add_field(name="Server Tiers", value="`Bronze` · `Silver` · `Gold` · `Diamond` · `None`",       inline=True)
     return e
 
@@ -7454,6 +7458,7 @@ async def log_db_update(action: str, player_name: str, user: discord.User, detai
     app_commands.Choice(name="Standard (1 Sim/Day | All)", value="Standard"),
     app_commands.Choice(name="Single (1 Match Consumable)", value="Single"),
     app_commands.Choice(name="Server Pro (Unlimited on Silver/Diamond)", value="Server Pro"),
+    app_commands.Choice(name="Career Beta (Career Mode Access)", value="Career Beta"),
     app_commands.Choice(name="None (Remove)", value="None")
 ])
 async def set_user_tier_cmd(interaction: discord.Interaction, user: discord.Member, tier: app_commands.Choice[str]):
@@ -7849,11 +7854,16 @@ class PrefixCog(commands.Cog):
 
     @staticmethod
     def _team_admin(ctx):
-        """Saving/editing/deleting teams is admin-only; anyone can view & use them."""
+        """Saving/editing/deleting teams: server admins, auth admins, or Server Pro users.
+        Anyone can still view & use saved teams."""
         try:
-            return (ctx.author.id == ADMIN_DISCORD_ID
+            if (ctx.author.id == ADMIN_DISCORD_ID
                     or (ctx.guild and ctx.author.guild_permissions.administrator)
-                    or str(ctx.author.id) in get_auth_admins())
+                    or str(ctx.author.id) in get_auth_admins()):
+                return True
+            # Server Pro tier users may also manage saved teams.
+            sid = str(ctx.guild.id) if ctx.guild else ""
+            return get_tier_status(str(ctx.author.id), sid)[0] == "Server Pro"
         except Exception:
             return False
 
@@ -7862,7 +7872,7 @@ class PrefixCog(commands.Cog):
         if not ctx.guild:
             return await ctx.send("❌ Use this inside a server.")
         if not self._team_admin(ctx):
-            return await ctx.send("🔒 Only **server admins** can save teams. Anyone can view them with `cv teams` and load them at the XI step.")
+            return await ctx.send("🔒 Only **server admins** or **Server Pro** users can save teams. Anyone can view them with `cv teams` and load them at the XI step.")
         name = (name or "").strip()[:24]
         if not name:
             return await ctx.send("❌ Give it a name, e.g. `cv saveteam \"RCB\"`.")
@@ -7941,7 +7951,7 @@ class PrefixCog(commands.Cog):
         if not ctx.guild:
             return await ctx.send("❌ Use this inside a server.")
         if not self._team_admin(ctx):
-            return await ctx.send("🔒 Only **server admins** can delete teams.")
+            return await ctx.send("🔒 Only **server admins** or **Server Pro** users can delete teams.")
         if delete_custom_team(name or ""):
             await ctx.send(f"🗑️ Deleted saved team **{name}**.")
         else:
@@ -7952,7 +7962,7 @@ class PrefixCog(commands.Cog):
         if not ctx.guild:
             return await ctx.send("❌ Use this inside a server.")
         if not self._team_admin(ctx):
-            return await ctx.send("🔒 Only **server admins** can edit teams.")
+            return await ctx.send("🔒 Only **server admins** or **Server Pro** users can edit teams.")
         ct = get_custom_team(name or "")
         if not ct:
             return await ctx.send(f"❌ No saved team named **{name}**. See `cv teams`, or create one with `cv saveteam`.")
@@ -8360,7 +8370,7 @@ class PrefixCog(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ Error during sync: {e}")
 
-    @commands.command(name="set_user_tier", aliases=["sut"], help="[OWNER] Assign subscription tier to a user.\nUsage: set_user_tier @user <tier>\nTiers: Basic, Standard, Single, Server Pro, None")
+    @commands.command(name="set_user_tier", aliases=["sut"], help="[OWNER] Assign subscription tier to a user.\nUsage: set_user_tier @user <tier>\nTiers: Basic, Standard, Single, Server Pro, Career Beta, None")
     async def set_user_tier(self, ctx, user: discord.Member, *, tier: str):
         if ctx.author.id != ADMIN_DISCORD_ID:
             return await ctx.send("❌ Owner only.")
@@ -8369,6 +8379,7 @@ class PrefixCog(commands.Cog):
             "Standard": "Standard (1 Sim/Day | All)",
             "Single": "Single (1 Match Consumable)",
             "Server Pro": "Server Pro (Unlimited on Silver/Diamond)",
+            "Career Beta": "Career Beta (Career Mode Access)",
             "None": "None (Remove)"
         }
         tier = tier.strip()
@@ -9757,7 +9768,14 @@ class PrefixCog(commands.Cog):
         _PITCHES = ["Flat", "Green Seamer", "Dry", "Dusty", "Spin-Friendly", "Bouncy", "Hard"]
         status_msg = await ctx.send("⚡ **Simulating all pending matches...** (playoff matches are auto-included as they unlock)")
         results = []
+        injuries_log = []
         errored = set()
+
+        # Mirror the real match-start filter: leave injured players out of the XI,
+        # falling back to the full squad only if fewer than 11 are fit.
+        def _available(squad):
+            fit = [p for p in squad if not p.get("injured")]
+            return fit if len(fit) >= 11 else squad
 
         # Re-scan after every match so newly-unlocked knockout matches (ACL playoffs, T20WC semis/final) get played too
         def _next_pending():
@@ -9783,10 +9801,18 @@ class PrefixCog(commands.Cog):
                 results.append(f"M{m_data['match_id']} ({r_label}): ❌ Squad not set")
                 continue
 
-            # Play each team's BEST balanced XI (top 11 by rating, ≥5 who can bowl),
-            # not just the first 11 in squad order.
-            roster1 = _best_xi(apply_server_overrides(s1, tourney["server_id"]))
-            roster2 = _best_xi(apply_server_overrides(s2, tourney["server_id"]))
+            # Injuries carry over between simmed matches exactly like real ones: first heal
+            # any that have now expired, then leave the still-injured out of THIS match's XI.
+            current_mid = m_data["match_id"]
+            for _td in (t1_data, t2_data):
+                for _p in _td.get("squad", []):
+                    if _p.get("injured") and _p.get("injury_until_match", 0) < current_mid:
+                        _p.pop("injured", None); _p.pop("injury_until_match", None); _p.pop("injury_severity", None)
+
+            # Play each team's BEST balanced XI (top 11 by rating, ≥5 who can bowl) from the
+            # players still FIT — not just the first 11 in squad order.
+            roster1 = _best_xi(apply_server_overrides(_available(s1), tourney["server_id"]))
+            roster2 = _best_xi(apply_server_overrides(_available(s2), tourney["server_id"]))
             pitch = random.choice(_PITCHES)
             t1 = {"name": m_data["team1"], "players": roster1, "color": t1_data.get("color", "#6B7280")}
             t2 = {"name": m_data["team2"], "players": roster2, "color": t2_data.get("color", "#6B7280")}
@@ -9822,6 +9848,16 @@ class PrefixCog(commands.Cog):
             # tourney dict has been updated in-place by the listener; re-fetch for fresh ref
             tourney = get_server_tournament(server_id)
 
+            # Log this match's freshly-rolled injuries one-by-one and CONSUME them, so they
+            # aren't re-announced when a real match later starts. The injured flags stay on
+            # the squad, so those players sit out the next simmed match (handled above).
+            _news = tourney.pop("pending_injury_news", [])
+            injury_suffix = ""
+            if _news:
+                save_tournament(tourney)
+                injuries_log.extend(_news)
+                injury_suffix = "  🚑 " + ", ".join(f"{it['player']} ({it['team']}, {it['severity']}m)" for it in _news)
+
             inn1, inn2 = match.innings1, match.innings2
             if inn2.total_runs >= match.target:
                 win_str = f"{inn2.batting_team['name']} won by {10 - inn2.wickets}W"
@@ -9837,7 +9873,7 @@ class PrefixCog(commands.Cog):
                 f"/{inn1.wickets if match.innings1.batting_team['name'] == t1['name'] else inn2.wickets} "
                 f"vs {t2['name']} {inn2.total_runs if match.innings2.batting_team['name'] == t2['name'] else inn1.total_runs}"
                 f"/{inn2.wickets if match.innings2.batting_team['name'] == t2['name'] else inn1.wickets} "
-                f"— **{win_str}**"
+                f"— **{win_str}**{injury_suffix}"
             )
 
         header = f"✅ **Simulation Complete! ({len(results)} matches)**\n"
@@ -9854,6 +9890,26 @@ class PrefixCog(commands.Cog):
                 chunk.append(ln); buf += len(ln) + 1
             if chunk:
                 await ctx.send("\n".join(chunk))
+
+        # Consolidated injury report to the injury channel (mirrors real matches; pings owners).
+        if injuries_log:
+            team_owners = {t["name"]: t.get("owner_id") for t in tourney.get("teams", [])}
+            rep, pings = [f"🚑 **Injury Report — {len(injuries_log)} from simulated matches:**"], []
+            for it in injuries_log:
+                mw = "match" if it["severity"] == 1 else "matches"
+                rep.append(f"• **{it['player']}** ({it['team']}) — out **{it['severity']}** {mw}")
+                oid = team_owners.get(it["team"])
+                if oid and oid not in pings: pings.append(oid)
+            if pings: rep.append(" ".join(f"<@{u}>" for u in pings))
+            inj_ch_id = tourney.get("injury_channel_id")
+            inj_ch = (self.bot.get_channel(int(inj_ch_id)) if inj_ch_id else None) or ctx.channel
+            chunk, buf = [], 0
+            for ln in rep:
+                if buf + len(ln) + 1 > 1900:
+                    await inj_ch.send("\n".join(chunk)); chunk, buf = [], 0
+                chunk.append(ln); buf += len(ln) + 1
+            if chunk:
+                await inj_ch.send("\n".join(chunk))
 
     @tournament.command(name="add_manager", help="[MANAGER] Assign a tournament manager.\nUsage: tournament add_manager <@user>")
     async def t_add_manager(self, ctx, user: discord.Member):
@@ -10203,8 +10259,11 @@ class PrefixCog(commands.Cog):
 
         # Snake draft from one ranked pool: prioritises high-rated players, balances the
         # teams, and guarantees every player is dealt to ONLY ONE team (no shared players).
+        # Rating DOMINATES (small ±2.5 jitter only breaks near-ties) so every genuinely good
+        # player is guaranteed into the drafted pool — the top (teams × squad) all get a squad,
+        # and _best_xi then puts the best of each squad into the XI that actually plays.
         num_teams = len(team_config)
-        ranked = sorted(db_players, key=lambda p: _player_overall(p) * (0.6 + 0.7 * random.random()), reverse=True)
+        ranked = sorted(db_players, key=lambda p: _player_overall(p) + random.uniform(-2.5, 2.5), reverse=True)
         squads = [[] for _ in range(num_teams)]
         _idx = 0
         for _rnd in range(max_s):
@@ -10385,34 +10444,29 @@ class PrefixCog(commands.Cog):
             else: val = ""
             lines.append(f"`{i:>2}.` **{p['name']}** ({p['team']}) — {val}")
         if c_val in PAGINATED:
-            view = LeaderboardView(title, header, lines)
+            view = TournamentLeaderboardView(title, header, lines)
             await ctx.send(embed=view.make_embed(), view=view)
         else:
             embed = discord.Embed(title=title, color=discord.Color.gold())
             embed.description = (header + "\n" if header else "") + ("\n".join(lines) if lines else "No players qualify yet.")
             await ctx.send(embed=embed)
 
-    @tournament.command(name="player_stats", help="View a specific player's tournament stats.\nUsage: tournament player_stats \"<team>\" \"<player>\"")
-    async def t_player_stats(self, ctx, team_name: str, *, player_name: str):
+    @tournament.command(name="player_stats", help="View a player's tournament stats — team optional.\nUsage: tournament player_stats <player>")
+    async def t_player_stats(self, ctx, *, player_name: str):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney: return await ctx.send("❌ No tournament exists.")
-        t_match = next((t for t in tourney.get("stats", {}).keys() if t.lower() == team_name.lower()), None)
-        if not t_match: return await ctx.send(f"❌ Team '{team_name}' not found or hasn't played yet.")
-        p_match = next((p for p in tourney["stats"][t_match].keys() if p.lower() == player_name.lower()), None)
-        if not p_match:
-            close = difflib.get_close_matches(player_name, list(tourney["stats"][t_match].keys()), n=1, cutoff=0.5)
-            if close: p_match = close[0]
-            else: return await ctx.send(f"❌ Player '{player_name}' not found in team '{t_match}'.")
-        stats = tourney["stats"][t_match][p_match]
-        sr = (stats["runs"]/stats["balls_faced"]*100) if stats["balls_faced"] > 0 else 0.0
-        bat_avg = stats["runs"]/stats["outs"] if stats["outs"] > 0 else float(stats["runs"])
-        bowl_avg = stats["runs_conceded"]/stats["wickets"] if stats["wickets"] > 0 else 0.0
-        econ = (stats["runs_conceded"]/stats["balls_bowled"]*6) if stats["balls_bowled"] > 0 else 0.0
-        embed = discord.Embed(title=f"📊 {p_match} — {t_match}", description=f"Matches: {stats['matches']}", color=discord.Color.blue())
-        embed.add_field(name="🏏 Batting", value=f"**Runs:** {stats['runs']}\n**SR:** {sr:.1f}\n**Avg:** {bat_avg:.1f}\n**4s:** {stats['fours']} | **6s:** {stats['sixes']}\n**50s:** {stats['fifties']} | **100s:** {stats['hundreds']}", inline=True)
-        embed.add_field(name="🎯 Bowling", value=f"**Wkts:** {stats['wickets']}\n**Econ:** {econ:.1f}\n**Avg:** {bowl_avg:.1f}\n**Overs:** {stats['balls_bowled']//6}.{stats['balls_bowled']%6}", inline=True)
-        await ctx.send(embed=embed)
+        stats_map = tourney.get("stats", {})
+        if not stats_map: return await ctx.send("❌ No stats yet. Complete a match first!")
+        # Search every team by player name; ask which team if the name is shared.
+        matches = find_player_in_tournament(tourney, player_name)
+        if not matches:
+            return await ctx.send(f"❌ Player '{player_name}' not found in any team.")
+        if len(matches) == 1:
+            t, p = matches[0]
+            return await ctx.send(embed=build_player_stats_embed(stats_map[t][p], p, t))
+        view = PlayerStatsTeamSelectView(stats_map, matches)
+        await ctx.send(f"🔎 **{matches[0][1]}** is on multiple teams — pick which one:", view=view)
 
     @tournament.command(name="help_guide", aliases=["help", "commands", "guide"], help="Show the tournament commands guide.\nUsage: cvt help")
     async def t_help_guide(self, ctx):
