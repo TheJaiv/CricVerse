@@ -34,7 +34,7 @@ from test_image import (
     generate_test_summary_image as _ti_summary,
     generate_test_scorecard_image as _ti_scorecard,
 )
-from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER
+from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, LeaderboardView
 from subscription_manager import (
     load_data_from_bin, load_tournament_data_from_bin,
     save_data_to_bin, save_tournament_data_to_bin,
@@ -10130,6 +10130,51 @@ class PrefixCog(commands.Cog):
         if len(db_players) < 11:
             return await ctx.send("❌ Not enough players in the database.")
 
+        # ── Curated pool from "message (13) copy 2.txt": use ONLY the players listed there
+        #    (one per line, flag emoji ignored). Category headers and any name not found in
+        #    the DB are skipped silently — never crashes on a missing/misspelt player. ──
+        def _strip_emoji(s):
+            keep = []
+            for c in s:
+                o = ord(c)
+                if (0x1F000 <= o <= 0x1FAFF or 0x1F1E6 <= o <= 0x1F1FF or 0x2600 <= o <= 0x27BF
+                        or 0xFE00 <= o <= 0xFE0F or o == 0x200D or 0xE0000 <= o <= 0xE007F
+                        or 0x2B00 <= o <= 0x2BFF or 0x2190 <= o <= 0x21FF):
+                    continue
+                keep.append(c)
+            return "".join(keep).strip()
+        def _has_emoji(s):
+            return any(0x1F000 <= ord(c) <= 0x1FAFF or 0x1F1E6 <= ord(c) <= 0x1F1FF
+                       or 0xE0000 <= ord(c) <= 0xE007F for c in s)
+
+        db_players = list(db_players)
+        _skipped = 0
+        _used_curated = False
+        try:
+            with open("message (13) copy 2.txt", encoding="utf-8") as _fh:
+                _lines = _fh.read().splitlines()
+            _dbmap = {p["name"].lower(): p for p in db_players}
+            _curated, _seen = [], set()
+            for _ln in _lines:
+                if not _has_emoji(_ln):          # category header / blank → ignore
+                    continue
+                _nm = _strip_emoji(_ln)
+                if not _nm:
+                    continue
+                _p = _dbmap.get(_nm.lower())
+                if _p:
+                    if _p["name"] not in _seen:
+                        _curated.append(_p); _seen.add(_p["name"])
+                else:
+                    _skipped += 1                # listed but not in DB → skip
+            if len(_curated) >= 11:
+                db_players = _curated            # use the curated set as the draft pool
+                _used_curated = True
+        except FileNotFoundError:
+            pass                                 # no file → fall back to the full DB
+        _pool_note = (f"\n📋 Used **{len(db_players)}** curated players from the list · skipped **{_skipped}** not in DB."
+                      if _used_curated else "")
+
         t_type = tourney.get("tournament_type", "round_robin")
         min_s  = tourney.get("min_squad", 11)
         max_s  = tourney.get("max_squad", 15)
@@ -10175,7 +10220,7 @@ class PrefixCog(commands.Cog):
         should_start = auto_start.lower() not in ("no", "false", "0")
         if not should_start:
             save_tournament(tourney)
-            return await ctx.send(f"✅ **Dev Setup Complete!** Added {len(tourney['teams'])} teams. Run `cv tournament start` when ready.")
+            return await ctx.send(f"✅ **Dev Setup Complete!** Added {len(tourney['teams'])} teams. Run `cv tournament start` when ready.{_pool_note}")
 
         # Auto-start via the shared generator (which also applies the conditions mode).
         # For home-pitch mode, give any team without one a random standard home pitch so
@@ -10185,7 +10230,7 @@ class PrefixCog(commands.Cog):
                 if not canonical_pitch(_t.get("home_pitch")):
                     _t["home_pitch"] = random.choice(["Flat", "Dead", "Hard", "Green", "Dusty"])
         save_tournament(tourney)
-        await ctx.send(f"⚡ **Dev Setup** — added **{len(tourney['teams'])}** teams. Generating…")
+        await ctx.send(f"⚡ **Dev Setup** — added **{len(tourney['teams'])}** teams. Generating…{_pool_note}")
         await self._generate_and_start(ctx.channel, tourney)
 
     @tournament.command(name="next_match", aliases=["nm"], help="[OWNER] Launch your team's next pending match.\nUsage: tournament next_match")
@@ -10320,9 +10365,14 @@ class PrefixCog(commands.Cog):
         elif c_val == "mvp": sp = sorted(all_players, key=lambda x: _mvp(x["stats"]), reverse=True)
         else: sp = []
         cat_labels = {"runs":"Most Runs","wickets":"Most Wickets","sr":"Best Strike Rate","bat_avg":"Best Batting Avg","fours":"Most Fours","sixes":"Most Sixes","fifties":"Most 50s","hundreds":"Most 100s","econ":"Best Economy","bowl_avg":"Best Bowling Avg","mvp":"MVP Score"}
-        embed = discord.Embed(title=f"🏆 Leaderboard: {cat_labels.get(c_val, c_val)}", color=discord.Color.gold())
+        # runs / wickets / MVP → first 50, paginated 10-per-page with ◀ ▶ buttons.
+        PAGINATED = {"runs", "wickets", "mvp"}
+        limit = 50 if c_val in PAGINATED else 10
+        title = f"🏆 Leaderboard: {cat_labels.get(c_val, c_val)}"
+        header = ("-# MVP = Runs (×SR mult) + boundary/milestone bonus + Wickets×40 + economy bonus"
+                  if c_val == "mvp" else "")
         lines = []
-        for i, p in enumerate(sp[:10], 1):
+        for i, p in enumerate(sp[:limit], 1):
             s = p["stats"]
             if c_val == "runs": val = f"**{s['runs']}** runs"
             elif c_val == "wickets": val = f"**{s['wickets']}** wkts"
@@ -10334,10 +10384,13 @@ class PrefixCog(commands.Cog):
             elif c_val == "mvp": val = f"**{_mvp(s):.0f}** pts"
             else: val = ""
             lines.append(f"`{i:>2}.` **{p['name']}** ({p['team']}) — {val}")
-        embed.description = "\n".join(lines) if lines else "No players qualify yet."
-        if c_val == "mvp":
-            embed.set_footer(text="MVP = Runs (×SR mult) + boundary/milestone bonus + Wickets×40 + economy bonus")
-        await ctx.send(embed=embed)
+        if c_val in PAGINATED:
+            view = LeaderboardView(title, header, lines)
+            await ctx.send(embed=view.make_embed(), view=view)
+        else:
+            embed = discord.Embed(title=title, color=discord.Color.gold())
+            embed.description = (header + "\n" if header else "") + ("\n".join(lines) if lines else "No players qualify yet.")
+            await ctx.send(embed=embed)
 
     @tournament.command(name="player_stats", help="View a specific player's tournament stats.\nUsage: tournament player_stats \"<team>\" \"<player>\"")
     async def t_player_stats(self, ctx, team_name: str, *, player_name: str):

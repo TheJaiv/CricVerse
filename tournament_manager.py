@@ -870,6 +870,54 @@ class T20StandingsView(discord.ui.View):
             attachments=[discord.File(fp=buf, filename=fname)], view=self)
 
 
+class LeaderboardView(discord.ui.View):
+    """◀ / ▶ paginated leaderboard — shows up to `len(lines)` entries, 10 per page.
+    Used by the runs / wickets / MVP leaderboards (first 50, 5 pages)."""
+
+    def __init__(self, title: str, header: str, lines: list, per_page: int = 10):
+        super().__init__(timeout=180)
+        self.title = title
+        self.header = header
+        self.lines = lines
+        self.per_page = per_page
+        self.pages_total = max(1, (len(lines) + per_page - 1) // per_page)
+        self.idx = 0
+        self._update_nav()
+
+    def _update_nav(self):
+        self.prev_btn.disabled = (self.idx == 0)
+        self.next_btn.disabled = (self.idx >= self.pages_total - 1)
+        self.page_btn.label = f"{self.idx + 1} / {self.pages_total}"
+
+    def make_embed(self):
+        embed = discord.Embed(title=self.title, color=discord.Color.gold())
+        chunk = self.lines[self.idx * self.per_page: self.idx * self.per_page + self.per_page]
+        body = "\n".join(chunk) if chunk else "No players qualify for this leaderboard yet."
+        embed.description = (self.header + "\n" if self.header else "") + body
+        embed.set_footer(text=f"Page {self.idx + 1}/{self.pages_total} · Top {len(self.lines)}")
+        return embed
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
+    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.idx = max(0, self.idx - 1)
+        self._update_nav()
+        await interaction.response.edit_message(embed=self.make_embed(), view=self)
+
+    @discord.ui.button(label="1 / 1", style=discord.ButtonStyle.secondary, disabled=True)
+    async def page_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary)
+    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.idx = min(self.pages_total - 1, self.idx + 1)
+        self._update_nav()
+        await interaction.response.edit_message(embed=self.make_embed(), view=self)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  ACL — Akatsuki Cricket League: playoff + Super Cup engine
 #  League (91) → Top-6 Playoffs (6 matches) → Akatsuki Super Cup.
@@ -2114,13 +2162,14 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         elif c_val == "mvp":
             sorted_players = sorted(all_players, key=lambda x: _mvp_score(x["stats"]), reverse=True)
 
-        embed = discord.Embed(title=f"🏆 Tournament Leaderboard: {category.name}", color=discord.Color.gold())
-        if c_val == "mvp":
-            embed.description = (
-                "-# *MVP = Runs (×SR multiplier) + Boundaries bonus + Milestone bonus + Wickets×40 + Economy bonus*\n"
-            )
+        # runs / wickets / MVP get the first 50, paginated 10-per-page with ◀ ▶ buttons;
+        # the qualifier-filtered categories stay a single top-10 embed.
+        PAGINATED = {"runs", "wickets", "mvp"}
+        limit = 50 if c_val in PAGINATED else 10
+        header = ("-# *MVP = Runs (×SR multiplier) + Boundaries bonus + Milestone bonus + Wickets×40 + Economy bonus*"
+                  if c_val == "mvp" else "")
         lines = []
-        for i, p in enumerate(sorted_players[:10], 1):
+        for i, p in enumerate(sorted_players[:limit], 1):
             s = p["stats"]
             if c_val == "runs": val = f"**{s['runs']}** runs"
             elif c_val == "wickets": val = f"**{s['wickets']}** wkts"
@@ -2134,11 +2183,15 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                 sr = (s["runs"]/s["balls_faced"]*100) if s["balls_faced"]>0 else 0
                 val = f"**{score:.0f}** pts — {s['runs']}R @{sr:.0f}SR · {s['wickets']}W"
             lines.append(f"`{i:>2}.` **{p['name']}** ({p['team']}) — {val}")
-        if c_val == "mvp":
-            embed.description += "\n".join(lines) if lines else "No stats yet."
+        title = f"🏆 Tournament Leaderboard: {category.name}"
+        if c_val in PAGINATED:
+            view = LeaderboardView(title, header, lines)
+            await interaction.response.send_message(embed=view.make_embed(), view=view)
         else:
-            embed.description = "\n".join(lines) if lines else "No players qualify for this leaderboard yet."
-        await interaction.response.send_message(embed=embed)
+            embed = discord.Embed(title=title, color=discord.Color.gold())
+            body = "\n".join(lines) if lines else "No players qualify for this leaderboard yet."
+            embed.description = (header + "\n" if header else "") + body
+            await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="player_stats", description="View a specific player's tournament stats.")
     async def player_stats(self, interaction: discord.Interaction, team_name: str, player_name: str):
