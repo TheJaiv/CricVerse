@@ -492,6 +492,12 @@ def scenario_complete(career, runs=0, fours=0, sixes=0, wickets=0, passed=False,
     perf = (wickets * 6) if mode == "bowl" else (runs // 5)
     raw  = perf * d["mult"] + (d["pass_bonus"] if passed else 0)
     coins = 0 if capped else max(0, int(round(raw)))
+    # A LOSS must never be net-profitable. Performance coins are only a partial consolation
+    # on a defeat — capped below the entry fee so you always forfeit something (otherwise a
+    # couple of wickets in a losing bowling scenario would out-earn the fee). Clearing the
+    # scenario (passed) is the only path to profit, via the pass_bonus.
+    if coins and not passed:
+        coins = min(coins, SCENARIO_ENTRY_FEE - 1)
     if coins:
         career["coins"] += coins
 

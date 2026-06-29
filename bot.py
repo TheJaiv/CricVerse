@@ -572,11 +572,14 @@ def swap_impact_player(match: CricketMatch, team_id: int, out_name: str, in_play
 def _do_impact_swap(match: CricketMatch, team_num: int, out_name: str, in_player: dict):
     swap_impact_player(match, team_num, out_name, in_player)
     team   = match.team1 if team_num == 1 else match.team2
-    prefix = getattr(match, "last_commentary_prefix", "")
-    match.last_commentary_prefix = (
+    msg = (
         f"🔄 **AI TACTIC:** {team['name']} uses IMPACT PLAYER! "
-        f"**{in_player['name']}** IN for **{out_name}**!\n" + prefix
+        f"**{in_player['name']}** IN for **{out_name}**!"
     )
+    # Keep the rolling prefix for any path that reads it, AND return the line so
+    # the verbose sim loops can actually surface the swap to the channel.
+    match.last_commentary_prefix = msg + "\n" + getattr(match, "last_commentary_prefix", "")
+    return msg
 
 def _ai_batting_impact(match: CricketMatch, innings: InningsState, team_num: int, subs):
     overs   = innings.total_balls // 6
@@ -608,20 +611,17 @@ def _ai_batting_impact(match: CricketMatch, innings: InningsState, team_num: int
 
     # Guarantee (batting second only): next batter is tail — sub them out before they walk in
     if not is_inn1 and next_up["bat"] < 60 and best_sub["bat"] > next_up["bat"] + 10:
-        _do_impact_swap(match, team_num, next_up["name"], best_sub)
-        return
+        return _do_impact_swap(match, team_num, next_up["name"], best_sub)
 
     # Powerplay crisis: 2+ wickets before over 6
     if wkts >= 2 and overs < 6 and best_sub["bat"] >= 72:
         if best_sub["bat"] > worst_up["bat"] + 12:
-            _do_impact_swap(match, team_num, worst_up["name"], best_sub)
-            return
+            return _do_impact_swap(match, team_num, worst_up["name"], best_sub)
 
     # Mid-innings wicket cluster: 3+ wickets after over 5, not in last 3 overs
     if wkts >= 3 and overs >= 5 and innings.total_balls < max_b - 18:
         if best_sub["bat"] > worst_up["bat"] + 10:
-            _do_impact_swap(match, team_num, worst_up["name"], best_sub)
-            return
+            return _do_impact_swap(match, team_num, worst_up["name"], best_sub)
 
     # Chase mode (batting second): RRR >= 9, bring in firepower
     if not is_inn1:
@@ -635,7 +635,7 @@ def _ai_batting_impact(match: CricketMatch, innings: InningsState, team_num: int
 
     # Late guarantee: last 4 overs and sub still unused — don't waste the slot
     if innings.total_balls >= max_b - 24 and best_sub["bat"] > worst_up["bat"] + 8:
-        _do_impact_swap(match, team_num, worst_up["name"], best_sub)
+        return _do_impact_swap(match, team_num, worst_up["name"], best_sub)
 
 def _ai_bowling_impact(match: CricketMatch, innings: InningsState, team_num: int, subs):
     balls = innings.total_balls
@@ -656,8 +656,7 @@ def _ai_bowling_impact(match: CricketMatch, innings: InningsState, team_num: int
 
     # Death overs: last 5 overs
     if balls >= max_b - 30:
-        _do_impact_swap(match, team_num, worst["name"], best_sub)
-        return
+        return _do_impact_swap(match, team_num, worst["name"], best_sub)
 
     # 2nd innings, opponent cruising (low RRR) — use from last 6 overs
     if match.current_innings_num == 2 and balls >= max_b - 36:
@@ -666,16 +665,19 @@ def _ai_bowling_impact(match: CricketMatch, innings: InningsState, team_num: int
             target = getattr(match, "target", match.innings1.total_runs + 1)
             rrr = (target - innings.total_runs) / balls_left * 6
             if rrr < 7:
-                _do_impact_swap(match, team_num, worst["name"], best_sub)
-                return
+                return _do_impact_swap(match, team_num, worst["name"], best_sub)
 
     # Absolute guarantee: last 2 overs, don't leave sub unused
     if balls >= max_b - 12:
-        _do_impact_swap(match, team_num, worst["name"], best_sub)
+        return _do_impact_swap(match, team_num, worst["name"], best_sub)
 
 def try_ai_impact_player(match: CricketMatch, innings: InningsState):
-    if not getattr(match, "impact_player", False): return
-    if not match.is_ai_game: return
+    """Let the AI use its Impact Player at an over boundary. Returns a list of
+    announcement lines for any swaps made this call, so verbose sim loops can
+    surface the move to the channel (callers may ignore the return value)."""
+    announcements = []
+    if not getattr(match, "impact_player", False): return announcements
+    if not match.is_ai_game: return announcements
 
     for team_num in (1, 2):
         if getattr(match, f"t{team_num}_impact_used", False): continue
@@ -684,9 +686,13 @@ def try_ai_impact_player(match: CricketMatch, innings: InningsState):
         if not subs: continue
 
         if innings.batting_team["name"] == team["name"]:
-            _ai_batting_impact(match, innings, team_num, subs)
+            msg = _ai_batting_impact(match, innings, team_num, subs)
         else:
-            _ai_bowling_impact(match, innings, team_num, subs)
+            msg = _ai_bowling_impact(match, innings, team_num, subs)
+        if msg:
+            announcements.append(msg)
+
+    return announcements
 
 def get_smart_ai_bowler(innings, pitch, weather="Clear", format_overs=20):
     if format_overs == 50:
@@ -1127,6 +1133,10 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
     _ctr_text = _format_match_no_label(_base_fmt)
     _ctr_w = get_tw(_ctr_text, font_micro)
     d.text((1195 - _ctr_w, 8), _ctr_text, fill=c_text_grey, font=font_micro)
+
+    # Pitch & weather — top-left corner, mirrors the match number
+    _cond_text = f"PITCH: {str(getattr(match, 'pitch', 'Flat')).upper()}  •  {str(getattr(match, 'weather', 'Clear')).upper()}"
+    d.text((5, 8), _cond_text, fill=c_text_grey, font=font_micro)
 
     # Center Custom Logo (or Placeholder)
     try:
@@ -2300,7 +2310,8 @@ async def loop_current_innings_simulation(interaction, match: CricketMatch):
             break
 
         if innings.total_balls % 6 == 0 and not innings.over_log:
-            try_ai_impact_player(match, innings)
+            for _ip_msg in try_ai_impact_player(match, innings):
+                await channel.send(_ip_msg)
             new_bowler = get_smart_ai_bowler(innings, match.pitch, match.weather, match.format_overs)
             if not new_bowler:
                 await channel.send("🚨 **CRITICAL ERROR:** Could not find a valid bowler.")
@@ -2352,7 +2363,8 @@ async def loop_current_innings_bbb(interaction, match: CricketMatch):
 
         # Pick the over's bowler at a true over start (over_log empty so wides don't re-pick).
         if innings.total_balls % 6 == 0 and not innings.over_log:
-            try_ai_impact_player(match, innings)
+            for _ip_msg in try_ai_impact_player(match, innings):
+                await channel.send(_ip_msg)
             new_bowler = get_smart_ai_bowler(innings, match.pitch, match.weather, match.format_overs)
             if not new_bowler:
                 await channel.send("🚨 **CRITICAL ERROR:** Could not find a valid bowler. Match stopped.")
@@ -2409,7 +2421,8 @@ async def loop_entire_match_simulation(interaction, match: CricketMatch):
         # deliveries yet this over, including wides). This prevents wides from triggering
         # a mid-over bowler swap when total_balls % 6 == 0.
         if innings.total_balls % 6 == 0 and not innings.over_log:
-            try_ai_impact_player(match, innings)
+            for _ip_msg in try_ai_impact_player(match, innings):
+                await channel.send(_ip_msg)
             new_bowler = get_smart_ai_bowler(innings, match.pitch, match.weather, match.format_overs)
             if not new_bowler:
                 await channel.send("🚨 **CRITICAL ERROR:** Could not find a valid bowler to continue simulation. Match has been stopped.")
@@ -2927,7 +2940,8 @@ async def prompt_new_over_bowler(interaction, match: CricketMatch):
     channel = interaction.channel if hasattr(interaction, 'channel') else interaction
     
     if match.is_ai_game and bowler_uid == match.p2_id:
-        try_ai_impact_player(match, innings)
+        for _ip_msg in try_ai_impact_player(match, innings):
+            await channel.send(_ip_msg)
         new_bowler = get_smart_ai_bowler(innings, match.pitch, match.weather, match.format_overs)
         if not new_bowler:
             await channel.send("🚨 **CRITICAL ERROR:** Could not find a valid bowler to proceed. The match cannot continue. Please use `/endmatch`.")
@@ -3011,7 +3025,8 @@ async def prompt_bowler_then_hub(interaction, match: CricketMatch):
 
     # AI game where AI is bowling: AI picks, reset over state, show hub directly
     if match.is_ai_game and bowler_uid == match.p2_id:
-        try_ai_impact_player(match, innings)
+        for _ip_msg in try_ai_impact_player(match, innings):
+            await channel.send(_ip_msg)
         new_bowler = get_smart_ai_bowler(innings, match.pitch, match.weather, match.format_overs)
         if not new_bowler:
             await channel.send("🚨 **CRITICAL ERROR:** Could not find a valid bowler to proceed. The match cannot continue. Please use `/endmatch`.")
@@ -3589,7 +3604,8 @@ async def run_interactive_delivery_sequence(interaction, match: CricketMatch):
     
     if (match.is_ai_game and match.get_bowler_user_id() == match.p2_id) or _bowler_is_bot(match):
         if getattr(innings, "total_balls", 0) % 6 == 0 or (innings.over_log and innings.over_log[-1] == "<:wicket:1520143043683156051>"):
-            try_ai_impact_player(match, innings)
+            for _ip_msg in try_ai_impact_player(match, innings):
+                await channel.send(_ip_msg)
         role = innings.current_bowler["role"]
         
         if "Spin" in role:
