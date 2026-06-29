@@ -78,6 +78,23 @@ T20_INTENT_BASE      = 0.22   # build-mode floor (pre-launch, stable)
 T20_INTENT_LAUNCH_SPAN = 0.62 # launch adds up to this on top of BASE
 T20_INTENT_REBUILD   = 0.36   # intent ×factor while a collapse is being rebuilt (dig in)
 T20_INTENT_DIFF_UP   = 0.30   # stuck on a tough deck with wickets in hand → throw the bat
+# ── TOTAL-BASED CHASE DIFFICULTY ──────────────────────────────────────────────────────
+# Each innings wears only from its OWN progress (no inter-innings carry), so there is no
+# blanket bat-first bias. The bat/bowl-first lean instead emerges from THE TOTAL: chasing
+# an ABOVE-par target is harder (bat-first edge), a BELOW-par target is easier (bowl-first
+# edge — a low-scoring match), and a par total is ~50/50. Par is derived from the pitch's
+# difficulty, so no per-pitch table is needed. 1st-innings scores are untouched.
+T20_PAR_RATE_FLAT  = 10.4   # par 1st-innings run-rate on a road (difficulty 0)
+T20_PAR_RATE_SLOPE = 4.4    # ...minus this × pitch difficulty (tougher deck → lower par)
+T20_PAR_EXCESS_CAP = 3.0    # clamp the above/below-par gap (rpo) so freak totals don't explode it
+T20_TGT_WKT = 0.075  # per rpo above par → 2nd-innings wicket-weight shift
+T20_TGT_BND = 0.035  # ...boundary-weight shift
+T20_TGT_DOT = 0.025  # ...dot-weight shift
+# Chase "have a go": an above-par target (rrr running ahead of the rate already being
+# managed, crr) must make the chaser THROW THE BAT, not block to a 40-run loss. Pitch-
+# agnostic — it fires exactly when the ask is steep for the surface. 2nd innings only.
+T20_CHASE_GO_BASE  = 0.42
+T20_CHASE_GO_SLOPE = 0.10
 # intent → outcome-weight map (the single tuning point). Boundary-heavy on purpose:
 # throwing the bat must produce FIRE KNOCKS (quick cameos that ADD runs) as well as
 # wickets — a side bowled out on a sticky still makes ~150 off 20-ball blitzes, it
@@ -150,6 +167,12 @@ def _t20_intent(match, innings, b_stats, archetype, total_balls, balls_left):
         target = getattr(match, "target", innings.total_runs + 1)
         rrr = (target - innings.total_runs) / B * 6.0
         intent = max(intent, min(1.0, 0.28 + (rrr - 7.5) * 0.055))
+        # Have a go at an above-par target: when the ask outruns the rate already being
+        # managed (crr), throw the bat rather than block to a heavy loss. (Won't fire on a
+        # comfortable chase, where rrr ≈ or < crr.)
+        if total_balls >= 12:
+            intent = max(intent, min(1.0, T20_CHASE_GO_BASE
+                                     + max(0.0, rrr - crr) * T20_CHASE_GO_SLOPE))
 
     # ── TOUGH DECK → throw the bat to USE wickets, but only as the innings wears on.
     #    Early, a side TRIES to bat (so it doesn't self-destruct for 60 in the powerplay);
@@ -395,7 +418,9 @@ def execute_ball_math_t20(match):
     # with innings 2 inheriting innings 1's wear. Scaled by the pitch's wear
     # susceptibility so roads stay roads. Worn surfaces give spin extra turn
     # (fed into the rating contest) and make timing slightly harder for everyone.
-    _balls_in = innings.total_balls + (match.max_balls if match.current_innings_num == 2 else 0)
+    # Each innings wears from its own progress only (the innings-to-innings change is
+    # modelled per pitch via PITCH_2ND_INN below) — so 1st-innings scores are unaffected.
+    _balls_in = innings.total_balls
     wear = (_balls_in / (2 * match.max_balls)) * WEAR_SUSCEPT.get(match.pitch, 1.0)
     if "Spin" in bowler["role"]:
         bowl_rating += wear * 5.0
@@ -773,6 +798,18 @@ def execute_ball_math_t20(match):
         wicket_weight *= (1.0 + wear * 0.35)
     boundary_weight *= (1.0 - wear * 0.07)
     dot_weight *= (1.0 + wear * 0.06)
+
+    # ── 2.1 TOTAL-BASED CHASE DIFFICULTY ── chasing an above-par total is harder
+    # (bat-first edge); a below-par total is easier (bowl-first edge). Par from pitch.
+    if match.current_innings_num == 2:
+        _par_rate = T20_PAR_RATE_FLAT - T20_PITCH_DIFFICULTY.get(match.pitch, 0.20) * T20_PAR_RATE_SLOPE
+        _tgt = getattr(match, "target", match.innings1.total_runs + 1)
+        _tgt_rate = _tgt / (match.max_balls / 6.0)
+        _excess = max(-T20_PAR_EXCESS_CAP, min(T20_PAR_EXCESS_CAP, _tgt_rate - _par_rate))
+        if _excess:
+            wicket_weight   *= (1.0 + _excess * T20_TGT_WKT)
+            boundary_weight *= (1.0 - _excess * T20_TGT_BND)
+            dot_weight      *= (1.0 + _excess * T20_TGT_DOT)
 
     # ── 2.0 BATTING MOMENTUM ──
     # A new batsman is vulnerable until set; a well-set batsman is dangerous.
