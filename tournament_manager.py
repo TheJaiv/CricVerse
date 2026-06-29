@@ -1729,17 +1729,27 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             color=discord.Color.orange()
         )
         embed.set_footer(text=tourney["name"])
-        from bot import reconstruct_scorecard_data, generate_scorecard_from_data
+        from bot import reconstruct_scorecard_data, generate_scorecard_from_data, build_stored_scorecard_embeds
         full_data = reconstruct_scorecard_data(tourney, m)
         if full_data:
+            await interaction.response.defer()
+            sent = False
             try:
-                await interaction.response.defer()
                 img_buf = generate_scorecard_from_data(full_data)
                 file = discord.File(fp=img_buf, filename=f"scorecard_m{match_id}.png")
                 await interaction.followup.send(embed=embed, file=file)
-                return
+                sent = True
             except Exception as _e:
-                print(f"⚠️ Scorecard regeneration failed for match {match_id}: {_e}")
+                print(f"⚠️ Scorecard image render failed for match {match_id}: {_e}")
+            try:
+                card_embeds = build_stored_scorecard_embeds(full_data)
+                if card_embeds:
+                    await interaction.followup.send(embeds=card_embeds)
+                    sent = True
+            except Exception as _e:
+                print(f"⚠️ Text scorecard render failed for match {match_id}: {_e}")
+            if sent:
+                return
         if interaction.response.is_done():
             embed.add_field(name="No image", value="Scorecard image could not be generated.", inline=False)
             await interaction.followup.send(embed=embed)

@@ -1378,10 +1378,14 @@ def extract_scoreboard_data(match: CricketMatch) -> dict:
 
 
 def extract_scorecard_players(match: CricketMatch) -> dict:
-    """Minimal per-match data for scorecard regeneration.
+    """Minimal per-match data for scorecard regeneration + full text scorecard.
     Only stores what can't be derived from the existing tournament/result JSON.
     Uses short keys + arrays to keep the stored JSON as small as possible.
-    Per-match size: ~580 bytes → 45 matches ≈ 26 KB added to the bin.
+    Stores EVERY active batter (with dismissal text) and EVERY bowler so the
+    `cv tournament match_scorecard` command can rebuild the exact end-of-innings
+    text scorecard — not just the top-4 image summary. Lists stay sorted by
+    runs / wickets so the image renderers (which take the first slots) are
+    unchanged. Per-match size: ~1–1.5 KB → 45 matches ≈ 50–70 KB in the bin.
     """
     potm = get_player_of_the_match(match)
     inn1 = match.innings1
@@ -1390,14 +1394,14 @@ def extract_scorecard_players(match: CricketMatch) -> dict:
     def _bat(inn):
         if not inn: return []
         active = [b for b in inn.batting_stats.values() if b.balls_faced > 0 or b.dismissal != "not out"]
-        top = sorted(active, key=lambda x: x.runs_scored, reverse=True)[:4]
-        return [[b.profile["name"], b.runs_scored, b.balls_faced, b.dismissal == "not out"] for b in top]
+        ordered = sorted(active, key=lambda x: x.runs_scored, reverse=True)
+        return [[b.profile["name"], b.runs_scored, b.balls_faced, b.dismissal] for b in ordered]
 
     def _bowl(inn):
         if not inn: return []
         active = [b for b in inn.bowling_stats.values() if b.balls_bowled > 0]
-        top = sorted(active, key=lambda x: (x.wickets_taken, -x.runs_conceded), reverse=True)[:4]
-        return [[b.profile["name"], b.wickets_taken, b.runs_conceded, f"{b.balls_bowled//6}.{b.balls_bowled%6}"] for b in top]
+        ordered = sorted(active, key=lambda x: (x.wickets_taken, -x.runs_conceded), reverse=True)
+        return [[b.profile["name"], b.wickets_taken, b.runs_conceded, f"{b.balls_bowled//6}.{b.balls_bowled%6}"] for b in ordered]
 
     # bf=1 means m["team1"] batted first, bf=2 means m["team2"] batted first
     team1_bats_first = (match.team1["name"] == inn1.batting_team["name"])
@@ -1459,7 +1463,17 @@ def reconstruct_scorecard_data(tourney: dict, m: dict) -> dict:
     t2_team = next((t for t in tourney.get("teams", []) if t["name"] == t2_name), {})
 
     def _bat(arrays):
-        return [{"name": a[0], "runs": a[1], "balls": a[2], "not_out": a[3]} for a in (arrays or [])]
+        out = []
+        for a in (arrays or []):
+            d4 = a[3] if len(a) > 3 else "not out"
+            if isinstance(d4, bool):
+                # old format: 4th element was a not_out boolean (no dismissal text)
+                not_out, dismissal = d4, ("not out" if d4 else "")
+            else:
+                dismissal = d4 or "not out"
+                not_out = (dismissal == "not out")
+            out.append({"name": a[0], "runs": a[1], "balls": a[2], "not_out": not_out, "dismissal": dismissal})
+        return out
     def _bowl(arrays):
         return [{"name": a[0], "wickets": a[1], "runs": a[2], "overs": a[3]} for a in (arrays or [])]
 
@@ -1508,6 +1522,70 @@ def reconstruct_scorecard_data(tourney: dict, m: dict) -> dict:
             "impact_sub": p.get("i2"),
         },
     }
+
+
+def build_stored_scorecard_embeds(data: dict) -> list:
+    """Build the detailed text scorecard for a completed match — one embed per
+    innings — from reconstructed match data. Mirrors the end-of-innings
+    `render_full_scorecard_embed` so a stored match reads the same as it did live.
+    Note: batters are listed by runs scored (the order they're stored in), not
+    strict batting order. Old matches (stored before full data) lack dismissal
+    text — those lines render blank.
+    """
+    embeds = []
+    potm = data.get("potm")
+
+    def _ov(balls):
+        return f"{balls // 6}.{balls % 6}"
+
+    def _side_embed(side, is_second):
+        runs = side.get("runs", 0)
+        wkts = side.get("wickets", 0)
+        balls = side.get("balls", 0)
+        emb = discord.Embed(
+            title=f"📋 Full Scorecard: {side.get('name', '').title()}",
+            color=discord.Color.gold(),
+        )
+        desc = ""
+        if is_second and potm:
+            desc += f"⭐ **Player of the Match:** {potm}\n\n"
+        desc += f"**Total Score:** {runs}/{wkts} in {_ov(balls)} Overs\n"
+        emb.description = desc
+
+        b_text = "```text\nBATTER                  R    B    SR\n"
+        for b in side.get("batters", []):
+            bf = b.get("balls", 0)
+            rs = b.get("runs", 0)
+            sr = (rs / bf * 100) if bf else 0.0
+            status = b.get("dismissal") or ("not out" if b.get("not_out") else "")
+            b_text += f"{b['name'][:18]:<24}{rs:<5}{bf:<5}{sr:<5.1f}\n"
+            b_text += f"  └ {status}\n"
+        b_text += "```"
+
+        bw_text = "```text\nBOWLER                  O    R    W    ECO\n"
+        for bw in side.get("bowlers", []):
+            ov = str(bw.get("overs", "0.0"))
+            try:
+                _w, _b = ov.split(".")
+                bls = int(_w) * 6 + int(_b)
+            except Exception:
+                bls = 0
+            rc = bw.get("runs", 0)
+            eco = (rc / bls * 6) if bls else 0.0
+            bw_text += f"{bw['name'][:18]:<24}{ov:<5}{rc:<5}{bw.get('wickets', 0):<5}{eco:<5.1f}\n"
+        bw_text += "```"
+
+        emb.add_field(name="Batting", value=b_text, inline=False)
+        emb.add_field(name="Bowling", value=bw_text, inline=False)
+        return emb
+
+    t1 = data.get("t1") or {}
+    t2 = data.get("t2") or {}
+    if t1.get("batters") or t1.get("runs"):
+        embeds.append(_side_embed(t1, False))
+    if t2.get("batters") or t2.get("runs"):
+        embeds.append(_side_embed(t2, True))
+    return embeds
 
 
 def _fetch_emoji_img(emoji_str: str, size: int = 72):
@@ -9877,6 +9955,14 @@ class PrefixCog(commands.Cog):
                 results.append(f"M{m_data['match_id']} ({r_label}): ❌ Error: {e}")
                 continue
 
+            # Capture the full scorecard the same way a real match does, so simmed
+            # matches also power `cv tournament match_scorecard` (image + text).
+            try:
+                match._scorecard_players = extract_scorecard_players(match)
+            except Exception as _e:
+                print(f"⚠️ simall scorecard extract failed M{m_data['match_id']}: {_e}")
+                match._scorecard_players = None
+
             # Trigger the existing stats + progression listener directly (sequential, no race)
             from tournament_manager import TournamentCog as _TC
             tc = self.bot.cogs.get("TournamentCog")
@@ -10202,14 +10288,24 @@ class PrefixCog(commands.Cog):
         embed.set_footer(text=tourney["name"])
         full_data = reconstruct_scorecard_data(tourney, m)
         if full_data:
+            sent = False
             try:
                 img_buf = generate_scorecard_from_data(full_data)
                 file = discord.File(fp=img_buf, filename=f"scorecard_m{match_id}.png")
                 await ctx.send(embed=embed, file=file)
-                return
+                sent = True
             except Exception as _e:
-                print(f"⚠️ Scorecard regeneration failed for match {match_id}: {_e}")
-        embed.add_field(name="No image", value="No scorecard data for this match.", inline=False)
+                print(f"⚠️ Scorecard image render failed for match {match_id}: {_e}")
+            try:
+                card_embeds = build_stored_scorecard_embeds(full_data)
+                if card_embeds:
+                    await ctx.send(embeds=card_embeds)
+                    sent = True
+            except Exception as _e:
+                print(f"⚠️ Text scorecard render failed for match {match_id}: {_e}")
+            if sent:
+                return
+        embed.add_field(name="No scorecard", value="No scorecard data saved for this match.", inline=False)
         await ctx.send(embed=embed)
 
     @tournament.command(name="dev_setup", help="[OWNER] Instantly fill teams with random squads and auto-start. Usage: tournament dev_setup [no]")
