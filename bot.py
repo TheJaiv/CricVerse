@@ -706,6 +706,12 @@ def execute_ball_math(match: CricketMatch):
 
 def _run_full_match_sync(match: CricketMatch):
     """Simulate a complete T20/ODI match synchronously (no Discord messages)."""
+    # Headless sims must run in "whole_match" mode so the ball engine auto-promotes
+    # the next batter on a wicket. In the default "interactive" mode a fallen wicket
+    # only sets pending_next_batter (awaiting a UI pick), so nobody past the opening
+    # pair ever bats — leaving only the top 2 batters with runs in stats/scorecard.
+    match.simulation_mode = "whole_match"
+
     def _sim_innings(innings):
         while True:
             if innings.wickets >= 10 or innings.total_balls >= match.max_balls:
@@ -758,6 +764,7 @@ def _sim_super_over(match: CricketMatch):
                           pitch=match.pitch, weather=match.weather)
         so.is_super_over = True
         so.sim_only = True
+        so.simulation_mode = "whole_match"   # auto-promote the next batter on a wicket
         so.max_balls = 6
 
         def _so_innings(inn, chasing):
