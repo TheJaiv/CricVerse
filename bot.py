@@ -4435,9 +4435,11 @@ class MatchSetupState:
         self.t1_name = "Team 1"
         self.t1_roster = []
         self.t1_squad = []
+        self.t1_captain = None
         self.t2_name = "Team 2"
         self.t2_roster = []
         self.t2_squad = []
+        self.t2_captain = None
         self.pitch = "Flat"
         self.weather = "Clear"
         self.tournament_name = "TOURNAMENT"
@@ -4445,20 +4447,112 @@ class MatchSetupState:
         self.sim_only = False
 
 
+# ── Captain & Wicket-Keeper rules (enforced at the start of every match setup) ──
+# Every XI must carry a keeper, and exactly one player is captain (+1 to their main
+# skill). A line in a typed XI may end with '(C)' to name the captain inline; '(c)'
+# and '(captain)' are accepted too, though '(C)' is the documented form.
+_CAPTAIN_MARK_RE = re.compile(r"\s*\(\s*(c|captain)\s*\)\s*$", re.IGNORECASE)
+
+
+def _strip_captain_mark(line):
+    """(clean_line, marked, lowercase_c_used) — pull a trailing captain marker off a
+    typed player line. lowercase_c_used flags the '(c)' form so we can nudge towards
+    the documented '(C)'."""
+    m = _CAPTAIN_MARK_RE.search(line)
+    if not m:
+        return line, False, False
+    return line[:m.start()].rstrip(), True, (m.group(1) == "c")
+
+
+def _has_wk(players):
+    """True if the XI contains at least one wicket-keeper (any 'WK' role)."""
+    return any("WK" in (p.get("role") or "") for p in players)
+
+
+def _captain_skill_field(p):
+    """Which skill a captain's +1 lands on: a batter's bat, a bowler's bowl, an
+    all-rounder's STRONGER suit (bat==bowl → random) so we never boost a weak suit."""
+    role = p.get("role") or ""
+    bat, bowl = int(p.get("bat", 0)), int(p.get("bowl", 0))
+    if "All-Rounder" in role:
+        if bat > bowl: return "bat"
+        if bowl > bat: return "bowl"
+        return random.choice(["bat", "bowl"])
+    if "Bowler" in role:
+        return "bowl"
+    return "bat"          # Batter / Batter_WK
+
+
+def _player_strength(p):
+    """A player's headline rating (their best suit) — used to auto-pick a captain."""
+    role = p.get("role") or ""
+    bat, bowl = int(p.get("bat", 0)), int(p.get("bowl", 0))
+    if "All-Rounder" in role: return max(bat, bowl)
+    if "Bowler" in role: return bowl
+    return bat
+
+
+def apply_captain_boost(players, captain_name):
+    """Return a NEW list with the named captain's primary skill +1 (capped 99) and an
+    is_captain flag. The captain dict is COPIED so the shared global DB dict is never
+    mutated (rosters often hold the same object the player DB does)."""
+    if not captain_name:
+        return players
+    out, done = [], False
+    for p in players:
+        if not done and p.get("name") == captain_name and not p.get("is_captain"):
+            fld = _captain_skill_field(p)
+            out.append({**p, fld: min(99, int(p.get(fld, 0)) + 1),
+                        "is_captain": True, "captain_skill": fld})
+            done = True
+        else:
+            out.append(p)
+    return out
+
+
+def with_captain(players):
+    """Guarantee a team has exactly one captain at match-build time: honor a captain
+    chosen during setup (is_captain already set), otherwise auto-pick the strongest
+    player. Keeps AI / sim-only / default sides on a level footing with chosen XIs."""
+    if not players or any(p.get("is_captain") for p in players):
+        return players
+    return apply_captain_boost(players, max(players, key=_player_strength).get("name"))
+
+
+def captain_note(players):
+    """One-line summary of who the captain is and where their +1 went, for setup msgs."""
+    cap = next((p for p in players if p.get("is_captain")), None)
+    if not cap:
+        return ""
+    skill = "Batting" if cap.get("captain_skill") == "bat" else "Bowling"
+    return f"🧢 **Captain:** {cap['name']}  ·  +1 {skill}"
+
+
 def parse_pasted_roster(raw_text, db_players):
+    """Resolve typed names → player dicts. A player line may end with a captain marker
+    ('(C)' documented; '(c)'/'(captain)' also accepted) to name the captain inline and
+    skip the captain prompt. Returns
+    (found_players, missing_names, captain_name, captain_error, lowercase_mark_used)."""
     # Create a lookup map where keys are lowercase for easy matching
     db_map = {p["name"].lower(): p for p in db_players}
     db_names_list = list(db_map.keys())
-    
+
     found_players = []
     missing_names = []
     seen_names = set() # 🚨 NEW: Tracks who is already in the XI
-    
+    captain_name = None
+    captain_marks = 0
+    lowercase_mark_used = False
+
     lines = [l.strip() for l in raw_text.split("\n") if l.strip()]
     for line in lines[:16]:
-        query = line.lower()
+        core, marked, low = _strip_captain_mark(line)
+        if marked:
+            captain_marks += 1
+            lowercase_mark_used = lowercase_mark_used or low
+        query = core.lower()
         matched_player = None
-        
+
         # 1. Exact match
         if query in db_map:
             matched_player = db_map[query]
@@ -4468,19 +4562,23 @@ def parse_pasted_roster(raw_text, db_players):
             if matches:
                 matched_player = db_map[matches[0]]
             else:
-                missing_names.append(line)
-                
+                missing_names.append(core)
+
         # 3. Duplicate check before adding to the team
         if matched_player:
             if matched_player["name"] not in seen_names:
                 found_players.append(matched_player)
                 seen_names.add(matched_player["name"])
+                if marked and captain_name is None:
+                    captain_name = matched_player["name"]
             else:
                 # If they try to add a duplicate, flag it as an error!
-                missing_names.append(f"{line} (Duplicate Entry)")
-                
-    return found_players, missing_names
-    
+                missing_names.append(f"{core} (Duplicate Entry)")
+
+    # More than one '(C)' is ambiguous → invalid (the caller re-prompts).
+    captain_error = "multiple" if captain_marks > 1 else None
+    return found_players, missing_names, captain_name, captain_error, lowercase_mark_used
+
 def format_xi_display(players):
     lines = []
     for i, p in enumerate(players, 1):
@@ -4633,6 +4731,68 @@ async def ask_team2_xi(channel, state):
 
 # --- Step 3: XI Verification UI ---
 
+def _role_short(p):
+    return (p.get("role") or "").replace("All-Rounder", "AR").replace("Bowler", "BWL").replace("Batter", "BAT").replace("_", " ")
+
+
+def _finalize_captain(state, team_num, name):
+    """Lock in the captain for a team and apply the +1 boost to its roster."""
+    if team_num == 1:
+        state.t1_captain = name
+        state.t1_roster = apply_captain_boost(state.t1_roster, name)
+    else:
+        state.t2_captain = name
+        state.t2_roster = apply_captain_boost(state.t2_roster, name)
+
+
+class CaptainSelectView(discord.ui.View):
+    """Pick the captain from a locked XI. The chosen player gets +1 to their main skill
+    (an all-rounder's stronger suit; bat==bowl → random). `after(channel, state)` is the
+    coroutine that continues setup once a captain is chosen."""
+    def __init__(self, state, channel, team_num, players, after):
+        super().__init__(timeout=120)
+        self.state = state
+        self.channel = channel
+        self.team_num = team_num
+        self.after = after
+        opts = [discord.SelectOption(label=p["name"][:100], description=_role_short(p)[:100], value=p["name"])
+                for p in players[:25]]
+        sel = discord.ui.Select(placeholder="🧢 Choose your Captain...", options=opts)
+        sel.callback = self._pick
+        self.add_item(sel)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not await _setup_cancelled_check(self)(interaction):
+            return False
+        owner = self.state.p1_id if self.team_num == 1 else (getattr(self.state, "p2_id", None) or self.state.p1_id)
+        if interaction.user.id != owner and interaction.user.id != getattr(self.state, "manager_id", None):
+            await interaction.response.send_message("❌ Only this team's owner can choose the captain.", ephemeral=True)
+            return False
+        return True
+
+    async def _pick(self, interaction: discord.Interaction):
+        _finalize_captain(self.state, self.team_num, interaction.data["values"][0])
+        roster = self.state.t1_roster if self.team_num == 1 else self.state.t2_roster
+        await interaction.response.edit_message(content=captain_note(roster), view=None)
+        await self.after(self.channel, self.state)
+
+
+async def handle_captain_step(channel, state, team_num, players, after):
+    """After an XI is locked: if a captain was named inline with '(C)', finalize and move
+    on; otherwise ask who the captain is. `after(channel, state)` runs once one is set."""
+    chosen = getattr(state, "t1_captain" if team_num == 1 else "t2_captain", None)
+    if chosen and chosen in {p["name"] for p in players}:
+        _finalize_captain(state, team_num, chosen)
+        roster = state.t1_roster if team_num == 1 else state.t2_roster
+        await channel.send(captain_note(roster))
+        return await after(channel, state)
+    owner_id = state.p1_id if team_num == 1 else (getattr(state, "p2_id", None) or state.p1_id)
+    await channel.send(
+        f"🧢 <@{owner_id}> — **Who is your Captain?** They get **+1** to their main skill.\n"
+        f"-# Tip: next time put `(C)` after a name in your XI to set the captain inline and skip this step.",
+        view=CaptainSelectView(state, channel, team_num, players, after))
+
+
 class Team1VerifyView(discord.ui.View):
     def __init__(self, state, channel, players):
         super().__init__(timeout=120)
@@ -4648,7 +4808,7 @@ class Team1VerifyView(discord.ui.View):
         await interaction.response.defer()
         await interaction.message.edit(view=None)
         await self.channel.send("✅ **Team 1 XI confirmed!**")
-        await ask_team2_name(self.channel, self.state)
+        await handle_captain_step(self.channel, self.state, 1, self.players, ask_team2_name)
     @discord.ui.button(label="✏️ Re-enter XI", style=discord.ButtonStyle.danger)
     async def redo(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.state.p1_id: return
@@ -4672,7 +4832,7 @@ class Team2VerifyView(discord.ui.View):
         await interaction.response.defer()
         await interaction.message.edit(view=None)
         await self.channel.send("✅ **Team 2 XI confirmed!**")
-        await ask_pitch_and_weather(self.channel, self.state)
+        await handle_captain_step(self.channel, self.state, 2, self.players, ask_pitch_and_weather)
     @discord.ui.button(label="✏️ Re-enter XI", style=discord.ButtonStyle.danger)
     async def redo(self, interaction: discord.Interaction, button: discord.ui.Button):
         target_id = self.state.p2_id if self.state.p2_id else self.state.p1_id
@@ -4738,26 +4898,31 @@ class TournamentXIView(discord.ui.View):
         await interaction.response.edit_message(content=self.get_msg_content(), view=self)
         
     async def confirm_cb(self, interaction: discord.Interaction):
-        if self.team_num == 1:
+        if not _has_wk(self.selected_players):
+            return await interaction.response.send_message(
+                "❌ **Invalid XI — no Wicket-Keeper.** Undo and add a keeper (a `WK`-role player) before confirming.",
+                ephemeral=True)
+        tnum = self.team_num
+        remaining = [p for p in self.squad if p not in self.selected_players]
+        if tnum == 1:
             self.state.t1_roster = self.selected_players
             self.state.t1_subs = []
-            await interaction.response.edit_message(content="✅ **Team 1 XI Confirmed!**", view=None)
-            remaining = [p for p in self.squad if p not in self.selected_players]
-            if getattr(self.state, "impact_player", False) and remaining:
-                view = TournamentSubSelectView(self.state, self.channel, 1, remaining)
-                await self.channel.send(view.get_msg_content(), view=view)
-            else:
-                await prompt_tournament_xi(self.channel, self.state, 2)
         else:
             self.state.t2_roster = self.selected_players
             self.state.t2_subs = []
-            await interaction.response.edit_message(content="✅ **Team 2 XI Confirmed!**", view=None)
-            remaining = [p for p in self.squad if p not in self.selected_players]
-            if getattr(self.state, "impact_player", False) and remaining:
-                view = TournamentSubSelectView(self.state, self.channel, 2, remaining)
-                await self.channel.send(view.get_msg_content(), view=view)
+
+        # Captain step → then the original Impact-Sub / next-team continuation.
+        async def _after_captain(channel, state):
+            if getattr(state, "impact_player", False) and remaining:
+                view = TournamentSubSelectView(state, channel, tnum, remaining)
+                await channel.send(view.get_msg_content(), view=view)
+            elif tnum == 1:
+                await prompt_tournament_xi(channel, state, 2)
             else:
-                await proceed_to_conditions(self.channel, self.state)
+                await proceed_to_conditions(channel, state)
+
+        await interaction.response.edit_message(content=f"✅ **Team {tnum} XI Confirmed!**", view=None)
+        await handle_captain_step(self.channel, self.state, tnum, self.selected_players, _after_captain)
 
     def get_msg_content(self):
         t_name = self.state.t1_name if self.team_num == 1 else self.state.t2_name
@@ -4952,8 +5117,8 @@ async def begin_toss(channel, state):
         return await _begin_test_match(channel, state)
 
     _sid = getattr(state, "tournament_server_id", None) or (str(channel.guild.id) if getattr(channel, "guild", None) else None)
-    t1 = {"name": state.t1_name, "players": apply_server_overrides(state.t1_roster, _sid), "subs": apply_server_overrides(getattr(state, 't1_subs', []), _sid), "color": getattr(state, 't1_color', '#6B7280')}
-    t2 = {"name": state.t2_name, "players": apply_server_overrides(state.t2_roster, _sid), "subs": apply_server_overrides(getattr(state, 't2_subs', []), _sid), "color": getattr(state, 't2_color', '#6B7280')}
+    t1 = {"name": state.t1_name, "players": with_captain(apply_server_overrides(state.t1_roster, _sid)), "subs": apply_server_overrides(getattr(state, 't1_subs', []), _sid), "color": getattr(state, 't1_color', '#6B7280')}
+    t2 = {"name": state.t2_name, "players": with_captain(apply_server_overrides(state.t2_roster, _sid)), "subs": apply_server_overrides(getattr(state, 't2_subs', []), _sid), "color": getattr(state, 't2_color', '#6B7280')}
 
     match = CricketMatch(state.p1, state.p2, state.p1_id, state.p2_id, t1, t2, state.format_overs, state.pitch, state.weather)
     match.impact_player = state.impact_player
@@ -5105,6 +5270,7 @@ async def on_message(message: discord.Message):
         req_length = 11
         typed = message.content.strip()
         _ct = get_custom_team(typed)
+        cap_name, cap_err, cap_low = None, None, False
         if typed.lower() == "default":
             players = list(TEAMS_DATA["Team 1"]["players"])
             if state.impact_player:
@@ -5123,22 +5289,34 @@ async def on_message(message: discord.Message):
                 state.t1_subs = []
         else:
             db = get_all_players()
-            parsed_players, missing = parse_pasted_roster(message.content, db)
+            parsed_players, missing, cap_name, cap_err, cap_low = parse_pasted_roster(message.content, db)
             players = parsed_players[:11]
             state.t1_subs = parsed_players[11:16] if state.impact_player else []
-            
+
         if missing or len(players) < req_length:
             err = f"❌ **Roster Validation Failed ({len(players)}/{req_length} Found)**\n\n"
             if players: err += f"✅ **Accepted:** {', '.join([p['name'] for p in players])}\n"
             if missing: err += f"❌ **Missing from DB:** {', '.join(missing)}\n\n"
             err += f"Please check spellings or add missing players to your CSV, then type your full list again."
             return await message.channel.send(err)
+        if cap_err == "multiple":
+            return await message.channel.send("❌ **Invalid — more than one captain marked.**\nPut `(C)` after exactly **one** player, then type your XI again.")
+        if not _has_wk(players):
+            return await message.channel.send("❌ **Invalid XI — no Wicket-Keeper.**\nEvery team must include at least one keeper (a `WK`-role player). Add a wicket-keeper, then type your full XI again.")
+
+        # A captain marked with '(C)' must be one of the XI; otherwise we'll prompt for it.
+        state.t1_captain = cap_name if (cap_name and cap_name in {p["name"] for p in players}) else None
 
         del active_setups[channel_id]
         xi_text = format_xi_display(players)
         if state.impact_player and state.t1_subs:
             xi_text += "\n\n**Impact Subs:**\n" + format_xi_display(state.t1_subs)
-        await message.channel.send(f"📋 **{state.t1_name} XI** Verified:\n{xi_text}\n\nIs this correct?", view=Team1VerifyView(state, message.channel, players))
+        cap_line = ""
+        if state.t1_captain:
+            cap_line = f"\n\n🧢 **Captain (from your list):** {state.t1_captain}"
+            if cap_low:
+                cap_line += "\n-# Noted `(c)` — the documented marker is uppercase `(C)`."
+        await message.channel.send(f"📋 **{state.t1_name} XI** Verified:\n{xi_text}{cap_line}\n\nIs this correct?", view=Team1VerifyView(state, message.channel, players))
 
     elif stage == "awaiting_team2_name":
         target_id = state.p2_id if state.p2_id else state.p1_id
@@ -5165,6 +5343,7 @@ async def on_message(message: discord.Message):
         req_length = 11
         typed = message.content.strip()
         _ct = get_custom_team(typed)
+        cap_name, cap_err, cap_low = None, None, False
         if typed.lower() == "default":
             players = list(TEAMS_DATA["Team 2"]["players"])
             if state.impact_player:
@@ -5183,22 +5362,34 @@ async def on_message(message: discord.Message):
                 state.t2_subs = []
         else:
             db = get_all_players()
-            parsed_players, missing = parse_pasted_roster(message.content, db)
+            parsed_players, missing, cap_name, cap_err, cap_low = parse_pasted_roster(message.content, db)
             players = parsed_players[:11]
             state.t2_subs = parsed_players[11:16] if state.impact_player else []
-            
+
         if missing or len(players) < req_length:
             err = f"❌ **Roster Validation Failed ({len(players)}/{req_length} Found)**\n\n"
             if players: err += f"✅ **Accepted:** {', '.join([p['name'] for p in players])}\n"
             if missing: err += f"❌ **Missing from DB:** {', '.join(missing)}\n\n"
             err += f"Please check spellings or add missing players to your CSV, then type your full list again."
             return await message.channel.send(err)
+        if cap_err == "multiple":
+            return await message.channel.send("❌ **Invalid — more than one captain marked.**\nPut `(C)` after exactly **one** player, then type your XI again.")
+        if not _has_wk(players):
+            return await message.channel.send("❌ **Invalid XI — no Wicket-Keeper.**\nEvery team must include at least one keeper (a `WK`-role player). Add a wicket-keeper, then type your full XI again.")
+
+        # A captain marked with '(C)' must be one of the XI; otherwise we'll prompt for it.
+        state.t2_captain = cap_name if (cap_name and cap_name in {p["name"] for p in players}) else None
 
         del active_setups[channel_id]
         xi_text = format_xi_display(players)
         if state.impact_player and state.t2_subs:
             xi_text += "\n\n**Impact Subs:**\n" + format_xi_display(state.t2_subs)
-        await message.channel.send(f"📋 **{state.t2_name} XI** Verified:\n{xi_text}\n\nIs this correct?", view=Team2VerifyView(state, message.channel, players))
+        cap_line = ""
+        if state.t2_captain:
+            cap_line = f"\n\n🧢 **Captain (from your list):** {state.t2_captain}"
+            if cap_low:
+                cap_line += "\n-# Noted `(c)` — the documented marker is uppercase `(C)`."
+        await message.channel.send(f"📋 **{state.t2_name} XI** Verified:\n{xi_text}{cap_line}\n\nIs this correct?", view=Team2VerifyView(state, message.channel, players))
 
     await bot.process_commands(message)
 
@@ -6594,8 +6785,8 @@ class TestTossDecisionView(discord.ui.View):
     async def _decide(self, interaction: discord.Interaction, choice: str):
         state = self.state
         _sid = getattr(state, "tournament_server_id", None) or (str(self.channel.guild.id) if getattr(self.channel, "guild", None) else None)
-        t1 = {"name": state.t1_name, "players": apply_server_overrides(state.t1_roster, _sid), "color": getattr(state, 't1_color', '#1D4ED8')}
-        t2 = {"name": state.t2_name, "players": apply_server_overrides(state.t2_roster, _sid), "color": getattr(state, 't2_color', '#DC2626')}
+        t1 = {"name": state.t1_name, "players": with_captain(apply_server_overrides(state.t1_roster, _sid)), "color": getattr(state, 't1_color', '#1D4ED8')}
+        t2 = {"name": state.t2_name, "players": with_captain(apply_server_overrides(state.t2_roster, _sid)), "color": getattr(state, 't2_color', '#DC2626')}
         winner_is_p1 = (state._test_toss_winner == state.p1_id)
         winning_team = t1 if winner_is_p1 else t2
         losing_team  = t2 if winner_is_p1 else t1
@@ -6624,8 +6815,8 @@ class TestTossDecisionView(discord.ui.View):
 async def _begin_test_match(channel, state):
     """Branch from begin_toss for Test (format_overs == 90) matches."""
     _sid = getattr(state, "tournament_server_id", None) or (str(channel.guild.id) if getattr(channel, "guild", None) else None)
-    t1 = {"name": state.t1_name, "players": apply_server_overrides(state.t1_roster, _sid), "color": getattr(state, 't1_color', '#1D4ED8')}
-    t2 = {"name": state.t2_name, "players": apply_server_overrides(state.t2_roster, _sid), "color": getattr(state, 't2_color', '#DC2626')}
+    t1 = {"name": state.t1_name, "players": with_captain(apply_server_overrides(state.t1_roster, _sid)), "color": getattr(state, 't1_color', '#1D4ED8')}
+    t2 = {"name": state.t2_name, "players": with_captain(apply_server_overrides(state.t2_roster, _sid)), "color": getattr(state, 't2_color', '#DC2626')}
     weather = state.weather
 
     # sim_only (/simulatematch): fully auto
@@ -8010,7 +8201,7 @@ class PrefixCog(commands.Cog):
             msg = await self.bot.wait_for("message", timeout=180.0, check=check)
         except asyncio.TimeoutError:
             return await ctx.send("⏳ Timed out — run `cv saveteam` again.")
-        parsed, missing = parse_pasted_roster(msg.content, get_all_players())
+        parsed, missing, *_cap = parse_pasted_roster(msg.content, get_all_players())
         players = parsed[:11]
         impact = parsed[11:16]
         if missing or len(players) < 11:
@@ -8103,7 +8294,7 @@ class PrefixCog(commands.Cog):
             return await ctx.send("⏳ Timed out — `cv editteam` again. Team unchanged.")
         if msg.content.strip().lower() == "cancel":
             return await msg.reply("❎ Cancelled — team unchanged.")
-        parsed, missing = parse_pasted_roster(msg.content, get_all_players())
+        parsed, missing, *_cap = parse_pasted_roster(msg.content, get_all_players())
         players = parsed[:11]
         impact = parsed[11:16]
         if missing or len(players) < 11:
@@ -9933,8 +10124,8 @@ class PrefixCog(commands.Cog):
             # Play each team's BEST balanced XI (top 11 by rating, ≥5 who can bowl) from the
             # players still FIT, then sort into a proper batting order (best batters open,
             # bowlers at the tail) — not just the first 11 in squad order.
-            roster1 = _batting_order(_best_xi(apply_server_overrides(_available(s1), tourney["server_id"])))
-            roster2 = _batting_order(_best_xi(apply_server_overrides(_available(s2), tourney["server_id"])))
+            roster1 = with_captain(_batting_order(_best_xi(apply_server_overrides(_available(s1), tourney["server_id"]))))
+            roster2 = with_captain(_batting_order(_best_xi(apply_server_overrides(_available(s2), tourney["server_id"]))))
             # Use the match's assigned conditions if valid; otherwise pick a fully random
             # pitch from the FULL valid set (not a tiny flat/dead-heavy list) so sims cover
             # every surface — green seamers, dustbowls, crackers, the lot.
