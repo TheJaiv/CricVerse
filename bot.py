@@ -9885,18 +9885,22 @@ class PrefixCog(commands.Cog):
             lines.append(f"⚠️ Below minimum ({len(squad)}/{min_s}) — add more before `cv tournament start`.")
         await ctx.send("\n".join(lines))
 
-    @tournament.command(name="squad", help="View a team's tournament squad and player ratings.\nUsage: tournament squad [team_name]")
+    @tournament.command(name="squad", help="View a team's tournament squad and player ratings.\nUsage: tournament squad [team_name | @owner]")
     async def t_squad(self, ctx, *, team_name: str = None):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney: return await ctx.send("❌ No tournament exists.")
-        
-        if team_name:
+
+        if ctx.message.mentions:
+            owner = ctx.message.mentions[0]
+            team = next((t for t in tourney["teams"] if t["owner_id"] == str(owner.id)), None)
+            if not team: return await ctx.send(f"❌ {owner.mention} does not own a team in this tournament.")
+        elif team_name:
             team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.lower()), None)
             if not team: return await ctx.send(f"❌ Team '{team_name}' not found.")
         else:
             team = next((t for t in tourney["teams"] if t["owner_id"] == str(ctx.author.id)), None)
-            if not team: return await ctx.send("❌ You do not own a team. Please specify a `team_name`.")
+            if not team: return await ctx.send("❌ You do not own a team. Specify a `team_name` or `@owner`.")
             
         if not team.get("squad"):
             return await ctx.send(f"❌ **{team['name']}** has not submitted their squad yet.")
