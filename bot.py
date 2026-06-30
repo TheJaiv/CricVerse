@@ -4585,10 +4585,11 @@ def captain_note(players):
     return f"🧢 **Captain:** {cap['name']}  ·  +1 {skill}"
 
 
-def parse_pasted_roster(raw_text, db_players):
+def parse_pasted_roster(raw_text, db_players, max_lines=16):
     """Resolve typed names → player dicts. A player line may end with a captain marker
     ('(C)' documented; '(c)'/'(captain)' also accepted) to name the captain inline and
-    skip the captain prompt. Returns
+    skip the captain prompt. `max_lines` caps how many lines are read (16 = 11 XI + 5
+    impact; pass more for a squad). Returns
     (found_players, missing_names, captain_name, captain_error, lowercase_mark_used)."""
     # Create a lookup map where keys are lowercase for easy matching
     db_map = {p["name"].lower(): p for p in db_players}
@@ -4602,7 +4603,7 @@ def parse_pasted_roster(raw_text, db_players):
     lowercase_mark_used = False
 
     lines = [l.strip() for l in raw_text.split("\n") if l.strip()]
-    for line in lines[:16]:
+    for line in lines[:max_lines]:
         core, marked, low = _strip_captain_mark(line)
         if marked:
             captain_marks += 1
@@ -8370,24 +8371,14 @@ class PrefixCog(commands.Cog):
     async def bestxi(self, ctx):
         if ctx.author.id != ADMIN_DISCORD_ID:
             return await ctx.send("🔒 Owner only.")
-        import difflib
         from tools.lineup_optimizer import recommend_xi, PITCHES, category
 
         db = get_all_players()
-        db_map = {p["name"].lower(): p for p in db}
-        db_names = list(db_map.keys())
 
+        # Reuse the same smart name resolver as the match-XI flow (partial names,
+        # typos, fuzzy cutoff 0.6) -- just lifting the line cap for a full squad.
         def resolve(text, cap):
-            found, missing = [], []
-            for line in [l.strip() for l in text.split("\n") if l.strip()][:cap]:
-                q = line.lower()
-                if q in db_map:
-                    found.append(db_map[q]); continue
-                cm = difflib.get_close_matches(q, db_names, n=1, cutoff=0.82)
-                if cm:
-                    found.append(db_map[cm[0]])
-                else:
-                    missing.append(line)
+            found, missing, *_ = parse_pasted_roster(text, db, max_lines=cap)
             return found, missing
 
         def check(m):
