@@ -2030,10 +2030,14 @@ def generate_acl_match_summary(data: dict) -> io.BytesIO:
         col = _hex(t.get("color")); bowl_col = _hex((data.get(cfg["other"]) or {}).get("color"))
         paste_logo(t.get("logo_emoji"), 172, cfg["logo_cy"] + LOGO_DY, 120, col)
 
-        nm = (t.get("name") or "")[:16]
-        text(NAME_X, cfg["hy"], nm, f_name, "lm", WHITE)
-        if data.get("toss_team") and data["toss_team"] == t.get("name"):
-            text(NAME_X + tw(nm, f_name) + 22, cfg["hy"], "TOSS", f_toss, "lm", WHITE)
+        nm = (t.get("name") or "")[:30]
+        _toss_on = data.get("toss_team") and data["toss_team"] == t.get("name")
+        # Fit the name into the space before the overs label (reserve a TOSS chip when shown)
+        _nm_max_w = (OVERS_R - 156) - NAME_X - 24 - (88 if _toss_on else 0)
+        f_nm = fit(nm, _nm_max_w, 50)
+        text(NAME_X, cfg["hy"], nm, f_nm, "lm", WHITE)
+        if _toss_on:
+            text(NAME_X + tw(nm, f_nm) + 22, cfg["hy"], "TOSS", f_toss, "lm", WHITE)
         text(OVERS_R, cfg["hy"], f"{_overs(t.get('balls', 0))} OVERS", f_overs, "rm", WHITE)
         text(cfg["scap"][0], cfg["scap"][1], _score(t), f_score, "mm", WHITE)
 
