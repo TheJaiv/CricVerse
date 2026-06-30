@@ -384,6 +384,193 @@ def generate_acl_points_table(tourney) -> io.BytesIO:
     return buf
 
 
+def generate_acl_fixtures_image(tourney, team_name) -> io.BytesIO:
+    """Fill assets/acl_fixtures.png with one team's fixtures (up to 13 league rows).
+    Coordinates pixel-scanned from the template (1024×1536):
+      • header team-logo placeholder box: x299–433, y62–182 (center 366,122)
+      • 8 columns — MATCH NO | TEAM | VS | TEAM | PITCH | WEATHER | STADIUM | STATUS
+      • 13 data rows, ~79px pitch
+    The VS badges, match-no pills, status pills and labels are already on the template —
+    we only render text/logos into the cells.
+    """
+    DARK  = (16, 28, 70)
+    GREEN = (22, 140, 78)
+    RED   = (192, 40, 52)
+    GOLD  = (190, 140, 0)
+    GREY  = (108, 108, 120)
+    WHITE = (245, 247, 252)
+
+    # Column x-centres
+    COL_MATCH = 72      # number sits on the navy parallelogram pill
+    COL_T1    = 213     # cell centre between match-no pill & VS badge (symmetric w/ T2 about VS)
+    COL_T2    = 435
+    COL_PITCH = 564
+    COL_WEA   = 693
+    COL_STAD  = 823
+    COL_STAT  = 937
+    # Max text widths per column (px) before wrap/shrink
+    W_TEAM, W_PITCH, W_WEA, W_STAD, W_STAT = 150, 120, 124, 134, 138
+    # Cell rows align to the VS badges / status pills (the row's visual centre);
+    # the match NUMBER sits on its own navy pill, ~14px higher.
+    ROW_CELL = [336, 415, 494, 573, 652, 731, 810, 888, 967, 1046, 1123, 1202, 1279]
+    ROW_NUM  = [322, 402, 484, 563, 642, 721, 800, 879, 958, 1037, 1113, 1192, 1270]
+    # Header: viewing team's logo placeholder + name gradient pill
+    PH_CX, PH_CY, PH_SZ = 366, 122, 104
+    NAME_CX, NAME_CY, NAME_W = 668, 183, 280
+
+    img = Image.open("assets/acl_fixtures.png").convert("RGBA")
+    d = ImageDraw.Draw(img)
+
+    def tw(s, f):
+        return d.textbbox((0, 0), str(s), font=f)[2]
+
+    def th(f):
+        bb = d.textbbox((0, 0), "Ag", font=f)
+        return bb[3] - bb[1], bb[1]
+
+    def _wrap(words, f, max_w):
+        """Greedily pack words into lines each ≤max_w; None if a single word overflows."""
+        lines, cur = [], ""
+        for w in words:
+            if tw(w, f) > max_w:
+                return None
+            trial = w if not cur else cur + " " + w
+            if tw(trial, f) <= max_w:
+                cur = trial
+            else:
+                lines.append(cur); cur = w
+        if cur:
+            lines.append(cur)
+        return lines
+
+    def _draw_lines(lines, f, cx, cy, fill):
+        h, off = th(f); gap = 4; lh = h + gap
+        total = len(lines) * lh - gap
+        y0 = cy - total / 2
+        for i, ln in enumerate(lines):
+            d.text((cx - tw(ln, f) / 2, y0 + i * lh - off), ln, font=f, fill=fill)
+
+    CELL_SZ = 20   # ONE constant font size for every data cell — uniform look
+
+    def cell(cx, cy, s, max_w, fill=DARK, max_lines=3):
+        """Render a centred cell value at the constant CELL_SZ. If it doesn't fit on
+        one line, word-wrap onto ≤max_lines at the SAME size (keeps every cell the
+        same font). Only a single over-long word/over-wrapped value drops below the
+        constant size, and ellipsizes as the final fallback."""
+        s = str(s)
+        f = _acl_pt_font(CELL_SZ)
+        words = s.split()
+        if tw(s, f) <= max_w:
+            return _draw_lines([s], f, cx, cy, fill)
+        if len(words) > 1:
+            lines = _wrap(words, f, max_w)
+            if lines and len(lines) <= max_lines:
+                return _draw_lines(lines, f, cx, cy, fill)
+        # rare: a single word (or too many wrapped lines) wider than the column →
+        # shrink just this value a little until it fits the line budget.
+        for sz in range(CELL_SZ - 1, 12, -1):
+            f = _acl_pt_font(sz)
+            if tw(s, f) <= max_w:
+                return _draw_lines([s], f, cx, cy, fill)
+            if len(words) > 1:
+                lines = _wrap(words, f, max_w)
+                if lines and len(lines) <= max_lines:
+                    return _draw_lines(lines, f, cx, cy, fill)
+        f = _acl_pt_font(13)
+        while len(s) > 1 and tw(s + "…", f) > max_w:
+            s = s[:-1]
+        _draw_lines([s + "…"], f, cx, cy, fill)
+
+    # ── Header: viewing team's logo into the placeholder box ──
+    team = next((t for t in tourney.get("teams", []) if t["name"] == team_name), {})
+    logo_str = team.get("logo_match") or team.get("logo_standings")
+    logo = _fetch_emoji_img(logo_str, PH_SZ) if logo_str else None
+    if logo is not None:
+        img.paste(logo, (int(PH_CX - PH_SZ / 2), int(PH_CY - PH_SZ / 2)), logo)
+        d = ImageDraw.Draw(img)
+
+    # ── Header: team name on the gradient pill below FIXTURES (its own larger size) ──
+    f_name = _acl_pt_font(30)
+    _nm = team_name.upper()
+    while tw(_nm, f_name) > NAME_W and f_name.size > 16:
+        f_name = _acl_pt_font(f_name.size - 1)
+    _draw_lines([_nm], f_name, NAME_CX, NAME_CY, WHITE)
+
+    # ── Rows: this team's matches in schedule order, capped to the 13 template rows ──
+    mine = [m for m in tourney.get("schedule", [])
+            if m.get("team1") == team_name or m.get("team2") == team_name]
+    mine.sort(key=lambda m: m.get("match_id", 0))
+
+    f_num = _acl_pt_font(26)
+    for m, y_cell, y_num in zip(mine[:len(ROW_CELL)], ROW_CELL, ROW_NUM):
+        _draw_lines([str(m.get("match_id", "?"))], f_num, COL_MATCH, y_num, WHITE)
+        t1, t2 = m.get("team1", "TBD"), m.get("team2", "TBD")
+        # locked knockout slots store a source label instead of a resolved team
+        if m.get("status") == "locked":
+            t1 = t1 if t1 != "TBD" else (m.get("team1_src") or "TBD")
+            t2 = t2 if t2 != "TBD" else (m.get("team2_src") or "TBD")
+        cell(COL_T1, y_cell, t1.upper(), W_TEAM)
+        cell(COL_T2, y_cell, t2.upper(), W_TEAM)
+        cell(COL_PITCH, y_cell, m.get("pitch") or "—", W_PITCH)
+        cell(COL_WEA,   y_cell, m.get("weather") or "—", W_WEA)
+        cell(COL_STAD,  y_cell, m.get("stadium") or "—", W_STAD)
+
+        status = m.get("status")
+        if status == "completed" and m.get("result"):
+            w = m["result"].get("winner")
+            if w == "TIE":            stat_txt, stat_col = "TIE", GOLD
+            elif w == team_name:      stat_txt, stat_col = "WON", GREEN
+            else:                     stat_txt, stat_col = "LOST", RED
+        elif status == "locked":      stat_txt, stat_col = "TBD", GREY
+        else:                         stat_txt, stat_col = "READY", GREEN
+        cell(COL_STAT, y_cell, stat_txt, W_STAT, fill=stat_col, max_lines=1)
+
+    out = Image.new("RGB", img.size, (255, 255, 255))
+    out.paste(img, mask=img.split()[3])
+    buf = io.BytesIO()
+    out.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
+class FixturesView(discord.ui.View):
+    """Adds a button under `cv fixtures` to toggle between the text embed and the
+    ACL fixtures image. Only attached for ACL tournaments (the template is ACL)."""
+    def __init__(self, tourney, team_name, *, timeout=300):
+        super().__init__(timeout=timeout)
+        self.tourney = tourney
+        self.team_name = team_name
+        self.showing_image = False
+
+    @discord.ui.button(label="View as Image", emoji="🖼️", style=discord.ButtonStyle.primary)
+    async def toggle(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        if not self.showing_image:
+            try:
+                buf = generate_acl_fixtures_image(self.tourney, self.team_name)
+            except Exception as e:
+                print(f"⚠️ Fixtures image render failed: {e}")
+                return await interaction.followup.send(f"⚠️ Couldn't render the fixtures image: {e}", ephemeral=True)
+            self.showing_image = True
+            button.label, button.emoji = "View as List", "📋"
+            file = discord.File(buf, filename=f"{self.team_name}_fixtures.png")
+            await interaction.message.edit(embed=None, attachments=[file], view=self)
+        else:
+            self.showing_image = False
+            button.label, button.emoji = "View as Image", "🖼️"
+            await interaction.message.edit(
+                embed=build_team_fixtures_embed(self.tourney, self.team_name),
+                attachments=[], view=self,
+            )
+
+
+def build_fixtures_view(tourney, team_name):
+    """Return a FixturesView for ACL tournaments, else None (no image template)."""
+    if tourney.get("tournament_type") == "acl":
+        return FixturesView(tourney, team_name)
+    return None
+
+
 def generate_t20wc_super8_table(tourney) -> io.BytesIO:
     """Fill super8_table.png template with live Super 8 group standings."""
     img = Image.open("assets/super8_table.png").convert("RGBA")
@@ -1896,7 +2083,12 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             team = next((t for t in tourney["teams"] if t.get("owner_id") == str(interaction.user.id)), None)
             if not team:
                 return await interaction.response.send_message("❌ You don't own a team here. Specify a team name: `/tournament fixtures <team>`.", ephemeral=True)
-        await interaction.response.send_message(embed=build_team_fixtures_embed(tourney, team["name"]))
+        view = build_fixtures_view(tourney, team["name"])
+        embed = build_team_fixtures_embed(tourney, team["name"])
+        if view:
+            await interaction.response.send_message(embed=embed, view=view)
+        else:
+            await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="next_match", description="[OWNER] Automatically launch your team's next pending match.")
     async def next_match(self, interaction: discord.Interaction):

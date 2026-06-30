@@ -10350,7 +10350,13 @@ class PrefixCog(commands.Cog):
             team = next((t for t in tourney["teams"] if t.get("owner_id") == str(ctx.author.id)), None)
             if not team:
                 return await ctx.send("❌ You don't own a team here. Specify a team: `cvt fixtures <team name>`.")
-        await ctx.send(embed=build_team_fixtures_embed(tourney, team["name"]))
+        from tournament_manager import build_fixtures_view
+        view = build_fixtures_view(tourney, team["name"])
+        embed = build_team_fixtures_embed(tourney, team["name"])
+        if view:
+            await ctx.send(embed=embed, view=view)
+        else:
+            await ctx.send(embed=embed)
 
     @tournament.command(name="force_result", help="[MANAGER] Manually set match result.\nUsage: tournament force_result <id> <winner> <t1_r> <t1_w> <t1_b> <t2_r> <t2_w> <t2_b>")
     async def t_force_result(self, ctx, match_id: int, winner_team: str, t1_runs: int, t1_wkts: int, t1_balls: int, t2_runs: int, t2_wkts: int, t2_balls: int):
