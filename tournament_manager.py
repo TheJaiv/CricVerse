@@ -1030,6 +1030,29 @@ def build_squad_confirm_text(team_name: str, found_players: list, fuzzy_correcti
     return txt
 
 
+def build_squad_confirm_embed(team_name: str, found_players: list, fuzzy_corrections: list) -> discord.Embed:
+    """Embed version of the squad-confirm preview. Embeds allow up to 4096 chars in the
+    description (vs 2000 for plain content), so large squads (e.g. 30 players) don't
+    blow the message limit. Roster is laid out in two columns to stay compact."""
+    roster_lines = [f"{i}. {p['name']}" for i, p in enumerate(found_players, 1)]
+    desc = "\n".join(roster_lines)
+    if len(desc) > 3900:  # hard safety margin under the 4096 description cap
+        desc = desc[:3900].rsplit("\n", 1)[0] + "\n…"
+    embed = discord.Embed(
+        title=f"📋 Confirm Squad for {team_name}",
+        description=desc,
+        color=discord.Color.gold(),
+    )
+    embed.set_author(name=f"{len(found_players)} players")
+    if fuzzy_corrections:
+        corr = ", ".join(f"`{inp}` → **{nm}**" for inp, nm in fuzzy_corrections)
+        if len(corr) > 1000:
+            corr = corr[:1000].rsplit(",", 1)[0] + ", …"
+        embed.add_field(name="⚠️ Auto-corrected names", value=corr, inline=False)
+    embed.set_footer(text="✅ Confirm to save · ❌ Cancel to abort")
+    return embed
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  ACL — Akatsuki Cricket League: playoff + Super Cup engine
 #  League (91) → Top-6 Playoffs (6 matches) → Akatsuki Super Cup.

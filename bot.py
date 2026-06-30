@@ -35,7 +35,7 @@ from test_image import (
     generate_test_summary_image as _ti_summary,
     generate_test_scorecard_image as _ti_scorecard,
 )
-from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS, SquadConfirmView, build_squad_confirm_text
+from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS, SquadConfirmView, build_squad_confirm_text, build_squad_confirm_embed
 from subscription_manager import (
     load_data_from_bin, load_tournament_data_from_bin,
     save_data_to_bin, save_tournament_data_to_bin,
@@ -9789,16 +9789,101 @@ class PrefixCog(commands.Cog):
             return await ctx.send(err)
 
         view = SquadConfirmView(ctx.author.id)
-        confirm_msg = await ctx.send(build_squad_confirm_text(team["name"], found_players, fuzzy_corrections), view=view)
+        confirm_msg = await ctx.send(embed=build_squad_confirm_embed(team["name"], found_players, fuzzy_corrections), view=view)
         await view.wait()
         if view.value is None:
-            return await confirm_msg.edit(content="⏳ Confirmation timed out — squad **not** saved. Run `cv tournament submit_squad` again.", view=None)
+            return await confirm_msg.edit(content="⏳ Confirmation timed out — squad **not** saved. Run `cv tournament submit_squad` again.", embed=None, view=None)
         if view.value is False:
-            return await confirm_msg.edit(content="❌ Squad submission cancelled. Run `cv tournament submit_squad` again to retry.", view=None)
+            return await confirm_msg.edit(content="❌ Squad submission cancelled. Run `cv tournament submit_squad` again to retry.", embed=None, view=None)
 
         team["squad"] = found_players
         save_tournament(tourney)
-        await confirm_msg.edit(content=f"✅ **Squad Confirmed and Saved for {team['name']}!**\nRegistered {len(found_players)} players.", view=None)
+        await confirm_msg.edit(content=f"✅ **Squad Confirmed and Saved for {team['name']}!**\nRegistered {len(found_players)} players.", embed=None, view=None)
+
+    @tournament.command(name="add_player", aliases=["addp", "ap"], help="[OWNER] Add player(s) to your squad before the tournament starts.\nUsage: tournament add_player <player1>, <player2>, ...")
+    async def t_add_player(self, ctx, *, args: str = ""):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        if tourney.get("status") != "registration":
+            return await ctx.send("❌ Squads are locked — players can only be added before the tournament starts.")
+
+        team = next((t for t in tourney["teams"] if t["owner_id"] == str(ctx.author.id)), None)
+        if not team:
+            return await ctx.send("❌ You do not own a team in this tournament.")
+
+        names = [n.strip() for n in args.split(",") if n.strip()]
+        if not names:
+            return await ctx.send("❌ Usage: `cv tournament add_player <player1>, <player2>, ...`")
+
+        squad = team.get("squad") or []
+        max_s = tourney.get("max_squad", 15)
+        db_players = get_all_players()
+        db_names = [p["name"] for p in db_players]
+
+        added, already, notfound, full = [], [], [], []
+        for nm in names:
+            if len(squad) >= max_s:
+                full.append(nm); continue
+            p = next((x for x in db_players if x["name"].lower() == nm.lower()), None)
+            if not p:
+                close = difflib.get_close_matches(nm, db_names, n=1, cutoff=0.6)
+                if close: p = next(x for x in db_players if x["name"] == close[0])
+            if not p:
+                notfound.append(nm); continue
+            if any(x["name"] == p["name"] for x in squad):
+                already.append(p["name"]); continue
+            squad.append(p); added.append(p["name"])
+
+        team["squad"] = squad
+        save_tournament(tourney)
+
+        lines = [f"📋 **{team['name']}** — {len(squad)}/{max_s} players"]
+        if added: lines.append(f"🟢 Added: {', '.join(added)}")
+        if already: lines.append(f"⚪ Already in squad: {', '.join(already)}")
+        if notfound: lines.append(f"🔴 Not found in DB: {', '.join(notfound)}")
+        if full: lines.append(f"🚫 Squad full ({max_s}) — skipped: {', '.join(full)}")
+        await ctx.send("\n".join(lines))
+
+    @tournament.command(name="remove_player", aliases=["removep", "rmp", "delp"], help="[OWNER] Remove player(s) from your squad before the tournament starts.\nUsage: tournament remove_player <player1>, <player2>, ...")
+    async def t_remove_player(self, ctx, *, args: str = ""):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        if tourney.get("status") != "registration":
+            return await ctx.send("❌ Squads are locked — players can only be removed before the tournament starts.")
+
+        team = next((t for t in tourney["teams"] if t["owner_id"] == str(ctx.author.id)), None)
+        if not team:
+            return await ctx.send("❌ You do not own a team in this tournament.")
+        squad = team.get("squad") or []
+        if not squad:
+            return await ctx.send("❌ Your squad is empty — nothing to remove.")
+
+        names = [n.strip() for n in args.split(",") if n.strip()]
+        if not names:
+            return await ctx.send("❌ Usage: `cv tournament remove_player <player1>, <player2>, ...`")
+
+        removed, notfound = [], []
+        for nm in names:
+            p = next((x for x in squad if x["name"].lower() == nm.lower()), None)
+            if not p:
+                close = difflib.get_close_matches(nm, [x["name"] for x in squad], n=1, cutoff=0.5)
+                if close: p = next(x for x in squad if x["name"] == close[0])
+            if not p:
+                notfound.append(nm); continue
+            squad.remove(p); removed.append(p["name"])
+
+        team["squad"] = squad
+        save_tournament(tourney)
+
+        min_s = tourney.get("min_squad", 11)
+        lines = [f"📋 **{team['name']}** — {len(squad)} players"]
+        if removed: lines.append(f"🔴 Removed: {', '.join(removed)}")
+        if notfound: lines.append(f"⚪ Not in squad: {', '.join(notfound)}")
+        if len(squad) < min_s:
+            lines.append(f"⚠️ Below minimum ({len(squad)}/{min_s}) — add more before `cv tournament start`.")
+        await ctx.send("\n".join(lines))
 
     @tournament.command(name="squad", help="View a team's tournament squad and player ratings.\nUsage: tournament squad [team_name]")
     async def t_squad(self, ctx, *, team_name: str = None):
