@@ -2024,10 +2024,11 @@ def generate_acl_match_summary(data: dict) -> io.BytesIO:
         text(x + 6, y, "IP", f, "lm", WHITE)
         return bw_px + 8
 
+    LOGO_DY = -12   # nudge both team logos higher in their caps
     for key in ("t1", "t2"):
         t = data.get(key) or {}; cfg = rows[key]
         col = _hex(t.get("color")); bowl_col = _hex((data.get(cfg["other"]) or {}).get("color"))
-        paste_logo(t.get("logo_emoji"), 172, cfg["logo_cy"], 120, col)
+        paste_logo(t.get("logo_emoji"), 172, cfg["logo_cy"] + LOGO_DY, 120, col)
 
         nm = (t.get("name") or "")[:16]
         text(NAME_X, cfg["hy"], nm, f_name, "lm", WHITE)
