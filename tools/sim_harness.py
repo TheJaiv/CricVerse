@@ -31,6 +31,7 @@ class BowlerStats:
         self.runs_conceded = 0
         self.balls_bowled = 0
         self.wickets_taken = 0
+        self.is_subbed_out = False
         self.form_factor = random.uniform(0.96, 1.04)
 
 
@@ -73,6 +74,15 @@ class CricketMatch:
         self.last_commentary = ""
         self.last_commentary_prefix = ""
         self.free_hit = False
+        # Impact-player rule (off unless a caller enables it). Mirrors bot.py.
+        self.impact_player = False
+        self.t1_impact_used = False
+        self.t2_impact_used = False
+        self.t1_subs = []
+        self.t2_subs = []
+        self.t1_impact_sub_name = None
+        self.t2_impact_sub_name = None
+        self.impact_log = []   # (team_id, over, "bat"/"bowl", sub_name) per swap
 
     def get_striker_user_id(self):  # never AI-batting branch in harness
         return None
@@ -90,7 +100,124 @@ def execute_ball_math(match):
     return execute_ball_math_t20(match)
 
 
+# ── Impact-player rule (ported from bot.py; AI subs a 12th man at over breaks) ──
+def swap_impact_player(match, team_id, out_name, in_player):
+    if team_id == 1:
+        match.t1_impact_used = True; match.t1_impact_sub_name = in_player["name"]; team = match.team1
+    else:
+        match.t2_impact_used = True; match.t2_impact_sub_name = in_player["name"]; team = match.team2
+    inn = match.current_innings
+    if not inn:
+        return
+    is_bat_swap = (inn.batting_team["name"] == team["name"])
+    match.impact_log.append((team_id, inn.total_balls // 6,
+                             "bat" if is_bat_swap else "bowl", in_player["name"]))
+    if inn.batting_team["name"] == team["name"]:                       # batting impact
+        if in_player["name"] not in inn.batting_stats:
+            pos = getattr(inn, "next_batter_idx", len(inn.batting_team["players"]))
+            inn.batting_team["players"].insert(pos, in_player)
+            inn.batting_stats[in_player["name"]] = BatterStats(in_player)
+        b = inn.batting_stats.get(out_name)
+        if b:
+            if b.dismissal == "not out" and b.balls_faced == 0:
+                b.dismissal = "Subbed Out"
+            elif b.dismissal == "not out":
+                b.dismissal = "Retired (Sub)"
+    else:                                                              # bowling impact
+        if in_player["name"] not in inn.bowling_stats:
+            if in_player not in inn.bowling_team["players"]:
+                inn.bowling_team["players"].append(in_player)
+            inn.bowling_stats[in_player["name"]] = BowlerStats(in_player)
+        bw = inn.bowling_stats.get(out_name)
+        if bw:
+            bw.is_subbed_out = True
+
+
+def _ai_batting_impact(match, innings, team_num, subs):
+    overs = innings.total_balls // 6
+    wkts = innings.wickets
+    max_b = match.max_balls
+    is_inn1 = (match.current_innings_num == 1)
+    bat_subs = [s for s in subs if "Batter" in s["role"] or "All-Rounder" in s["role"]] or subs
+    best_sub = max(bat_subs, key=lambda x: x["bat"])
+    players = innings.batting_team["players"]
+    upcoming = [p for p in players[innings.next_batter_idx:]
+                if innings.batting_stats[p["name"]].dismissal == "not out"]
+    if not upcoming:
+        return
+    if is_inn1:
+        swappable = [p for p in upcoming if "Bowler" not in p["role"]]
+        if not swappable:
+            return
+    else:
+        swappable = upcoming
+    next_up = swappable[0]
+    worst_up = min(swappable, key=lambda x: x["bat"])
+    if not is_inn1 and next_up["bat"] < 60 and best_sub["bat"] > next_up["bat"] + 10:
+        return swap_impact_player(match, team_num, next_up["name"], best_sub)
+    if wkts >= 2 and overs < 6 and best_sub["bat"] >= 72 and best_sub["bat"] > worst_up["bat"] + 12:
+        return swap_impact_player(match, team_num, worst_up["name"], best_sub)
+    if wkts >= 3 and overs >= 5 and innings.total_balls < max_b - 18 and best_sub["bat"] > worst_up["bat"] + 10:
+        return swap_impact_player(match, team_num, worst_up["name"], best_sub)
+    if not is_inn1:
+        balls_left = max_b - innings.total_balls
+        if balls_left > 0:
+            target = getattr(match, "target", match.innings1.total_runs + 1)
+            rrr = (target - innings.total_runs) / balls_left * 6
+            if rrr >= 9 and best_sub["bat"] >= 75 and best_sub["bat"] > worst_up["bat"] + 8:
+                return swap_impact_player(match, team_num, worst_up["name"], best_sub)
+    if innings.total_balls >= max_b - 24 and best_sub["bat"] > worst_up["bat"] + 8:
+        return swap_impact_player(match, team_num, worst_up["name"], best_sub)
+
+
+def _ai_bowling_impact(match, innings, team_num, subs):
+    balls = innings.total_balls
+    max_b = match.max_balls
+    bowl_subs = [s for s in subs if "Bowler" in s["role"] or "All-Rounder" in s["role"]] or subs
+    best_sub = max(bowl_subs, key=lambda x: x["bowl"])
+    curr = innings.current_bowler
+    cands = [p for p in innings.bowling_team["players"]
+             if not curr or p["name"] != curr["name"]]
+    if not cands:
+        return
+    worst = min(cands, key=lambda x: x["bowl"])
+    if best_sub["bowl"] <= worst["bowl"] + 8:
+        return
+    if balls >= max_b - 30:
+        return swap_impact_player(match, team_num, worst["name"], best_sub)
+    if match.current_innings_num == 2 and balls >= max_b - 36:
+        balls_left = max_b - balls
+        if balls_left > 0:
+            target = getattr(match, "target", match.innings1.total_runs + 1)
+            rrr = (target - innings.total_runs) / balls_left * 6
+            if rrr < 7:
+                return swap_impact_player(match, team_num, worst["name"], best_sub)
+    if balls >= max_b - 12:
+        return swap_impact_player(match, team_num, worst["name"], best_sub)
+
+
+def try_ai_impact_player(match, innings):
+    """Over-boundary hook: each team uses its Impact Player once, when the AI
+    tactic fires. No is_ai_game gate (the harness is always AI vs AI)."""
+    if not getattr(match, "impact_player", False):
+        return
+    for team_num in (1, 2):
+        if getattr(match, f"t{team_num}_impact_used", False):
+            continue
+        team = match.team1 if team_num == 1 else match.team2
+        subs = getattr(match, f"t{team_num}_subs", [])
+        if not subs:
+            continue
+        if innings.batting_team["name"] == team["name"]:
+            _ai_batting_impact(match, innings, team_num, subs)
+        else:
+            _ai_bowling_impact(match, innings, team_num, subs)
+
+
 def run_full_match(match):
+    match.t1_subs = match.team1.get("subs", [])
+    match.t2_subs = match.team2.get("subs", [])
+
     def _sim_innings(innings):
         while True:
             if innings.wickets >= 10 or innings.total_balls >= match.max_balls:
@@ -108,6 +235,7 @@ def run_full_match(match):
                 innings.bouncers_in_over = 0
                 innings.cutters_in_over = 0
                 innings.mystery_bowled_this_over = False
+                try_ai_impact_player(match, innings)    # impact sub at over breaks
 
     match.innings1 = InningsState(match.team1, match.team2)
     match.current_innings = match.innings1
