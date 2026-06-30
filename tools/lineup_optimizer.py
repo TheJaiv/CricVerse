@@ -1012,11 +1012,12 @@ def optimize(squad, format_overs=20, coarse_n=30, fine_n=150, fine_k=6,
     print(f"Scoring each pitch's XI vs a varied field ({home_n} each) ...")
     hp = home_pitch_advice(pitch_orders, opp_specs["same"], squad, home_n,
                            format_overs, seed + 9, procs)
-    # Rank by WORST-CASE (maximin), not average: a home pitch is only good if no
-    # visiting style can exploit you. A high average can hide a fatal weak column
-    # (e.g. a turning deck crushes pace sides but loses to spin-strong sides).
-    ranked = sorted(PITCHES, key=lambda p: (min(hp[p].values()),
-                                            sum(hp[p].values()) / len(hp[p])),
+    # Rank by AVERAGE + FLOOR: reward a big advantage (so you dominate, not merely
+    # survive) while penalising any exploitable weak column. Pure average hides a
+    # fatal hole (turning crushes pace but loses to spin); pure floor (maximin) just
+    # picks a mediocre deck. The sum wants both: strong AND no soft underbelly.
+    ranked = sorted(PITCHES,
+                    key=lambda p: sum(hp[p].values()) / len(hp[p]) + min(hp[p].values()),
                     reverse=True)
     best_home = ranked[0]
     home_order = per_pitch[best_home][0]
@@ -1061,7 +1062,8 @@ def optimize(squad, format_overs=20, coarse_n=30, fine_n=150, fine_k=6,
 # Single-scenario recommender (one pitch, one opponent) — used by the Discord bot.
 # Self-contained, NO multiprocessing, so it's safe to call from an async thread.
 # ─────────────────────────────────────────────────────────────────────────────
-def _winpct_vs_team(order, pitch, opp_factory, n, format_overs, seed, squad):
+def _winpct_vs_team(order, pitch, opp_factory, n, format_overs, seed, squad,
+                    weather="Clear"):
     random.seed(seed)
     me_players = [dict(p) for p in order]
     _apply_captain(me_players)
@@ -1072,14 +1074,42 @@ def _winpct_vs_team(order, pitch, opp_factory, n, format_overs, seed, squad):
               "subs": [dict(p) for p in me_subs]}
         opp = opp_factory()
         if i % 2 == 0:
-            m = CricketMatch(me, opp, format_overs, pitch, "Clear")
+            m = CricketMatch(me, opp, format_overs, pitch, weather)
         else:
-            m = CricketMatch(opp, me, format_overs, pitch, "Clear")
+            m = CricketMatch(opp, me, format_overs, pitch, weather)
         m.impact_player = IMPACT_ON
         run_full_match(m)
         if i % 2 == 0:
             sm, so = m.innings1.total_runs, m.innings2.total_runs
         else:
+            so, sm = m.innings1.total_runs, m.innings2.total_runs
+        w += sm > so
+        t += sm == so
+    return 100.0 * (w + 0.5 * t) / n
+
+
+def _winpct_innings_vs_team(order, pitch, opp_factory, n, format_overs, seed, squad,
+                            me_first, weather="Clear"):
+    """Win% on `pitch` vs the opponent when this XI ALWAYS bats first (me_first) or
+    always fields first / chases. Used for the toss recommendation."""
+    random.seed(seed)
+    me_players = [dict(p) for p in order]
+    _apply_captain(me_players)
+    me_subs = _my_bench(order, squad)
+    w = t = 0
+    for _ in range(n):
+        me = {"name": "YOU", "players": [dict(p) for p in me_players],
+              "subs": [dict(p) for p in me_subs]}
+        opp = opp_factory()
+        if me_first:
+            m = CricketMatch(me, opp, format_overs, pitch, weather)
+            m.impact_player = IMPACT_ON
+            run_full_match(m)
+            sm, so = m.innings1.total_runs, m.innings2.total_runs
+        else:
+            m = CricketMatch(opp, me, format_overs, pitch, weather)
+            m.impact_player = IMPACT_ON
+            run_full_match(m)
             so, sm = m.innings1.total_runs, m.innings2.total_runs
         w += sm > so
         t += sm == so
@@ -1109,8 +1139,8 @@ def _opponent_factory(opp_spec, ref_ovr):
     return make
 
 
-def recommend_xi(squad, pitch, opp_spec, format_overs=20, n_coarse=24, n_fine=120,
-                 k=6, max_combos=80, max_cand=60, seed=42):
+def recommend_xi(squad, pitch, opp_spec, weather="Clear", format_overs=20, n_coarse=24,
+                 n_fine=120, k=6, max_combos=80, max_cand=60, seed=42, toss_n=150):
     """Best XI + order for ONE pitch vs ONE opponent (a style string or an explicit
     11). Returns a dict: order, captain, impact, winpct, benched, ref_ovr.
     Single-process and quick (~a few thousand matches) so a bot can await it."""
@@ -1132,7 +1162,8 @@ def recommend_xi(squad, pitch, opp_spec, format_overs=20, n_coarse=24, n_fine=12
     def best_of(orders, base_seed, coarse=True):
         n = n_coarse if coarse else n_fine
         scored = [(o, _winpct_vs_team(o, pitch, opp_factory, n, format_overs,
-                                      base_seed + i, squad)) for i, o in enumerate(orders)]
+                                      base_seed + i, squad, weather))
+                  for i, o in enumerate(orders)]
         scored.sort(key=lambda x: -x[1])
         return scored
 
@@ -1145,6 +1176,12 @@ def recommend_xi(squad, pitch, opp_spec, format_overs=20, n_coarse=24, n_fine=12
     ord_fine = best_of([o for o, _w in ords[:k]], seed + 1500, coarse=False)
     best_order, winpct = ord_fine[0]
 
+    # Toss: win% batting first vs fielding first (chasing) on this pitch/opponent.
+    bf = _winpct_innings_vs_team(best_order, pitch, opp_factory, toss_n, format_overs,
+                                 seed + 2000, squad, me_first=True, weather=weather)
+    ff = _winpct_innings_vs_team(best_order, pitch, opp_factory, toss_n, format_overs,
+                                 seed + 2500, squad, me_first=False, weather=weather)
+
     bench = _my_bench(best_order, squad)
     chosen = {p["name"] for p in best_order}
     return {
@@ -1154,7 +1191,57 @@ def recommend_xi(squad, pitch, opp_spec, format_overs=20, n_coarse=24, n_fine=12
         "winpct": winpct,
         "benched": [p for p in squad if p["name"] not in chosen],
         "ref_ovr": ref_ovr,
+        "toss": {"bat_first": bf, "field_first": ff,
+                 "decision": "BAT FIRST" if bf >= ff else "FIELD FIRST"},
     }
+
+
+def _quick_xi(squad, pitch):
+    """A quick, legal, pitch-appropriate XI (no simulation): the highest pitch_value
+    combo from a small role-feasible pool. Used by the fast best-home-pitch scan."""
+    need_wk = any("WK" in p["role"] for p in squad)
+    pv = lambda p: pitch_value(p, pitch)
+    pool = sorted(squad, key=lambda p: -pv(p))[:13]
+    if need_wk and not any("WK" in p["role"] for p in pool):
+        pool.append(max((p for p in squad if "WK" in p["role"]), key=pv))
+    for ok, need in ((lambda p: category(p) in ("AR", "BWL"), 6),
+                     (lambda p: category(p) == "BAT", 5)):
+        for p in sorted(squad, key=lambda q: -pv(q)):
+            if sum(1 for q in pool if ok(q)) >= need:
+                break
+            if ok(p) and p not in pool:
+                pool.append(p)
+    best, best_pv = None, -1
+    for c in itertools.combinations(pool, 11):
+        cl = list(c)
+        if not _is_valid_xi(cl, require_wk=need_wk):
+            continue
+        s = sum(pv(p) for p in cl)
+        if s > best_pv:
+            best_pv, best = s, cl
+    return best or sorted(squad, key=lambda p: -pv(p))[:11]
+
+
+def best_home_pitch(squad, n=60, format_overs=20, seed=42):
+    """The pitch where THIS squad is strongest — i.e. the deck whose WORST-CASE win%
+    against a varied field (balanced/spin/pace/bat) is highest, so however good a
+    visitor is, your home advantage holds. Returns ranked pitches + the field grid."""
+    squad = [_norm(p) for p in squad]
+    ref = team_ovr(sorted(squad, key=lambda p: -player_ovr(p))[:11])
+    field = {}
+    for pi, pitch in enumerate(PITCHES):
+        order = _default_order(_quick_xi(squad, pitch))
+        field[pitch] = {kind: _winpct_vs_kind(order, pitch, ref, kind, n, format_overs,
+                                               seed + pi * 131 + ki * 17, squad)
+                        for ki, kind in enumerate(FIELD_KINDS)}
+    # Score = average advantage + worst-case floor. Rewards a BIG edge (so you
+    # dominate, not just survive) while still penalising any exploitable weak column
+    # -- so the pick is the deck you're strongest on with no soft underbelly.
+    def score(p):
+        v = field[p]
+        return sum(v.values()) / len(v) + min(v.values())
+    ranked = sorted(PITCHES, key=score, reverse=True)
+    return {"ranked": ranked, "field": field, "best": ranked[0], "ref_ovr": ref}
 
 
 def _report(best_order, best_overall, best_grid, fine, finalists, fine_n):

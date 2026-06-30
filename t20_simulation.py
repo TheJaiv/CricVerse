@@ -66,9 +66,9 @@ _T20_INTENT = True
 
 # How hard each surface is to SCORE on (0 = road → 1 = unplayable).
 T20_PITCH_DIFFICULTY = {
-    "Flat": 0.00, "Dead": 0.00, "Hard": 0.15, "Bouncy": 0.30, "Two-Paced": 0.40,
-    "Dry": 0.35, "Soft": 0.42, "Green": 0.40, "Damp": 0.42, "Worn": 0.46,
-    "Dusty": 0.50, "Slow": 0.46, "Turning": 0.52, "Cracked": 0.62, "Sticky": 0.78,
+    "Flat": 0.00, "Dead": 0.00, "Hard": 0.15, "Bouncy": 0.4, "Two-Paced": 0.40,
+    "Dry": 0.35, "Soft": 0.42, "Green": 0.52, "Damp": 0.42, "Worn": 0.46,
+    "Dusty": 0.45, "Slow": 0.46, "Turning": 0.52, "Cracked": 0.62, "Sticky": 0.78,
 }
 # Launch-timing model:
 T20_LAUNCH_ABPW      = 8.2    # balls a wicket survives attacking, on a road
@@ -429,11 +429,11 @@ def execute_ball_math_t20(match):
     if match.pitch == "Flat":
         bat_rating += 5
     elif match.pitch == "Green" and "Pace" in bowler["role"]:
-        bowl_rating += 3
+        bowl_rating += 4
     elif match.pitch == "Dry" and "Spin" in bowler["role"] and innings.total_balls > 60:
         bowl_rating += 3
     elif match.pitch == "Dusty":
-        if "Spin" in bowler["role"]: bowl_rating += 4
+        if "Spin" in bowler["role"]: bowl_rating += 3
         bat_rating -= 1
     elif match.pitch == "Hard":
         if "Pace" in bowler["role"] and innings.total_balls < 36: bowl_rating += 3
@@ -453,16 +453,17 @@ def execute_ball_math_t20(match):
         if "Spin" in bowler["role"] and innings.total_balls > 60: bowl_rating += 4
         if innings.total_balls > 60: bat_rating -= 1
     elif match.pitch == "Turning":
-        if "Spin" in bowler["role"]: bowl_rating += 5
+        if "Spin" in bowler["role"]: bowl_rating += 4
        
     elif match.pitch == "Two-Paced":
         bat_rating -= 2
     elif match.pitch == "Slow":
-        if "Spin" in bowler["role"]: bowl_rating += 3
-        bat_rating -= 2
+        if "Spin" in bowler["role"]: bowl_rating += 1
+        bat_rating -= 3
     elif match.pitch == "Bouncy":
-        if "Pace" in bowler["role"]: bowl_rating += 4
+        if "Pace" in bowler["role"]: bowl_rating += 3
         bat_rating -= 1
+      
     elif match.pitch == "Sticky":
         bowl_rating += 4
         bat_rating -= 2

@@ -8371,7 +8371,7 @@ class PrefixCog(commands.Cog):
     async def bestxi(self, ctx):
         if ctx.author.id != ADMIN_DISCORD_ID:
             return await ctx.send("🔒 Owner only.")
-        from tools.lineup_optimizer import recommend_xi, PITCHES, category
+        from tools.lineup_optimizer import recommend_xi, best_home_pitch, PITCHES, category
 
         db = get_all_players()
 
@@ -8385,19 +8385,98 @@ class PrefixCog(commands.Cog):
             return (m.author.id == ctx.author.id and m.channel.id == ctx.channel.id
                     and m.content.strip())
 
-        # 1) squad
-        await ctx.send("🧠 **Best XI Finder** (owner) — paste your **SQUAD** (11–25 names, "
-                       "one per line). You have 3 minutes.")
-        try:
-            msg = await self.bot.wait_for("message", timeout=180.0, check=check)
-        except asyncio.TimeoutError:
+        async def confirm(players, label):
+            listing = "\n".join(f"`{i:>2}.` {p['name']} · {p['bat']}/{p['bowl']}"
+                                for i, p in enumerate(players, 1))
+
+            class _Confirm(discord.ui.View):
+                def __init__(self):
+                    super().__init__(timeout=120)
+                    self.ok = None
+
+                async def interaction_check(self, it):
+                    if it.user.id != ctx.author.id:
+                        await it.response.send_message("Not your panel.", ephemeral=True)
+                        return False
+                    return True
+
+                @discord.ui.button(label="Yes, correct", style=discord.ButtonStyle.success, emoji="✅")
+                async def yes(self, it, btn):
+                    self.ok = True
+                    await it.response.defer()
+                    self.stop()
+
+                @discord.ui.button(label="No, re-enter", style=discord.ButtonStyle.danger, emoji="✏️")
+                async def no(self, it, btn):
+                    self.ok = False
+                    await it.response.defer()
+                    self.stop()
+
+            v = _Confirm()
+            m = await ctx.send(f"**{label}** — {len(players)} players:\n{listing}\n\n"
+                               f"Is this correct?", view=v)
+            await v.wait()
+            await m.edit(view=None)
+            return v.ok
+
+        async def collect(prompt, cap, min_n, label):
+            """Paste -> resolve -> confirm, looping until confirmed (or timeout)."""
+            while True:
+                await ctx.send(prompt)
+                try:
+                    m = await self.bot.wait_for("message", timeout=180.0, check=check)
+                except asyncio.TimeoutError:
+                    return None
+                found, missing = resolve(m.content, cap)
+                if missing or len(found) < min_n:
+                    e = f"❌ Need **≥{min_n} valid players** ({len(found)} found)."
+                    if missing:
+                        e += f"\nNot in DB: {', '.join(missing)}"
+                    await m.reply(e + "\nLet's try again.")
+                    continue
+                ok = await confirm(found, label)
+                if ok is None:
+                    return None
+                if ok:
+                    return found
+                # 'No' -> loop and re-paste
+
+        # 1) squad (with confirm)
+        squad = await collect("🧠 **Best XI Finder** (owner) — paste your **SQUAD** "
+                              "(11–30 names, one per line). You have 3 minutes.",
+                              30, 11, "Your SQUAD")
+        if squad is None:
             return await ctx.send("⏳ Timed out — run `cv bestxi` again.")
-        squad, missing = resolve(msg.content, 25)
-        if missing or len(squad) < 11:
-            e = f"❌ Need **≥11 valid players** ({len(squad)} found)."
-            if missing:
-                e += f"\nNot in DB: {', '.join(missing)}"
-            return await msg.reply(e)
+
+        # 1b) best HOME pitch — the deck this squad is strongest on (vs any style)
+        hp_msg = await ctx.send("🏟️ Finding the pitch your team is strongest on… (~7s)")
+        try:
+            hp = await asyncio.to_thread(best_home_pitch, squad)
+        except Exception:
+            hp = None
+        if hp:
+            f = hp["field"][hp["best"]]
+            worst_kind = min(f, key=f.get)
+            best_avg = sum(f.values()) / len(f)
+            lines = []
+            for p in hp["ranked"][:5]:
+                ff = hp["field"][p]
+                lines.append(f"`{p:<10}` adv **{sum(ff.values()) / len(ff):.0f}%** · "
+                             f"floor {min(ff.values()):.0f}% · "
+                             f"[bal{ff['balanced']:.0f} spin{ff['spin']:.0f} "
+                             f"pace{ff['pace']:.0f} bat{ff['bat']:.0f}]")
+            e = discord.Embed(
+                title=f"🏟️ Best HOME pitch: {hp['best']}", color=0x3498db,
+                description=(f"The deck your squad is strongest on: **{best_avg:.0f}%** "
+                            f"average advantage, and even its toughest matchup "
+                            f"(**{worst_kind}-strong**) is still a win at "
+                            f"**{f[worst_kind]:.0f}%** — no style can exploit it.\n\n"
+                            f"**Top decks (advantage + floor):**\n" + "\n".join(lines)))
+            e.set_footer(text="Ranked by average advantage + worst-case floor — "
+                              "dominant AND with no soft underbelly.")
+            await hp_msg.edit(content=None, embed=e)
+        else:
+            await hp_msg.edit(content="⚠️ Couldn't compute the home pitch — continuing.")
 
         # 2) pitch + opponent picker
         class _BestXIView(discord.ui.View):
@@ -8405,6 +8484,7 @@ class PrefixCog(commands.Cog):
                 super().__init__(timeout=240)
                 self.pitch = None
                 self.opp = None
+                self.weather = "Clear"
                 self.go = False
                 self.ps = discord.ui.Select(
                     placeholder="1) Pick the PITCH…",
@@ -8418,10 +8498,16 @@ class PrefixCog(commands.Cog):
                         discord.SelectOption(label="Batting-heavy", value="bat", emoji="🏏"),
                         discord.SelectOption(label="Enter their exact XI", value="custom", emoji="📝"),
                     ])
+                self.wsel = discord.ui.Select(
+                    placeholder="3) WEATHER (optional · default Clear)…",
+                    options=[discord.SelectOption(label=w, value=w,
+                             default=(w == "Clear")) for w in ALL_WEATHER][:25])
                 self.ps.callback = self._p
                 self.osel.callback = self._o
+                self.wsel.callback = self._w
                 self.add_item(self.ps)
                 self.add_item(self.osel)
+                self.add_item(self.wsel)
 
             async def interaction_check(self, it):
                 if it.user.id != ctx.author.id:
@@ -8435,6 +8521,10 @@ class PrefixCog(commands.Cog):
 
             async def _o(self, it):
                 self.opp = self.osel.values[0]
+                await it.response.defer()
+
+            async def _w(self, it):
+                self.weather = self.wsel.values[0]
                 await it.response.defer()
 
             @discord.ui.button(label="Find Best XI", style=discord.ButtonStyle.success, emoji="🧠")
@@ -8455,27 +8545,21 @@ class PrefixCog(commands.Cog):
             return await panel.edit(content="⏳ Timed out — run `cv bestxi` again.", view=None)
         await panel.edit(view=None)
 
-        # 3) opponent: a style, or an explicit XI
+        # 3) opponent: a style, or an explicit XI (with confirm)
         opp_spec = view.opp
         if view.opp == "custom":
-            await ctx.send("📝 Paste the **opponent's 11** (one per line). 3 minutes.")
-            try:
-                omsg = await self.bot.wait_for("message", timeout=180.0, check=check)
-            except asyncio.TimeoutError:
+            opp_players = await collect("📝 Paste the **opponent's 11** (one per line). "
+                                        "3 minutes.", 11, 11, "Opponent XI")
+            if opp_players is None:
                 return await ctx.send("⏳ Timed out — run `cv bestxi` again.")
-            opp_xi, omiss = resolve(omsg.content, 11)
-            if omiss or len(opp_xi) < 11:
-                e = f"❌ Need **11 valid opponent players** ({len(opp_xi)} found)."
-                if omiss:
-                    e += f"\nNot in DB: {', '.join(omiss)}"
-                return await omsg.reply(e)
-            opp_spec = opp_xi[:11]
+            opp_spec = opp_players[:11]
 
         opp_label = "their XI" if view.opp == "custom" else f"a {view.opp}-strong side"
-        working = await ctx.send(f"🧠 Simulating the best XI on **{view.pitch}** vs {opp_label}… "
-                                 f"(~10s)")
+        working = await ctx.send(f"🧠 Simulating the best XI on **{view.pitch}** "
+                                 f"({view.weather}) vs {opp_label}… (~10s)")
         try:
-            r = await asyncio.to_thread(recommend_xi, squad, view.pitch, opp_spec)
+            r = await asyncio.to_thread(recommend_xi, squad, view.pitch, opp_spec,
+                                        view.weather)
         except Exception as ex:
             return await working.edit(content=f"❌ Error: {ex}")
 
@@ -8487,12 +8571,18 @@ class PrefixCog(commands.Cog):
             wk = " (WK)" if "WK" in p["role"] else ""
             c = " 🧢" if p["name"] == cap else ""
             rows.append(f"`{i:>2}.` {p['name']}{wk} · {p['bat']}/{p['bowl']}{c}")
-        e = discord.Embed(title=f"🧠 Best XI · {view.pitch} vs {opp_label}",
+        e = discord.Embed(title=f"🧠 Best XI · {view.pitch} / {view.weather} vs {opp_label}",
                           description="\n".join(rows), color=0x2ecc71)
         e.add_field(name="🧢 Captain", value=cap, inline=True)
         e.add_field(name="⚡ Impact Player",
                     value=(f"{imp['name']} ({category(imp)})" if imp else "—"), inline=True)
         e.add_field(name="Win %", value=f"{r['winpct']:.0f}%", inline=True)
+        toss = r.get("toss")
+        if toss:
+            e.add_field(
+                name="🪙 Win the toss →",
+                value=f"**{toss['decision']}**  (bat {toss['bat_first']:.0f}% · "
+                      f"field {toss['field_first']:.0f}%)", inline=False)
         if r["benched"]:
             e.add_field(name="Left out",
                         value=", ".join(p["name"] for p in r["benched"][:14]), inline=False)
