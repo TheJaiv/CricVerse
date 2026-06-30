@@ -35,7 +35,7 @@ from test_image import (
     generate_test_summary_image as _ti_summary,
     generate_test_scorecard_image as _ti_scorecard,
 )
-from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView
+from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS
 from subscription_manager import (
     load_data_from_bin, load_tournament_data_from_bin,
     save_data_to_bin, save_tournament_data_to_bin,
@@ -1022,7 +1022,13 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
             return d.textsize(text, font=font)[0]
         else:
             return len(text) * 12
-            
+
+    def get_th(text, font):
+        if hasattr(font, 'getbbox'):
+            bb = font.getbbox(text)
+            return bb[3] - bb[1]
+        return 20
+
     potm_name = get_player_of_the_match(match) if match.current_innings_num == 2 else ""
     
     c_white = "#FFFFFF"
@@ -1040,6 +1046,22 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
     c_grid = "#E8E8E8"   # Faint Light Grey
     c_ball = c_accent    # Adaptive color based on format
     c_text_grey = "#777777"
+
+    # Impact Player markers — names of players who came on as an impact sub
+    impact_subs = {
+        n for n in (getattr(match, "t1_impact_sub_name", None),
+                    getattr(match, "t2_impact_sub_name", None)) if n
+    }
+
+    def draw_ip_badge(bx, name_y):
+        """Small 'IP' badge marking a player who came on as an impact sub.
+        Vertically centered on the name; returns the x-advance (badge width + gap)."""
+        bw_px = get_tw("IP", font_small) + 8
+        bh_px = get_th("IP", font_small) + 6
+        by = name_y + (get_th("A", font_bold) - bh_px) // 2
+        d.rounded_rectangle([(bx, by), (bx + bw_px, by + bh_px)], radius=3, fill=c_accent)
+        d.text((bx + 4, by + 3), "IP", fill=c_white, font=font_small)
+        return bw_px + 6
 
     # ==========================================
     # 1. CORE LAYOUT & BARS
@@ -1200,14 +1222,16 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
         for idx, b in enumerate(top_b):
             y = 285 + (idx * 50)
             name = b.profile['name'][:16].upper()
-        
+
             d.text((offset_x + 75, y), name, fill=c_navy, font=font_bold)
-            
+            marker_x = offset_x + 75 + get_tw(name, font_bold) + 8
+
+            if b.profile['name'] in impact_subs:
+                marker_x += draw_ip_badge(marker_x, y)
+
             if potm_name == b.profile['name']:
-                nw = get_tw(name, font_bold)
-            
-                d.text((offset_x + 75 + nw + 8, y - 4), "★", fill="#FFD700", font=font_title)
-            
+                d.text((marker_x, y - 4), "★", fill="#FFD700", font=font_title)
+
             runs = str(b.runs_scored)
             if b.dismissal == "not out": runs += "*"
             d.text((offset_x + 465 - get_tw(runs, font_bold)//2, y), runs, fill=c_navy, font=font_bold)
@@ -1241,13 +1265,16 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
         for idx, bowl in enumerate(top_bowl):
             y = 615 + (idx * 50)
             name = bowl.profile['name'][:16].upper()
-        
+
             d.text((offset_x + 75, y), name, fill=c_navy, font=font_bold)
-            
+            marker_x = offset_x + 75 + get_tw(name, font_bold) + 8
+
+            if bowl.profile['name'] in impact_subs:
+                marker_x += draw_ip_badge(marker_x, y)
+
             if potm_name == bowl.profile['name']:
-                nw = get_tw(name, font_bold)
-                d.text((offset_x + 75 + nw + 8, y - 4), "★", fill="#FFD700", font=font_title)
-            
+                d.text((marker_x, y - 4), "★", fill="#FFD700", font=font_title)
+
             wr = f"{bowl.wickets_taken}-{bowl.runs_conceded}"
             d.text((offset_x + 465 - get_tw(wr, font_bold)//2, y), wr, fill=c_navy, font=font_bold)
             
@@ -1341,10 +1368,12 @@ def extract_scoreboard_data(match: CricketMatch) -> dict:
     # Build round label from schedule entry
     _mid = getattr(match, "tournament_match_id", None)
     _round_label = ""
+    _stadium = None
     if tourney and _mid:
         _m_sched = next((x for x in tourney.get("schedule", []) if x["match_id"] == _mid), None)
         if _m_sched:
             _round_label = _match_round_label(_m_sched)
+            _stadium = _m_sched.get("stadium")
 
     return {
         "theme": theme,
@@ -1354,6 +1383,7 @@ def extract_scoreboard_data(match: CricketMatch) -> dict:
                       else None),
         "match_id": str(getattr(match, "tournament_match_id", "?")),
         "round_label": _round_label,
+        "stadium": _stadium,
         "tourn_name": getattr(match, "tournament_name", "TOURNAMENT").upper(),
         "format_overs": getattr(match, "format_overs", 20),
         "result_str": result_str,
@@ -1501,6 +1531,7 @@ def reconstruct_scorecard_data(tourney: dict, m: dict) -> dict:
         "tournament_type": tourney.get("tournament_type", "round_robin"),
         "match_id":        str(m["match_id"]),
         "round_label":     _match_round_label(m),
+        "stadium":         m.get("stadium"),
         "tourn_name":      tourney["name"].upper(),
         "format_overs":    r.get("format_overs", 20),
         "result_str":      p.get("rs", ""),
@@ -1957,9 +1988,17 @@ def generate_acl_match_summary(data: dict) -> io.BytesIO:
         w = t.get("wickets", 0)
         return str(t.get("runs", 0)) if w >= 10 else f"{t.get('runs', 0)}-{w}"
 
-    rl = (data.get("round_label") or data.get("tourn_name") or "").upper()
+    # Title strip: "MATCH <id> • <Stadium>" (falls back to round/tournament label if no venue/id).
+    _mid = str(data.get("match_id") or "").strip()
+    _venue = (data.get("stadium") or "").strip()
+    if _mid and _mid != "?" and _venue:
+        rl = f"MATCH {_mid} • {_venue}".upper()
+    elif _mid and _mid != "?":
+        rl = f"MATCH {_mid}".upper()
+    else:
+        rl = (data.get("round_label") or data.get("tourn_name") or "").upper()
     if rl:
-        text(865, 200, rl[:40], f_title, "mm")
+        text(865, 200, rl[:60], fit(rl[:60], 900, 32), "mm")
 
     rows = {
         "t1": dict(hy=320, logo_cy=415, scap=(1414, 320), rows_y=[383, 432, 481], other="t2"),
@@ -1969,6 +2008,16 @@ def generate_acl_match_summary(data: dict) -> io.BytesIO:
     BAT_NAME_X, RUNS_X, BALLS_R = 270, 722, 898
     # Bowling mirrors batting: NAME (wide) | PERFORMANCE (big, = runs) | OVERS (small, = balls).
     BOWL_NAME_X, BOWL_PERF_X, BOWL_OV_R = 967, 1372, 1528
+
+    def ip_badge(x, y, fsize=20):
+        """Small orange 'IP' badge marking an impact-sub player; returns the width drawn."""
+        f = _acl_font(fsize)
+        hh = th(f)[0]
+        bw_px = tw("IP", f) + 12
+        bh_px = hh + 10
+        d.rounded_rectangle([(x, y - bh_px / 2), (x + bw_px, y + bh_px / 2)], radius=4, fill=(196, 75, 26))
+        text(x + 6, y, "IP", f, "lm", WHITE)
+        return bw_px + 8
 
     for key in ("t1", "t2"):
         t = data.get(key) or {}; cfg = rows[key]
@@ -1984,16 +2033,23 @@ def generate_acl_match_summary(data: dict) -> io.BytesIO:
 
         # Names take the team's colour (white fallback only where they sit on a dark strip).
         def name_col(x, y, base): return WHITE if _dark_bg(x, y) else base
+        ip_name = (t.get("impact_sub") or "").upper()
         for i, b in enumerate((t.get("batters") or [])[:3]):
             y = cfg["rows_y"][i]; star = "*" if b.get("not_out") else ""
             nm = b["name"].upper()
-            text(BAT_NAME_X, y, nm, fit(nm, 400, 31), "lm", name_col(BAT_NAME_X, y, col))
+            bf = fit(nm, 400, 31)
+            text(BAT_NAME_X, y, nm, bf, "lm", name_col(BAT_NAME_X, y, col))
+            if ip_name and nm == ip_name:
+                ip_badge(BAT_NAME_X + tw(nm, bf) + 10, y)
             text(RUNS_X, y, f"{b['runs']}{star}", f_runs, "lm", WHITE)
             text(BALLS_R, y, str(b["balls"]), f_balls, "rm", WHITE)
 
         for i, bw in enumerate((t.get("bowlers") or [])[:3]):
             y = cfg["rows_y"][i]; nm = bw["name"].upper()
-            text(BOWL_NAME_X, y, nm, fit(nm, 380, 31), "lm", name_col(BOWL_NAME_X, y, bowl_col))
+            wf = fit(nm, 380, 31)
+            text(BOWL_NAME_X, y, nm, wf, "lm", name_col(BOWL_NAME_X, y, bowl_col))
+            if ip_name and nm == ip_name:
+                ip_badge(BOWL_NAME_X + tw(nm, wf) + 10, y)
             figcol = WHITE if _dark_bg(BOWL_PERF_X + 30, y) else bowl_col
             text(BOWL_PERF_X, y, f"{bw['wickets']}-{bw['runs']}", f_runs, "lm", figcol)
             text(BOWL_OV_R, y, str(bw.get("overs", "")).split(".")[0], f_balls, "rm")
@@ -8310,6 +8366,149 @@ class PrefixCog(commands.Cog):
         await msg.reply(out)
         await self._log_team_action(ctx, "Edited", ct["name"], players, impact)
 
+    @commands.command(name="bestxi", aliases=["bxi", "optimizexi"], help="[OWNER] Find the best XI from your squad for a chosen pitch vs an opponent.\nUsage: bestxi  → paste squad → pick pitch + what the other team is good at (or paste their XI)")
+    async def bestxi(self, ctx):
+        if ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("🔒 Owner only.")
+        import difflib
+        from tools.lineup_optimizer import recommend_xi, PITCHES, category
+
+        db = get_all_players()
+        db_map = {p["name"].lower(): p for p in db}
+        db_names = list(db_map.keys())
+
+        def resolve(text, cap):
+            found, missing = [], []
+            for line in [l.strip() for l in text.split("\n") if l.strip()][:cap]:
+                q = line.lower()
+                if q in db_map:
+                    found.append(db_map[q]); continue
+                cm = difflib.get_close_matches(q, db_names, n=1, cutoff=0.82)
+                if cm:
+                    found.append(db_map[cm[0]])
+                else:
+                    missing.append(line)
+            return found, missing
+
+        def check(m):
+            return (m.author.id == ctx.author.id and m.channel.id == ctx.channel.id
+                    and m.content.strip())
+
+        # 1) squad
+        await ctx.send("🧠 **Best XI Finder** (owner) — paste your **SQUAD** (11–25 names, "
+                       "one per line). You have 3 minutes.")
+        try:
+            msg = await self.bot.wait_for("message", timeout=180.0, check=check)
+        except asyncio.TimeoutError:
+            return await ctx.send("⏳ Timed out — run `cv bestxi` again.")
+        squad, missing = resolve(msg.content, 25)
+        if missing or len(squad) < 11:
+            e = f"❌ Need **≥11 valid players** ({len(squad)} found)."
+            if missing:
+                e += f"\nNot in DB: {', '.join(missing)}"
+            return await msg.reply(e)
+
+        # 2) pitch + opponent picker
+        class _BestXIView(discord.ui.View):
+            def __init__(self):
+                super().__init__(timeout=240)
+                self.pitch = None
+                self.opp = None
+                self.go = False
+                self.ps = discord.ui.Select(
+                    placeholder="1) Pick the PITCH…",
+                    options=[discord.SelectOption(label=p, value=p) for p in PITCHES][:25])
+                self.osel = discord.ui.Select(
+                    placeholder="2) The opponent is strong at…",
+                    options=[
+                        discord.SelectOption(label="Balanced side", value="balanced", emoji="⚖️"),
+                        discord.SelectOption(label="Spin-strong", value="spin", emoji="🌀"),
+                        discord.SelectOption(label="Pace-strong", value="pace", emoji="🔥"),
+                        discord.SelectOption(label="Batting-heavy", value="bat", emoji="🏏"),
+                        discord.SelectOption(label="Enter their exact XI", value="custom", emoji="📝"),
+                    ])
+                self.ps.callback = self._p
+                self.osel.callback = self._o
+                self.add_item(self.ps)
+                self.add_item(self.osel)
+
+            async def interaction_check(self, it):
+                if it.user.id != ctx.author.id:
+                    await it.response.send_message("Not your panel.", ephemeral=True)
+                    return False
+                return True
+
+            async def _p(self, it):
+                self.pitch = self.ps.values[0]
+                await it.response.defer()
+
+            async def _o(self, it):
+                self.opp = self.osel.values[0]
+                await it.response.defer()
+
+            @discord.ui.button(label="Find Best XI", style=discord.ButtonStyle.success, emoji="🧠")
+            async def run_btn(self, it, btn):
+                if not self.pitch or not self.opp:
+                    return await it.response.send_message(
+                        "Pick a pitch AND an opponent type first.", ephemeral=True)
+                self.go = True
+                await it.response.defer()
+                self.stop()
+
+        view = _BestXIView()
+        panel = await ctx.send(
+            f"✅ Squad: **{len(squad)} players**. Now choose the **pitch** and **opponent**, "
+            f"then hit **Find Best XI**.", view=view)
+        await view.wait()
+        if not view.go:
+            return await panel.edit(content="⏳ Timed out — run `cv bestxi` again.", view=None)
+        await panel.edit(view=None)
+
+        # 3) opponent: a style, or an explicit XI
+        opp_spec = view.opp
+        if view.opp == "custom":
+            await ctx.send("📝 Paste the **opponent's 11** (one per line). 3 minutes.")
+            try:
+                omsg = await self.bot.wait_for("message", timeout=180.0, check=check)
+            except asyncio.TimeoutError:
+                return await ctx.send("⏳ Timed out — run `cv bestxi` again.")
+            opp_xi, omiss = resolve(omsg.content, 11)
+            if omiss or len(opp_xi) < 11:
+                e = f"❌ Need **11 valid opponent players** ({len(opp_xi)} found)."
+                if omiss:
+                    e += f"\nNot in DB: {', '.join(omiss)}"
+                return await omsg.reply(e)
+            opp_spec = opp_xi[:11]
+
+        opp_label = "their XI" if view.opp == "custom" else f"a {view.opp}-strong side"
+        working = await ctx.send(f"🧠 Simulating the best XI on **{view.pitch}** vs {opp_label}… "
+                                 f"(~10s)")
+        try:
+            r = await asyncio.to_thread(recommend_xi, squad, view.pitch, opp_spec)
+        except Exception as ex:
+            return await working.edit(content=f"❌ Error: {ex}")
+
+        # 4) format result
+        cap = r["captain"]["name"] if r["captain"] else "-"
+        imp = r["impact"]
+        rows = []
+        for i, p in enumerate(r["order"], 1):
+            wk = " (WK)" if "WK" in p["role"] else ""
+            c = " 🧢" if p["name"] == cap else ""
+            rows.append(f"`{i:>2}.` {p['name']}{wk} · {p['bat']}/{p['bowl']}{c}")
+        e = discord.Embed(title=f"🧠 Best XI · {view.pitch} vs {opp_label}",
+                          description="\n".join(rows), color=0x2ecc71)
+        e.add_field(name="🧢 Captain", value=cap, inline=True)
+        e.add_field(name="⚡ Impact Player",
+                    value=(f"{imp['name']} ({category(imp)})" if imp else "—"), inline=True)
+        e.add_field(name="Win %", value=f"{r['winpct']:.0f}%", inline=True)
+        if r["benched"]:
+            e.add_field(name="Left out",
+                        value=", ".join(p["name"] for p in r["benched"][:14]), inline=False)
+        e.set_footer(text=f"Squad {len(squad)} · team OVR {r['ref_ovr']} · owner-only · "
+                          f"batting order optimised for this deck")
+        await working.edit(content=None, embed=e)
+
     @commands.command(name="playerlistratings", aliases=["plr", "plratings"], help="[OWNER] Download the full player database WITH ratings.\nUsage: plr")
     async def playerlistratings(self, ctx):
         if ctx.author.id != ADMIN_DISCORD_ID:
@@ -9364,12 +9563,14 @@ class PrefixCog(commands.Cog):
             "impact_player": kwargs['impact_player'], "injuries_enabled": kwargs['injuries'],
             "tournament_type": t_type,
             "conditions_mode": kwargs['conditions'],
+            "stadiums": default_stadium_pool(t_type),
         }
         save_tournament(t_data)
         type_label = {"t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League"}.get(t_type, "Round Robin")
         extra = ""
         if t_type == "acl":
             extra = "\n🔴 **ACL needs exactly 14 teams** — each plays every other once (91 matches) → Top 6 Playoffs → Super Cup."
+            extra += f"\n🏟️ **Stadiums:** {len(DEFAULT_ACL_STADIUMS)} venues pre-loaded — fixtures get a random one at start. Edit with `cvt stadium_add`/`cvt stadiums` before `cvt start`."
         elif t_type == "t20_world_cup":
             extra = "\n⚠️ **T20 World Cup needs exactly 16 teams** in 4 groups of 4."
         if kwargs['conditions'] == "auto":
@@ -10369,6 +10570,124 @@ class PrefixCog(commands.Cog):
         foot += " · all required before `cvt start`" if mode == "home" else f" · conditions mode: {mode} (home pitch used only in 'home' mode)"
         e.set_footer(text=foot)
         await ctx.send(embed=e)
+
+    # ── Stadiums (cosmetic ACL venue labels) ──────────────────────────────────
+    @tournament.command(name="stadiums", aliases=["venues", "stadium_list", "stadium"], help="List the ACL stadium pool and how fixtures are assigned.\nUsage: tournament stadiums")
+    async def t_stadiums(self, ctx):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        if not stadiums_enabled(tourney):
+            return await ctx.send("🏟️ Stadiums are an **ACL-only** feature for now.")
+        pool = get_stadium_pool(tourney)
+        sched = tourney.get("schedule", [])
+        counts = {}
+        for m in sched:
+            s = m.get("stadium")
+            if s: counts[s] = counts.get(s, 0) + 1
+        assigned = sum(counts.values())
+        e = discord.Embed(title=f"🏟️ {tourney['name']} — Stadiums",
+                          color=discord.Color.from_rgb(200, 30, 40))
+        if pool:
+            lines = []
+            for i, s in enumerate(pool):
+                c = counts.get(s, 0)
+                tail = f"  · {c} fixture{'s' if c != 1 else ''}" if c else ""
+                lines.append(f"`{i+1:>2}` 📍 **{s}**{tail}")
+            e.description = "\n".join(lines)
+        else:
+            e.description = "*No stadiums in the pool.* Add some with `cvt stadium_add \"<name>\"`."
+        foot = f"{len(pool)} venue(s)"
+        if sched: foot += f" · {assigned}/{len(sched)} fixtures assigned"
+        foot += " · cosmetic only (pitch & weather are separate)"
+        e.set_footer(text=foot)
+        await ctx.send(embed=e)
+
+    @tournament.command(name="stadium_add", aliases=["addstadium", "add_stadium"], help="[MANAGER] Add a stadium to the ACL pool.\nUsage: tournament stadium_add \"<name>\"")
+    async def t_stadium_add(self, ctx, *, name: str):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        if not stadiums_enabled(tourney):
+            return await ctx.send("🏟️ Stadiums are an **ACL-only** feature for now.")
+        nm = name.strip().strip('"').strip()
+        if not nm: return await ctx.send("❌ Provide a stadium name.")
+        pool = tourney.setdefault("stadiums", [])
+        if canonical_stadium(nm, pool):
+            return await ctx.send(f"⚠️ **{nm}** is already in the pool.")
+        pool.append(nm)
+        save_tournament(tourney)
+        await ctx.send(f"🏟️ Added 📍 **{nm}** to the stadium pool ({len(pool)} total).")
+
+    @tournament.command(name="stadium_remove", aliases=["removestadium", "remove_stadium", "delstadium"], help="[MANAGER] Remove a stadium from the ACL pool.\nUsage: tournament stadium_remove \"<name>\"")
+    async def t_stadium_remove(self, ctx, *, name: str):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        if not stadiums_enabled(tourney):
+            return await ctx.send("🏟️ Stadiums are an **ACL-only** feature for now.")
+        pool = tourney.get("stadiums", [])
+        cs = canonical_stadium(name, pool)
+        if not cs: return await ctx.send(f"❌ **{name.strip()}** isn't in the pool. `cvt stadiums` to view.")
+        pool.remove(cs)
+        save_tournament(tourney)
+        await ctx.send(f"🗑️ Removed **{cs}** from the pool ({len(pool)} left). *Matches already on it keep the label — re-roll or `cvt set_stadium` to change.*")
+
+    @tournament.command(name="stadium_clear", aliases=["clearstadiums", "clear_stadiums"], help="[MANAGER] Clear the entire ACL stadium pool.\nUsage: tournament stadium_clear")
+    async def t_stadium_clear(self, ctx):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        if not stadiums_enabled(tourney):
+            return await ctx.send("🏟️ Stadiums are an **ACL-only** feature for now.")
+        tourney["stadiums"] = []
+        save_tournament(tourney)
+        await ctx.send("🧹 Stadium pool cleared. Add new ones with `cvt stadium_add \"<name>\"`.")
+
+    @tournament.command(name="reroll_stadiums", aliases=["stadium_reroll", "reroll_venues"], help="[MANAGER] Randomly reassign stadiums to all upcoming matches from the pool.\nUsage: tournament reroll_stadiums")
+    async def t_reroll_stadiums(self, ctx):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        if not stadiums_enabled(tourney):
+            return await ctx.send("🏟️ Stadiums are an **ACL-only** feature for now.")
+        pool = get_stadium_pool(tourney)
+        if not pool: return await ctx.send("❌ The stadium pool is empty. Add venues with `cvt stadium_add` first.")
+        n = reroll_stadiums(tourney)
+        save_tournament(tourney)
+        await ctx.send(f"🎲 Reassigned stadiums to **{n}** upcoming match(es) from {len(pool)} venue(s).")
+
+    @tournament.command(name="set_stadium", aliases=["setstadium", "set_venue", "venue"], help="[MANAGER] Set/override a match's stadium (cosmetic).\nUsage: tournament set_stadium <match_id> <name | none>")
+    async def t_set_stadium(self, ctx, match_id: int, *, name: str):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        if not stadiums_enabled(tourney):
+            return await ctx.send("🏟️ Stadiums are an **ACL-only** feature for now.")
+        m = next((x for x in tourney.get("schedule", []) if x["match_id"] == match_id), None)
+        if not m: return await ctx.send(f"❌ No match **#{match_id}** in this tournament.")
+        if m.get("status") == "completed": return await ctx.send(f"❌ Match #{match_id} is already completed.")
+        nm = name.strip().strip('"').strip()
+        if nm.lower() in ("none", "clear", "remove", "-"):
+            m.pop("stadium", None)
+            save_tournament(tourney)
+            return await ctx.send(f"🏟️ Cleared the stadium for match **#{match_id}**.")
+        pool = tourney.get("stadiums", [])
+        match_name = canonical_stadium(nm, pool)
+        m["stadium"] = match_name or nm
+        note = "" if match_name else " *(not in pool — set as a one-off; `cvt stadium_add` to add it)*"
+        save_tournament(tourney)
+        await ctx.send(f"🏟️ Match **#{match_id}** ({m['team1']} vs {m['team2']}) → 📍 **{m['stadium']}**{note}")
 
     @tournament.command(name="set_team_color", help="[MANAGER] Set a team's scorecard color.\nUsage: tournament set_team_color \"<team_name>\" #RRGGBB")
     async def t_set_team_color(self, ctx, team_name: str, color: str):

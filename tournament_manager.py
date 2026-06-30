@@ -9,6 +9,10 @@ import requests
 from PIL import Image, ImageDraw, ImageFont
 import asyncio
 from subscription_manager import DB_CACHE, async_save_tournament_to_bin, get_all_players, get_tier_status
+from stadium_manager import (
+    stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium,
+    assign_stadiums, reroll_stadiums, stadium_label, DEFAULT_ACL_STADIUMS,
+)
 
 # ── Tournament pitch & weather conditions ────────────────────────────────────
 # Canonical engine lists (mirror the PitchWeatherView dropdowns in bot.py).
@@ -51,6 +55,7 @@ def assign_tournament_conditions(tourney):
       auto   → weighted pools (group 90% / knockout 100%)
       home   → pitch = home team's (team1) home_pitch; weather = pooled
     """
+    assign_stadiums(tourney)   # cosmetic venue labels (ACL only; no-op otherwise) — independent of conditions_mode
     mode = tourney.get("conditions_mode", "manual")
     if mode == "manual":
         return
@@ -316,7 +321,7 @@ def generate_acl_points_table(tourney) -> io.BytesIO:
     ROW_Y = [(ROW_BOUNDS[i] + ROW_BOUNDS[i + 1]) // 2 for i in range(14)]
     LOGO_CX, LOGO_SZ, NAME_X = 235, 30, 272
     TINT_X0, TINT_X1 = 200, 1576
-    PLAYED_X, WON_X, LOST_X, NRR_X, POINTS_X = 787, 955, 1123, 1290, 1474
+    PLAYED_X, WON_X, LOST_X, POINTS_X, NRR_X = 787, 955, 1123, 1290, 1474
 
     standings = get_tournament_standings(tourney)[:14]
     team_logos = {t["name"]: (t.get("logo_match") or t.get("logo_standings")) for t in tourney.get("teams", [])}
@@ -690,11 +695,13 @@ def _build_flat_pages(tourney):
 
 
 def _conditions_label(m):
-    """Short pitch · weather tag for a scheduled match (manual matches show 'at match')."""
+    """Short pitch · weather (· venue) tag for a scheduled match (manual matches show 'at match')."""
     p, w = m.get("pitch"), m.get("weather")
-    if p and w:
-        return f"🏟️ {p} · 🌤️ {w}"
-    return "🏟️ *picked at match*"
+    base = f"🏟️ {p} · 🌤️ {w}" if (p and w) else "🏟️ *picked at match*"
+    venue = stadium_label(m)
+    if venue:
+        base += f" · {venue}"
+    return base
 
 
 def _build_status_embed(tourney, page_info):
@@ -1335,6 +1342,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             "injuries_enabled": injuries,
             "tournament_type": t_type,
             "conditions_mode": (conditions.value if conditions else "manual"),
+            "stadiums": default_stadium_pool(t_type),
         }
         save_tournament(t_data)
 
@@ -1343,6 +1351,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             extra = "\n⚠️ **T20 World Cup requires exactly 16 teams (4 groups of 4). Assign each team a group (A/B/C/D) when using `/tournament add_team`.**"
         elif t_type == "acl":
             extra = "\n🔴 **ACL requires exactly 14 teams.** Each plays every other once (91 league matches) → Top 6 Playoffs → Super Cup. No groups needed — just `/tournament add_team` for all 14."
+            extra += f"\n🏟️ **Stadiums:** {len(DEFAULT_ACL_STADIUMS)} venues pre-loaded — fixtures get a random one at start. Edit the pool with `cvt stadium_add` / `cvt stadiums` before starting."
         if t_data["conditions_mode"] == "auto":
             extra += "\n🎲 **Conditions: Auto** — pitch & weather auto-assigned per match."
         elif t_data["conditions_mode"] == "home":
