@@ -9,7 +9,7 @@ import asyncio
 import io
 import os
 import json
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageStat
 import math
 from keep_alive import keep_alive
 from odi_simulation import execute_ball_math_odi, get_smart_ai_bowler_odi
@@ -35,7 +35,7 @@ from test_image import (
     generate_test_summary_image as _ti_summary,
     generate_test_scorecard_image as _ti_scorecard,
 )
-from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS
+from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS, SquadConfirmView, build_squad_confirm_text
 from subscription_manager import (
     load_data_from_bin, load_tournament_data_from_bin,
     save_data_to_bin, save_tournament_data_to_bin,
@@ -1920,10 +1920,13 @@ def generate_acl_match_summary(data: dict) -> io.BytesIO:
                     _ip[xx, yy] = (252, 252, 252, 255)
 
     # Recolor each team-row's coloured frame (header bar + logo cap + score cap +
-    # run/over block) to that team's colour — swap only Hue/Saturation in HSV and keep
-    # Value, so the brightness gradient is preserved. White panels / grey grid (low
+    # run/over block) to that team's colour — swap only Hue/Saturation in HSV. The
+    # template bakes the top row's frame lighter than the bottom, so each frame's
+    # brightness is shifted to a common (lighter) mean V → both rows read the same,
+    # with the within-frame gradient kept intact. White panels / grey grid (low
     # saturation) are untouched by the mask.
     from colorsys import rgb_to_hsv as _r2h
+    FRAME_V_TARGET = 185
     def _rc_hex(c):
         try:
             c = (c or "").lstrip("#"); return tuple(int(c[i:i+2], 16) for i in (0, 2, 4))
@@ -1935,6 +1938,8 @@ def generate_acl_match_summary(data: dict) -> io.BytesIO:
         reg = img.crop(box).convert("RGB")
         h, s, v = reg.convert("HSV").split()
         mask = s.point(lambda x: 255 if x > 70 else 0)
+        _shift = FRAME_V_TARGET - ImageStat.Stat(v, mask).mean[0]
+        v.paste(v.point(lambda x: max(0, min(255, int(x + _shift)))), (0, 0), mask)
         h.paste(Image.new("L", reg.size, H), (0, 0), mask)
         s.paste(Image.new("L", reg.size, S), (0, 0), mask)
         img.paste(Image.merge("HSV", (h, s, v)).convert("RGB"), (box[0], box[1]))
@@ -9752,8 +9757,9 @@ class PrefixCog(commands.Cog):
         
         found_players = []
         missing = []
+        fuzzy_corrections = []
         seen = set()
-        
+
         lines = [l.strip() for l in msg.content.split("\n") if l.strip()]
         for line in lines[:(max_s + 3)]:
             q = line.lower()
@@ -9761,23 +9767,33 @@ class PrefixCog(commands.Cog):
             if not match:
                 fuzz = difflib.get_close_matches(q, db_names_list, n=1, cutoff=0.6)
                 if fuzz: match = db_map[fuzz[0]]
-            
+
             if match:
                 if match["name"] not in seen and len(found_players) < max_s:
                     found_players.append(match)
                     seen.add(match["name"])
+                    if match["name"].lower() != q:
+                        fuzzy_corrections.append((line, match["name"]))
             else:
                 missing.append(line)
-                
+
         if missing or len(found_players) < min_s:
             err = f"❌ **Roster Invalid ({len(found_players)}/{min_s} Minimum Found)**\n"
             if missing: err += f"Missing: {', '.join(missing)}\n"
             err += "Please fix the names and try again."
             return await ctx.send(err)
-            
+
+        view = SquadConfirmView(ctx.author.id)
+        confirm_msg = await ctx.send(build_squad_confirm_text(team["name"], found_players, fuzzy_corrections), view=view)
+        await view.wait()
+        if view.value is None:
+            return await confirm_msg.edit(content="⏳ Confirmation timed out — squad **not** saved. Run `cv tournament submit_squad` again.", view=None)
+        if view.value is False:
+            return await confirm_msg.edit(content="❌ Squad submission cancelled. Run `cv tournament submit_squad` again to retry.", view=None)
+
         team["squad"] = found_players
         save_tournament(tourney)
-        await ctx.send(f"✅ **Squad Verified and Saved for {team['name']}!**\nRegistered {len(found_players)} players.")
+        await confirm_msg.edit(content=f"✅ **Squad Confirmed and Saved for {team['name']}!**\nRegistered {len(found_players)} players.", view=None)
 
     @tournament.command(name="squad", help="View a team's tournament squad and player ratings.\nUsage: tournament squad [team_name]")
     async def t_squad(self, ctx, *, team_name: str = None):

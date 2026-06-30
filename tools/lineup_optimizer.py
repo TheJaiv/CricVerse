@@ -1296,12 +1296,12 @@ def _report(best_order, best_overall, best_grid, fine, finalists, fine_n):
 # ─────────────────────────────────────────────────────────────────────────────
 
 MY_SQUAD = [
-    "Joe Root", "Mitchell Starc", "Yashasvi Jaiswal", "Ben Stokes", "Ravindra Jadeja",
-    "Mustafizur Rahman", "Haris Rauf", "Trent Boult", "Kyle Verreynne", "Angelo Perera",
-    "Sam Cook", "Harry Tector", "Muhammad Haris", "Akash Deep", "D'Arcy Short",
-    "Max O'Dowd", "Ollie Pope", "Nathan Ellis", "Sikandar Raza", "Aiden Markram",
-    "Noor Ahmad", "Eshan Malinga", "Ish Sodhi", "Kusal Mendis", "Salman Ali Agha",
-    "Dimuth Karunaratne", "Ali Khan", "Mitchell Swepson", "Mahmudullah"
+    "Rashid Khan", "Kagiso Rabada", "Yuzvendra Chahal", "Siraj Ullah Khadem", "Shreyas Iyer",
+    "Tilak Varma", "Scott Boland", "Anrich Nortje", "Waqas Maqsood",
+    "Hashmatullah Shahidi", "Shan Masood", "Priyansh Arya", "Ben Foakes", "Daryl Mitchell",
+    "Billy Stanlake", "Will Jacks", "Jediah Blades", "Aashirvad Suryavanshi", "Washington Sundar",
+    "Jaskaran Malhotra", "Vihaan Malhotra", "Thomas Balkin", "Shai Hope", "Peter Handscomb",
+    "Prabsimran Singh"
 ]
 
 def _cli():

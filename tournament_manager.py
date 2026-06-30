@@ -317,11 +317,11 @@ def generate_acl_points_table(tourney) -> io.BytesIO:
     """Fill assets/acl_pointstable.png with the live 14-team ACL standings.
     Highlights: #1 = League Shield (gold), #2-6 = Playoffs zone (green)."""
     DARK = (16, 28, 70)
-    ROW_BOUNDS = [305, 344, 383, 420, 457, 493, 530, 567, 604, 642, 680, 718, 756, 794, 842]
+    ROW_BOUNDS = [303, 344, 383, 420, 457, 495, 532, 569, 607, 644, 681, 719, 756, 796, 845]
     ROW_Y = [(ROW_BOUNDS[i] + ROW_BOUNDS[i + 1]) // 2 for i in range(14)]
-    LOGO_CX, LOGO_SZ, NAME_X = 235, 30, 272
-    TINT_X0, TINT_X1 = 200, 1576
-    PLAYED_X, WON_X, LOST_X, POINTS_X, NRR_X = 787, 955, 1123, 1290, 1474
+    LOGO_CX, LOGO_SZ, NAME_X, LOGO_DY = 235, 30, 272, -4
+    TINT_X0, TINT_X1 = 200, 1577
+    PLAYED_X, WON_X, LOST_X, POINTS_X, NRR_X = 789, 958, 1133, 1320, 1496
 
     standings = get_tournament_standings(tourney)[:14]
     team_logos = {t["name"]: (t.get("logo_match") or t.get("logo_standings")) for t in tourney.get("teams", [])}
@@ -364,7 +364,7 @@ def generate_acl_points_table(tourney) -> io.BytesIO:
         y = ROW_Y[i]
         logo = _fetch_emoji_img(team_logos.get(name), LOGO_SZ)
         if logo is not None:
-            img.paste(logo, (int(LOGO_CX - LOGO_SZ / 2), int(y - LOGO_SZ / 2)), logo)
+            img.paste(logo, (int(LOGO_CX - LOGO_SZ / 2), int(y - LOGO_SZ / 2 + LOGO_DY)), logo)
             d = ImageDraw.Draw(img)
         nm = name[:24].upper()
         fnm = fit(nm, 700 - NAME_X - 12, 26)
@@ -737,8 +737,8 @@ def _build_status_embed(tourney, page_info):
             lines.append(f"`#{m['match_id']}` {tag}{t1b} {r['t1_runs']}/{r['t1_wickets']} vs {t2b} {r['t2_runs']}/{r['t2_wickets']} ✅")
         else:
             # ACL playoff slots may be unresolved (None) — show their TBD source label
-            a = m.get("team1") or f"*{m.get('team1_src', 'TBD')}*"
-            b = m.get("team2") or f"*{m.get('team2_src', 'TBD')}*"
+            a = f"**{m['team1']}**" if m.get("team1") else f"*{m.get('team1_src', 'TBD')}*"
+            b = f"**{m['team2']}**" if m.get("team2") else f"*{m.get('team2_src', 'TBD')}*"
             icon = "🔒" if m["status"] == "locked" else "⏳"
             lines.append(f"`#{m['match_id']}` {tag}{a} vs {b} {icon}\n     └ {_conditions_label(m)}")
     # Split into multiple fields if content exceeds Discord's 1024-char limit
@@ -980,6 +980,54 @@ class PlayerStatsTeamSelectView(discord.ui.View):
         p = self.by_team[t]
         await interaction.response.edit_message(
             content=None, embed=build_player_stats_embed(self.stats_map[t][p], p, t), view=None)
+
+
+class SquadConfirmView(discord.ui.View):
+    """Confirm/Cancel prompt shown before a parsed squad is saved to a team.
+    Restricted to the submitter. value: None=timeout, True=confirm, False=cancel."""
+
+    def __init__(self, author_id: int):
+        super().__init__(timeout=120)
+        self.author_id = author_id
+        self.value = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("❌ Only the person submitting this squad can confirm it.", ephemeral=True)
+            return False
+        return True
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+    @discord.ui.button(label="✅ Confirm", style=discord.ButtonStyle.success)
+    async def confirm_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.value = True
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(view=self)
+        self.stop()
+
+    @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.danger)
+    async def cancel_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.value = False
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(view=self)
+        self.stop()
+
+
+def build_squad_confirm_text(team_name: str, found_players: list, fuzzy_corrections: list) -> str:
+    """Preview message for a parsed squad awaiting confirmation. Flags any name that
+    wasn't an exact match so the submitter can catch a wrong auto-correction."""
+    roster = "\n".join(f"{i}. {p['name']}" for i, p in enumerate(found_players, 1))
+    txt = f"📋 **Confirm Squad for {team_name}** — {len(found_players)} players:\n{roster}\n"
+    if fuzzy_corrections:
+        corr = ", ".join(f"`{inp}` → **{nm}**" for inp, nm in fuzzy_corrections)
+        txt += f"\n⚠️ **Auto-corrected names:** {corr}\n"
+    txt += "\nClick **✅ Confirm** to save or **❌ Cancel** to abort."
+    return txt
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1452,6 +1500,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         db_names_list = list(db_map.keys())
         found_players = []
         missing = []
+        fuzzy_corrections = []
         seen = set()
         lines = [l.strip() for l in msg.content.split("\n") if l.strip()]
         for line in lines[:(max_s + 3)]:
@@ -1464,6 +1513,8 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                 if match["name"] not in seen and len(found_players) < max_s:
                     found_players.append(match)
                     seen.add(match["name"])
+                    if match["name"].lower() != q:
+                        fuzzy_corrections.append((line, match["name"]))
             else:
                 missing.append(line)
         if missing or len(found_players) < min_s:
@@ -1471,9 +1522,16 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             if missing: err += f"Missing: {', '.join(missing)}\n"
             err += "Please fix the names and try `/tournament submit_squad` again."
             return await msg.reply(err)
+        view = SquadConfirmView(interaction.user.id)
+        confirm_msg = await msg.reply(build_squad_confirm_text(team["name"], found_players, fuzzy_corrections), view=view)
+        await view.wait()
+        if view.value is None:
+            return await confirm_msg.edit(content="⏳ Confirmation timed out — squad **not** saved. Run `/tournament submit_squad` again.", view=None)
+        if view.value is False:
+            return await confirm_msg.edit(content="❌ Squad submission cancelled. Run `/tournament submit_squad` again to retry.", view=None)
         team["squad"] = found_players
         save_tournament(tourney)
-        await msg.reply(f"✅ **Squad Verified and Saved for {team['name']}!**\nRegistered {len(found_players)} players.")
+        await confirm_msg.edit(content=f"✅ **Squad Confirmed and Saved for {team['name']}!**\nRegistered {len(found_players)} players.", view=None)
 
     @app_commands.command(name="status", description="View the current tournament schedule — navigate rounds with arrow buttons.")
     async def status(self, interaction: discord.Interaction):
