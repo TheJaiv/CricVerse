@@ -7044,24 +7044,10 @@ async def on_start_tournament_match(channel, manager_id, tourney, match_data):
 
     current_mid = match_data["match_id"]
 
-    # Injury expiry is COUNT-based, not match-id based: an injured player sits out this
-    # many of their team's matches whenever/whichever they're actually played (robust to
-    # skipping ahead or playing out of order). Each match a team plays burns one match off
-    # its injured players; when the count runs out they're cleared and available next time.
-    for team_data in [t1_data, t2_data]:
-        for p in team_data["squad"]:
-            if not p.get("injured"):
-                continue
-            left = p.get("injury_matches_left", p.get("injury_severity", 1))
-            if left <= 0:
-                # Already served the full spell — clear and let them play this match.
-                p.pop("injured", None)
-                p.pop("injury_until_match", None)
-                p.pop("injury_severity", None)
-                p.pop("injury_matches_left", None)
-            else:
-                # Still injured: sit out this match, burn one off the counter.
-                p["injury_matches_left"] = left - 1
+    # Injury expiry is COUNT-based and counted down at match COMPLETION
+    # (see on_tournament_match_complete) — NOT here. That way, starting a match that is
+    # then abandoned/incomplete does not consume an injury. At match start we only need to
+    # leave still-injured players out of the XI, which available_squad() does below.
 
     # Injuries are now reported immediately when a match completes
     # (see on_tournament_match_complete), so nothing to announce here.

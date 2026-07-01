@@ -2201,7 +2201,26 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         process_team_stats(t1_name, t1_inn, t2_inn)
         process_team_stats(t2_name, t2_inn, t1_inn)
 
-        # --- INJURY ROLL (group/super8/league only, not knockouts; needs injuries_enabled) ---
+        # --- INJURY COUNTDOWN (real matches only; count COMPLETED matches, not started ones) ---
+        # Players already injured coming into this match sat it out; now that it has actually
+        # FINISHED, burn one match off their spell. Doing this at completion (not at start)
+        # means starting a match that's then abandoned/incomplete won't consume the injury.
+        # Runs BEFORE the roll so freshly-injured players aren't decremented the same match.
+        # channel is None only on the sim path, which keeps its own expiry — leave it alone.
+        if channel is not None:
+            for _tn in (t1_name, t2_name):
+                _tobj = next((t for t in tourney["teams"] if t["name"] == _tn), None)
+                if not _tobj: continue
+                for _p in _tobj["squad"]:
+                    if not _p.get("injured"): continue
+                    _left = _p.get("injury_matches_left", _p.get("injury_severity", 1)) - 1
+                    if _left <= 0:
+                        _p.pop("injured", None); _p.pop("injury_until_match", None)
+                        _p.pop("injury_severity", None); _p.pop("injury_matches_left", None)
+                    else:
+                        _p["injury_matches_left"] = _left
+
+        # --- INJURY ROLL (group/super8/league only, needs injuries_enabled) ---
         if tourney.get("injuries_enabled", False) and m_data.get("stage") in ("group", "super8", "league"):
             import random as _rng
             # ACL injuries are more frequent and RATING-SCALED — a star (high bat/bowl)
