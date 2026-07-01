@@ -2131,7 +2131,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         ])
 
     @commands.Cog.listener()
-    async def on_tournament_match_complete(self, match):
+    async def on_tournament_match_complete(self, match, channel=None):
         server_id = match.tournament_server_id
         tourney = get_server_tournament(server_id)
         if not tourney: return
@@ -2209,6 +2209,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             # (vs one per whole match for other formats), so the squad depth matters more.
             _is_acl = tourney.get("tournament_type") == "acl"
             _match_injured = False
+            _new_injuries = []
             for team_name, bat_inn, bowl_inn in [(t1_name, t1_inn, t2_inn), (t2_name, t2_inn, t1_inn)]:
                 if not _is_acl and _match_injured: break
                 team_obj = next((t for t in tourney["teams"] if t["name"] == team_name), None)
@@ -2244,12 +2245,33 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                     player["injured"] = True
                     player["injury_until_match"] = until_id
                     player["injury_severity"] = severity
-                    tourney.setdefault("pending_injury_news", []).append({
-                        "team": team_name, "player": p_name,
-                        "severity": severity, "until": until_id,
-                    })
+                    _inj_entry = {"team": team_name, "player": p_name,
+                                  "severity": severity, "until": until_id}
+                    _new_injuries.append(_inj_entry)
+                    if channel is None:
+                        # Sim path (no channel): queue for the consolidated sim report.
+                        tourney.setdefault("pending_injury_news", []).append(_inj_entry)
                     if _is_acl: _team_injured = True
                     else: _match_injured = True
+
+            # Real match: report injuries to the injury/log channel immediately,
+            # right after this match — no waiting for the next match to start.
+            if channel is not None and _new_injuries:
+                team_owners = {t["name"]: t.get("owner_id") for t in tourney.get("teams", [])}
+                _lines, _pings = ["🚑 **Injury Report:**"], []
+                for item in _new_injuries:
+                    m_word = "team match" if item["severity"] == 1 else "team matches"
+                    _lines.append(f"• **{item['player']}** ({item['team']}) — ruled out for their next **{item['severity']}** {m_word}")
+                    oid = team_owners.get(item["team"])
+                    if oid and oid not in _pings: _pings.append(oid)
+                if _pings:
+                    _lines.append(" ".join(f"<@{uid}>" for uid in _pings))
+                inj_ch_id = tourney.get("injury_channel_id")
+                announce_ch = (self.bot.get_channel(int(inj_ch_id)) if inj_ch_id else None) or channel
+                try:
+                    await announce_ch.send("\n".join(_lines))
+                except Exception as _e:
+                    print(f"⚠️ Injury report send failed: {_e}")
 
         # --- KNOCKOUTS AUTO-PROGRESSION ---
         t_type = tourney.get("tournament_type", "round_robin")

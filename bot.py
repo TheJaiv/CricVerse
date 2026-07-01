@@ -2964,7 +2964,7 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
             del active_games[channel.id]
 
         if getattr(match_to_finalize, "tournament_server_id", None):
-            bot.dispatch("tournament_match_complete", match_to_finalize)
+            bot.dispatch("tournament_match_complete", match_to_finalize, channel)
 
 # ==========================================
 # 🏏 6. OVER HUB & INTERACTIVE MENUS
@@ -6971,23 +6971,9 @@ async def on_start_tournament_match(channel, manager_id, tourney, match_data):
                 p.pop("injury_until_match", None)
                 p.pop("injury_severity", None)
 
-    # Announce any injury news queued from the last match
-    injury_news = tourney.pop("pending_injury_news", [])
-    if injury_news:
-        team_owners = {t["name"]: t.get("owner_id") for t in tourney.get("teams", [])}
-        lines = ["🚑 **Injury Report:**"]
-        pings = []
-        for item in injury_news:
-            m_word = "team match" if item["severity"] == 1 else "team matches"
-            lines.append(f"• **{item['player']}** ({item['team']}) — ruled out for their next **{item['severity']}** {m_word}")
-            owner_id = team_owners.get(item["team"])
-            if owner_id and owner_id not in pings:
-                pings.append(owner_id)
-        if pings:
-            lines.append(" ".join(f"<@{uid}>" for uid in pings))
-        inj_ch_id = tourney.get("injury_channel_id")
-        announce_ch = (bot.get_channel(int(inj_ch_id)) if inj_ch_id else None) or channel
-        await announce_ch.send("\n".join(lines))
+    # Injuries are now reported immediately when a match completes
+    # (see on_tournament_match_complete), so nothing to announce here.
+    tourney.pop("pending_injury_news", None)
 
     save_tournament(tourney)
 
