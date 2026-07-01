@@ -2243,8 +2243,9 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                     if severity == 0: continue
                     until_id = team_pending[severity - 1]["match_id"]
                     player["injured"] = True
-                    player["injury_until_match"] = until_id
+                    player["injury_until_match"] = until_id       # kept for sim/display
                     player["injury_severity"] = severity
+                    player["injury_matches_left"] = severity      # real expiry: count matches actually played
                     _inj_entry = {"team": team_name, "player": p_name,
                                   "severity": severity, "until": until_id}
                     _new_injuries.append(_inj_entry)

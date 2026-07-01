@@ -3242,7 +3242,9 @@ async def prompt_bowler_then_hub(interaction, match: CricketMatch):
         await channel.send("🚨 **ERROR:** No eligible bowlers available.")
         return
 
-    view = discord.ui.View(timeout=300)
+    # No timeout: a bowler pick can sit past 5 min in a live match (someone steps away);
+    # a discarded view would freeze the over, and the match can't progress without a bowler.
+    view = discord.ui.View(timeout=None)
     select = discord.ui.Select(
         placeholder=f"🎳 Pick bowler for Over {innings.total_balls // 6 + 1}...",
         options=options[:25]
@@ -3252,11 +3254,24 @@ async def prompt_bowler_then_hub(interaction, match: CricketMatch):
         b_name = select.values[0]
         b_stats = innings.bowling_stats[b_name]
         if b_stats.balls_bowled // 6 >= bowler_quota or (innings.current_bowler and innings.current_bowler["name"] == b_name):
-            await inter.response.send_message("❌ Illegal selection (quota full or same bowler back-to-back).", ephemeral=True)
+            try:
+                await inter.response.send_message("❌ Illegal selection (quota full or same bowler back-to-back).", ephemeral=True)
+            except discord.NotFound:
+                pass
             return
         match._pending_bowler = next(p for p in innings.bowling_team["players"] if p["name"] == b_name)
-        await inter.response.defer()
-        await inter.message.edit(view=None)
+        # The interaction token can be dead (10062) if the loop stalled between render and
+        # click. defer()/edit then 404 — but the downstream flow only needs the channel
+        # (bot token), so swallow the failure and keep the over progressing instead of
+        # crashing the match. The dropdown is removed via the bot-token message edit below.
+        try:
+            await inter.response.defer()
+        except discord.NotFound:
+            pass
+        try:
+            await inter.message.edit(view=None)
+        except discord.HTTPException:
+            pass
         if getattr(match, "is_club", False):
             # Club matches are interactive-only — no Sim hub. Apply the bowler and bowl.
             innings.current_bowler = match._pending_bowler
@@ -7029,13 +7044,24 @@ async def on_start_tournament_match(channel, manager_id, tourney, match_data):
 
     current_mid = match_data["match_id"]
 
-    # Clear injuries that have expired before this match
+    # Injury expiry is COUNT-based, not match-id based: an injured player sits out this
+    # many of their team's matches whenever/whichever they're actually played (robust to
+    # skipping ahead or playing out of order). Each match a team plays burns one match off
+    # its injured players; when the count runs out they're cleared and available next time.
     for team_data in [t1_data, t2_data]:
         for p in team_data["squad"]:
-            if p.get("injured") and p.get("injury_until_match", 0) < current_mid:
+            if not p.get("injured"):
+                continue
+            left = p.get("injury_matches_left", p.get("injury_severity", 1))
+            if left <= 0:
+                # Already served the full spell — clear and let them play this match.
                 p.pop("injured", None)
                 p.pop("injury_until_match", None)
                 p.pop("injury_severity", None)
+                p.pop("injury_matches_left", None)
+            else:
+                # Still injured: sit out this match, burn one off the counter.
+                p["injury_matches_left"] = left - 1
 
     # Injuries are now reported immediately when a match completes
     # (see on_tournament_match_complete), so nothing to announce here.
@@ -11119,12 +11145,51 @@ class PrefixCog(commands.Cog):
         player.pop("injured", None)
         player.pop("injury_until_match", None)
         player.pop("injury_severity", None)
+        player.pop("injury_matches_left", None)
         tourney["pending_injury_news"] = [
             n for n in tourney.get("pending_injury_news", [])
             if not (n["team"] == team["name"] and n["player"] == player["name"])
         ]
         save_tournament(tourney)
         await ctx.send(f"✅ Injury cleared for **{player['name']}** ({team['name']}).")
+
+    @tournament.command(name="add_injury", help="[MANAGER] Manually injure a player for N matches.\nUsage: cvt add_injury \"<team_name>\" \"<player_name>\" [matches=1]")
+    async def t_add_injury(self, ctx, team_name: str, player_name: str, matches: int = 1):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        team = self._team_by_ref(ctx, tourney, team_name)
+        if not team: return await ctx.send(f"❌ Team **{team_name}** not found (use the team name or ping its @owner).")
+        player = next((p for p in team.get("squad", []) if p["name"].lower() == player_name.lower()), None)
+        if not player: return await ctx.send(f"❌ Player **{player_name}** not found in **{team['name']}**.")
+        if player.get("injured"): return await ctx.send(f"ℹ️ **{player['name']}** is already injured. Use `cvt remove_injury` first to change it.")
+        matches = max(1, min(matches, 10))
+        team_pending = [m for m in tourney.get("schedule", [])
+                        if m["status"] == "pending" and (m["team1"] == team["name"] or m["team2"] == team["name"])]
+        sev = min(matches, len(team_pending)) if team_pending else matches
+        if sev <= 0:
+            return await ctx.send(f"ℹ️ **{team['name']}** has no pending matches to sit out.")
+        player["injured"] = True
+        player["injury_severity"] = sev
+        player["injury_matches_left"] = sev
+        if team_pending:
+            player["injury_until_match"] = team_pending[sev - 1]["match_id"]
+        save_tournament(tourney)
+        m_word = "match" if sev == 1 else "matches"
+        # Report to the injury channel, mirroring an auto-rolled injury.
+        report = f"🚑 **Injury Report:**\n• **{player['name']}** ({team['name']}) — ruled out for their next **{sev}** team {m_word}"
+        owner_id = team.get("owner_id")
+        if owner_id:
+            report += f"\n<@{owner_id}>"
+        inj_ch_id = tourney.get("injury_channel_id")
+        announce_ch = (self.bot.get_channel(int(inj_ch_id)) if inj_ch_id else None) or ctx.channel
+        try:
+            await announce_ch.send(report)
+        except Exception as _e:
+            print(f"⚠️ Injury report send failed: {_e}")
+        await ctx.send(f"✅ **{player['name']}** ({team['name']}) injured for **{sev}** {m_word}.")
 
     @tournament.command(name="match_scorecard", help="View the scorecard image for a completed match.\nUsage: tournament match_scorecard <match_id>")
     async def t_match_scorecard(self, ctx, match_id: int):
@@ -11491,7 +11556,7 @@ class PrefixCog(commands.Cog):
         )
         embed.add_field(name="📊 Stats & standings", value="`standings`/`st` · `status`/`sched` · `bracket`/`br` (ACL) · `leaderboard`/`lb <cat>` · `player_stats` · `squad` · `match_scorecard <id>`", inline=False)
         embed.add_field(name="🔥 Knockouts (Managers)", value="**ACL:** `gp`  ·  **Round Robin:** `generate_knockouts`  ·  **T20 WC:** `generate_super8`", inline=False)
-        embed.add_field(name="⚙️ Admin (prefix-only)", value="`transfer_team` · `replace_player` · `force_delete` · `set_theme` · `set_injury_channel` · `remove_injury` · `force_result` · `admin_record_result` · `simulate_all`", inline=False)
+        embed.add_field(name="⚙️ Admin (prefix-only)", value="`transfer_team` · `replace_player` · `force_delete` · `set_theme` · `set_injury_channel` · `add_injury` · `remove_injury` · `force_result` · `admin_record_result` · `simulate_all`", inline=False)
         embed.set_footer(text="Tip: leaderboard categories — runs · wickets · sr · bat_avg · econ · bowl_avg · mvp · fours · sixes · fifties · hundreds")
         await ctx.send(embed=embed)
 
