@@ -4917,7 +4917,10 @@ async def prompt_tournament_xi(channel, state, team_num):
 
 class TournamentXIView(discord.ui.View):
     def __init__(self, state, channel, team_num):
-        super().__init__(timeout=300)
+        # No timeout: picking 11 players one-by-one (×2 teams, with paging) routinely
+        # runs past 5 min. A finite timeout discards the view mid-selection while the
+        # dropdown still looks live, freezing the picker ("unknown view, Discarding").
+        super().__init__(timeout=None)
         self.state = state
         self.channel = channel
         self.team_num = team_num
@@ -4972,27 +4975,42 @@ class TournamentXIView(discord.ui.View):
             return False
         return True
         
+    async def _safe_edit(self, interaction: discord.Interaction, *, content=None, view=False):
+        # The interaction token can be dead (10062 Unknown interaction) if the bot
+        # restarted or the event loop stalled between render and click. In that case
+        # fall back to a plain message edit (uses the bot token, not the interaction
+        # token) so the UI still updates; only give up if that fails too.
+        content = self.get_msg_content() if content is None else content
+        view = self if view is False else view   # sentinel: default to this live view
+        try:
+            await interaction.response.edit_message(content=content, view=view)
+        except discord.NotFound:
+            try:
+                await interaction.message.edit(content=content, view=view)
+            except discord.HTTPException:
+                pass
+
     async def select_cb(self, interaction: discord.Interaction):
         val = interaction.data["values"][0]
         player = next(p for p in self.squad if p["name"] == val)
         self.selected_players.append(player)
         self.update_ui()
-        await interaction.response.edit_message(content=self.get_msg_content(), view=self)
-        
+        await self._safe_edit(interaction)
+
     async def undo_cb(self, interaction: discord.Interaction):
         self.selected_players.pop()
         self.update_ui()
-        await interaction.response.edit_message(content=self.get_msg_content(), view=self)
+        await self._safe_edit(interaction)
 
     async def prev_cb(self, interaction: discord.Interaction):
         self.page -= 1
         self.update_ui()
-        await interaction.response.edit_message(content=self.get_msg_content(), view=self)
+        await self._safe_edit(interaction)
 
     async def next_cb(self, interaction: discord.Interaction):
         self.page += 1
         self.update_ui()
-        await interaction.response.edit_message(content=self.get_msg_content(), view=self)
+        await self._safe_edit(interaction)
 
     async def confirm_cb(self, interaction: discord.Interaction):
         if not _has_wk(self.selected_players):
@@ -5018,7 +5036,7 @@ class TournamentXIView(discord.ui.View):
             else:
                 await proceed_to_conditions(channel, state)
 
-        await interaction.response.edit_message(content=f"✅ **Team {tnum} XI Confirmed!**", view=None)
+        await self._safe_edit(interaction, content=f"✅ **Team {tnum} XI Confirmed!**", view=None)
         await handle_captain_step(self.channel, self.state, tnum, self.selected_players, _after_captain)
 
     def get_msg_content(self):
@@ -5034,7 +5052,9 @@ class TournamentXIView(discord.ui.View):
 
 class TournamentSubSelectView(discord.ui.View):
     def __init__(self, state, channel, team_num, remaining):
-        super().__init__(timeout=300)
+        # No timeout — same reason as TournamentXIView: don't let the picker expire
+        # mid-selection.
+        super().__init__(timeout=None)
         self.state = state
         self.channel = channel
         self.team_num = team_num
@@ -5083,27 +5103,40 @@ class TournamentSubSelectView(discord.ui.View):
             msg += "*No subs selected yet.*\n"
         return msg
 
+    async def _safe_edit(self, interaction: discord.Interaction, *, content=None, view=None):
+        # Survive a dead interaction token (10062) by falling back to a bot-token
+        # message edit, so a stalled/restarted loop never crashes the picker.
+        content = self.get_msg_content() if content is None else content
+        try:
+            await interaction.response.edit_message(content=content, view=view)
+        except discord.NotFound:
+            try:
+                await interaction.message.edit(content=content, view=view)
+            except discord.HTTPException:
+                pass
+
     async def select_cb(self, interaction: discord.Interaction):
         val = interaction.data["values"][0]
         player = next(p for p in self.remaining if p["name"] == val)
         self.selected_subs.append(player)
         self.update_ui()
-        await interaction.response.edit_message(content=self.get_msg_content(), view=self)
+        await self._safe_edit(interaction, view=self)
 
     async def undo_cb(self, interaction: discord.Interaction):
         self.selected_subs.pop()
         self.update_ui()
-        await interaction.response.edit_message(content=self.get_msg_content(), view=self)
+        await self._safe_edit(interaction, view=self)
 
     async def confirm_cb(self, interaction: discord.Interaction):
         t_name = self.state.t1_name if self.team_num == 1 else self.state.t2_name
+        msg = f"✅ **{t_name} Impact Subs Confirmed!** ({len(self.selected_subs)} selected)"
+        # Guard the edit so a dead token can't stall the hand-off to the next step.
+        await self._safe_edit(interaction, content=msg, view=None)
         if self.team_num == 1:
             self.state.t1_subs = self.selected_subs
-            await interaction.response.edit_message(content=f"✅ **{t_name} Impact Subs Confirmed!** ({len(self.selected_subs)} selected)", view=None)
             await prompt_tournament_xi(self.channel, self.state, 2)
         else:
             self.state.t2_subs = self.selected_subs
-            await interaction.response.edit_message(content=f"✅ **{t_name} Impact Subs Confirmed!** ({len(self.selected_subs)} selected)", view=None)
             await proceed_to_conditions(self.channel, self.state)
 
 
