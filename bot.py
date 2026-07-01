@@ -8455,25 +8455,17 @@ class PrefixCog(commands.Cog):
         await msg.reply(out)
         await self._log_team_action(ctx, "Edited", ct["name"], players, impact)
 
-    @commands.command(name="bestxi", aliases=["bxi", "optimizexi"], help="[OWNER] Find the best XI from your squad for a chosen pitch vs an opponent.\nUsage: bestxi  → paste squad → pick pitch + what the other team is good at (or paste their XI)")
-    async def bestxi(self, ctx):
-        if ctx.author.id != ADMIN_DISCORD_ID:
-            return await ctx.send("🔒 Owner only.")
-        from tools.lineup_optimizer import recommend_xi, best_home_pitch, PITCHES, category
-
+    async def _roster_collect(self, ctx, prompt, cap, min_n, label):
+        """Paste -> smart-resolve (same fuzzy matcher as the match-XI flow) -> confirm
+        (Yes / re-enter), looping until confirmed. Returns the player dicts or None on
+        timeout. Shared by `cv bestxi` and `cv bestpitch`."""
         db = get_all_players()
-
-        # Reuse the same smart name resolver as the match-XI flow (partial names,
-        # typos, fuzzy cutoff 0.6) -- just lifting the line cap for a full squad.
-        def resolve(text, cap):
-            found, missing, *_ = parse_pasted_roster(text, db, max_lines=cap)
-            return found, missing
 
         def check(m):
             return (m.author.id == ctx.author.id and m.channel.id == ctx.channel.id
                     and m.content.strip())
 
-        async def confirm(players, label):
+        async def confirm(players):
             listing = "\n".join(f"`{i:>2}.` {p['name']} · {p['bat']}/{p['bowl']}"
                                 for i, p in enumerate(players, 1))
 
@@ -8507,64 +8499,77 @@ class PrefixCog(commands.Cog):
             await m.edit(view=None)
             return v.ok
 
-        async def collect(prompt, cap, min_n, label):
-            """Paste -> resolve -> confirm, looping until confirmed (or timeout)."""
-            while True:
-                await ctx.send(prompt)
-                try:
-                    m = await self.bot.wait_for("message", timeout=180.0, check=check)
-                except asyncio.TimeoutError:
-                    return None
-                found, missing = resolve(m.content, cap)
-                if missing or len(found) < min_n:
-                    e = f"❌ Need **≥{min_n} valid players** ({len(found)} found)."
-                    if missing:
-                        e += f"\nNot in DB: {', '.join(missing)}"
-                    await m.reply(e + "\nLet's try again.")
-                    continue
-                ok = await confirm(found, label)
-                if ok is None:
-                    return None
-                if ok:
-                    return found
-                # 'No' -> loop and re-paste
+        while True:
+            await ctx.send(prompt)
+            try:
+                m = await self.bot.wait_for("message", timeout=180.0, check=check)
+            except asyncio.TimeoutError:
+                return None
+            found, missing, *_ = parse_pasted_roster(m.content, db, max_lines=cap)
+            if missing or len(found) < min_n:
+                e = f"❌ Need **≥{min_n} valid players** ({len(found)} found)."
+                if missing:
+                    e += f"\nNot in DB: {', '.join(missing)}"
+                await m.reply(e + "\nLet's try again.")
+                continue
+            ok = await confirm(found)
+            if ok is None:
+                return None
+            if ok:
+                return found
+            # 'No' -> loop and re-paste
 
-        # 1) squad (with confirm)
-        squad = await collect("🧠 **Best XI Finder** (owner) — paste your **SQUAD** "
-                              "(11–30 names, one per line). You have 3 minutes.",
-                              30, 11, "Your SQUAD")
+    @commands.command(name="bestpitch", aliases=["bp", "homepitch"], help="[OWNER] Find the pitch your squad is strongest on (vs any opponent style).\nUsage: bestpitch → paste squad")
+    async def bestpitch(self, ctx):
+        if ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("🔒 Owner only.")
+        from tools.lineup_optimizer import best_home_pitch
+
+        squad = await self._roster_collect(
+            ctx, "🏟️ **Best Pitch Finder** (owner) — paste your **SQUAD** (11–30 names, "
+            "one per line). You have 3 minutes.", 30, 11, "Your SQUAD")
         if squad is None:
-            return await ctx.send("⏳ Timed out — run `cv bestxi` again.")
+            return await ctx.send("⏳ Timed out — run `cv bestpitch` again.")
 
-        # 1b) best HOME pitch — the deck this squad is strongest on (vs any style)
-        hp_msg = await ctx.send("🏟️ Finding the pitch your team is strongest on… (~7s)")
+        working = await ctx.send("🏟️ Finding the pitch your team is strongest on… (~7s)")
         try:
             hp = await asyncio.to_thread(best_home_pitch, squad)
-        except Exception:
-            hp = None
-        if hp:
-            f = hp["field"][hp["best"]]
-            worst_kind = min(f, key=f.get)
-            best_avg = sum(f.values()) / len(f)
-            lines = []
-            for p in hp["ranked"][:5]:
-                ff = hp["field"][p]
-                lines.append(f"`{p:<10}` adv **{sum(ff.values()) / len(ff):.0f}%** · "
-                             f"floor {min(ff.values()):.0f}% · "
-                             f"[bal{ff['balanced']:.0f} spin{ff['spin']:.0f} "
-                             f"pace{ff['pace']:.0f} bat{ff['bat']:.0f}]")
-            e = discord.Embed(
-                title=f"🏟️ Best HOME pitch: {hp['best']}", color=0x3498db,
-                description=(f"The deck your squad is strongest on: **{best_avg:.0f}%** "
-                            f"average advantage, and even its toughest matchup "
-                            f"(**{worst_kind}-strong**) is still a win at "
-                            f"**{f[worst_kind]:.0f}%** — no style can exploit it.\n\n"
-                            f"**Top decks (advantage + floor):**\n" + "\n".join(lines)))
-            e.set_footer(text="Ranked by average advantage + worst-case floor — "
-                              "dominant AND with no soft underbelly.")
-            await hp_msg.edit(content=None, embed=e)
-        else:
-            await hp_msg.edit(content="⚠️ Couldn't compute the home pitch — continuing.")
+        except Exception as ex:
+            return await working.edit(content=f"❌ Error: {ex}")
+
+        f = hp["field"][hp["best"]]
+        worst_kind = min(f, key=f.get)
+        best_avg = sum(f.values()) / len(f)
+        lines = []
+        for p in hp["ranked"][:8]:
+            ff = hp["field"][p]
+            lines.append(f"`{p:<10}` adv **{sum(ff.values()) / len(ff):.0f}%** · "
+                         f"floor {min(ff.values()):.0f}% · "
+                         f"[bal{ff['balanced']:.0f} spin{ff['spin']:.0f} "
+                         f"pace{ff['pace']:.0f} bat{ff['bat']:.0f}]")
+        e = discord.Embed(
+            title=f"🏟️ Best HOME pitch: {hp['best']}", color=0x3498db,
+            description=(f"The deck your squad is strongest on: **{best_avg:.0f}%** "
+                        f"average advantage, and even its toughest matchup "
+                        f"(**{worst_kind}-strong**) is still a win at "
+                        f"**{f[worst_kind]:.0f}%** — no style can exploit it.\n\n"
+                        f"**Top decks (advantage + floor):**\n" + "\n".join(lines)))
+        e.set_footer(text=f"Squad {len(squad)} · team OVR {hp['ref_ovr']} · owner-only · "
+                          f"ranked by average advantage + worst-case floor")
+        await working.edit(content=None, embed=e)
+
+    @commands.command(name="bestxi", aliases=["bxi", "optimizexi"], help="[OWNER] Find the best XI from your squad for a chosen pitch vs an opponent.\nUsage: bestxi  → paste squad → pick pitch + what the other team is good at (or paste their XI)")
+    async def bestxi(self, ctx):
+        if ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("🔒 Owner only.")
+        from tools.lineup_optimizer import recommend_xi, PITCHES, category
+
+        # 1) squad (with confirm)
+        squad = await self._roster_collect(
+            ctx, "🧠 **Best XI Finder** (owner) — paste your **SQUAD** (11–30 names, "
+            "one per line). You have 3 minutes.", 30, 11, "Your SQUAD")
+        if squad is None:
+            return await ctx.send("⏳ Timed out — run `cv bestxi` again.")
 
         # 2) pitch + opponent picker
         class _BestXIView(discord.ui.View):
@@ -8636,8 +8641,9 @@ class PrefixCog(commands.Cog):
         # 3) opponent: a style, or an explicit XI (with confirm)
         opp_spec = view.opp
         if view.opp == "custom":
-            opp_players = await collect("📝 Paste the **opponent's 11** (one per line). "
-                                        "3 minutes.", 11, 11, "Opponent XI")
+            opp_players = await self._roster_collect(
+                ctx, "📝 Paste the **opponent's 11** (one per line). 3 minutes.",
+                11, 11, "Opponent XI")
             if opp_players is None:
                 return await ctx.send("⏳ Timed out — run `cv bestxi` again.")
             opp_spec = opp_players[:11]
