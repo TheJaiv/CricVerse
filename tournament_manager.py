@@ -416,7 +416,7 @@ def generate_acl_fixtures_image(tourney, team_name) -> io.BytesIO:
     ROW_NUM  = [322, 402, 484, 563, 642, 721, 800, 879, 958, 1037, 1113, 1192, 1270]
     # Header: viewing team's logo placeholder + name gradient pill
     PH_CX, PH_CY, PH_SZ = 366, 122, 104
-    NAME_CX, NAME_CY, NAME_W = 668, 183, 280
+    NAME_CX, NAME_CY, NAME_W = 648, 186, 280
 
     img = Image.open("assets/acl_fixtures.png").convert("RGBA")
     d = ImageDraw.Draw(img)

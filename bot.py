@@ -4925,20 +4925,39 @@ class TournamentXIView(discord.ui.View):
         self.owner_id = state.p1_id if team_num == 1 else state.p2_id
         self.selected_players = []
         self.req_count = 11
+        self.page = 0          # dropdown page — squads >25 span multiple pages
         self.update_ui()
-        
+
     def update_ui(self):
         self.clear_items()
+        PAGE = 25
         if len(self.selected_players) < self.req_count:
             options = []
             for p in self.squad:
                 if p not in self.selected_players:
                     role_short = p["role"].replace("All-Rounder", "AR").replace("Bowler", "BWL").replace("Batter", "BAT").replace("_", " ")
                     options.append(discord.SelectOption(label=p["name"], description=role_short, value=p["name"]))
-            select = discord.ui.Select(placeholder=f"Pick Player {len(self.selected_players)+1} of {self.req_count}...", options=options[:25])
+            # Discord caps a dropdown at 25 options, but a tournament squad can be up to 30.
+            # Page through them so EVERY player is reachable at every pick — batting order
+            # (= pick order) stays fully under the owner's control, including page-2 players.
+            total_pages = max(1, (len(options) + PAGE - 1) // PAGE)
+            self.page = max(0, min(self.page, total_pages - 1))
+            page_opts = options[self.page * PAGE:(self.page + 1) * PAGE]
+            ph = f"Pick Player {len(self.selected_players)+1} of {self.req_count}..."
+            if total_pages > 1:
+                ph += f" (page {self.page+1}/{total_pages})"
+            select = discord.ui.Select(placeholder=ph, options=page_opts)
             select.callback = self.select_cb
             self.add_item(select)
-            
+
+            if total_pages > 1:
+                btn_prev = discord.ui.Button(label="◀ Prev", style=discord.ButtonStyle.secondary, disabled=self.page == 0)
+                btn_prev.callback = self.prev_cb
+                self.add_item(btn_prev)
+                btn_next = discord.ui.Button(label="Next ▶", style=discord.ButtonStyle.secondary, disabled=self.page >= total_pages - 1)
+                btn_next.callback = self.next_cb
+                self.add_item(btn_next)
+
         btn_undo = discord.ui.Button(label="Undo Last", style=discord.ButtonStyle.danger, disabled=len(self.selected_players)==0)
         btn_undo.callback = self.undo_cb
         self.add_item(btn_undo)
@@ -4964,7 +4983,17 @@ class TournamentXIView(discord.ui.View):
         self.selected_players.pop()
         self.update_ui()
         await interaction.response.edit_message(content=self.get_msg_content(), view=self)
-        
+
+    async def prev_cb(self, interaction: discord.Interaction):
+        self.page -= 1
+        self.update_ui()
+        await interaction.response.edit_message(content=self.get_msg_content(), view=self)
+
+    async def next_cb(self, interaction: discord.Interaction):
+        self.page += 1
+        self.update_ui()
+        await interaction.response.edit_message(content=self.get_msg_content(), view=self)
+
     async def confirm_cb(self, interaction: discord.Interaction):
         if not _has_wk(self.selected_players):
             return await interaction.response.send_message(
