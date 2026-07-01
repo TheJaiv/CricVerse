@@ -5018,7 +5018,11 @@ class TournamentXIView(discord.ui.View):
                 "❌ **Invalid XI — no Wicket-Keeper.** Undo and add a keeper (a `WK`-role player) before confirming.",
                 ephemeral=True)
         tnum = self.team_num
-        remaining = [p for p in self.squad if p not in self.selected_players]
+        # Exclude injured players from the Impact-Sub list. available_squad() only drops
+        # them when ≥11 fit remain; in the <11-fit fallback the full squad (injured
+        # included) is used for XI selection, so injured players can otherwise leak into
+        # the leftover `remaining` list and be offered as subs.
+        remaining = [p for p in self.squad if p not in self.selected_players and not p.get("injured")]
         if tnum == 1:
             self.state.t1_roster = self.selected_players
             self.state.t1_subs = []
