@@ -9062,7 +9062,11 @@ class PrefixCog(commands.Cog):
         tourney = get_server_tournament(server_id)
         if not tourney: return await ctx.send("❌ No tournament exists on this server.")
 
-        if team_name:
+        if ctx.message.mentions:
+            owner = ctx.message.mentions[0]
+            team = next((t for t in tourney["teams"] if t.get("owner_id") == str(owner.id)), None)
+            if not team: return await ctx.send(f"❌ {owner.mention} does not own a team in this tournament.")
+        elif team_name:
             team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.lower()), None)
             if not team: return await ctx.send(f"❌ Team '{team_name}' not found.")
         else:
@@ -9599,6 +9603,80 @@ class PrefixCog(commands.Cog):
 
     # ======================================================================
 
+    # ── Tournament helpers ────────────────────────────────────────────────
+    def _is_tourney_mgr(self, ctx, tourney):
+        """True if the caller may act as a tournament manager."""
+        return ((ctx.author.id == ADMIN_DISCORD_ID)
+                or ctx.author.guild_permissions.administrator
+                or (str(ctx.author.id) in (tourney or {}).get("managers", [])))
+
+    def _team_by_ref(self, ctx, tourney, team_name):
+        """Resolve a team by @owner mention (preferred) or by name — so anywhere a
+        <team_name> is accepted you can ping the owner instead. Returns team or None."""
+        if ctx.message.mentions:
+            oid = str(ctx.message.mentions[0].id)
+            return next((t for t in tourney["teams"] if t.get("owner_id") == oid), None)
+        if team_name:
+            nm = re.sub(r"<@!?\d+>", "", team_name).strip()
+            return next((t for t in tourney["teams"] if t["name"].lower() == nm.lower()), None)
+        return None
+
+    def _resolve_squad_target(self, ctx, tourney, args):
+        """For owner/manager squad-edit commands, decide which team is being edited.
+        - Ping an @owner → that owner's team (caller must be that owner or a manager).
+        - No mention → the caller's own team.
+        Returns (team, cleaned_args, error_msg); on error team is None and error_msg is set."""
+        if ctx.message.mentions:
+            owner = ctx.message.mentions[0]
+            oid = str(owner.id)
+            team = next((t for t in tourney["teams"] if t.get("owner_id") == oid), None)
+            if not team:
+                return None, args, f"❌ {owner.mention} does not own a team in this tournament."
+            if oid != str(ctx.author.id) and not self._is_tourney_mgr(ctx, tourney):
+                return None, args, "❌ Only managers can edit another team's squad."
+            return team, re.sub(r"<@!?\d+>", "", args).strip(), None
+        team = next((t for t in tourney["teams"] if t.get("owner_id") == str(ctx.author.id)), None)
+        if not team:
+            return None, args, "❌ You do not own a team. Managers: ping the team's `@owner` to target it."
+        return team, args.strip(), None
+
+    # Read-only tournament subcommands that should NOT be audit-logged.
+    _TLOG_SKIP = {
+        "squad", "status", "groups", "fixtures", "bracket", "homepitch", "stadiums",
+        "leaderboard", "player_stats", "help_guide", "standings", "match_scorecard",
+        "next_match", "help",
+    }
+
+    async def cog_after_invoke(self, ctx):
+        """Audit-log every tournament-mutating command into the configured log channel."""
+        try:
+            cmd = ctx.command
+            if not cmd or not cmd.parent or cmd.parent.name != "tournament":
+                return
+            if cmd.name in self._TLOG_SKIP or not ctx.guild:
+                return
+            tourney = get_server_tournament(str(ctx.guild.id))
+            if not tourney:
+                return
+            ch_id = tourney.get("log_channel")
+            if not ch_id:
+                return
+            ch = self.bot.get_channel(int(ch_id))
+            if ch is None:
+                return
+            content = (ctx.message.content or "")[:900]
+            embed = discord.Embed(
+                description=(f"**Command:** `cvt {cmd.name}`\n"
+                             f"**By:** {ctx.author.mention} in {ctx.channel.mention}\n"
+                             f"```\n{content}\n```"),
+                color=discord.Color.blurple(),
+                timestamp=discord.utils.utcnow(),
+            )
+            embed.set_author(name=str(ctx.author), icon_url=ctx.author.display_avatar.url)
+            await ch.send(embed=embed)
+        except Exception:
+            pass
+
     @commands.group(name="tournament", aliases=["t"], invoke_without_command=True, help="Main command for tournaments.\nUsage: tournament")
     async def tournament(self, ctx):
         await ctx.send_help(ctx.command)
@@ -9699,9 +9777,9 @@ class PrefixCog(commands.Cog):
         if not tourney: return await ctx.send("❌ No tournament exists.")
         if not is_mgr: return await ctx.send("❌ Managers only.")
         
-        team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.lower()), None)
-        if not team: return await ctx.send(f"❌ Team '{team_name}' not found.")
-        if not team.get("squad"): return await ctx.send(f"❌ Team '{team_name}' has no squad submitted yet.")
+        team = self._team_by_ref(ctx, tourney, team_name)
+        if not team: return await ctx.send(f"❌ Team '{team_name}' not found (use the team name or ping its @owner).")
+        if not team.get("squad"): return await ctx.send(f"❌ Team '{team['name']}' has no squad submitted yet.")
             
         old_p = next((p for p in team["squad"] if p["name"].lower() == out_player.lower()), None)
         if not old_p:
@@ -9737,9 +9815,9 @@ class PrefixCog(commands.Cog):
         
         if team_name:
             if not is_mgr:
-                return await ctx.send("❌ Only Managers can use the team_name parameter to submit for others.")
-            team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.lower()), None)
-            if not team: return await ctx.send(f"❌ Team '{team_name}' not found.")
+                return await ctx.send("❌ Only Managers can submit for another team.")
+            team = self._team_by_ref(ctx, tourney, team_name)
+            if not team: return await ctx.send(f"❌ Team '{team_name}' not found (use the team name or ping its @owner).")
         else:
             team = next((t for t in tourney["teams"] if t["owner_id"] == str(ctx.author.id)), None)
             if not team: return await ctx.send("❌ You do not own a team. Managers must provide the `team_name` parameter.")
@@ -9800,7 +9878,7 @@ class PrefixCog(commands.Cog):
         save_tournament(tourney)
         await confirm_msg.edit(content=f"✅ **Squad Confirmed and Saved for {team['name']}!**\nRegistered {len(found_players)} players.", embed=None, view=None)
 
-    @tournament.command(name="add_player", aliases=["addp", "ap"], help="[OWNER] Add player(s) to your squad before the tournament starts.\nUsage: tournament add_player <player1>, <player2>, ...")
+    @tournament.command(name="add_player", aliases=["addp", "ap"], help="[OWNER/MANAGER] Add player(s) to a squad before the tournament starts.\nUsage: tournament add_player [@owner] <player1>, <player2>, ...\n(Owners edit their own team; managers can target another team by pinging its @owner.)")
     async def t_add_player(self, ctx, *, args: str = ""):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
@@ -9808,9 +9886,8 @@ class PrefixCog(commands.Cog):
         if tourney.get("status") != "registration":
             return await ctx.send("❌ Squads are locked — players can only be added before the tournament starts.")
 
-        team = next((t for t in tourney["teams"] if t["owner_id"] == str(ctx.author.id)), None)
-        if not team:
-            return await ctx.send("❌ You do not own a team in this tournament.")
+        team, args, err = self._resolve_squad_target(ctx, tourney, args)
+        if err: return await ctx.send(err)
 
         names = [n.strip() for n in args.split(",") if n.strip()]
         if not names:
@@ -9845,7 +9922,7 @@ class PrefixCog(commands.Cog):
         if full: lines.append(f"🚫 Squad full ({max_s}) — skipped: {', '.join(full)}")
         await ctx.send("\n".join(lines))
 
-    @tournament.command(name="remove_player", aliases=["removep", "rmp", "delp"], help="[OWNER] Remove player(s) from your squad before the tournament starts.\nUsage: tournament remove_player <player1>, <player2>, ...")
+    @tournament.command(name="remove_player", aliases=["removep", "rmp", "delp"], help="[OWNER/MANAGER] Remove player(s) from a squad before the tournament starts.\nUsage: tournament remove_player [@owner] <player1>, <player2>, ...\n(Owners edit their own team; managers can target another team by pinging its @owner.)")
     async def t_remove_player(self, ctx, *, args: str = ""):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
@@ -9853,12 +9930,11 @@ class PrefixCog(commands.Cog):
         if tourney.get("status") != "registration":
             return await ctx.send("❌ Squads are locked — players can only be removed before the tournament starts.")
 
-        team = next((t for t in tourney["teams"] if t["owner_id"] == str(ctx.author.id)), None)
-        if not team:
-            return await ctx.send("❌ You do not own a team in this tournament.")
+        team, args, err = self._resolve_squad_target(ctx, tourney, args)
+        if err: return await ctx.send(err)
         squad = team.get("squad") or []
         if not squad:
-            return await ctx.send("❌ Your squad is empty — nothing to remove.")
+            return await ctx.send(f"❌ **{team['name']}**'s squad is empty — nothing to remove.")
 
         names = [n.strip() for n in args.split(",") if n.strip()]
         if not names:
@@ -10339,7 +10415,7 @@ class PrefixCog(commands.Cog):
         tourney = get_server_tournament(server_id)
         if not tourney: return await ctx.send("❌ No tournament exists.")
         if team_name:
-            team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.lower()), None)
+            team = self._team_by_ref(ctx, tourney, team_name)
             if not team:
                 import difflib as _dl
                 close = _dl.get_close_matches(team_name, [t["name"] for t in tourney["teams"]], n=1, cutoff=0.5)
@@ -10656,11 +10732,12 @@ class PrefixCog(commands.Cog):
         if not tourney: return await ctx.send("❌ No tournament exists.")
         if not is_mgr: return await ctx.send("❌ Managers only.")
         if tourney["status"] != "registration": return await ctx.send("❌ Cannot remove teams after tournament has started.")
-        idx = next((i for i, t in enumerate(tourney["teams"]) if t["name"].lower() == team_name.lower()), None)
-        if idx is None: return await ctx.send(f"❌ Team **{team_name}** not found.")
-        del tourney["teams"][idx]
+        team = self._team_by_ref(ctx, tourney, team_name)
+        if team is None: return await ctx.send(f"❌ Team **{team_name}** not found (use the team name or ping its @owner).")
+        tname = team["name"]
+        tourney["teams"].remove(team)
         save_tournament(tourney)
-        await ctx.send(f"✅ Team **{team_name}** removed.")
+        await ctx.send(f"✅ Team **{tname}** removed.")
 
     @tournament.command(name="transfer_team", help="[MANAGER] Transfer team ownership to a new user.\nUsage: tournament transfer_team \"<team_name>\" @new_owner")
     async def t_transfer_team(self, ctx, team_name: str, new_owner: discord.Member):
@@ -10718,8 +10795,8 @@ class PrefixCog(commands.Cog):
         if not tourney: return await ctx.send("❌ No tournament exists.")
         is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
         if not is_mgr: return await ctx.send("❌ Managers only.")
-        team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.strip().lower()), None)
-        if not team: return await ctx.send(f"❌ No team named **{team_name}** in this tournament.")
+        team = self._team_by_ref(ctx, tourney, team_name)
+        if not team: return await ctx.send(f"❌ No team **{team_name}** in this tournament (use the team name or ping its @owner).")
         cp = canonical_pitch(pitch)
         if not cp: return await ctx.send(f"❌ Invalid pitch **{pitch}**.\nOptions: {', '.join(ALL_PITCHES)}")
         team["home_pitch"] = cp
@@ -10896,8 +10973,8 @@ class PrefixCog(commands.Cog):
         if not is_mgr: return await ctx.send("❌ Managers only.")
         if not _re.match(r'^#[0-9A-Fa-f]{6}$', color):
             return await ctx.send("❌ Invalid color format. Use a 6-digit hex code like `#FF0000`.")
-        team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.lower()), None)
-        if not team: return await ctx.send(f"❌ Team **{team_name}** not found.")
+        team = self._team_by_ref(ctx, tourney, team_name)
+        if not team: return await ctx.send(f"❌ Team **{team_name}** not found (use the team name or ping its @owner).")
         team["color"] = color.upper()
         save_tournament(tourney)
         await ctx.send(embed=discord.Embed(description=f"✅ **{team['name']}** color set to `{color.upper()}`.", color=int(color.lstrip('#'), 16)))
@@ -10910,9 +10987,9 @@ class PrefixCog(commands.Cog):
             return await ctx.send("❌ No tournament exists.")
         if logo_type not in ("standings", "match"):
             return await ctx.send("❌ First argument must be `standings` or `match`.\nUsage: `cvt set_team_logo <standings|match> \"<team_name>\" <emoji_or_url>`")
-        team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.lower()), None)
+        team = self._team_by_ref(ctx, tourney, team_name)
         if not team:
-            return await ctx.send(f"❌ Team **{team_name}** not found.")
+            return await ctx.send(f"❌ Team **{team_name}** not found (use the team name or ping its @owner).")
         is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
         if not is_mgr and team.get("owner_id") != str(ctx.author.id):
             return await ctx.send("❌ Only Managers or the Team Owner can set the logo.")
@@ -10961,6 +11038,20 @@ class PrefixCog(commands.Cog):
         save_tournament(tourney)
         await ctx.send(f"✅ Injury reports will now be posted in {ctx.channel.mention}.")
 
+    @tournament.command(name="set_log_channel", aliases=["setlog", "log_channel"], help="[MANAGER] Set this channel as the tournament audit-log channel (logs every tournament-changing command: squad edits, pitch/stadium/theme/colour/logo changes, injuries, results, etc.).\nUsage: tournament set_log_channel [off]")
+    async def t_set_log_channel(self, ctx, mode: str = None):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        if not self._is_tourney_mgr(ctx, tourney): return await ctx.send("❌ Managers only.")
+        if mode and mode.lower() in ("off", "disable", "none", "remove", "stop"):
+            tourney.pop("log_channel", None)
+            save_tournament(tourney)
+            return await ctx.send("🛑 Tournament logging disabled.")
+        tourney["log_channel"] = str(ctx.channel.id)
+        save_tournament(tourney)
+        await ctx.send(f"📝 Tournament actions will now be logged in {ctx.channel.mention}.\n-# Use `cvt set_log_channel off` to stop.")
+
     @tournament.command(name="remove_injury", help="[MANAGER] Manually clear a player's injury.\nUsage: cvt remove_injury \"<team_name>\" \"<player_name>\"")
     async def t_remove_injury(self, ctx, team_name: str, player_name: str):
         server_id = str(ctx.guild.id)
@@ -10968,8 +11059,8 @@ class PrefixCog(commands.Cog):
         if not tourney: return await ctx.send("❌ No tournament exists.")
         is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
         if not is_mgr: return await ctx.send("❌ Managers only.")
-        team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.lower()), None)
-        if not team: return await ctx.send(f"❌ Team **{team_name}** not found.")
+        team = self._team_by_ref(ctx, tourney, team_name)
+        if not team: return await ctx.send(f"❌ Team **{team_name}** not found (use the team name or ping its @owner).")
         player = next((p for p in team.get("squad", []) if p["name"].lower() == player_name.lower()), None)
         if not player: return await ctx.send(f"❌ Player **{player_name}** not found in **{team['name']}**.")
         if not player.get("injured"): return await ctx.send(f"ℹ️ **{player['name']}** is not currently injured.")
