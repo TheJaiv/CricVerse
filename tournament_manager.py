@@ -1534,6 +1534,172 @@ def build_team_fixtures_embed(tourney, team_name):
     return e
 
 
+_TM_STAT_KEYS = ("matches", "runs", "balls_faced", "outs", "fours", "sixes",
+                 "fifties", "hundreds", "wickets", "runs_conceded", "balls_bowled")
+_TM_STAT_DEFAULT = {k: 0 for k in _TM_STAT_KEYS}
+
+
+def _match_bracket_rank(tourney, m):
+    """How far into the tournament a match sits — higher = later. Used to find
+    the matches that were built on (i.e. depend on) another match's result."""
+    if m.get("stage") in ("group", "league") or isinstance(m.get("round"), int):
+        return 0
+    t_type = tourney.get("tournament_type", "round_robin")
+    if t_type == "acl":
+        return {"Qualifier": 1, "Eliminator 1": 1, "Eliminator 2": 1,
+                "The Knockout": 2, "Qualifier 2": 3,
+                "Grand Final": 4, "Super League Qualifier": 4, "Super Cup": 5}.get(m.get("round"), 1)
+    if m.get("stage") == "super8":
+        return 1
+    return 4 if str(m.get("round")) == "Final" else 3   # knockout: Semi-Finals(3) < Final(4)
+
+
+def _revert_match_stats(tourney, m_data):
+    """Undo a completed match's contribution to the tournament player stats.
+    Returns (reverted: bool, exact: bool)."""
+    result = m_data.get("result") or {}
+    stats = tourney.get("stats", {})
+    delta = result.get("stats_delta")
+    if delta:
+        for team, players in delta.items():
+            tstats = stats.get(team, {})
+            for pname, fields in players.items():
+                ps = tstats.get(pname)
+                if not ps: continue
+                for f, amt in fields.items():
+                    ps[f] = ps.get(f, 0) - amt
+                if all(ps.get(k, 0) <= 0 for k in _TM_STAT_KEYS):
+                    tstats.pop(pname, None)
+        return True, True
+
+    # Fallback for matches recorded before stats_delta existed: best-effort from the
+    # stored scorecard. Can't recover fours/sixes or bench players' match counts, so
+    # totals come back approximate.
+    sc = result.get("scorecard_players")
+    if not sc:
+        return False, False
+    t1, t2 = m_data["team1"], m_data["team2"]
+    first_team, second_team = (t1, t2) if sc.get("bf", 1) == 1 else (t2, t1)
+
+    def _sub(team, pname, field, amt):
+        ps = stats.get(team, {}).get(pname)
+        if ps is not None:
+            ps[field] = max(0, ps.get(field, 0) - amt)
+
+    def _sub_bat(team, arr):
+        for a in (arr or []):
+            name = a[0]
+            _sub(team, name, "matches", 1)
+            _sub(team, name, "runs", a[1]); _sub(team, name, "balls_faced", a[2])
+            dism = a[3] if len(a) > 3 else "not out"
+            if not isinstance(dism, bool) and dism and dism != "not out":
+                _sub(team, name, "outs", 1)
+            if a[1] >= 100: _sub(team, name, "hundreds", 1)
+            elif a[1] >= 50: _sub(team, name, "fifties", 1)
+
+    def _sub_bowl(team, arr):
+        for a in (arr or []):
+            name = a[0]
+            _sub(team, name, "wickets", a[1]); _sub(team, name, "runs_conceded", a[2])
+            ov = str(a[3]); balls = 0
+            if "." in ov:
+                o, b = ov.split("."); balls = int(o) * 6 + int(b)
+            elif ov.isdigit():
+                balls = int(ov) * 6
+            _sub(team, name, "balls_bowled", balls)
+
+    _sub_bat(first_team, sc.get("b1")); _sub_bat(second_team, sc.get("b2"))
+    _sub_bowl(first_team, sc.get("w1")); _sub_bowl(second_team, sc.get("w2"))
+    return True, False
+
+
+def revert_tournament_match(tourney, match_id):
+    """Cancel a completed match so it can be replayed. Reverts the result, the player
+    stats it fed, and any downstream bracket matches generated from it (the points
+    table & NRR recompute from results automatically). Returns (ok, message)."""
+    sched = tourney.get("schedule", [])
+    m = next((x for x in sched if x.get("match_id") == match_id), None)
+    if not m:
+        return False, f"❌ Match #{match_id} not found."
+    if m.get("status") != "completed":
+        return False, f"❌ Match #{match_id} isn't completed — nothing to cancel."
+
+    rank = _match_bracket_rank(tourney, m)
+    t_type = tourney.get("tournament_type", "round_robin")
+
+    # Guard: don't strand a later, already-played match that was built on this result.
+    blockers = [x for x in sched
+                if x is not m and x.get("status") == "completed"
+                and _match_bracket_rank(tourney, x) > rank]
+    if blockers:
+        ids = ", ".join(f"#{x['match_id']} ({_tm_round_label(x)})" for x in blockers[:6])
+        return False, ("❌ Can't cancel this match — later match(es) built on its result are "
+                       f"already completed: {ids}. Cancel those first, then retry.")
+
+    reverted, exact = _revert_match_stats(tourney, m)
+    if not reverted:
+        stat_note = "\n⚠️ No per-player data was stored for this match, so leaderboard stats were left untouched."
+    elif not exact:
+        stat_note = "\n⚠️ This match predates exact stat tracking — leaderboard totals were reversed approximately."
+    else:
+        stat_note = ""
+
+    # Reopen the match itself.
+    m["status"] = "pending"
+    m["result"] = None
+    tourney["current_match_idx"] = max(0, tourney.get("current_match_idx", 0) - 1)
+    if tourney.get("status") == "completed":
+        tourney["status"] = "active"
+
+    # Retract downstream matches whose teams were derived from the now-stale result.
+    # Only ever removes tail (highest-id) matches, preserving the match_id == index+1 invariant.
+    removed = []
+    if t_type == "acl":
+        if m.get("stage") == "league":
+            # A changed league result reshuffles the seeding → the whole generated bracket is stale.
+            ko = [x for x in sched if x.get("stage") in ACL_KO_STAGES]
+            for x in ko:
+                sched.remove(x)
+            removed = ko
+            for k in ("league_shield", "playoff_seeds", "acl_trophy_winner",
+                      "acl_runner_up", "acl_champion"):
+                tourney.pop(k, None)
+        else:
+            # A playoff/Super Cup result: clear every derived (TBD-origin) slot, then re-derive.
+            for x in sched:
+                if x is m:
+                    continue
+                rnd = x.get("round")
+                if rnd in ("The Knockout", "Qualifier 2", "Grand Final"):
+                    x["team1"] = None; x["team2"] = None; x["status"] = "locked"; x["result"] = None
+                elif rnd == "Super Cup":
+                    x["team2"] = None; x["status"] = "locked"; x["result"] = None
+            slq = _acl_get(tourney, "Super League Qualifier")
+            if slq:
+                sched.remove(slq); removed.append(slq)
+            for k in ("acl_trophy_winner", "acl_runner_up", "acl_champion"):
+                tourney.pop(k, None)
+            _acl_try_advance(tourney)
+    else:
+        # Round Robin / T20 World Cup: drop later-stage matches — they regenerate
+        # automatically once the earlier stage is completed again.
+        later = [x for x in sched
+                 if _match_bracket_rank(tourney, x) > rank and x.get("status") in ("pending", "locked")]
+        for x in later:
+            sched.remove(x)
+        removed = later
+
+    assign_tournament_conditions(tourney)
+    save_tournament(tourney)
+
+    msg = f"✅ **Match #{match_id} cancelled** — it's back to *pending* and ready to replay."
+    if removed:
+        rlabels = ", ".join(sorted({(_tm_round_label(x) or f"#{x['match_id']}") for x in removed}))
+        msg += f"\n♻️ Reset downstream match(es): {rlabels}."
+    msg += stat_note
+    return True, msg
+
+
 class TournamentCog(commands.GroupCog, group_name="tournament"):
     def __init__(self, bot):
         self.bot = bot
@@ -2034,6 +2200,37 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             embed.add_field(name="No image", value="No scorecard data saved for this match.", inline=False)
             await interaction.response.send_message(embed=embed)
 
+    @app_commands.command(name="cancel_match", description="[MANAGER] Cancel a completed match so it can be replayed.")
+    @app_commands.describe(match_id="The match number to cancel (see /tournament status).")
+    async def cancel_match(self, interaction: discord.Interaction, match_id: int):
+        server_id = str(interaction.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney:
+            return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
+        if not self.is_manager(interaction, tourney):
+            return await interaction.response.send_message("❌ Managers only.", ephemeral=True)
+        m = next((x for x in tourney.get("schedule", []) if x.get("match_id") == match_id), None)
+        if not m:
+            return await interaction.response.send_message(f"❌ Match #{match_id} not found.", ephemeral=True)
+        if m.get("status") != "completed":
+            return await interaction.response.send_message(f"❌ Match #{match_id} isn't completed — nothing to cancel.", ephemeral=True)
+
+        r = m.get("result") or {}
+        label = _tm_round_label(m) or f"Match {match_id}"
+        summary = (f"**{m['team1']}** {r.get('t1_runs', 0)}/{r.get('t1_wickets', 0)}  vs  "
+                   f"**{m['team2']}** {r.get('t2_runs', 0)}/{r.get('t2_wickets', 0)}  —  🏆 {r.get('winner', '?')}")
+        view = SquadConfirmView(interaction.user.id)
+        await interaction.response.send_message(
+            f"⚠️ Cancel **Match #{match_id}** ({label})?\n{summary}\n\n"
+            "This wipes the result and the stats it recorded, and reopens the match for a replay. "
+            "Any downstream knockout matches built on it will be reset.",
+            view=view)
+        await view.wait()
+        if not view.value:
+            return await interaction.edit_original_response(content="❌ Cancellation aborted — match left as-is.", view=None)
+        _ok, msg = revert_tournament_match(tourney, match_id)
+        await interaction.edit_original_response(content=msg, view=None)
+
     @app_commands.command(name="play_next", description="[MANAGER] Launch the next pending tournament match in this channel.")
     async def play_next(self, interaction: discord.Interaction):
         server_id = str(interaction.guild.id)
@@ -2177,29 +2374,41 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         if t1_name not in tourney["stats"]: tourney["stats"][t1_name] = {}
         if t2_name not in tourney["stats"]: tourney["stats"][t2_name] = {}
 
+        # Record every increment into stats_delta too, keyed {team: {player: {field: amount}}},
+        # and stash it on the result. That lets `cancel_match` reverse this match's contribution
+        # exactly when it's redone, instead of guessing from the summarised scorecard.
+        stats_delta = {}
+        def _add(team_name, p_name, field, amt):
+            if not amt: return
+            p_stats = tourney["stats"][team_name].setdefault(p_name, dict(_TM_STAT_DEFAULT))
+            p_stats[field] = p_stats.get(field, 0) + amt
+            fdelta = stats_delta.setdefault(team_name, {}).setdefault(p_name, {})
+            fdelta[field] = fdelta.get(field, 0) + amt
+
         def process_team_stats(team_name, batting_inn, bowling_inn):
             for p in batting_inn.batting_team["players"]:
                 p_name = p["name"]
-                p_stats = tourney["stats"][team_name].setdefault(p_name, {"matches": 0, "runs": 0, "balls_faced": 0, "outs": 0, "fours": 0, "sixes": 0, "fifties": 0, "hundreds": 0, "wickets": 0, "runs_conceded": 0, "balls_bowled": 0})
-                p_stats["matches"] += 1
+                tourney["stats"][team_name].setdefault(p_name, dict(_TM_STAT_DEFAULT))
+                _add(team_name, p_name, "matches", 1)
                 if p_name in batting_inn.batting_stats:
                     b_stat = batting_inn.batting_stats[p_name]
-                    p_stats["runs"] += b_stat.runs_scored
-                    p_stats["balls_faced"] += b_stat.balls_faced
-                    if b_stat.dismissal != "not out": p_stats["outs"] += 1
-                    p_stats["fours"] += getattr(b_stat, "fours", 0)
-                    p_stats["sixes"] += getattr(b_stat, "sixes", 0)
-                    if b_stat.runs_scored >= 100: p_stats["hundreds"] += 1
-                    elif b_stat.runs_scored >= 50: p_stats["fifties"] += 1
+                    _add(team_name, p_name, "runs", b_stat.runs_scored)
+                    _add(team_name, p_name, "balls_faced", b_stat.balls_faced)
+                    if b_stat.dismissal != "not out": _add(team_name, p_name, "outs", 1)
+                    _add(team_name, p_name, "fours", getattr(b_stat, "fours", 0))
+                    _add(team_name, p_name, "sixes", getattr(b_stat, "sixes", 0))
+                    if b_stat.runs_scored >= 100: _add(team_name, p_name, "hundreds", 1)
+                    elif b_stat.runs_scored >= 50: _add(team_name, p_name, "fifties", 1)
             for p_name, bw_stat in bowling_inn.bowling_stats.items():
                 if bw_stat.balls_bowled > 0:
-                    p_stats = tourney["stats"][team_name].setdefault(p_name, {"matches": 0, "runs": 0, "balls_faced": 0, "outs": 0, "fours": 0, "sixes": 0, "fifties": 0, "hundreds": 0, "wickets": 0, "runs_conceded": 0, "balls_bowled": 0})
-                    p_stats["wickets"] += bw_stat.wickets_taken
-                    p_stats["runs_conceded"] += bw_stat.runs_conceded
-                    p_stats["balls_bowled"] += bw_stat.balls_bowled
+                    tourney["stats"][team_name].setdefault(p_name, dict(_TM_STAT_DEFAULT))
+                    _add(team_name, p_name, "wickets", bw_stat.wickets_taken)
+                    _add(team_name, p_name, "runs_conceded", bw_stat.runs_conceded)
+                    _add(team_name, p_name, "balls_bowled", bw_stat.balls_bowled)
 
         process_team_stats(t1_name, t1_inn, t2_inn)
         process_team_stats(t2_name, t2_inn, t1_inn)
+        m_data["result"]["stats_delta"] = stats_delta
 
         # --- INJURY COUNTDOWN (real matches only; count COMPLETED matches, not started ones) ---
         # Players already injured coming into this match sat it out; now that it has actually
@@ -2685,7 +2894,8 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             name="🏏 Play your matches",
             value=("`fixtures`/`fx` `[team]` — your upcoming + results\n"
                    "`play <id>` — **owners launch any of their own matches**; managers any\n"
-                   "`next_match`/`nm` — launch your earliest pending · `play_next`/`pn` — [MGR] next in order"),
+                   "`next_match`/`nm` — launch your earliest pending · `play_next`/`pn` — [MGR] next in order\n"
+                   "`cancel_match`/`redo <id>` — [MGR] wipe a completed match & reopen it for a replay"),
             inline=False,
         )
         embed.add_field(
