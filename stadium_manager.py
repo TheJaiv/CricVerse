@@ -20,7 +20,8 @@
 import random
 
 # Tournament types for which stadiums are active. Add types here to enable elsewhere.
-STADIUM_TOURNEY_TYPES = {"acl"}
+# ("dsl" venues are NOT random — each team has a home ground; see dsl_manager.py.)
+STADIUM_TOURNEY_TYPES = {"acl", "dsl"}
 
 # Starter pool seeded onto new ACL tournaments. Cosmetic — rename/replace freely with
 # cvt stadium_add / stadium_remove / stadium_clear before the tournament starts.
@@ -69,6 +70,10 @@ def assign_stadiums(tourney):
     Safe to call repeatedly (alongside assign_tournament_conditions)."""
     if not stadiums_enabled(tourney):
         return
+    if tourney.get("tournament_type") == "dsl":
+        # DSL: league matches at the home (team1) team's ground, playoffs per policy.
+        from dsl_manager import assign_dsl_stadiums   # lazy — avoids circular import
+        return assign_dsl_stadiums(tourney)
     pool = get_stadium_pool(tourney)
     if not pool:
         return
@@ -84,6 +89,8 @@ def reroll_stadiums(tourney):
     Returns the number of matches reassigned (0 if disabled / empty pool)."""
     if not stadiums_enabled(tourney):
         return 0
+    if tourney.get("tournament_type") == "dsl":
+        return 0   # DSL venues are home-ground based — a random reroll would break the mapping
     pool = get_stadium_pool(tourney)
     if not pool:
         return 0

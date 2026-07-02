@@ -67,6 +67,11 @@ DB_CACHE = {
     # Saved custom XI presets per server (player NAMES — re-resolved against the live DB on load):
     # { server_id: { "<name lower>": {"name": "RCB", "players": ["Virat Kohli", ...]} } }
     "custom_teams": {},
+    # Per-league, per-server access grants (bot-owner only — independent of server tiers,
+    # which update_server_tier() wholesale-replaces). last_season keeps season numbering
+    # monotonic in Mongo even if the on-disk archive files are lost between deploys:
+    # { "dsl": { server_id: {"enabled": True, "last_season": 2} } }
+    "league_access": {},
 }
 
 def load_data_from_bin():
@@ -86,6 +91,7 @@ def load_data_from_bin():
             DB_CACHE["server_overrides"]    = doc.get("server_overrides", {})
             DB_CACHE["draft_stats"]         = doc.get("draft_stats", {})
             DB_CACHE["custom_teams"]        = doc.get("custom_teams", {})
+            DB_CACHE["league_access"]       = doc.get("league_access", {})
             _migrate_custom_teams()  # flatten any legacy per-server teams into one global pool
             raw_mc = doc.get("match_counts", {})
             DB_CACHE["match_counts"] = {
@@ -104,10 +110,22 @@ def load_tournament_data_from_bin():
         print("⚠️ MONGO_URI missing! Tournament data will be empty.")
         return
     try:
+        # Regular tournaments and DSL league seasons live in SEPARATE documents so the
+        # recurring league never competes with normal tournaments for Mongo's 16MB
+        # per-document cap. The in-memory cache stays one unified list — nothing
+        # downstream needs to know about the split.
         doc = _get_db()["tournaments"].find_one({"_id": "tournament_data"})
-        if doc:
-            DB_CACHE["tournaments"] = doc.get("tournaments", [])
-            print(f"✅ Loaded {len(DB_CACHE['tournaments'])} tournament(s) from MongoDB!")
+        tours = list(doc.get("tournaments", [])) if doc else []
+        dsl_doc = _get_db()["tournaments"].find_one({"_id": "dsl_tournament_data"})
+        dsl_tours = list(dsl_doc.get("tournaments", [])) if dsl_doc else []
+        # De-dupe on the boundary: a dsl tournament saved into the main doc by an
+        # older bot version must not load twice once it also exists in the dsl doc.
+        if dsl_tours:
+            dsl_ids = {(str(t.get("server_id")), t.get("name")) for t in dsl_tours}
+            tours = [t for t in tours if (str(t.get("server_id")), t.get("name")) not in dsl_ids]
+        DB_CACHE["tournaments"] = tours + dsl_tours
+        if doc or dsl_doc:
+            print(f"✅ Loaded {len(tours)} tournament(s) + {len(dsl_tours)} DSL season(s) from MongoDB!")
         else:
             print("⚠️ No tournament document found in MongoDB. Starting with empty cache.")
     except Exception as e:
@@ -136,12 +154,23 @@ def save_tournament_data_to_bin(snapshot=None):
         # Serialize a point-in-time snapshot (taken on the caller's thread) so the
         # background writer never encodes a dict the event loop is mutating mid-save.
         data = snapshot if snapshot is not None else copy.deepcopy(DB_CACHE["tournaments"])
-        _get_db()["tournaments"].replace_one(
+        # Split by league: DSL seasons get their own document (own 16MB budget) —
+        # see load_tournament_data_from_bin. Matched on tournament_type, not an
+        # import of dsl_manager, so this module stays a leaf.
+        regular = [t for t in data if t.get("tournament_type") != "dsl"]
+        dsl     = [t for t in data if t.get("tournament_type") == "dsl"]
+        db = _get_db()
+        db["tournaments"].replace_one(
             {"_id": "tournament_data"},
-            {"_id": "tournament_data", "tournaments": data},
+            {"_id": "tournament_data", "tournaments": regular},
             upsert=True
         )
-        print("✅ MongoDB Save OK (tournaments)")
+        db["tournaments"].replace_one(
+            {"_id": "dsl_tournament_data"},
+            {"_id": "dsl_tournament_data", "tournaments": dsl},
+            upsert=True
+        )
+        print(f"✅ MongoDB Save OK (tournaments: {len(regular)} regular / {len(dsl)} DSL)")
         return True
     except Exception as e:
         print(f"❌ MongoDB Tournament Save Error: {e}")
