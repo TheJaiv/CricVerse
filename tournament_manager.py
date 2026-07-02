@@ -1539,6 +1539,35 @@ _TM_STAT_KEYS = ("matches", "runs", "balls_faced", "outs", "fours", "sixes",
 _TM_STAT_DEFAULT = {k: 0 for k in _TM_STAT_KEYS}
 
 
+def _tm_next_mid(tourney):
+    """Next free match_id = max existing id + 1. MUST be used instead of len()+1 —
+    once any match is removed (e.g. by cancel_match), len()+1 collides with an
+    existing id and creates a duplicate the lookups can't tell apart."""
+    return max((m.get("match_id", 0) for m in tourney.get("schedule", [])), default=0) + 1
+
+
+def repair_tournament_schedule(tourney):
+    """Heal a schedule that has duplicate match_ids (from the old len()+1 bug): keep
+    the first entry for each id, hand every later duplicate a fresh unique id.
+    Returns (changed: bool, message: str). No matches are deleted."""
+    sched = tourney.get("schedule", [])
+    seen, remaps = set(), []
+    next_id = _tm_next_mid(tourney)
+    for m in sched:
+        mid = m.get("match_id")
+        if mid in seen:
+            new_id = next_id; next_id += 1
+            remaps.append((mid, new_id, _tm_round_label(m) or m.get("status", "?")))
+            m["match_id"] = new_id
+        seen.add(m.get("match_id"))
+    if not remaps:
+        return False, "✅ No duplicate match IDs found — schedule is healthy."
+    save_tournament(tourney)
+    lines = "\n".join(f"• #{old} → **#{new}**  ({lbl})" for old, new, lbl in remaps)
+    return True, (f"🛠️ Fixed **{len(remaps)}** duplicate match ID(s):\n{lines}\n"
+                  "The completed match keeps its original number; the stray copy was renumbered.")
+
+
 def _match_bracket_rank(tourney, m):
     """How far into the tournament a match sits — higher = later. Used to find
     the matches that were built on (i.e. depend on) another match's result."""
@@ -1978,8 +2007,9 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         if len(real_teams) < 4:
             return await interaction.response.send_message("❌ Need at least 4 teams to play Semi-Finals.", ephemeral=True)
         top4 = real_teams[:4]
-        sf1 = {"match_id": len(tourney["schedule"]) + 1, "round": "Semi-Final 1", "stage": "knockout", "team1": top4[0], "team2": top4[3], "status": "pending", "result": None}
-        sf2 = {"match_id": len(tourney["schedule"]) + 2, "round": "Semi-Final 2", "stage": "knockout", "team1": top4[1], "team2": top4[2], "status": "pending", "result": None}
+        _base = _tm_next_mid(tourney)
+        sf1 = {"match_id": _base, "round": "Semi-Final 1", "stage": "knockout", "team1": top4[0], "team2": top4[3], "status": "pending", "result": None}
+        sf2 = {"match_id": _base + 1, "round": "Semi-Final 2", "stage": "knockout", "team1": top4[1], "team2": top4[2], "status": "pending", "result": None}
         tourney["schedule"].extend([sf1, sf2])
         save_tournament(tourney)
         await interaction.response.send_message(f"🔥 **Knockout Stage Set!**\n**Semi-Final 1:** {top4[0]} vs {top4[3]}\n**Semi-Final 2:** {top4[1]} vs {top4[2]}\n\nUse `/tournament play_next` to begin!")
@@ -2333,8 +2363,17 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         tourney = get_server_tournament(server_id)
         if not tourney: return
 
-        match_idx = match.tournament_match_id - 1
-        m_data = tourney["schedule"][match_idx]
+        # Look up the schedule entry by its match_id, NOT by (id-1) as a list index —
+        # index-based lookup silently writes to the wrong match if ids ever stop being
+        # a contiguous 1..N run (removed/regenerated knockouts, repaired duplicates).
+        _mid = match.tournament_match_id
+        m_data = next((x for x in tourney["schedule"] if x.get("match_id") == _mid), None)
+        if m_data is None:
+            try:
+                m_data = tourney["schedule"][_mid - 1]   # legacy fallback
+            except (IndexError, TypeError):
+                print(f"⚠️ on_tournament_match_complete: match_id {_mid} not found in schedule.")
+                return
 
         t1_name, t2_name = match.team1["name"], match.team2["name"]
         if match.innings1.batting_team["name"] == t1_name:
@@ -2522,7 +2561,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         if sf1 and sf2 and sf1["status"] == "completed" and sf2["status"] == "completed":
             if not any(m.get("round") == "Final" for m in tourney["schedule"]):
                 tourney["schedule"].append({
-                    "match_id": len(tourney["schedule"]) + 1, "round": "Final", "stage": "knockout",
+                    "match_id": _tm_next_mid(tourney), "round": "Final", "stage": "knockout",
                     "team1": sf1["result"]["winner"], "team2": sf2["result"]["winner"],
                     "status": "pending", "result": None
                 })
@@ -2909,5 +2948,5 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             value=("**ACL:** `generate_playoffs`/`gp`  ·  **Round Robin:** `generate_knockouts`  ·  **T20 WC:** `generate_super8`"),
             inline=False,
         )
-        embed.set_footer(text="More admin tools are prefix-only: cvt transfer_team · replace_player · force_delete · set_theme · remove_injury · simulate_all")
+        embed.set_footer(text="More admin tools are prefix-only: cvt transfer_team · replace_player · force_delete · set_theme · remove_injury · repair_schedule · simulate_all")
         await interaction.response.send_message(embed=embed, ephemeral=True)

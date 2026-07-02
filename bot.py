@@ -35,7 +35,7 @@ from test_image import (
     generate_test_summary_image as _ti_summary,
     generate_test_scorecard_image as _ti_scorecard,
 )
-from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, revert_tournament_match, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS, SquadConfirmView, build_squad_confirm_text, build_squad_confirm_embed
+from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, revert_tournament_match, repair_tournament_schedule, _tm_next_mid, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS, SquadConfirmView, build_squad_confirm_text, build_squad_confirm_embed
 from subscription_manager import (
     load_data_from_bin, load_tournament_data_from_bin,
     save_data_to_bin, save_tournament_data_to_bin,
@@ -10554,6 +10554,16 @@ class PrefixCog(commands.Cog):
         _ok, msg = revert_tournament_match(tourney, match_id)
         await ctx.send(msg)
 
+    @tournament.command(name="repair_schedule", aliases=["fix_schedule", "fix_ids"], help="[MANAGER] Fix duplicate match IDs in the schedule.\nUsage: tournament repair_schedule")
+    async def t_repair_schedule(self, ctx):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (tourney and str(ctx.author.id) in tourney.get("managers", []))
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        _changed, msg = repair_tournament_schedule(tourney)
+        await ctx.send(msg)
+
     @tournament.command(name="generate_knockouts", help="[MANAGER] Generate Knockouts (Semi-Finals) for Top 4 teams.\nUsage: tournament generate_knockouts")
     async def t_generate_knockouts(self, ctx):
         server_id = str(ctx.guild.id)
@@ -10580,8 +10590,9 @@ class PrefixCog(commands.Cog):
             
         top4 = real_teams[:4]
         
-        sf1 = {"match_id": len(tourney["schedule"]) + 1, "round": "Semi-Final 1", "stage": "knockout", "team1": top4[0], "team2": top4[3], "status": "pending", "result": None}
-        sf2 = {"match_id": len(tourney["schedule"]) + 2, "round": "Semi-Final 2", "stage": "knockout", "team1": top4[1], "team2": top4[2], "status": "pending", "result": None}
+        _base = _tm_next_mid(tourney)
+        sf1 = {"match_id": _base, "round": "Semi-Final 1", "stage": "knockout", "team1": top4[0], "team2": top4[3], "status": "pending", "result": None}
+        sf2 = {"match_id": _base + 1, "round": "Semi-Final 2", "stage": "knockout", "team1": top4[1], "team2": top4[2], "status": "pending", "result": None}
         
         tourney["schedule"].extend([sf1, sf2])
         save_tournament(tourney)
@@ -11403,7 +11414,7 @@ class PrefixCog(commands.Cog):
             sf2 = next((m for m in tourney["schedule"] if m["round"] == "Semi-Final 2"), None)
             if sf1 and sf2 and sf1["status"] == "completed" and sf2["status"] == "completed":
                 if not any(m["round"] == "Final" for m in tourney["schedule"]):
-                    tourney["schedule"].append({"match_id": len(tourney["schedule"]) + 1, "round": "Final", "stage": "knockout", "team1": sf1["result"]["winner"], "team2": sf2["result"]["winner"], "status": "pending", "result": None})
+                    tourney["schedule"].append({"match_id": _tm_next_mid(tourney), "round": "Final", "stage": "knockout", "team1": sf1["result"]["winner"], "team2": sf2["result"]["winner"], "status": "pending", "result": None})
             final_m = next((m for m in tourney["schedule"] if m["round"] == "Final"), None)
             if final_m and final_m["status"] == "completed":
                 tourney["status"] = "completed"
