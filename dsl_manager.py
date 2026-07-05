@@ -13,10 +13,10 @@
 #     current season at query time (cached on file mtime/size).
 #
 # Venues:
-#   • Each venue has a WEIGHTED PROFILE over the existing 15 pitch types — no new
-#     pitch names, so the sim engines need zero changes. Each team picks a home
-#     venue; league fixtures are played at team1's (the home side's) ground and the
-#     match pitch is drawn from that ground's profile.
+#   • Each venue has ONE FIXED PITCH from the existing 15 pitch types — the same
+#     ground always plays the same way (no new pitch names, so the sim engines
+#     need zero changes). Each team picks a home venue; league fixtures are played
+#     at team1's (the home side's) ground on that ground's pitch.
 #
 # Import direction: this module may import from tournament_manager / stadium_manager /
 # subscription_manager. Those modules must only ever import dsl_manager LAZILY
@@ -42,30 +42,32 @@ from tournament_manager import (
 # ══════════════════════════════════════════════════════════════════════════════
 # CONFIG — the single tuning point for the whole league. Edit freely.
 # ══════════════════════════════════════════════════════════════════════════════
+# Each venue has ONE FIXED PITCH (from the existing engine pitch types): the same
+# ground always plays the same way, every match, every season.
 # Production venue set (12 grounds, one per franchise) — swap back in after testing
 # by setting "team_count": 12 and "venues": _PROD_VENUES below.
 _PROD_VENUES = {
-    "Wankhede Stadium":            {"Flat": 40, "Hard": 30, "Bouncy": 20, "Two-Paced": 10},
-    "M Chinnaswamy Stadium":       {"Flat": 45, "Dead": 25, "Hard": 20, "Two-Paced": 10},
-    "MA Chidambaram Stadium":      {"Dry": 30, "Turning": 30, "Dusty": 20, "Slow": 20},
-    "Eden Gardens":                {"Flat": 30, "Hard": 25, "Turning": 25, "Worn": 20},
-    "Arun Jaitley Stadium":        {"Slow": 30, "Dry": 25, "Dead": 25, "Two-Paced": 20},
-    "Rajiv Gandhi Intl Stadium":   {"Flat": 30, "Slow": 25, "Dry": 25, "Turning": 20},
-    "Narendra Modi Stadium":       {"Hard": 30, "Flat": 25, "Bouncy": 25, "Dry": 20},
-    "Sawai Mansingh Stadium":      {"Flat": 35, "Hard": 25, "Slow": 20, "Worn": 20},
-    "PCA Stadium Mohali":          {"Hard": 35, "Bouncy": 25, "Flat": 25, "Green": 15},
-    "Ekana Stadium":               {"Slow": 35, "Two-Paced": 25, "Dry": 20, "Dead": 20},
-    "DY Patil Stadium":            {"Flat": 30, "Hard": 30, "Bouncy": 20, "Dead": 20},
-    "HPCA Stadium Dharamsala":     {"Green": 30, "Hard": 30, "Bouncy": 25, "Flat": 15},
+    "Wankhede Stadium":            "Flat",
+    "M Chinnaswamy Stadium":       "Dead",
+    "MA Chidambaram Stadium":      "Turning",
+    "Eden Gardens":                "Hard",
+    "Arun Jaitley Stadium":        "Slow",
+    "Rajiv Gandhi Intl Stadium":   "Dry",
+    "Narendra Modi Stadium":       "Bouncy",
+    "Sawai Mansingh Stadium":      "Worn",
+    "PCA Stadium Mohali":          "Green",
+    "Ekana Stadium":               "Two-Paced",
+    "DY Patil Stadium":            "Flat",
+    "HPCA Stadium Dharamsala":     "Green",
 }
 
-# ── TEST venue set: 5 grounds mixing pitch types from the default 15 ──
+# ── TEST venue set: 5 grounds, 5 distinct pitch characters ──
 _TEST_VENUES = {
-    "Thunder Dome":        {"Flat": 35, "Hard": 30, "Bouncy": 20, "Two-Paced": 15},   # batting paradise
-    "Desert Fort Arena":   {"Dusty": 35, "Dry": 30, "Turning": 20, "Cracked": 15},    # spin hell
-    "Emerald Bay Oval":    {"Green": 35, "Damp": 25, "Bouncy": 25, "Hard": 15},       # seamer's dream
-    "Misty Hills Ground":  {"Slow": 30, "Soft": 25, "Two-Paced": 25, "Dead": 20},     # grind it out
-    "Royal Palm Stadium":  {"Flat": 30, "Dead": 25, "Worn": 25, "Sticky": 20},        # two-faced deck
+    "Thunder Dome":        "Flat",     # batting paradise
+    "Desert Fort Arena":   "Dusty",    # spin hell
+    "Emerald Bay Oval":    "Green",    # seamer's dream
+    "Misty Hills Ground":  "Slow",     # grind it out
+    "Royal Palm Stadium":  "Sticky",   # nightmare deck
 }
 
 DSL_CONFIG = {
@@ -81,12 +83,13 @@ DSL_CONFIG = {
     "impact_player": True,
     "injuries": False,
     "conditions_mode": "stadium",           # pitch drawn from the match venue's profile
+    "match_order": "random",                # "random" | "sequential" (strict schedule) | "round"
     "require_unique_venues": True,          # every team must claim a different home ground
     "auto_playoffs": True,                  # generate the Semis automatically when league ends
     # Playoff venues: "random" → random ground per playoff match, or a dict like
     # {"Semi-Final 1": "Thunder Dome", "Final": "Thunder Dome"}.
     "playoff_venue_policy": "random",
-    # venue → weighted pitch profile (weights over the EXISTING engine pitch types).
+    # venue → its ONE fixed pitch (same ground = same pitch, always).
     "venues": _TEST_VENUES,                 # TEST (production: _PROD_VENUES)
 }
 
@@ -98,15 +101,12 @@ ARCHIVE_DIR = "dsl_archive"
 ARCHIVE_SCHEMA_VERSION = 1
 
 # ── Config sanity check (import time — fail loudly on a typo'd pitch name) ────
-for _v, _profile in DSL_CONFIG["venues"].items():
-    if not _profile:
-        raise ValueError(f"DSL_CONFIG venue '{_v}' has an empty pitch profile.")
-    for _p in _profile:
-        if canonical_pitch(_p) != _p:
-            raise ValueError(
-                f"DSL_CONFIG venue '{_v}' uses unknown pitch '{_p}'. "
-                f"Valid pitches: {', '.join(ALL_PITCHES)}"
-            )
+for _v, _pitch in DSL_CONFIG["venues"].items():
+    if canonical_pitch(_pitch) != _pitch:
+        raise ValueError(
+            f"DSL_CONFIG venue '{_v}' uses unknown pitch '{_pitch}'. "
+            f"Valid pitches: {', '.join(ALL_PITCHES)}"
+        )
 
 
 def is_dsl_tournament(tourney):
@@ -174,6 +174,7 @@ def create_dsl_tournament(server_id: str, creator_id) -> dict:
         "league_key": DSL_CONFIG["league_key"],
         "season": season,
         "conditions_mode": DSL_CONFIG["conditions_mode"],
+        "match_order": DSL_CONFIG["match_order"],
         "stadiums": list(DSL_CONFIG["venues"]),
     }
 
@@ -229,12 +230,12 @@ def assign_dsl_stadiums(tourney):
 
 
 def pick_dsl_conditions(stadium, is_knockout: bool):
-    """(pitch, weather): pitch from the venue's weighted profile, weather from the
-    standard pools. Falls back to the generic picker for unknown venues."""
-    profile = DSL_CONFIG["venues"].get(canonical_venue(stadium) or "")
-    if not profile:
+    """(pitch, weather): the venue's ONE fixed pitch (same ground = same pitch,
+    always), weather from the standard pools. Falls back to the generic picker
+    for unknown venues."""
+    pitch = DSL_CONFIG["venues"].get(canonical_venue(stadium) or "")
+    if not pitch:
         return pick_conditions(is_knockout)
-    pitch = random.choices(list(profile), weights=list(profile.values()), k=1)[0]
     _, weather = pick_conditions(is_knockout)
     return pitch, weather
 
@@ -422,6 +423,123 @@ def load_all_seasons(server_id):
     return seasons
 
 
+def compute_season_awards(stats, matches):
+    """Season superlatives from the stored stats + compact match records.
+    Stored inside the archive JSON at end_season (and computed live for the
+    in-progress season / old archives that predate the field)."""
+    players = [(team, name, ps) for team, tm in (stats or {}).items() for name, ps in tm.items()]
+
+    def _top(key):
+        c = [(t, n, ps) for t, n, ps in players if ps.get(key, 0) > 0]
+        if not c:
+            return None
+        t, n, ps = max(c, key=lambda x: x[2].get(key, 0))
+        return {"name": n, "team": t, "value": ps.get(key, 0)}
+
+    awards = {
+        "most_runs":    _top("runs"),      # Orange Cap
+        "most_wickets": _top("wickets"),   # Purple Cap
+        "most_sixes":   _top("sixes"),
+        "most_fours":   _top("fours"),
+        "most_fifties": _top("fifties"),
+        "most_hundreds": _top("hundreds"),
+    }
+    qual = [(t, n, ps) for t, n, ps in players if ps.get("balls_faced", 0) >= 60]
+    if qual:
+        t, n, ps = max(qual, key=lambda x: x[2]["runs"] / x[2]["balls_faced"])
+        awards["best_sr"] = {"name": n, "team": t,
+                             "value": round(ps["runs"] / ps["balls_faced"] * 100, 1)}
+    qual = [(t, n, ps) for t, n, ps in players if ps.get("balls_bowled", 0) >= 60]
+    if qual:
+        t, n, ps = min(qual, key=lambda x: x[2]["runs_conceded"] / x[2]["balls_bowled"])
+        awards["best_economy"] = {"name": n, "team": t,
+                                  "value": round(ps["runs_conceded"] / ps["balls_bowled"] * 6, 2)}
+
+    hi = lo = None
+    for r in (matches or []):
+        for tk, rk, wk in (("team1", "t1_runs", "t1_wickets"), ("team2", "t2_runs", "t2_wickets")):
+            runs = r.get(rk)
+            if runs is None:
+                continue
+            entry = {"team": r.get(tk), "runs": runs, "wickets": r.get(wk),
+                     "vs": r.get("team2") if tk == "team1" else r.get("team1"),
+                     "stadium": r.get("stadium")}
+            if hi is None or runs > hi["runs"]:
+                hi = entry
+            if lo is None or runs < lo["runs"]:
+                lo = entry
+    awards["highest_total"] = hi
+    awards["lowest_total"] = lo
+    return awards
+
+
+def get_season_summary(server_id, season, current_tourney=None):
+    """The full season dict for `cvt seasons <n>`: an archived season (with its
+    stored awards, computed on the fly for pre-awards archives) or the current
+    in-progress season built live. Returns None if that season doesn't exist."""
+    for s in load_all_seasons(server_id):
+        if s.get("season") == season:
+            if not s.get("awards"):
+                s = dict(s, awards=compute_season_awards(s.get("stats"), s.get("matches")))
+            return s
+    cur = _current_if_dsl(server_id, current_tourney)
+    if cur and cur.get("season") == season:
+        matches = [rec for rec in (_compact_match_record(m) for m in cur.get("schedule", [])) if rec]
+        return {
+            "season": season, "name": cur.get("name"),
+            "champion": cur.get("dsl_champion"), "runner_up": cur.get("dsl_runner_up"),
+            "final_standings": [[n, st] for n, st in get_tournament_standings(cur)],
+            "stats": cur.get("stats", {}), "matches": matches,
+            "awards": compute_season_awards(cur.get("stats"), matches),
+            "in_progress": cur.get("status") != "completed",
+        }
+    return None
+
+
+def season_detail_embed(data):
+    """Rich per-season summary embed: champion, podium standings, awards, totals."""
+    season = data.get("season", "?")
+    color = discord.Color.gold() if data.get("champion") else discord.Color.from_rgb(20, 60, 160)
+    title_name = data.get("name") or f"{DSL_CONFIG['display_name']} S{season}"
+    e = discord.Embed(title=f"📖 {title_name} — Season Review", color=color)
+    if data.get("champion"):
+        e.description = (f"👑 **Champions: {data['champion']}**"
+                         + (f"  ·  🥈 Runner-up: **{data['runner_up']}**" if data.get("runner_up") else ""))
+    elif data.get("in_progress"):
+        e.description = "⏳ *Season in progress — live numbers so far.*"
+
+    standings = data.get("final_standings") or []
+    if standings:
+        rows = ["```", f"{'#':<3}{'Team':<20}{'P':>2}{'W':>2}{'L':>2}{'Pts':>4}{'NRR':>7}", "─" * 40]
+        for i, (nm, st) in enumerate(standings[:8], 1):
+            rows.append(f"{i:<3}{str(nm)[:18]:<20}{st.get('P',0):>2}{st.get('W',0):>2}"
+                        f"{st.get('L',0):>2}{st.get('Pts',0):>4}{st.get('NRR',0):>+7.2f}")
+        rows.append("```")
+        e.add_field(name="🏁 League Table", value="\n".join(rows), inline=False)
+
+    aw = data.get("awards") or {}
+    def _fmt(a, suffix=""):
+        return f"**{a['name']}** ({a['team']}) — {a['value']}{suffix}" if a else "—"
+    e.add_field(name="🧢 Orange Cap (Most Runs)", value=_fmt(aw.get("most_runs"), " runs"), inline=True)
+    e.add_field(name="🟣 Purple Cap (Most Wkts)", value=_fmt(aw.get("most_wickets"), " wkts"), inline=True)
+    e.add_field(name="💣 Most Sixes", value=_fmt(aw.get("most_sixes")), inline=True)
+    e.add_field(name="🏏 Most Fours", value=_fmt(aw.get("most_fours")), inline=True)
+    e.add_field(name="⚡ Best Strike Rate", value=_fmt(aw.get("best_sr"), " SR") + " *(min 60 balls)*", inline=True)
+    e.add_field(name="🎯 Best Economy", value=_fmt(aw.get("best_economy"), " rpo") + " *(min 10 ov)*", inline=True)
+    hi, lo = aw.get("highest_total"), aw.get("lowest_total")
+    if hi:
+        e.add_field(name="📈 Highest Total",
+                    value=f"**{hi['team']}** {hi['runs']}/{hi['wickets']} vs {hi['vs']}"
+                          + (f" 📍 {hi['stadium']}" if hi.get("stadium") else ""), inline=False)
+    if lo:
+        e.add_field(name="📉 Lowest Total",
+                    value=f"**{lo['team']}** {lo['runs']}/{lo['wickets']} vs {lo['vs']}"
+                          + (f" 📍 {lo['stadium']}" if lo.get("stadium") else ""), inline=False)
+    done = sum(1 for m in data.get("matches", []) if m.get("winner"))
+    e.set_footer(text=f"{done} matches · {DSL_CONFIG['display_name']} · cvt seasons for the honours board")
+    return e
+
+
 def _compact_match_record(m):
     """Compact per-match record for archives/venue stats, or None if not usable."""
     r = m.get("result") or {}
@@ -449,6 +567,7 @@ def write_season_archive(tourney):
     season = int(tourney.get("season", next_season_number(server_id)))
     final = _dsl_get(tourney, "Final")
     champ = tourney.get("dsl_champion") or ((final or {}).get("result") or {}).get("winner")
+    match_records = [rec for rec in (_compact_match_record(m) for m in tourney.get("schedule", [])) if rec]
 
     archive = {
         "schema_version": ARCHIVE_SCHEMA_VERSION,
@@ -463,7 +582,10 @@ def write_season_archive(tourney):
         "teams": [{"name": t["name"], "owner_id": t.get("owner_id"),
                    "home_stadium": t.get("home_stadium")} for t in tourney.get("teams", [])],
         "stats": tourney.get("stats", {}),
-        "matches": [rec for rec in (_compact_match_record(m) for m in tourney.get("schedule", [])) if rec],
+        "matches": match_records,
+        # Precomputed season superlatives so `cvt seasons <n>` loads them straight
+        # from the file (older archives without this field get them recomputed).
+        "awards": compute_season_awards(tourney.get("stats", {}), match_records),
     }
 
     os.makedirs(ARCHIVE_DIR, exist_ok=True)

@@ -44,3 +44,6 @@ test_full.png
 test_summary.png
 preview_*.png
 _*.py
+*_test_output.png
+*_test.png
+test_previews/

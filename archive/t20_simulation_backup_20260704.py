@@ -150,27 +150,6 @@ T20_RUNOUT_SHARE = 0.07
 # that quietly inflated every innings and made chases cheaper.
 T20_NOBALL_RATE = 0.003
 
-# ── BOWLER-TYPE STRIKE IDENTITY ──────────────────────────────────────────────
-# Applied POST-compressor because the wicket compressor was flattening it
-# (measured: spin's wicket share equalled its ball share even on ragging
-# turners — real turners have spin striking well above its share of overs).
-# Favoured type strikes more, the other type less; the factors are paired so
-# the pitch's TOTAL wicket rate stays ~neutral: the SHARE shifts, the par and
-# all-out rates don't. Deliberately mild. {pitch: (favoured, fav_mult, other_mult)}
-# (other_mult set so fav_share·fav + other_share·other ≈ 1.00 given spin bowls
-#  ~42% of balls and pace ~58% — verified via all-out rates staying at old levels)
-T20_TYPE_STRIKE = {
-    "Turning": ("Spin", 1.18, 0.87), "Dusty": ("Spin", 1.15, 0.89),
-    "Worn":    ("Spin", 1.12, 0.91), "Dry":  ("Spin", 1.08, 0.94),
-    "Green":   ("Pace", 1.15, 0.78), "Damp": ("Pace", 1.12, 0.82),
-    "Bouncy":  ("Pace", 1.10, 0.85), "Hard": ("Pace", 1.05, 0.93),
-}
-
-# Wides at real T20 levels (~5-6/innings), clustered at the death where yorker
-# attempts miss. (The old flat 4% gave only ~4.3/innings.)
-T20_WIDE_RATE       = 0.045
-T20_WIDE_RATE_DEATH = 0.060
-
 # ── CHASE ATTRITION (innings 2) — flattens the chase-win curve ────────────────
 # Audit finding: chasers used ~3 wickets whether hunting 150 or 230 — cruising
 # cost nothing (89% success chasing 190 on a 214-par deck), while steep chases
@@ -725,8 +704,7 @@ def execute_ball_math_t20(match):
     else:
         is_cutter = False
 
-    _wide_p = T20_WIDE_RATE_DEATH if is_death_overs else T20_WIDE_RATE
-    if not is_no_ball and random.random() < _wide_p and "Yorker" not in deliv and "Slow" not in deliv:
+    if not is_no_ball and random.random() < 0.04 and "Yorker" not in deliv and "Slow" not in deliv:
         is_wide = True
         innings.total_runs += 1
         if not hasattr(innings, 'extras'): innings.extras = 0
@@ -1062,17 +1040,6 @@ def execute_ball_math_t20(match):
     # consistently. (Mirrors the ODI engine's ODI_WKT_COMPRESS.)
     if wicket_weight > T20_BASE_WKT:
         wicket_weight = T20_BASE_WKT + (wicket_weight - T20_BASE_WKT) * T20_WKT_COMPRESS
-
-    # ── BOWLER-TYPE STRIKE IDENTITY ── post-compressor so it can't be flattened:
-    # on a turner the spinner hunts while the seamer contains (and vice versa on
-    # a green top). Mild paired multipliers — share shifts, totals don't.
-    _ts = T20_TYPE_STRIKE.get(match.pitch)
-    if _ts:
-        _fav, _fmul, _omul = _ts
-        if _fav in bowler["role"]:
-            wicket_weight *= _fmul
-        elif _is_pace_b or _is_spin_b:
-            wicket_weight *= _omul
 
     # 🚨 ANTI-OVERCOOK SAFETIES (Prevents stacked conditions from breaking the game)
     four_weight = max(0.5, min(four_weight, 23.0)) # Hard cap — clips road-deck freak 250s

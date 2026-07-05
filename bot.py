@@ -35,7 +35,7 @@ from test_image import (
     generate_test_summary_image as _ti_summary,
     generate_test_scorecard_image as _ti_scorecard,
 )
-from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, revert_tournament_match, repair_tournament_schedule, _tm_next_mid, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS, SquadConfirmView, build_squad_confirm_text, build_squad_confirm_embed
+from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, revert_tournament_match, repair_tournament_schedule, _tm_next_mid, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS, SquadConfirmView, build_squad_confirm_text, build_squad_confirm_embed, match_order_gate, MATCH_ORDER_LABELS
 import dsl_manager
 from dsl_manager import (
     DSL_CONFIG, is_dsl_enabled, set_dsl_enabled, dsl_enabled_servers,
@@ -43,6 +43,7 @@ from dsl_manager import (
     dsl_generate_league_schedule, dsl_generate_playoffs, dsl_bracket_embed,
     write_season_archive, save_uploaded_archive,
     aggregate_player_stats, aggregate_venue_stats, season_history,
+    get_season_summary, season_detail_embed,
 )
 from subscription_manager import (
     load_data_from_bin, load_tournament_data_from_bin,
@@ -2786,6 +2787,7 @@ async def trigger_super_over(channel, match: CricketMatch):
     so_match.tournament_match_id = getattr(match, "tournament_match_id", None)
     so_match.manager_id = getattr(match, "manager_id", None)
     so_match.tournament_name = getattr(match, "tournament_name", "TOURNAMENT")
+    so_match.tournament_type = getattr(match, "tournament_type", None)   # DSL realism carries into super overs
     active_games[channel.id] = so_match
     
     await channel.send("🚨 **SCORES ARE TIED!** 🚨\nGet ready for the **SUPER OVER!**\n*The team that batted second will bat first. Max 2 wickets.*")
@@ -4933,149 +4935,118 @@ class Team2VerifyView(discord.ui.View):
         await ask_team2_xi(self.channel, self.state)
         
 async def prompt_tournament_xi(channel, state, team_num):
+    """Tournament XI selection: paste the 11 (order = batting order, optional '(C)'
+    captain marker) or hit ✅ Use Default XI. Replaces the old one-by-one dropdown
+    picker. Validates: every name in the (injury-filtered) squad, no duplicates,
+    exactly 11, and a wicket-keeper present."""
     owner_id = state.p1_id if team_num == 1 else state.p2_id
     t_name = state.t1_name if team_num == 1 else state.t2_name
-    view = TournamentXIView(state, channel, team_num)
-    await channel.send(view.get_msg_content(), view=view)
+    squad = state.t1_squad if team_num == 1 else state.t2_squad
+    default_xi = getattr(state, f"t{team_num}_default_xi", None)
+    default_cap = getattr(state, f"t{team_num}_default_captain", None)
 
-class TournamentXIView(discord.ui.View):
-    def __init__(self, state, channel, team_num):
-        # No timeout: picking 11 players one-by-one (×2 teams, with paging) routinely
-        # runs past 5 min. A finite timeout discards the view mid-selection while the
-        # dropdown still looks live, freezing the picker ("unknown view, Discarding").
-        super().__init__(timeout=None)
-        self.state = state
-        self.channel = channel
-        self.team_num = team_num
-        self.squad = state.t1_squad if team_num == 1 else state.t2_squad
-        self.owner_id = state.p1_id if team_num == 1 else state.p2_id
-        self.selected_players = []
-        self.req_count = 11
-        self.page = 0          # dropdown page — squads >25 span multiple pages
-        self.update_ui()
+    async def _lock_xi(xi, captain_name, via):
+        remaining = [p for p in squad if p not in xi and not p.get("injured")]
+        if team_num == 1:
+            state.t1_roster = xi; state.t1_subs = []
+        else:
+            state.t2_roster = xi; state.t2_subs = []
 
-    def update_ui(self):
-        self.clear_items()
-        PAGE = 25
-        if len(self.selected_players) < self.req_count:
-            options = []
-            for p in self.squad:
-                if p not in self.selected_players:
-                    role_short = p["role"].replace("All-Rounder", "AR").replace("Bowler", "BWL").replace("Batter", "BAT").replace("_", " ")
-                    options.append(discord.SelectOption(label=p["name"], description=role_short, value=p["name"]))
-            # Discord caps a dropdown at 25 options, but a tournament squad can be up to 30.
-            # Page through them so EVERY player is reachable at every pick — batting order
-            # (= pick order) stays fully under the owner's control, including page-2 players.
-            total_pages = max(1, (len(options) + PAGE - 1) // PAGE)
-            self.page = max(0, min(self.page, total_pages - 1))
-            page_opts = options[self.page * PAGE:(self.page + 1) * PAGE]
-            ph = f"Pick Player {len(self.selected_players)+1} of {self.req_count}..."
-            if total_pages > 1:
-                ph += f" (page {self.page+1}/{total_pages})"
-            select = discord.ui.Select(placeholder=ph, options=page_opts)
-            select.callback = self.select_cb
-            self.add_item(select)
+        async def _after(ch, st):
+            if getattr(st, "impact_player", False) and remaining:
+                v = TournamentSubSelectView(st, ch, team_num, remaining)
+                await ch.send(v.get_msg_content(), view=v)
+            elif team_num == 1:
+                await prompt_tournament_xi(ch, st, 2)
+            else:
+                await proceed_to_conditions(ch, st)
 
-            if total_pages > 1:
-                btn_prev = discord.ui.Button(label="◀ Prev", style=discord.ButtonStyle.secondary, disabled=self.page == 0)
-                btn_prev.callback = self.prev_cb
-                self.add_item(btn_prev)
-                btn_next = discord.ui.Button(label="Next ▶", style=discord.ButtonStyle.secondary, disabled=self.page >= total_pages - 1)
-                btn_next.callback = self.next_cb
-                self.add_item(btn_next)
+        await channel.send(f"✅ **{t_name} XI locked** ({via}):\n" + format_xi_display(xi))
+        if captain_name and captain_name in {p["name"] for p in xi}:
+            setattr(state, f"t{team_num}_captain", captain_name)
+        await handle_captain_step(channel, state, team_num, xi, _after)
 
-        btn_undo = discord.ui.Button(label="Undo Last", style=discord.ButtonStyle.danger, disabled=len(self.selected_players)==0)
-        btn_undo.callback = self.undo_cb
-        self.add_item(btn_undo)
-        
-        btn_confirm = discord.ui.Button(label="Confirm XI", style=discord.ButtonStyle.success, disabled=len(self.selected_players) < self.req_count)
-        btn_confirm.callback = self.confirm_cb
-        self.add_item(btn_confirm)
-        
-    async def interaction_check(self, interaction: discord.Interaction):
-        if interaction.user.id != self.owner_id and interaction.user.id != getattr(self.state, "manager_id", None):
-            await interaction.response.send_message("❌ Only the Team Owner or Manager can select this XI.", ephemeral=True)
-            return False
-        return True
-        
-    async def _safe_edit(self, interaction: discord.Interaction, *, content=None, view=False):
-        # The interaction token can be dead (10062 Unknown interaction) if the bot
-        # restarted or the event loop stalled between render and click. In that case
-        # fall back to a plain message edit (uses the bot token, not the interaction
-        # token) so the UI still updates; only give up if that fails too.
-        content = self.get_msg_content() if content is None else content
-        view = self if view is False else view   # sentinel: default to this live view
-        try:
-            await interaction.response.edit_message(content=content, view=view)
-        except discord.NotFound:
+    # ── prompt message: instructions + the squad for reference ──
+    inj_note = ""
+    full_squad = state.t1_squad if team_num == 1 else state.t2_squad
+    msg = (f"📋 <@{owner_id}> (or Manager) — **{t_name} XI Selection**\n"
+           f"**Paste your XI below** — 11 names, one per line. "
+           f"⚠️ The order is your exact **batting order**; add `(C)` after a name to set the captain.\n")
+    if default_xi:
+        msg += "…or press ✅ **Use Default XI** (also works by typing `default`).\n"
+    elif (getattr(state, 'tournament_server_id', None)
+          and (getattr(state, f't{team_num}_default_xi', 'x') is None)):
+        msg += "-# *(saved default XI unavailable: player injured or no longer in squad)*\n"
+    msg += "\n**Squad:** " + " · ".join(p["name"] for p in squad)
+
+    view = discord.ui.View(timeout=None)
+    view.done = False
+    if default_xi:
+        btn = discord.ui.Button(label="✅ Use Default XI", style=discord.ButtonStyle.success)
+
+        async def _use_default(inter: discord.Interaction):
+            if inter.user.id != owner_id and inter.user.id != getattr(state, "manager_id", None):
+                return await inter.response.send_message("❌ Only the Team Owner or Manager can pick this XI.", ephemeral=True)
+            if view.done:
+                return await inter.response.defer()
+            view.done = True
             try:
-                await interaction.message.edit(content=content, view=view)
+                await inter.response.edit_message(view=None)
             except discord.HTTPException:
                 pass
+            await _lock_xi(list(default_xi), default_cap, "default XI")
+        btn.callback = _use_default
+        view.add_item(btn)
 
-    async def select_cb(self, interaction: discord.Interaction):
-        val = interaction.data["values"][0]
-        player = next(p for p in self.squad if p["name"] == val)
-        self.selected_players.append(player)
-        self.update_ui()
-        await self._safe_edit(interaction)
+    await channel.send(msg, view=view if default_xi else None)
 
-    async def undo_cb(self, interaction: discord.Interaction):
-        self.selected_players.pop()
-        self.update_ui()
-        await self._safe_edit(interaction)
+    def _check(m):
+        return (m.channel.id == channel.id and not m.author.bot
+                and m.author.id in (owner_id, getattr(state, "manager_id", None)))
 
-    async def prev_cb(self, interaction: discord.Interaction):
-        self.page -= 1
-        self.update_ui()
-        await self._safe_edit(interaction)
+    while not view.done:
+        # Abort silently if this setup was cancelled/replaced (endmatch, new match…).
+        cur = active_setups.get(channel.id)
+        if not cur or cur[1] is not state:
+            return
+        try:
+            reply = await bot.wait_for("message", timeout=300, check=_check)
+        except asyncio.TimeoutError:
+            continue   # no hard timeout — same behaviour as the old no-timeout picker
+        if view.done:
+            return
+        content = reply.content.strip()
+        if content.lower() in ("default", "default xi", "d"):
+            if default_xi:
+                view.done = True
+                return await _lock_xi(list(default_xi), default_cap, "default XI")
+            await reply.reply("❌ No valid default XI saved for this team — paste the 11 names instead.")
+            continue
+        lines = [l for l in content.split("\n") if l.strip()]
+        if len(lines) < 8:
+            continue   # ordinary chat — ignore, keep waiting for a pasted XI
+        found, missing, cap_name, cap_err, _low = parse_pasted_roster(content, squad, max_lines=13)
+        errs = []
+        if missing:
+            errs.append("Not in the (fit) squad: " + ", ".join(f"**{n}**" for n in missing[:6]))
+        if len(found) != 11:
+            errs.append(f"Need exactly **11** players — found **{len(found)}**.")
+        if cap_err == "multiple":
+            errs.append("Multiple `(C)` markers — mark exactly one captain (or none).")
+        if len(found) == 11 and not _has_wk(found):
+            errs.append("No **Wicket-Keeper** in the XI — include a `WK`-role player.")
+        if errs:
+            await reply.reply("❌ **Invalid XI:**\n• " + "\n• ".join(errs) + "\n*Fix and paste again.*")
+            continue
+        view.done = True
+        for item in view.children:
+            item.disabled = True
+        return await _lock_xi(found, cap_name, "typed")
 
-    async def next_cb(self, interaction: discord.Interaction):
-        self.page += 1
-        self.update_ui()
-        await self._safe_edit(interaction)
 
-    async def confirm_cb(self, interaction: discord.Interaction):
-        if not _has_wk(self.selected_players):
-            return await interaction.response.send_message(
-                "❌ **Invalid XI — no Wicket-Keeper.** Undo and add a keeper (a `WK`-role player) before confirming.",
-                ephemeral=True)
-        tnum = self.team_num
-        # Exclude injured players from the Impact-Sub list. available_squad() only drops
-        # them when ≥11 fit remain; in the <11-fit fallback the full squad (injured
-        # included) is used for XI selection, so injured players can otherwise leak into
-        # the leftover `remaining` list and be offered as subs.
-        remaining = [p for p in self.squad if p not in self.selected_players and not p.get("injured")]
-        if tnum == 1:
-            self.state.t1_roster = self.selected_players
-            self.state.t1_subs = []
-        else:
-            self.state.t2_roster = self.selected_players
-            self.state.t2_subs = []
+# (The old one-by-one TournamentXIView dropdown picker was replaced by the
+#  paste / default-XI flow in prompt_tournament_xi above.)
 
-        # Captain step → then the original Impact-Sub / next-team continuation.
-        async def _after_captain(channel, state):
-            if getattr(state, "impact_player", False) and remaining:
-                view = TournamentSubSelectView(state, channel, tnum, remaining)
-                await channel.send(view.get_msg_content(), view=view)
-            elif tnum == 1:
-                await prompt_tournament_xi(channel, state, 2)
-            else:
-                await proceed_to_conditions(channel, state)
-
-        await self._safe_edit(interaction, content=f"✅ **Team {tnum} XI Confirmed!**", view=None)
-        await handle_captain_step(self.channel, self.state, tnum, self.selected_players, _after_captain)
-
-    def get_msg_content(self):
-        t_name = self.state.t1_name if self.team_num == 1 else self.state.t2_name
-        msg = f"📋 <@{self.owner_id}> (or Manager) — **{t_name} XI Selection**\n"
-        msg += f"Select {self.req_count} players from your squad using the dropdown below.\n"
-        msg += f"⚠️ **IMPORTANT:** The order you select them determines your exact batting order!\n\n"
-        for i, p in enumerate(self.selected_players, 1):
-            msg += f"`{i:>2}.` **{p['name']}**\n"
-        if getattr(self.state, "impact_player", False) and len(self.selected_players) == self.req_count:
-            msg += "\n*After confirming, you'll choose your Impact Subs from the remaining squad.*"
-        return msg
 
 class TournamentSubSelectView(discord.ui.View):
     def __init__(self, state, channel, team_num, remaining):
@@ -5283,6 +5254,7 @@ async def begin_toss(channel, state):
     match.tournament_match_id = getattr(state, "tournament_match_id", None)
     match.manager_id = getattr(state, "manager_id", None)
     match.tournament_name = getattr(state, "tournament_name", "TOURNAMENT")
+    match.tournament_type = getattr(state, "tournament_type", None)   # "dsl" flips the engine's league-realism mode
     # Draft mode: carry the result-recording info so the leaderboard updates on finish
     if getattr(state, "is_draft", False):
         match.is_draft = True
@@ -7082,6 +7054,14 @@ async def on_start_tournament_match(channel, manager_id, tourney, match_data):
     state.tournament_match_id = match_data["match_id"]
     state.manager_id = manager_id
     state.tournament_name = tourney["name"]
+    state.tournament_type = tourney.get("tournament_type", "round_robin")   # engine reads this (DSL realism mode)
+
+    # Default XIs (resolved against the FIT squad — an injured/missing player
+    # invalidates the default and the owner types the XI instead).
+    state.t1_default_xi = resolve_default_xi(t1_data, state.t1_squad)
+    state.t2_default_xi = resolve_default_xi(t2_data, state.t2_squad)
+    state.t1_default_captain = t1_data.get("default_captain")
+    state.t2_default_captain = t2_data.get("default_captain")
     state.format_overs = tourney.get("format_overs", 20)
     state.impact_player = tourney.get("impact_player", False)
 
@@ -7177,6 +7157,7 @@ def _help_match_embed():
     e.add_field(name="/simulatematch",                                  value="Instantly simulate a full match — pick teams, format and conditions.", inline=False)
     e.add_field(name="TEST format in /match",                           value="Select 'TEST (90 overs)' in the format dropdown to play a 5-day Test with session/innings/full-match modes.", inline=False)
     e.add_field(name="/impactplayer",                                   value="During an active match, swap in your Impact Player (if rule is on).", inline=False)
+    e.add_field(name="`cv resume`  ·  `cv forcehub`",                  value="Match stuck with no buttons (Discord hiccup ate the prompt)? Re-shows the lost over hub / bowler pick / next-batter prompt — no progress is lost.", inline=False)
     e.add_field(name="/endmatch  ·  `cv endmatch`  ·  `cv em`",       value="Force-cancel the current match or setup in this channel.", inline=False)
     e.add_field(name="/my_tier",                                        value="Check your subscription tier and remaining daily match limits.", inline=False)
     e.set_footer(text="Slash commands work from anywhere  ·  cv / cv<shortcut> need the cv prefix")
@@ -7507,6 +7488,27 @@ def _best_xi(squad: list, n: int = 11, min_bowlers: int = 5) -> list:
         for i in range(min(min_bowlers - have, len(spare), len(drop))):
             xi.remove(drop[i]); xi.append(spare[i])
     return xi
+
+def resolve_default_xi(team_data: dict, fit_squad: list):
+    """A team's saved default XI resolved against the currently-FIT squad, in the
+    saved (batting) order. Returns the list of player dicts, or None unless every
+    one of the 11 names resolves to a fit squad member, uniquely, with a keeper —
+    so an injured/transferred player automatically invalidates the default."""
+    names = team_data.get("default_xi") or []
+    if len(names) != 11:
+        return None
+    by_name = {p["name"].lower(): p for p in fit_squad}
+    xi, seen = [], set()
+    for nm in names:
+        p = by_name.get(str(nm).strip().lower())
+        if not p or p["name"] in seen:
+            return None
+        xi.append(p)
+        seen.add(p["name"])
+    if not _has_wk(xi):
+        return None
+    return xi
+
 
 def _batting_order(players: list) -> list:
     """Arrange an XI into a realistic batting order (the sim bats in roster order).
@@ -9025,6 +9027,81 @@ class PrefixCog(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ Restore failed: {e}")
 
+    # ── Match recovery ────────────────────────────────────────────────────────────
+    @commands.command(name="resume", aliases=["forcehub", "showhub", "rescue"],
+                      help="Recover a stuck match — re-shows whatever prompt was lost (over hub / bowler pick / next batter / toss / innings end).\nUsage: resume")
+    async def resume_match_cmd(self, ctx):
+        """If a Discord hiccup (5xx, timeout) eats the message carrying the next
+        view, the match is alive in memory but has no buttons. This inspects the
+        match state and re-issues the correct prompt. Re-showing a prompt never
+        mutates match state, so it's safe even if the old view is still alive."""
+        channel = ctx.channel
+        match = active_games.get(channel.id)
+
+        # 90-over Test matches live in their own registry with their own hub.
+        if match is None and channel.id in active_test_matches:
+            tmatch = active_test_matches[channel.id]
+            try:
+                await channel.send("🛟 **Match recovered — here's your Test hub again:**",
+                                   embed=render_test_embed(tmatch), view=TestSimView(tmatch, channel.id))
+            except Exception as e:
+                await channel.send(f"❌ Couldn't rebuild the Test hub: {e}")
+            return
+
+        if match is None:
+            if channel.id in active_setups:
+                return await ctx.send("ℹ️ A match **setup** is in progress here (no live match yet). Re-run the last setup step, or `/endmatch` to scrap it and start over.")
+            return await ctx.send("❌ No active match in this channel.")
+
+        allowed = (ctx.author.id in (match.p1_id, match.p2_id)
+                   or ctx.author.id == getattr(match, "manager_id", None)
+                   or ctx.author.id == ADMIN_DISCORD_ID
+                   or (ctx.guild and ctx.author.guild_permissions.administrator))
+        if not allowed:
+            return await ctx.send("❌ Only the players, the match manager, or a server admin can resume this match.")
+
+        # Toss never finished → re-issue the right toss prompt.
+        if match.current_innings is None or match.innings1 is None:
+            if match.toss_winner is not None:
+                return await channel.send(f"🛟 Re-sending the toss decision — <@{match.toss_winner}>, choose:",
+                                          view=TossDecisionView(match))
+            if not match.is_ai_game:
+                return await channel.send(f"🛟 Re-sending the toss — <@{match.p2_id}>, call the coin!",
+                                          view=TossCallView(match))
+            return await ctx.send("❌ This match never got past the toss — use `/endmatch` and start again.")
+
+        # A DRS window lost to the crash can't be rebuilt mid-flight — decision stands.
+        if getattr(match, "pending_drs", False):
+            match.pending_drs = False
+            await channel.send("⚖️ The pending **DRS window was lost** in the crash — the on-field decision stands.")
+
+        await channel.send("🛟 **Resuming the match from its last saved state…**")
+        innings = match.current_innings
+
+        # Innings/match already decided → the end-of-innings router handles 1st→2nd
+        # innings, super overs, and full completion (incl. tournament recording).
+        target = getattr(match, "target", match.innings1.total_runs + 1) if match.current_innings_num == 2 else None
+        if (innings.wickets >= _match_max_wickets(match)
+                or innings.total_balls >= match.max_balls
+                or (target is not None and innings.total_runs >= target)):
+            return await handle_innings_end(channel, match)
+
+        # A wicket was waiting on the next-batter pick.
+        if getattr(match, "pending_next_batter", False):
+            return await prompt_next_batter(channel, match)
+
+        # Headless / full-sim flows: re-enter the sim loop where it stopped.
+        if getattr(match, "sim_only", False) or match.simulation_mode == "whole_match":
+            return await loop_entire_match_simulation(channel, match)
+
+        # Interactive flows:
+        if getattr(match, "_pending_bowler", None):
+            return await prompt_over_pacing_hub(channel, match)          # bowler picked, hub message lost
+        if innings.total_balls % 6 == 0 and (innings.over_log or not innings.current_bowler):
+            match.over_completed = False                                  # over just ended (or fresh over, no bowler)
+            return await prompt_bowler_then_hub(channel, match)
+        return await run_interactive_delivery_sequence(channel, match)    # mid-over → bowl the next ball
+
     # ── DSL (Dominators Super League) owner controls ─────────────────────────────
     @commands.command(name="enable_dsl", help="[OWNER] Grant a server access to the Dominators Super League.\nUsage: enable_dsl [server_id]  (defaults to this server)")
     async def enable_dsl(self, ctx, server_id: str = None):
@@ -9820,15 +9897,18 @@ class PrefixCog(commands.Cog):
     async def tournament(self, ctx):
         await ctx.send_help(ctx.command)
 
-    @tournament.command(name="create", help="[ADMIN] Create a new tournament.\nUsage: tournament create \"<name>\" <format> [event=roundrobin/t20wc/acl] [impact_player=true/false] [injuries=true/false]")
+    @tournament.command(name="create", help="[ADMIN] Create a new tournament.\nUsage: tournament create \"<name>\" <format> [event=roundrobin/t20wc/acl] [impact_player=true/false] [injuries=true/false] [order=random/schedule/round]")
     async def t_create(self, ctx, name: str, format_str: str, *options: str):
-        kwargs = { 'impact_player': False, 'injuries': False, 'conditions': 'manual' }
+        kwargs = { 'impact_player': False, 'injuries': False, 'conditions': 'manual', 'match_order': 'random', 'stadium_mode': 'random' }
         event_map = {
             "roundrobin": "round_robin", "round_robin": "round_robin", "rr": "round_robin",
             "t20wc": "t20_world_cup", "t20_world_cup": "t20_world_cup", "worldcup": "t20_world_cup", "wc": "t20_world_cup",
             "acl": "acl",
         }
         cond_map = {"manual": "manual", "auto": "auto", "home": "home", "home_pitch": "home", "homepitch": "home"}
+        order_map = {"random": "random", "any": "random",
+                     "schedule": "sequential", "strict": "sequential", "sequential": "sequential",
+                     "round": "round", "rounds": "round"}
         t_type = "round_robin"
         for opt in options:
             try:
@@ -9840,6 +9920,16 @@ class PrefixCog(commands.Cog):
                     if not cm:
                         return await ctx.send(f"❌ Invalid conditions `{value}`. Use `manual`, `auto`, or `home`.")
                     kwargs['conditions'] = cm
+                elif key in ('order', 'match_order'):
+                    om = order_map.get(value.strip().lower())
+                    if not om:
+                        return await ctx.send(f"❌ Invalid order `{value}`. Use `random` (any match), `schedule` (strict order), or `round` (round by round).")
+                    kwargs['match_order'] = om
+                elif key in ('stadiums', 'stadium'):
+                    sm = {"random": "random", "none": "random", "linked": "linked", "link": "linked", "home": "linked"}.get(value.strip().lower())
+                    if not sm:
+                        return await ctx.send(f"❌ Invalid stadiums `{value}`. Use `random` (default) or `linked` (home stadium with fixed pitch).")
+                    kwargs['stadium_mode'] = sm
                 elif key in ('event', 'event_type', 'type'):
                     et = event_map.get(value.strip().lower())
                     if not et:
@@ -9870,7 +9960,9 @@ class PrefixCog(commands.Cog):
             "format_overs": format_overs, "min_squad": 11, "max_squad": 15,
             "impact_player": kwargs['impact_player'], "injuries_enabled": kwargs['injuries'],
             "tournament_type": t_type,
-            "conditions_mode": kwargs['conditions'],
+            "conditions_mode": ("home" if kwargs['stadium_mode'] == "linked" else kwargs['conditions']),
+            "match_order": kwargs['match_order'],
+            "stadium_mode": kwargs['stadium_mode'],
             "stadiums": default_stadium_pool(t_type),
         }
         save_tournament(t_data)
@@ -9881,10 +9973,16 @@ class PrefixCog(commands.Cog):
             extra += f"\n🏟️ **Stadiums:** {len(DEFAULT_ACL_STADIUMS)} venues pre-loaded — fixtures get a random one at start. Edit with `cvt stadium_add`/`cvt stadiums` before `cvt start`."
         elif t_type == "t20_world_cup":
             extra = "\n⚠️ **T20 World Cup needs exactly 16 teams** in 4 groups of 4."
-        if kwargs['conditions'] == "auto":
+        if kwargs['stadium_mode'] == "linked":
+            extra += ("\n🏟️ **Stadiums: Linked** — every team sets a home ground with a FIXED pitch: "
+                      "`cvt set_home_stadium \"<team>\" <stadium name> <pitch>`. Home fixtures are played there, "
+                      "on that pitch. Can't start until all teams have one (`cvt home_stadiums` to check).")
+        elif kwargs['conditions'] == "auto":
             extra += "\n🎲 **Conditions: Auto** — pitch & weather auto-assigned per match."
         elif kwargs['conditions'] == "home":
             extra += "\n🏟️ **Conditions: Home Pitch** — set each team's home pitch with `cvt set_home_pitch \"<team>\" <pitch>`. Can't start until **all** teams have one (`cvt homepitch` to check)."
+        if kwargs['match_order'] != "random":
+            extra += f"\n{MATCH_ORDER_LABELS[kwargs['match_order']]}"
         await ctx.send(f"🏆 **Tournament Created:** `{name}`  ·  {type_label}\nUse `cv tournament add_team` to get started!{extra}")
 
     @tournament.command(name="add_team", help="[MANAGER] Add a team and assign an Owner.\nUsage: tournament add_team \"<team_name>\" <@owner>")
@@ -10235,8 +10333,16 @@ class PrefixCog(commands.Cog):
         for t in tourney["teams"]:
             if len(t.get("squad", [])) < min_s:
                 return f"❌ Team **{t['name']}** does not have a valid squad yet."
+        # Linked stadiums: every team needs a home ground (which carries its fixed pitch).
+        if tourney.get("stadium_mode") == "linked" and t_type != "dsl":
+            missing = [t["name"] for t in tourney["teams"]
+                       if not t.get("home_stadium") or not canonical_pitch(t.get("home_pitch"))]
+            if missing:
+                return ("❌ **Linked stadiums:** every team needs a home ground with its fixed pitch before starting.\n"
+                        "Missing: " + ", ".join(f"**{m}**" for m in missing) +
+                        "\nUse `cvt set_home_stadium \"<team>\" <stadium name> <pitch>` · `cvt home_stadiums` to review.")
         # Home-pitch mode: every team must have a home pitch set before starting.
-        if tourney.get("conditions_mode") == "home":
+        elif tourney.get("conditions_mode") == "home":
             missing = [t["name"] for t in tourney["teams"] if not canonical_pitch(t.get("home_pitch"))]
             if missing:
                 return ("❌ **Home-Pitch mode:** set a home pitch for every team before starting.\n"
@@ -10578,7 +10684,10 @@ class PrefixCog(commands.Cog):
         pending = next((m for m in schedule if m["status"] == "pending" and m["round"] == current_round), None)
         if not pending:
             return await ctx.send("🏆 All matches have been completed!")
-            
+        ok, gate_msg = match_order_gate(tourney, pending)
+        if not ok:
+            return await ctx.send(gate_msg)
+
         r_label = f"Round {current_round}" if isinstance(current_round, int) else current_round
         await ctx.send(f"🚀 **Launching {r_label} — Match {pending['match_id']}...**")
         self.bot.dispatch("start_tournament_match", ctx.channel, ctx.author.id, tourney, pending)
@@ -10602,6 +10711,9 @@ class PrefixCog(commands.Cog):
             return await ctx.send(f"❌ Match {match_id} isn't ready — its teams depend on earlier results. Try `cvt bracket`.")
         if match["status"] != "pending":
             return await ctx.send(f"❌ Match {match_id} is already completed.")
+        ok, gate_msg = match_order_gate(tourney, match)
+        if not ok:
+            return await ctx.send(gate_msg)
 
         r_label = f"Round {match['round']}" if isinstance(match['round'], int) else match['round']
         await ctx.send(f"🚀 **Launching Match {match['match_id']} ({r_label})...**\n<@{ctx.author.id}> — make sure your opponent is here to pick their XI.")
@@ -10834,11 +10946,17 @@ class PrefixCog(commands.Cog):
                     if _p.get("injured") and _p.get("injury_until_match", 0) < current_mid:
                         _p.pop("injured", None); _p.pop("injury_until_match", None); _p.pop("injury_severity", None)
 
-            # Play each team's BEST balanced XI (top 11 by rating, ≥5 who can bowl) from the
-            # players still FIT, then sort into a proper batting order (best batters open,
-            # bowlers at the tail) — not just the first 11 in squad order.
-            roster1 = with_captain(_batting_order(_best_xi(apply_server_overrides(_available(s1), tourney["server_id"]))))
-            roster2 = with_captain(_batting_order(_best_xi(apply_server_overrides(_available(s2), tourney["server_id"]))))
+            # XI priority: the team's saved DEFAULT XI (kept in its saved batting order,
+            # when all 11 are fit) — otherwise the BEST balanced XI (top 11 by rating,
+            # ≥5 who can bowl) sorted into a proper batting order.
+            def _sim_roster(tdata, squad):
+                fit = _available(squad)
+                dxi = resolve_default_xi(tdata, fit)
+                if dxi:
+                    return with_captain(apply_server_overrides(dxi, tourney["server_id"]))
+                return with_captain(_batting_order(_best_xi(apply_server_overrides(fit, tourney["server_id"]))))
+            roster1 = _sim_roster(t1_data, s1)
+            roster2 = _sim_roster(t2_data, s2)
             # Use the match's assigned conditions if valid; otherwise pick a fully random
             # pitch from the FULL valid set (not a tiny flat/dead-heavy list) so sims cover
             # every surface — green seamers, dustbowls, crackers, the lot.
@@ -10948,6 +11066,108 @@ class PrefixCog(commands.Cog):
                 chunk.append(ln); buf += len(ln) + 1
             if chunk:
                 await inj_ch.send("\n".join(chunk))
+
+    @tournament.command(name="sim", aliases=["simulate", "sim_match"], help="[MANAGER] Instantly simulate ONE match (scorecard + stats saved, default XI used).\nUsage: tournament sim <match_id>")
+    async def t_sim_match(self, ctx, match_id: int):
+        """Single-match version of simulate_all: same headless engine, same stats/
+        scorecard recording, same injury handling — for exactly one pending match.
+        Uses each team's default XI when valid, else the built-in best-XI picker."""
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (str(ctx.author.id) in tourney.get("managers", []))
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        if tourney["status"] != "active": return await ctx.send("❌ Tournament is not active.")
+        m_data = next((m for m in tourney.get("schedule", []) if m.get("match_id") == match_id), None)
+        if not m_data: return await ctx.send(f"❌ Match #{match_id} not found.")
+        if m_data["status"] == "locked":
+            return await ctx.send(f"❌ Match #{match_id} isn't ready — its teams depend on earlier results.")
+        if m_data["status"] != "pending":
+            return await ctx.send(f"❌ Match #{match_id} is already completed.")
+        ok, gate_msg = match_order_gate(tourney, m_data)
+        if not ok: return await ctx.send(gate_msg)
+
+        t1_data = next((t for t in tourney["teams"] if t["name"] == m_data["team1"]), None)
+        t2_data = next((t for t in tourney["teams"] if t["name"] == m_data["team2"]), None)
+        if not t1_data or not t2_data:
+            return await ctx.send("❌ A team in this match no longer exists.")
+        if len(t1_data.get("squad", [])) < 2 or len(t2_data.get("squad", [])) < 2:
+            return await ctx.send("❌ Both teams need submitted squads first.")
+
+        def _available(squad):
+            fit = [p for p in squad if not p.get("injured")]
+            return fit if len(fit) >= 11 else squad
+
+        # Heal expired injuries exactly like simulate_all, then leave the rest out.
+        for _td in (t1_data, t2_data):
+            for _p in _td.get("squad", []):
+                if _p.get("injured") and _p.get("injury_until_match", 0) < match_id:
+                    _p.pop("injured", None); _p.pop("injury_until_match", None); _p.pop("injury_severity", None)
+
+        def _sim_roster(tdata):
+            fit = _available(tdata.get("squad", []))
+            dxi = resolve_default_xi(tdata, fit)
+            if dxi:
+                return with_captain(apply_server_overrides(dxi, server_id)), "default XI"
+            return with_captain(_batting_order(_best_xi(apply_server_overrides(fit, server_id)))), "best XI"
+
+        roster1, src1 = _sim_roster(t1_data)
+        roster2, src2 = _sim_roster(t2_data)
+        pitch = canonical_pitch(m_data.get("pitch")) or random.choice(ALL_PITCHES)
+        weather = canonical_weather(m_data.get("weather")) or "Clear"
+        t1 = {"name": m_data["team1"], "players": roster1, "color": t1_data.get("color", "#6B7280")}
+        t2 = {"name": m_data["team2"], "players": roster2, "color": t2_data.get("color", "#6B7280")}
+
+        match = CricketMatch(None, None, 0, 0, t1, t2, tourney.get("format_overs", 20), pitch, weather)
+        match.tournament_server_id = tourney["server_id"]
+        match.tournament_match_id = match_id
+        match.tournament_type = tourney.get("tournament_type", "round_robin")
+        match.manager_id = ctx.author.id
+        match.tournament_name = tourney["name"]
+        match.sim_only = True
+        match._scorecard_players = None
+        t_bat, t_bowl = (t1, t2) if random.random() < 0.5 else (t2, t1)
+        match.innings1 = InningsState(t_bat, t_bowl)
+
+        r_label = f"R{m_data['round']}" if isinstance(m_data['round'], int) else m_data['round']
+        status_msg = await ctx.send(f"⚡ Simulating **Match #{match_id}** ({r_label}) — {t1['name']} ({src1}) vs {t2['name']} ({src2})…")
+        try:
+            await asyncio.to_thread(_run_full_match_sync, match)
+        except Exception as e:
+            return await status_msg.edit(content=f"❌ Simulation failed: {e}")
+        try:
+            match._scorecard_players = extract_scorecard_players(match)
+        except Exception as _e:
+            print(f"⚠️ cvt sim scorecard extract failed M{match_id}: {_e}")
+            match._scorecard_players = None
+
+        tc = self.bot.cogs.get("TournamentCog")
+        if tc:
+            await tc.on_tournament_match_complete(match)
+        else:
+            self.bot.dispatch("tournament_match_complete", match)
+            await asyncio.sleep(0.5)
+
+        tourney = get_server_tournament(server_id)
+        _news = tourney.pop("pending_injury_news", []) if tourney else []
+        injury_suffix = ""
+        if _news:
+            save_tournament(tourney)
+            injury_suffix = "\n🚑 " + ", ".join(f"**{it['player']}** ({it['team']}, out {it['severity']}m)" for it in _news)
+
+        inn1, inn2 = match.innings1, match.innings2
+        if inn2.total_runs >= match.target:
+            win_str = f"{inn2.batting_team['name']} won by {10 - inn2.wickets} wickets"
+        elif inn2.total_runs == match.target - 1:
+            win_str = "Match tied" if not getattr(match, "tiebreak_winner_name", None) else f"{match.tiebreak_winner_name} won (Super Over)"
+        else:
+            win_str = f"{inn1.batting_team['name']} won by {inn1.total_runs - inn2.total_runs} runs"
+        await status_msg.edit(content=(
+            f"✅ **Match #{match_id}** ({r_label}) simulated:\n"
+            f"**{inn1.batting_team['name']}** {inn1.total_runs}/{inn1.wickets} ({inn1.total_balls // 6}.{inn1.total_balls % 6})  vs  "
+            f"**{inn2.batting_team['name']}** {inn2.total_runs}/{inn2.wickets} ({inn2.total_balls // 6}.{inn2.total_balls % 6})\n"
+            f"🏆 **{win_str}**{injury_suffix}\n"
+            f"-# `cvt match_scorecard {match_id}` for the full card"))
 
     @tournament.command(name="add_manager", help="[MANAGER] Assign a tournament manager.\nUsage: tournament add_manager <@user>")
     async def t_add_manager(self, ctx, user: discord.Member):
@@ -11096,6 +11316,10 @@ class PrefixCog(commands.Cog):
             if is_dsl_tournament(tourney):
                 return await self.t_venue_stats.callback(self, ctx, venue=name)
             return await ctx.send("🏟️ ACL stadiums are cosmetic labels — per-venue stats are a **DSL** feature (`cvt venue_stats`).")
+        from stadium_manager import linked_stadiums
+        if linked_stadiums(tourney) and not is_dsl_tournament(tourney):
+            # Linked mode: the "pool" is the teams' home grounds — show those.
+            return await self.t_home_stadiums.callback(self, ctx)
         pool = get_stadium_pool(tourney)
         sched = tourney.get("schedule", [])
         counts = {}
@@ -11104,21 +11328,20 @@ class PrefixCog(commands.Cog):
             if s: counts[s] = counts.get(s, 0) + 1
         assigned = sum(counts.values())
         if is_dsl_tournament(tourney):
-            # DSL: fixed venue list with pitch profiles + home teams
+            # DSL: fixed venue list, each with its ONE pitch + home team
             homes = {}
             for t in tourney.get("teams", []):
                 v = canonical_venue(t.get("home_stadium"))
                 if v: homes[v] = t["name"]
             lines = []
-            for i, (v, profile) in enumerate(DSL_CONFIG["venues"].items()):
-                top = " / ".join(p for p, _ in sorted(profile.items(), key=lambda kv: -kv[1])[:2])
+            for i, (v, pitch) in enumerate(DSL_CONFIG["venues"].items()):
                 c = counts.get(v, 0)
                 tail = f" · {c} fixture{'s' if c != 1 else ''}" if c else ""
                 home = f" · 🏠 **{homes[v]}**" if v in homes else ""
-                lines.append(f"`{i+1:>2}` 📍 **{v}** — *{top}*{home}{tail}")
+                lines.append(f"`{i+1:>2}` 📍 **{v}** — 🏟️ *{pitch}*{home}{tail}")
             e = discord.Embed(title=f"🏟️ {tourney['name']} — Venues",
                               description="\n".join(lines), color=discord.Color.from_rgb(20, 60, 160))
-            e.set_footer(text=f"{len(DSL_CONFIG['venues'])} venues · the home ground's pitch profile decides each match's pitch · cvt venue_stats for all-time numbers")
+            e.set_footer(text=f"{len(DSL_CONFIG['venues'])} venues · every ground has ONE fixed pitch — same stadium, same pitch, every match · cvt stadium <name> for its all-time stats")
             return await ctx.send(embed=e)
         e = discord.Embed(title=f"🏟️ {tourney['name']} — Stadiums",
                           color=discord.Color.from_rgb(200, 30, 40))
@@ -11198,9 +11421,10 @@ class PrefixCog(commands.Cog):
         is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
         if not is_mgr: return await ctx.send("❌ Managers only.")
         if not stadiums_enabled(tourney):
-            return await ctx.send("🏟️ Stadiums are an **ACL/DSL-only** feature for now.")
-        if is_dsl_tournament(tourney):
-            return await ctx.send(f"🔒 **{DSL_CONFIG['short_name']}** matches are played at the home team's ground — venues can't be rerolled.")
+            return await ctx.send("🏟️ Stadiums are an **ACL/DSL/linked-only** feature for now.")
+        from stadium_manager import linked_stadiums
+        if is_dsl_tournament(tourney) or linked_stadiums(tourney):
+            return await ctx.send("🔒 Matches are played at the **home team's ground** — venues can't be rerolled.")
         pool = get_stadium_pool(tourney)
         if not pool: return await ctx.send("❌ The stadium pool is empty. Add venues with `cvt stadium_add` first.")
         n = reroll_stadiums(tourney)
@@ -11232,48 +11456,201 @@ class PrefixCog(commands.Cog):
         await ctx.send(f"🏟️ Match **#{match_id}** ({m['team1']} vs {m['team2']}) → 📍 **{m['stadium']}**{note}")
 
     # ── DSL (Dominators Super League) — home venues, venue stats & seasons ─────────
-    @tournament.command(name="set_home_stadium", aliases=["sethomestadium", "home_stadium", "shs"], help="[MANAGER/OWNER] Set a DSL team's home ground (its pitch profile decides home-match pitches).\nUsage: tournament set_home_stadium \"<team>\" <venue>")
+    @tournament.command(name="set_home_stadium", aliases=["sethomestadium", "home_stadium", "shs"], help="[MANAGER/OWNER] Set a team's home ground.\nDSL: tournament set_home_stadium \"<team>\" <venue>\nLinked-stadium tournaments: tournament set_home_stadium \"<team>\" <stadium name> <pitch>")
     async def t_set_home_stadium(self, ctx, team_name: str, *, venue: str):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney: return await ctx.send("❌ No tournament exists.")
-        if not is_dsl_tournament(tourney):
-            return await ctx.send(f"❌ Home stadiums are a **{DSL_CONFIG['short_name']}** feature.")
+        from stadium_manager import linked_stadiums
+        if not is_dsl_tournament(tourney) and not linked_stadiums(tourney):
+            return await ctx.send("❌ Home stadiums need a **DSL** season or a tournament created with **stadiums=linked**.")
         if tourney["status"] != "registration":
-            return await ctx.send("❌ Home grounds are locked once the season starts.")
+            return await ctx.send("❌ Home grounds are locked once the tournament starts.")
         team = self._team_by_ref(ctx, tourney, team_name)
         if not team: return await ctx.send(f"❌ No team **{team_name}** in this tournament (use the team name or ping its @owner).")
         is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
         if not is_mgr and team.get("owner_id") != str(ctx.author.id):
             return await ctx.send("❌ Only Managers or the Team Owner can set the home stadium.")
-        ok, msg = set_home_stadium(tourney, team["name"], venue)
-        if ok:
-            save_tournament(tourney)
-        await ctx.send(msg)
 
-    @tournament.command(name="home_stadiums", aliases=["homestadiums", "venues_home", "hs"], help="[DSL] List each team's home ground and its pitch character.\nUsage: tournament home_stadiums")
+        if is_dsl_tournament(tourney):
+            ok, msg = set_home_stadium(tourney, team["name"], venue)
+            if ok:
+                save_tournament(tourney)
+            return await ctx.send(msg)
+
+        # Linked mode: free-form stadium name, LAST word must be the fixed home pitch.
+        parts = venue.strip().strip('"').rsplit(None, 1)
+        if len(parts) < 2:
+            return await ctx.send("❌ Linked stadiums need a name **and** a pitch: `cvt set_home_stadium \"<team>\" <stadium name> <pitch>`\n"
+                                  f"Pitches: {', '.join(ALL_PITCHES)}")
+        stadium_name, pitch_raw = parts[0].strip().strip('"'), parts[1]
+        cp = canonical_pitch(pitch_raw)
+        if not cp:
+            return await ctx.send(f"❌ Invalid pitch **{pitch_raw}** (the LAST word must be the pitch).\nOptions: {', '.join(ALL_PITCHES)}")
+        if not stadium_name:
+            return await ctx.send("❌ Provide a stadium name before the pitch.")
+        team["home_stadium"] = stadium_name
+        team["home_pitch"] = cp   # the linked ground CARRIES the fixed pitch (home-conditions machinery)
+        save_tournament(tourney)
+        await ctx.send(f"🏟️ **{team['name']}** will play their home games at **{stadium_name}** — a fixed **{cp}** pitch.")
+
+    @tournament.command(name="home_stadiums", aliases=["homestadiums", "venues_home", "hs"], help="List each team's home ground and its pitch (DSL / linked-stadium tournaments).\nUsage: tournament home_stadiums")
     async def t_home_stadiums(self, ctx):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney: return await ctx.send("❌ No tournament exists.")
-        if not is_dsl_tournament(tourney):
-            return await ctx.send(f"❌ Home stadiums are a **{DSL_CONFIG['short_name']}** feature.")
+        from stadium_manager import linked_stadiums
+        is_dsl = is_dsl_tournament(tourney)
+        if not is_dsl and not linked_stadiums(tourney):
+            return await ctx.send("❌ Home stadiums need a **DSL** season or a tournament created with **stadiums=linked**.")
         teams = tourney.get("teams", [])
         if not teams: return await ctx.send("📋 No teams yet.")
         lines = []
         for t in sorted(teams, key=lambda x: x["name"].lower()):
-            v = canonical_venue(t.get("home_stadium"))
-            if v:
-                profile = DSL_CONFIG["venues"][v]
-                top = " / ".join(p for p, _ in sorted(profile.items(), key=lambda kv: -kv[1])[:2])
-                lines.append(f"• **{t['name']}** — 📍 {v} *({top})*")
+            if is_dsl:
+                v = canonical_venue(t.get("home_stadium"))
+                pitch = DSL_CONFIG["venues"].get(v) if v else None
+            else:
+                v = t.get("home_stadium")
+                pitch = canonical_pitch(t.get("home_pitch"))
+            if v and pitch:
+                lines.append(f"• **{t['name']}** — 📍 {v} *({pitch} pitch)*")
             else:
                 lines.append(f"• **{t['name']}** — ❌ *not set*")
-        set_n = sum(1 for t in teams if canonical_venue(t.get("home_stadium")))
+        set_n = sum(1 for ln in lines if "❌" not in ln)
         e = discord.Embed(title=f"🏟️ {tourney['name']} — Home Grounds",
                           description="\n".join(lines), color=discord.Color.from_rgb(20, 60, 160))
-        e.set_footer(text=f"{set_n}/{len(teams)} set · all required before cvt start · cvt stadiums for the full venue list")
+        e.set_footer(text=f"{set_n}/{len(teams)} set · all required before cvt start")
         await ctx.send(embed=e)
+
+    # ── Default XI ────────────────────────────────────────────────────────────────
+    @tournament.command(name="set_default_xi", aliases=["sdxi", "set_default11", "setdefaultxi"], help="[OWNER/MANAGER] Save your team's default XI (paste 11 names; order = batting order; '(C)' marks captain; 'clear' removes).\nUsage: tournament set_default_xi [team]")
+    async def t_set_default_xi(self, ctx, *, team_name: str = None):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
+        if team_name:
+            team = self._team_by_ref(ctx, tourney, team_name)
+            if not team: return await ctx.send(f"❌ Team **{team_name}** not found.")
+            if not is_mgr and team.get("owner_id") != str(ctx.author.id):
+                return await ctx.send("❌ Only Managers can set another team's default XI.")
+        else:
+            team = next((t for t in tourney["teams"] if t.get("owner_id") == str(ctx.author.id)), None)
+            if not team: return await ctx.send("❌ You don't own a team here. Managers: `cvt set_default_xi <team>`.")
+        squad = team.get("squad", [])
+        if len(squad) < 11:
+            return await ctx.send(f"❌ **{team['name']}** hasn't submitted a squad yet.")
+
+        await ctx.send(f"📋 Paste the **default XI for {team['name']}** — 11 names, one per line "
+                       f"(order = batting order, `(C)` after a name marks the captain). "
+                       f"Type `clear` to remove the saved default. *3 minutes.*")
+        def check(m): return m.author.id == ctx.author.id and m.channel.id == ctx.channel.id
+        try:
+            msg = await self.bot.wait_for("message", timeout=180.0, check=check)
+        except asyncio.TimeoutError:
+            return await ctx.send("⏳ Timed out — run `cvt set_default_xi` again.")
+        if msg.content.strip().lower() == "clear":
+            team.pop("default_xi", None); team.pop("default_captain", None)
+            save_tournament(tourney)
+            return await msg.reply(f"🧹 Default XI cleared for **{team['name']}**.")
+
+        found, missing, cap_name, cap_err, _low = parse_pasted_roster(msg.content, squad, max_lines=13)
+        errs = []
+        if missing: errs.append("Not in the squad: " + ", ".join(f"**{n}**" for n in missing[:6]))
+        if len(found) != 11: errs.append(f"Need exactly **11** — found **{len(found)}**.")
+        if cap_err == "multiple": errs.append("Multiple `(C)` markers — mark exactly one captain (or none).")
+        if len(found) == 11 and not _has_wk(found): errs.append("No **Wicket-Keeper** — include a `WK`-role player.")
+        if errs:
+            return await msg.reply("❌ **Invalid XI:**\n• " + "\n• ".join(errs) + "\n*Run `cvt set_default_xi` again.*")
+
+        team["default_xi"] = [p["name"] for p in found]
+        if cap_name: team["default_captain"] = cap_name
+        else: team.pop("default_captain", None)
+        save_tournament(tourney)
+        cap_note = f"\n🧢 Captain: **{cap_name}**" if cap_name else ""
+        await msg.reply(f"✅ **Default XI saved for {team['name']}** — offered at every match start and used by sims:\n"
+                        + format_xi_display(found) + cap_note +
+                        "\n-# invalid automatically if a member is injured or leaves the squad")
+
+    @tournament.command(name="default_xi", aliases=["dxi", "defaultxi"], help="View a team's saved default XI.\nUsage: tournament default_xi [team]")
+    async def t_default_xi(self, ctx, *, team_name: str = None):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        if team_name:
+            team = self._team_by_ref(ctx, tourney, team_name)
+            if not team: return await ctx.send(f"❌ Team **{team_name}** not found.")
+        else:
+            team = next((t for t in tourney["teams"] if t.get("owner_id") == str(ctx.author.id)), None)
+            if not team: return await ctx.send("❌ You don't own a team here — specify one: `cvt default_xi <team>`.")
+        names = team.get("default_xi")
+        if not names:
+            return await ctx.send(f"ℹ️ **{team['name']}** has no default XI saved. `cvt set_default_xi` to save one.")
+        by_name = {p["name"].lower(): p for p in team.get("squad", [])}
+        lines = []
+        for i, nm in enumerate(names, 1):
+            p = by_name.get(nm.lower())
+            if p is None:
+                lines.append(f"`{i:>2}.` ~~{nm}~~ ❌ *no longer in squad*")
+            elif p.get("injured"):
+                lines.append(f"`{i:>2}.` **{nm}** 🚑 *injured*")
+            else:
+                lines.append(f"`{i:>2}.` **{nm}**")
+        fit = resolve_default_xi(team, [p for p in team.get("squad", []) if not p.get("injured")])
+        status = "🟢 valid — will be offered at match start" if fit else "🔴 currently INVALID (injury/missing player) — the match will ask for a typed XI"
+        cap = team.get("default_captain")
+        e = discord.Embed(title=f"📋 {team['name']} — Default XI",
+                          description="\n".join(lines) + (f"\n🧢 Captain: **{cap}**" if cap else ""),
+                          color=discord.Color.green() if fit else discord.Color.red())
+        e.set_footer(text=status)
+        await ctx.send(embed=e)
+
+    @tournament.command(name="fill_squads", aliases=["fillsquads", "autofill_squads"], help="[MANAGER] Auto-fill under-min squads with unpicked players below a rating cap.\nUsage: tournament fill_squads <max_rating>")
+    async def t_fill_squads(self, ctx, cap: float):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        if tourney["status"] != "registration":
+            return await ctx.send("❌ Squads can only be auto-filled before the tournament starts.")
+        min_s = tourney.get("min_squad", 11)
+        under = [t for t in tourney["teams"] if len(t.get("squad", [])) < min_s]
+        if not under:
+            return await ctx.send(f"✅ Every team already meets the minimum squad size ({min_s}).")
+
+        taken = {p["name"].lower() for t in tourney["teams"] for p in t.get("squad", [])}
+        pool = [p for p in get_all_players()
+                if p["name"].lower() not in taken and _player_overall(p) < cap]
+        random.shuffle(pool)
+        need_total = sum(min_s - len(t.get("squad", [])) for t in under)
+        if not pool:
+            return await ctx.send(f"❌ No unpicked players below rating **{cap:g}** available.")
+
+        # Deal round-robin (one player per team per pass) so no team hogs the pool.
+        plan = {t["name"]: [] for t in under}
+        idx = 0
+        while idx < len(pool) and any(len(t.get("squad", [])) + len(plan[t["name"]]) < min_s for t in under):
+            for t in under:
+                if idx >= len(pool): break
+                if len(t.get("squad", [])) + len(plan[t["name"]]) < min_s:
+                    plan[t["name"]].append(pool[idx]); idx += 1
+
+        summary = "\n".join(f"• **{tn}** +{len(ps)}: " + ", ".join(p["name"] for p in ps)
+                            for tn, ps in plan.items() if ps)
+        short = "" if idx >= need_total or all(len(t.get("squad", [])) + len(plan[t["name"]]) >= min_s for t in under) \
+            else f"\n⚠️ Pool ran out — **{need_total - idx}** slot(s) stay unfilled (raise the cap and re-run)."
+        view = SquadConfirmView(ctx.author.id)
+        prompt = await ctx.send(f"🧾 **Auto-fill plan** (players with rating < **{cap:g}**, unpicked by any team):\n{summary}{short}\n\nApply?", view=view)
+        await view.wait()
+        if not view.value:
+            return await prompt.edit(content="❌ Auto-fill cancelled — squads untouched.", view=None)
+        for t in under:
+            t["squad"].extend(plan[t["name"]])
+        save_tournament(tourney)
+        filled = sum(len(ps) for ps in plan.values())
+        await prompt.edit(content=f"✅ **Auto-fill complete** — added **{filled}** player(s):\n{summary}{short}", view=None)
 
     @tournament.command(name="venue_stats", aliases=["pitch_stats", "vs", "venuestats"], help="[DSL] All-time venue numbers across every season.\nUsage: tournament venue_stats [venue]")
     async def t_venue_stats(self, ctx, *, venue: str = None):
@@ -11302,11 +11679,9 @@ class PrefixCog(commands.Cog):
             e = discord.Embed(title=f"📍 {v} — All-Time Venue Stats",
                               description=_fmt(v, st, detailed=True),
                               color=discord.Color.from_rgb(20, 60, 160))
-            profile = DSL_CONFIG["venues"].get(v)
-            if profile:
-                e.add_field(name="Pitch profile",
-                            value=" · ".join(f"{p} {w}%" for p, w in sorted(profile.items(), key=lambda kv: -kv[1])),
-                            inline=False)
+            pitch = DSL_CONFIG["venues"].get(v)
+            if pitch:
+                e.add_field(name="Pitch", value=f"🏟️ **{pitch}** — fixed (same pitch every match here)", inline=False)
             e.set_footer(text="All seasons combined (archives + current)")
             return await ctx.send(embed=e)
 
@@ -11351,21 +11726,32 @@ class PrefixCog(commands.Cog):
             file=file,
         )
 
-    @tournament.command(name="seasons", aliases=["history", "champions"], help="[DSL] Past seasons and their champions.\nUsage: tournament seasons")
-    async def t_seasons(self, ctx):
+    @tournament.command(name="seasons", aliases=["history", "champions", "season"], help="[DSL] Honours board — or one season's full review.\nUsage: tournament seasons [number]\n`cvt season 1` → S1 winner, runner-up, table, Orange/Purple Cap, records…")
+    async def t_seasons(self, ctx, season: int = None):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
+
+        # `cvt season 1` → the full season review (from the archive JSON / live season)
+        if season is not None:
+            data = get_season_summary(server_id, season, tourney)
+            if not data:
+                have = [str(s) for s, *_ in season_history(server_id, tourney)]
+                hint = f" Available: {', '.join('S' + s for s in have)}" if have else ""
+                return await ctx.send(f"❌ No **S{season}** found for this server.{hint}")
+            return await ctx.send(embed=season_detail_embed(data))
+
         rows = season_history(server_id, tourney)
         if not rows:
             return await ctx.send(f"📜 No {DSL_CONFIG['short_name']} seasons yet. `cvt start dsl` begins Season 1!")
         lines = []
-        for season, name, champ, runner in rows:
+        for s_no, name, champ, runner in rows:
             if champ:
-                lines.append(f"`S{season}` 👑 **{champ}**" + (f" *(def. {runner})*" if runner else ""))
+                lines.append(f"`S{s_no}` 👑 **{champ}**" + (f" *(def. {runner})*" if runner else ""))
             else:
-                lines.append(f"`S{season}` ⏳ *in progress*")
+                lines.append(f"`S{s_no}` ⏳ *in progress*")
         e = discord.Embed(title=f"📜 {DSL_CONFIG['display_name']} — Honours Board",
                           description="\n".join(lines), color=discord.Color.gold())
+        e.set_footer(text="cvt season <number> for a season's full review")
         await ctx.send(embed=e)
 
     @tournament.command(name="career", aliases=["overall_stats", "alltime"], help="[DSL] A player's all-time stats across every season.\nUsage: tournament career <player>")
@@ -11720,6 +12106,14 @@ class PrefixCog(commands.Cog):
             for _i, _t in enumerate(tourney["teams"]):
                 if not canonical_venue(_t.get("home_stadium")):
                     _t["home_stadium"] = _venues[_i % len(_venues)]
+        # Linked stadiums: invent a ground + pitch per team so dev_setup stays one-shot.
+        elif tourney.get("stadium_mode") == "linked":
+            _pitches = ["Flat", "Dead", "Hard", "Green", "Dusty", "Slow", "Turning", "Bouncy"]
+            for _i, _t in enumerate(tourney["teams"]):
+                if not _t.get("home_stadium"):
+                    _t["home_stadium"] = f"{_t['name']} Stadium"
+                if not canonical_pitch(_t.get("home_pitch")):
+                    _t["home_pitch"] = _pitches[_i % len(_pitches)]
         save_tournament(tourney)
         await ctx.send(f"⚡ **Dev Setup** — added **{len(tourney['teams'])}** teams. Generating…{_pool_note}")
         await self._generate_and_start(ctx.channel, tourney)
@@ -11734,10 +12128,114 @@ class PrefixCog(commands.Cog):
         if not my_team: return await ctx.send("❌ You are not a Team Owner in this tournament.")
         my_matches = [m for m in tourney.get("schedule", []) if m["status"] == "pending" and (m["team1"] == my_team["name"] or m["team2"] == my_team["name"])]
         if not my_matches: return await ctx.send(f"✅ **{my_team['name']}** has no pending matches right now!")
-        match = my_matches[0]
+        # Under an order policy, pick my earliest LAUNCHABLE match (not just earliest).
+        match, gate_msg = None, ""
+        for m in my_matches:
+            ok, gate_msg = match_order_gate(tourney, m)
+            if ok:
+                match = m
+                break
+        if match is None:
+            return await ctx.send(gate_msg)
         r_label = f"Round {match['round']}" if isinstance(match['round'], int) else match['round']
         await ctx.send(f"🚀 **Launching Match {match['match_id']} ({r_label})...**")
         self.bot.dispatch("start_tournament_match", ctx.channel, ctx.author.id, tourney, match)
+
+    @tournament.command(name="award_win", aliases=["walkover", "award"], help="[MANAGER] Award a match to a team — pure walkover: 2 points & a W, no stats, no NRR impact.\nUsage: tournament award_win <match_id> <team>")
+    async def t_award_win(self, ctx, match_id: int, *, team_name: str):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (str(ctx.author.id) in tourney.get("managers", []))
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        if tourney["status"] != "active": return await ctx.send("❌ Tournament is not active.")
+        m_data = next((m for m in tourney.get("schedule", []) if m.get("match_id") == match_id), None)
+        if not m_data: return await ctx.send(f"❌ Match #{match_id} not found.")
+        if m_data["status"] == "completed": return await ctx.send(f"❌ Match #{match_id} is already completed. (`cvt redo {match_id}` first to replay/re-award.)")
+        if m_data["status"] == "locked":
+            return await ctx.send(f"❌ Match #{match_id} is **locked** — its teams aren't decided yet.")
+        t1_name, t2_name = m_data["team1"], m_data["team2"]
+        winner = next((n for n in (t1_name, t2_name) if n.lower() == team_name.strip().lower()), None)
+        if not winner:
+            return await ctx.send(f"❌ **{team_name}** isn't in this match. It's **{t1_name}** vs **{t2_name}**.")
+        loser = t2_name if winner == t1_name else t1_name
+
+        view = SquadConfirmView(ctx.author.id)
+        prompt = await ctx.send(
+            f"⚠️ Award **Match #{match_id}** ({t1_name} vs {t2_name}) to **{winner}** as a **walkover**?\n"
+            f"• {winner}: +1 W, +2 points · {loser}: +1 L\n"
+            f"• **No player stats, no NRR impact** for either side.", view=view)
+        await view.wait()
+        if not view.value:
+            return await prompt.edit(content="❌ Award cancelled — match left as-is.", view=None)
+
+        # Walkover result: zero runs/balls contribute nothing to NRR (0 runs over 0 overs),
+        # no batted_first → venue stats skip it, no stats_delta → nothing on leaderboards.
+        m_data["status"] = "completed"
+        m_data["result"] = {
+            "winner": winner, "loser": loser, "format_overs": tourney.get("format_overs", 20),
+            "t1_runs": 0, "t1_wickets": 0, "t1_balls": 0,
+            "t2_runs": 0, "t2_wickets": 0, "t2_balls": 0,
+            "walkover": True, "stats_delta": None,
+        }
+        tourney["current_match_idx"] = tourney.get("current_match_idx", 0) + 1
+
+        # Knockout / bracket progression — same paths a played match triggers.
+        t_type = tourney.get("tournament_type", "round_robin")
+        if t_type == "acl":
+            _acl_try_advance(tourney)
+        elif t_type == "dsl":
+            from dsl_manager import DSL_CONFIG, dsl_generate_playoffs, _dsl_try_advance
+            if DSL_CONFIG["auto_playoffs"]:
+                dsl_generate_playoffs(tourney)
+            _dsl_try_advance(tourney)
+        else:
+            tc = self.bot.cogs.get("TournamentCog")
+            if t_type == "t20_world_cup" and tc:
+                tc._try_generate_semis(tourney)
+            sf1 = next((m for m in tourney["schedule"] if m.get("round") == "Semi-Final 1"), None)
+            sf2 = next((m for m in tourney["schedule"] if m.get("round") == "Semi-Final 2"), None)
+            if sf1 and sf2 and sf1["status"] == "completed" and sf2["status"] == "completed":
+                if not any(m.get("round") == "Final" for m in tourney["schedule"]):
+                    tourney["schedule"].append({"match_id": _tm_next_mid(tourney), "round": "Final", "stage": "knockout",
+                                                "team1": sf1["result"]["winner"], "team2": sf2["result"]["winner"],
+                                                "status": "pending", "result": None})
+            final_m = next((m for m in tourney["schedule"] if m.get("round") == "Final"), None)
+            if final_m and final_m["status"] == "completed" and tourney["status"] != "completed":
+                tourney["status"] = "completed"
+        assign_tournament_conditions(tourney)
+        save_tournament(tourney)
+        r_label = f"Round {m_data['round']}" if isinstance(m_data['round'], int) else m_data['round']
+        await prompt.edit(content=(f"🏆 **Match #{match_id}** ({r_label}) awarded to **{winner}** — walkover recorded.\n"
+                                   f"Points table gets the W/L; player stats and NRR are untouched."), view=None)
+
+    @tournament.command(name="lock_stats", aliases=["lockstats", "stats_lock"], help="[MANAGER] Freeze the player-stats table — matches played while locked record NO player stats (points/NRR still count).\nUsage: tournament lock_stats")
+    async def t_lock_stats(self, ctx):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (str(ctx.author.id) in tourney.get("managers", []))
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        if tourney.get("stats_locked"):
+            return await ctx.send("🔒 The stats table is **already locked**. `cvt unlock_stats` to resume recording.")
+        tourney["stats_locked"] = True
+        save_tournament(tourney)
+        await ctx.send("🔒 **Stats table LOCKED** — matches played from now on won't add to any player's tournament stats "
+                       "(results, points and NRR still count). `cvt unlock_stats` to resume.")
+
+    @tournament.command(name="unlock_stats", aliases=["unlockstats", "stats_unlock"], help="[MANAGER] Resume recording player stats after a lock.\nUsage: tournament unlock_stats")
+    async def t_unlock_stats(self, ctx):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (str(ctx.author.id) in tourney.get("managers", []))
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        if not tourney.get("stats_locked"):
+            return await ctx.send("🔓 The stats table isn't locked.")
+        tourney["stats_locked"] = False
+        save_tournament(tourney)
+        await ctx.send("🔓 **Stats table UNLOCKED** — player stats record normally again. "
+                       "*(Matches played during the lock stay excluded.)*")
 
     @tournament.command(name="admin_record_result", help="[MANAGER] Manually record a match result.\nUsage: tournament admin_record_result <id> <winner> <t1_r> <t1_w> <t1_b> <t2_r> <t2_w> <t2_b>")
     async def t_admin_record_result(self, ctx, match_id: int, winner: str, t1_runs: int, t1_wickets: int, t1_balls: int, t2_runs: int, t2_wickets: int, t2_balls: int):
@@ -11927,23 +12425,25 @@ class PrefixCog(commands.Cog):
             name="🔵 DSL Quickstart (Dominators Super League)",
             value=("**1.** `cvt start dsl` — opens a preconfigured season (S1, S2, …)\n"
                    "**2.** `cvt add_team \"<team>\" @owner` ×12 · owners `cvt ss`\n"
-                   "**3.** `cvt set_home_stadium \"<team>\" <venue>` — home games use that ground's **pitch profile**\n"
+                   "**3.** `cvt set_home_stadium \"<team>\" <venue>` — every ground has **one fixed pitch**\n"
                    "**4.** `cvt start` → home & away league → Top-4 Playoffs auto-generate\n"
                    "**5.** `cvt venue_stats` · `cvt career <player>` · `cvt seasons` — all-time numbers\n"
                    "**6.** after the Final: `cvt end_season` → archive + slot freed for next season"),
             inline=False,
         )
-        embed.add_field(name="🛠️ Setup", value="`create` · `add_team` · `add_manager` · `submit_squad`/`ss` · `start` · `set_team_logo` · `set_team_color`", inline=False)
+        embed.add_field(name="🛠️ Setup", value="`create` · `add_team` · `add_manager` · `submit_squad`/`ss` · `fill_squads <cap>` (auto-fill under-min squads) · `set_default_xi`/`sdxi` (paste once, reuse every match) · `start` · `set_team_logo` · `set_team_color`", inline=False)
         embed.add_field(
             name="🏏 Play your matches",
             value=("`fixtures`/`fx` `[team]` — your upcoming + results\n"
                    "`play <id>` — **owners launch any of their own**; managers any\n"
-                   "`next_match`/`nm` — your earliest pending · `play_next`/`pn` — [MGR] next in order"),
+                   "`next_match`/`nm` — your earliest pending · `play_next`/`pn` — [MGR] next in order\n"
+                   "`sim <id>` — [MGR] instantly simulate one match (default XIs, full stats/scorecard)\n"
+                   "at match start: **paste your XI** (order = batting order, `(C)` = captain) or ✅ **Use Default XI**"),
             inline=False,
         )
         embed.add_field(name="📊 Stats & standings", value="`standings`/`st` · `status`/`sched` · `bracket`/`br` (ACL) · `leaderboard`/`lb <cat>` · `player_stats` · `squad` · `match_scorecard <id>`", inline=False)
         embed.add_field(name="🔥 Knockouts (Managers)", value="**ACL:** `gp`  ·  **Round Robin:** `generate_knockouts`  ·  **T20 WC:** `generate_super8`", inline=False)
-        embed.add_field(name="⚙️ Admin (prefix-only)", value="`transfer_team` · `replace_player` · `force_delete` · `set_theme` · `set_injury_channel` · `add_injury` · `remove_injury` · `force_result` · `admin_record_result` · `simulate_all`", inline=False)
+        embed.add_field(name="⚙️ Admin (prefix-only)", value="`transfer_team` · `replace_player` · `force_delete` · `set_theme` · `set_injury_channel` · `add_injury` · `remove_injury` · `force_result` · `admin_record_result` · `simulate_all` · `award_win <id> <team>` (walkover: W only, no stats/NRR) · `lock_stats`/`unlock_stats` (freeze player-stats recording)", inline=False)
         embed.set_footer(text="Tip: leaderboard categories — runs · wickets · sr · bat_avg · econ · bowl_avg · mvp · fours · sixes · fifties · hundreds")
         await ctx.send(embed=embed)
 

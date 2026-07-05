@@ -90,16 +90,14 @@ def main():
        "every league match is at the home (team1) team's ground")
     ok(all(m.get("pitch") and m.get("weather") for m in t["schedule"]),
        "every match has pitch + weather assigned")
-    for m in t["schedule"]:
-        profile = DSL_CONFIG["venues"][m["stadium"]]
-        assert m["pitch"] in profile, f"pitch {m['pitch']} not in {m['stadium']} profile"
-    ok(True, "every assigned pitch comes from its venue's profile")
+    ok(all(m["pitch"] == DSL_CONFIG["venues"][m["stadium"]] for m in t["schedule"]),
+       "every match is on its venue's ONE fixed pitch")
 
-    print("— pitch profile draw —")
+    print("— fixed pitch draw —")
     sample_venue = next(iter(DSL_CONFIG["venues"]))
-    draws = Counter(pick_dsl_conditions(sample_venue, False)[0] for _ in range(2000))
-    ok(set(draws) == set(DSL_CONFIG["venues"][sample_venue]),
-       f"{sample_venue} 2000-draw sample uses exactly its profile pitches ({dict(draws)})")
+    draws = Counter(pick_dsl_conditions(sample_venue, False)[0] for _ in range(500))
+    ok(set(draws) == {DSL_CONFIG["venues"][sample_venue]},
+       f"{sample_venue} always plays its fixed pitch ({dict(draws)})")
 
     print("— league → playoffs —")
     ko_early, msg = dsl_generate_playoffs(t)
@@ -176,6 +174,21 @@ def main():
         hist = season_history("999", t2)
         ok(hist[0][2] == t["dsl_champion"] and hist[-1][2] is None,
            "season history shows S1 champion + S2 in progress")
+
+        # season review: awards stored in the archive JSON and loadable
+        from dsl_manager import get_season_summary, season_detail_embed
+        ok(data.get("awards", {}).get("most_runs", {}).get("name") == "Rohit",
+           "archive JSON carries awards (Orange Cap = Rohit, 700 runs)")
+        summ = get_season_summary("999", t["season"], t2)
+        ok(summ and summ["champion"] == t["dsl_champion"]
+           and summ["awards"]["most_wickets"]["name"] == "Bumrah",
+           "get_season_summary loads S1 with awards (Purple Cap = Bumrah)")
+        emb = season_detail_embed(summ)
+        ok(any("Orange Cap" in f.name for f in emb.fields) and "Champions" in (emb.description or ""),
+           "season review embed renders champion + award fields")
+        live = get_season_summary("999", t2["season"], t2)
+        ok(live and live.get("in_progress") and live["awards"]["most_runs"]["name"] == "Rohit",
+           "current in-progress season summary computes live awards")
         invalidate_archive_cache()
 
     print(f"\nALL {PASS} CHECKS PASSED ✅")

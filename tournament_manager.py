@@ -925,7 +925,10 @@ def _build_status_embed(tourney, page_info):
             w = r["winner"]
             t1b = f"**{m['team1']}**" if w == m["team1"] else m["team1"]
             t2b = f"**{m['team2']}**" if w == m["team2"] else m["team2"]
-            lines.append(f"`#{m['match_id']}` {tag}{t1b} {r['t1_runs']}/{r['t1_wickets']} vs {t2b} {r['t2_runs']}/{r['t2_wickets']} ✅")
+            if r.get("walkover"):
+                lines.append(f"`#{m['match_id']}` {tag}{t1b} vs {t2b} — 🏆 awarded to **{w}** ✅")
+            else:
+                lines.append(f"`#{m['match_id']}` {tag}{t1b} {r['t1_runs']}/{r['t1_wickets']} vs {t2b} {r['t2_runs']}/{r['t2_wickets']} ✅")
         else:
             # ACL playoff slots may be unresolved (None) — show their TBD source label
             a = f"**{m['team1']}**" if m.get("team1") else f"*{m.get('team1_src', 'TBD')}*"
@@ -1498,6 +1501,49 @@ def owner_can_launch(tourney, match, user_id, is_manager=False):
     return bool(is_manager) or str(user_id) in match_owner_ids(tourney, match)
 
 
+# Match-order policies (chosen at creation; stored as tourney["match_order"]).
+# Older tournaments have no field → "random", the pre-existing behaviour.
+MATCH_ORDER_LABELS = {
+    "random":     "🎲 Random — anyone can start any ready match",
+    "sequential": "🔢 Strict Schedule — matches must be played in exact order",
+    "round":      "🔁 Strict Round — any match within the current round",
+}
+
+
+def match_order_gate(tourney, match):
+    """(ok, message): may this pending match be launched under the tournament's
+    match-order policy? Locked matches are rejected elsewhere; knockout ordering
+    is already enforced by the locked-slot system, so:
+      random     → always ok
+      sequential → every earlier-numbered pending match must be done first
+      round      → no earlier ROUND may still have pending matches (integer rounds)
+    """
+    mode = tourney.get("match_order", "random")
+    if mode == "random":
+        return True, ""
+    sched = tourney.get("schedule", [])
+    if mode == "sequential":
+        blocker = min((m for m in sched
+                       if m.get("status") == "pending" and m.get("match_id", 0) < match.get("match_id", 0)),
+                      key=lambda m: m.get("match_id", 0), default=None)
+        if blocker:
+            return False, (f"❌ **Strict Schedule:** Match **#{blocker['match_id']}** "
+                           f"({blocker.get('team1', '?')} vs {blocker.get('team2', '?')}) must be played first.")
+        return True, ""
+    if mode == "round":
+        if not isinstance(match.get("round"), int):
+            return True, ""   # knockouts: the bracket's locks already order them
+        pending_rounds = [m["round"] for m in sched
+                          if m.get("status") == "pending" and isinstance(m.get("round"), int)]
+        cur = min(pending_rounds) if pending_rounds else None
+        if cur is not None and match["round"] > cur:
+            left = sum(1 for m in sched if m.get("status") == "pending" and m.get("round") == cur)
+            return False, (f"❌ **Strict Round:** Round **{cur}** still has **{left}** pending "
+                           f"match(es) — finish those before Round {match['round']}.")
+        return True, ""
+    return True, ""
+
+
 def build_team_fixtures_embed(tourney, team_name):
     """Embed of one team's fixtures: Upcoming (with launchable hint) + Results."""
     sched = tourney.get("schedule", [])
@@ -1524,7 +1570,10 @@ def build_team_fixtures_embed(tourney, team_name):
             if w == "TIE": outcome = "🟰 Tie"; tied += 1
             elif w == team_name: outcome = "✅ Won"; won += 1
             else: outcome = "❌ Lost"; lost += 1
-            results.append(f"`#{m['match_id']}` {rlabel} · vs **{opp}**  {my_r}/{my_w} : {op_r}/{op_w}  {outcome}")
+            if r.get("walkover"):
+                results.append(f"`#{m['match_id']}` {rlabel} · vs **{opp}**  *(walkover)*  {outcome}")
+            else:
+                results.append(f"`#{m['match_id']}` {rlabel} · vs **{opp}**  {my_r}/{my_w} : {op_r}/{op_w}  {outcome}")
         elif m["status"] == "locked":
             upcoming.append(f"`#{m['match_id']}` {rlabel} · vs *{opp_src or 'TBD'}*  🔒 awaiting earlier results\n     └ {_conditions_label(m)}")
         else:  # pending → launchable
@@ -1795,7 +1844,16 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         app_commands.Choice(name="Auto — random conditions per match (weighted)", value="auto"),
         app_commands.Choice(name="Home Pitch — each match on the home team's pitch", value="home"),
     ])
-    async def create(self, interaction: discord.Interaction, name: str, format: app_commands.Choice[str], event_type: app_commands.Choice[str] = None, min_squad: int = 11, max_squad: int = 15, impact_player: bool = False, injuries: bool = False, custom_overs: int = None, conditions: app_commands.Choice[str] = None):
+    @app_commands.choices(match_order=[
+        app_commands.Choice(name="Random — anyone can start any match (default)", value="random"),
+        app_commands.Choice(name="Strict Schedule — match 2 only after match 1", value="sequential"),
+        app_commands.Choice(name="Strict Round — any match in the ongoing round", value="round"),
+    ])
+    @app_commands.choices(stadiums=[
+        app_commands.Choice(name="Random — venue labels assigned randomly (default)", value="random"),
+        app_commands.Choice(name="Linked — each team sets a home stadium with a FIXED home pitch", value="linked"),
+    ])
+    async def create(self, interaction: discord.Interaction, name: str, format: app_commands.Choice[str], event_type: app_commands.Choice[str] = None, min_squad: int = 11, max_squad: int = 15, impact_player: bool = False, injuries: bool = False, custom_overs: int = None, conditions: app_commands.Choice[str] = None, match_order: app_commands.Choice[str] = None, stadiums: app_commands.Choice[str] = None):
         if not interaction.user.guild_permissions.administrator and interaction.user.id != 1087369198801526836:
             return await interaction.response.send_message("❌ Only Server Admins can initialize a tournament.", ephemeral=True)
 
@@ -1819,6 +1877,11 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         t_type = event_type.value if event_type else "round_robin"
         type_label = {"t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League"}.get(t_type, "Round Robin")
 
+        stadium_mode = stadiums.value if stadiums else "random"
+        cond_mode = conditions.value if conditions else "manual"
+        if stadium_mode == "linked":
+            cond_mode = "home"   # the linked stadium CARRIES the fixed home pitch
+
         t_data = {
             "server_id": server_id,
             "name": name,
@@ -1834,7 +1897,9 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             "impact_player": impact_player,
             "injuries_enabled": injuries,
             "tournament_type": t_type,
-            "conditions_mode": (conditions.value if conditions else "manual"),
+            "conditions_mode": cond_mode,
+            "match_order": (match_order.value if match_order else "random"),
+            "stadium_mode": stadium_mode,
             "stadiums": default_stadium_pool(t_type),
         }
         save_tournament(t_data)
@@ -1845,10 +1910,16 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         elif t_type == "acl":
             extra = "\n🔴 **ACL requires exactly 14 teams.** Each plays every other once (91 league matches) → Top 6 Playoffs → Super Cup. No groups needed — just `/tournament add_team` for all 14."
             extra += f"\n🏟️ **Stadiums:** {len(DEFAULT_ACL_STADIUMS)} venues pre-loaded — fixtures get a random one at start. Edit the pool with `cvt stadium_add` / `cvt stadiums` before starting."
-        if t_data["conditions_mode"] == "auto":
+        if stadium_mode == "linked":
+            extra += ("\n🏟️ **Stadiums: Linked** — every team sets a home ground with a FIXED pitch: "
+                      "`cvt set_home_stadium \"<team>\" <stadium name> <pitch>`. Home fixtures are played there, "
+                      "on that pitch. Can't start until all teams have one (`cvt home_stadiums` to check).")
+        elif t_data["conditions_mode"] == "auto":
             extra += "\n🎲 **Conditions: Auto** — pitch & weather auto-assigned per match."
         elif t_data["conditions_mode"] == "home":
             extra += "\n🏟️ **Conditions: Home Pitch** — set each team's home pitch with `/tournament set_home_pitch` (or `cvt set_home_pitch`). The tournament can't start until **all** teams have one."
+        if t_data["match_order"] != "random":
+            extra += f"\n{MATCH_ORDER_LABELS[t_data['match_order']]}"
         await interaction.response.send_message(
             f"🏆 **Tournament Created:** `{name}`  ·  {type_label}\nYou have been automatically assigned as a Manager.\nUse `/tournament add_manager` or `/tournament add_team` to get started!{extra}"
         )
@@ -2333,6 +2404,9 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         pending = next((m for m in schedule if m["status"] == "pending" and m["round"] == current_round), None)
         if not pending:
             return await interaction.response.send_message("🏆 All matches have been completed!", ephemeral=True)
+        ok, gate_msg = match_order_gate(tourney, pending)
+        if not ok:
+            return await interaction.response.send_message(gate_msg, ephemeral=True)
         r_label = f"Round {current_round}" if isinstance(current_round, int) else current_round
         await interaction.response.send_message(f"🚀 **Launching {r_label} — Match {pending['match_id']}...**")
         self.bot.dispatch("start_tournament_match", interaction.channel, interaction.user.id, tourney, pending)
@@ -2353,6 +2427,9 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             return await interaction.response.send_message(f"❌ Match {match_id} isn't ready — its teams depend on earlier results.", ephemeral=True)
         if match["status"] != "pending":
             return await interaction.response.send_message(f"❌ Match {match_id} is already completed.", ephemeral=True)
+        ok, gate_msg = match_order_gate(tourney, match)
+        if not ok:
+            return await interaction.response.send_message(gate_msg, ephemeral=True)
         r_label = _tm_round_label(match)
         await interaction.response.send_message(f"🚀 **Launching Match {match['match_id']} ({r_label})...**\n<@{interaction.user.id}> — make sure your opponent is here to pick their XI.")
         self.bot.dispatch("start_tournament_match", interaction.channel, interaction.user.id, tourney, match)
@@ -2390,7 +2467,15 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         my_matches = [m for m in tourney.get("schedule", []) if m["status"] == "pending" and (m["team1"] == my_team_name or m["team2"] == my_team_name)]
         if not my_matches:
             return await interaction.response.send_message(f"✅ Your team (**{my_team_name}**) has no pending matches right now!", ephemeral=True)
-        match = my_matches[0]
+        # Under an order policy, pick my earliest LAUNCHABLE match (not just earliest).
+        match, gate_msg = None, ""
+        for m in my_matches:
+            ok, gate_msg = match_order_gate(tourney, m)
+            if ok:
+                match = m
+                break
+        if match is None:
+            return await interaction.response.send_message(gate_msg, ephemeral=True)
         r_label = f"Round {match['round']}" if isinstance(match['round'], int) else match['round']
         await interaction.response.send_message(f"🚀 **Launching Next Match for {my_team_name}: Match {match['match_id']} ({r_label})...**")
         self.bot.dispatch("start_tournament_match", interaction.channel, interaction.user.id, tourney, match)
@@ -2511,9 +2596,15 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                     _add(team_name, p_name, "runs_conceded", bw_stat.runs_conceded)
                     _add(team_name, p_name, "balls_bowled", bw_stat.balls_bowled)
 
-        process_team_stats(t1_name, t1_inn, t2_inn)
-        process_team_stats(t2_name, t2_inn, t1_inn)
-        m_data["result"]["stats_delta"] = stats_delta
+        # A locked stats table (cvt lock_stats) freezes the player leaderboard: the
+        # match result/points/NRR still count, but no player stats are recorded
+        # (and stats_delta stays empty, so cancel_match has nothing to reverse).
+        if tourney.get("stats_locked"):
+            m_data["result"]["stats_delta"] = None
+        else:
+            process_team_stats(t1_name, t1_inn, t2_inn)
+            process_team_stats(t2_name, t2_inn, t1_inn)
+            m_data["result"]["stats_delta"] = stats_delta
 
         # --- INJURY COUNTDOWN (real matches only; count COMPLETED matches, not started ones) ---
         # Players already injured coming into this match sat it out; now that it has actually
