@@ -110,6 +110,10 @@ T20_INTENT_DIFF_UP   = 0.30   # stuck on a tough deck with wickets in hand → t
 T20_PAR_RATE_FLAT  = 10.4   # par 1st-innings run-rate on a road (difficulty 0)
 T20_PAR_RATE_SLOPE = 4.4    # ...minus this × pitch difficulty (tougher deck → lower par)
 T20_PAR_EXCESS_CAP = 3.0    # clamp the above/below-par gap (rpo) so freak totals don't explode it
+# Below-par targets ease at most this much (rpo): chasing a tiny total should be
+# SAFE, not a turbo run-fest — the old symmetric cap let cruise chases run at
+# boundary ×1.11 / wicket ×0.78 and finish 4-5 overs early on tough decks.
+T20_TGT_EASE_CAP   = 1.2
 T20_TGT_WKT = 0.075  # per rpo above par → 2nd-innings wicket-weight shift
 T20_TGT_BND = 0.035  # ...boundary-weight shift
 T20_TGT_DOT = 0.025  # ...dot-weight shift
@@ -118,6 +122,16 @@ T20_TGT_DOT = 0.025  # ...dot-weight shift
 # agnostic — it fires exactly when the ask is steep for the surface. 2nd innings only.
 T20_CHASE_GO_BASE  = 0.42
 T20_CHASE_GO_SLOPE = 0.10
+# ...but ONLY when the ask is real: below this fraction of the pitch's par rate
+# the chase is cruising and bats normally (the old unconditional 0.42 intent
+# floor made sides chasing 5-an-over swing like they needed 9 — finishing tiny
+# chases 4-5 overs early instead of knocking them off calmly).
+T20_CHASE_GO_GATE  = 0.75
+# Cruise control: when the required rate sits below the gate, the chase not only
+# skips the have-a-go floor — its intent is CAPPED here. This tames the innings-1
+# "throw the bat on a tough deck" term, which otherwise turns a small chase on a
+# Sticky/Green into a slog: 4-5 overs early when it works, a collapse when not.
+T20_CHASE_CRUISE_INTENT = 0.43
 # intent → outcome-weight map (the single tuning point). Boundary-heavy on purpose:
 # throwing the bat must produce FIRE KNOCKS (quick cameos that ADD runs) as well as
 # wickets — a side bowled out on a sticky still makes ~150 off 20-ball blitzes, it
@@ -185,12 +199,15 @@ T20_WIDE_RATE_DEATH = 0.060
 # stay possible, match-level bat/bowl-first holds ~50/50 (toss stays minor).
 T20_CHASE_ATTR_A  = 2.90
 T20_CHASE_ATTR_B  = 1.90
-T20_CHASE_ATTR_LO = 0.90
+T20_CHASE_ATTR_LO = 0.84
 T20_CHASE_ATTR_HI = 1.35
-# The attrition exists to fix BATTING DECKS (where the wicket cap made chase
-# aggression free); tougher pitches already punished chases correctly, so the
-# effect fades out with pitch difficulty and vanishes at/above this threshold.
+# The tax fades with pitch difficulty but never below MIN_FADE: measured with a
+# full fade-to-zero, successful chases on tough decks finished with 25-31 balls
+# to spare and 4+ overs left 41-61% of the time (real T20: ~10-13 balls, ~12-15%)
+# — the "either they cruise or they collapse" bimodal feel. The floored cruising
+# tax keeps winning chases honest on every surface.
 T20_CHASE_ATTR_DIFF_FADE = 0.45
+T20_CHASE_ATTR_MIN_FADE  = 0.55
 
 SPIN_SHOT_MATRIX = {
     "Off spin": ["Sweep", "Drive", "Flick"],
@@ -237,9 +254,11 @@ def _t20_intent(match, innings, b_stats, archetype, total_balls, balls_left):
         rrr = (target - innings.total_runs) / B * 6.0
         intent = max(intent, min(1.0, 0.28 + (rrr - 7.5) * 0.055))
         # Have a go at an above-par target: when the ask outruns the rate already being
-        # managed (crr), throw the bat rather than block to a heavy loss. (Won't fire on a
-        # comfortable chase, where rrr ≈ or < crr.)
-        if total_balls >= 12:
+        # managed (crr), throw the bat rather than block to a heavy loss. Gated so a
+        # CRUISING chase (rrr well below the pitch's par rate) bats normally instead
+        # of swinging — see T20_CHASE_GO_GATE.
+        _pr = T20_PAR_RATE_FLAT - diff * T20_PAR_RATE_SLOPE
+        if total_balls >= 12 and rrr > _pr * T20_CHASE_GO_GATE:
             intent = max(intent, min(1.0, T20_CHASE_GO_BASE
                                      + max(0.0, rrr - crr) * T20_CHASE_GO_SLOPE))
 
@@ -263,6 +282,16 @@ def _t20_intent(match, innings, b_stats, archetype, total_balls, balls_left):
     intent += {"Aggressor": 0.10, "Finisher": 0.06, "Standard": 0.0, "Anchor": -0.10}.get(archetype, 0.0)
     if b_stats.balls_faced < 5:
         intent -= 0.10
+
+    # ── CRUISE CONTROL (chases only, applied LAST so the tough-deck slog term can't
+    #    override it): needing well under the par rate, a chasing side bats normally —
+    #    it knocks the target off calmly instead of finishing 4-5 overs early or
+    #    slogging itself into a collapse. ──
+    if match.current_innings_num == 2 and B > 0:
+        _pr2 = T20_PAR_RATE_FLAT - diff * T20_PAR_RATE_SLOPE
+        _rrr2 = max(0.0, getattr(match, "target", innings.total_runs + 1) - innings.total_runs) / B * 6.0
+        if _rrr2 < _pr2 * T20_CHASE_GO_GATE:
+            intent = min(intent, T20_CHASE_CRUISE_INTENT)
 
     return max(0.0, min(1.0, intent))
 
@@ -891,7 +920,7 @@ def execute_ball_math_t20(match):
             _par_rate *= DSL_PAR_ADJ   # judge DSL chases against DSL's own (lower) par
         _tgt = getattr(match, "target", match.innings1.total_runs + 1)
         _tgt_rate = _tgt / (match.max_balls / 6.0)
-        _excess = max(-T20_PAR_EXCESS_CAP, min(T20_PAR_EXCESS_CAP, _tgt_rate - _par_rate))
+        _excess = max(-T20_TGT_EASE_CAP, min(T20_PAR_EXCESS_CAP, _tgt_rate - _par_rate))
         if _excess:
             wicket_weight   *= (1.0 + _excess * T20_TGT_WKT)
             boundary_weight *= (1.0 - _excess * T20_TGT_BND)
@@ -905,9 +934,10 @@ def execute_ball_math_t20(match):
             _ratio = _rrr_live / max(1.0, _par_rate)
             _attr = max(T20_CHASE_ATTR_LO, min(T20_CHASE_ATTR_HI,
                         T20_CHASE_ATTR_A - T20_CHASE_ATTR_B * _ratio))
-            # Fade with pitch difficulty: full strength on roads, none on tough decks
-            # (those chases were already correctly punishing before this system).
-            _fade = max(0.0, 1.0 - T20_PITCH_DIFFICULTY.get(match.pitch, 0.20) / T20_CHASE_ATTR_DIFF_FADE)
+            # Fade with pitch difficulty — floored, so even tough-deck chases pay a
+            # cruising tax (see T20_CHASE_ATTR_MIN_FADE note).
+            _fade = max(T20_CHASE_ATTR_MIN_FADE,
+                        1.0 - T20_PITCH_DIFFICULTY.get(match.pitch, 0.20) / T20_CHASE_ATTR_DIFF_FADE)
             _chase_attr = 1.0 + (_attr - 1.0) * _fade
 
     # ── 2.0 BATTING MOMENTUM ──

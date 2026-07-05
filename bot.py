@@ -2455,6 +2455,10 @@ async def loop_current_innings_simulation(interaction, match: CricketMatch):
     channel = interaction.channel if hasattr(interaction, 'channel') else interaction
 
     while True:
+        # /endmatch (or anything that tears the match down) must stop the sim INSTANTLY —
+        # the loop only holds a private reference, so re-check the registry every ball.
+        if active_games.get(channel.id) is not match:
+            return
         innings = match.current_innings
         max_w = _match_max_wickets(match)
         if innings.wickets >= max_w or innings.total_balls >= match.max_balls or (
@@ -2473,13 +2477,20 @@ async def loop_current_innings_simulation(interaction, match: CricketMatch):
         if innings.total_balls % 6 == 0 and not innings.over_log:
             for _ip_msg in try_ai_impact_player(match, innings):
                 await channel.send(_ip_msg)
-            new_bowler = get_smart_ai_bowler(innings, match.pitch, match.weather, match.format_overs)
-            if not new_bowler:
-                await channel.send("🚨 **CRITICAL ERROR:** Could not find a valid bowler.")
-                if channel.id in active_games:
-                    del active_games[channel.id]
-                return
-            innings.current_bowler = new_bowler
+            # The bowler the user just picked at the hub bowls THIS over; the AI only
+            # takes over from the following over onward.
+            pending = getattr(match, '_pending_bowler', None)
+            if pending:
+                innings.current_bowler = pending
+                match._pending_bowler = None
+            else:
+                new_bowler = get_smart_ai_bowler(innings, match.pitch, match.weather, match.format_overs)
+                if not new_bowler:
+                    await channel.send("🚨 **CRITICAL ERROR:** Could not find a valid bowler.")
+                    if channel.id in active_games:
+                        del active_games[channel.id]
+                    return
+                innings.current_bowler = new_bowler
 
         tb_before = innings.total_balls
         execute_ball_math(match)
@@ -2513,6 +2524,9 @@ async def loop_current_innings_bbb(interaction, match: CricketMatch):
         return False
 
     while True:
+        # /endmatch must stop a ball-by-ball broadcast INSTANTLY.
+        if active_games.get(channel.id) is not match:
+            return
         innings = match.current_innings
 
         if _innings_over(innings):
@@ -2526,13 +2540,19 @@ async def loop_current_innings_bbb(interaction, match: CricketMatch):
         if innings.total_balls % 6 == 0 and not innings.over_log:
             for _ip_msg in try_ai_impact_player(match, innings):
                 await channel.send(_ip_msg)
-            new_bowler = get_smart_ai_bowler(innings, match.pitch, match.weather, match.format_overs)
-            if not new_bowler:
-                await channel.send("🚨 **CRITICAL ERROR:** Could not find a valid bowler. Match stopped.")
-                if channel.id in active_games:
-                    del active_games[channel.id]
-                return
-            innings.current_bowler = new_bowler
+            # The hub-selected bowler gets THIS over; AI picks from the next over on.
+            pending = getattr(match, '_pending_bowler', None)
+            if pending:
+                innings.current_bowler = pending
+                match._pending_bowler = None
+            else:
+                new_bowler = get_smart_ai_bowler(innings, match.pitch, match.weather, match.format_overs)
+                if not new_bowler:
+                    await channel.send("🚨 **CRITICAL ERROR:** Could not find a valid bowler. Match stopped.")
+                    if channel.id in active_games:
+                        del active_games[channel.id]
+                    return
+                innings.current_bowler = new_bowler
 
         # Fresh scoreboard card for this over.
         try:
@@ -2542,6 +2562,8 @@ async def loop_current_innings_bbb(interaction, match: CricketMatch):
 
         # Bowl the over, one legal delivery at a time, editing the card after each.
         while True:
+            if active_games.get(channel.id) is not match:
+                return   # /endmatch mid-over — stop dead, no more balls or edits
             if _innings_over(innings):
                 break   # outer loop renders the final state + ends the innings cleanly
             tb_before = innings.total_balls
@@ -2566,6 +2588,9 @@ async def loop_entire_match_simulation(interaction, match: CricketMatch):
     channel = interaction.channel if hasattr(interaction, 'channel') else interaction
     
     while True:
+        # /endmatch must stop a running whole-match sim INSTANTLY.
+        if active_games.get(channel.id) is not match:
+            return
         innings = match.current_innings
         max_w = _match_max_wickets(match)
         if innings.wickets >= max_w or innings.total_balls >= match.max_balls or (match.current_innings_num == 2 and innings.total_runs >= getattr(match, "target", match.innings1.total_runs + 1)):
@@ -2584,13 +2609,19 @@ async def loop_entire_match_simulation(interaction, match: CricketMatch):
         if innings.total_balls % 6 == 0 and not innings.over_log:
             for _ip_msg in try_ai_impact_player(match, innings):
                 await channel.send(_ip_msg)
-            new_bowler = get_smart_ai_bowler(innings, match.pitch, match.weather, match.format_overs)
-            if not new_bowler:
-                await channel.send("🚨 **CRITICAL ERROR:** Could not find a valid bowler to continue simulation. Match has been stopped.")
-                if channel.id in active_games:
-                    del active_games[channel.id]
-                return
-            innings.current_bowler = new_bowler
+            # A hub-selected bowler gets THIS over; AI picks from the next over on.
+            pending = getattr(match, '_pending_bowler', None)
+            if pending:
+                innings.current_bowler = pending
+                match._pending_bowler = None
+            else:
+                new_bowler = get_smart_ai_bowler(innings, match.pitch, match.weather, match.format_overs)
+                if not new_bowler:
+                    await channel.send("🚨 **CRITICAL ERROR:** Could not find a valid bowler to continue simulation. Match has been stopped.")
+                    if channel.id in active_games:
+                        del active_games[channel.id]
+                    return
+                innings.current_bowler = new_bowler
 
         tb_before = innings.total_balls
         execute_ball_math(match)
@@ -3429,7 +3460,8 @@ class OverControlHubView(discord.ui.View):
         await interaction.message.edit(view=None)
         self.match.simulation_mode = "whole_match"
         self.match.verbose = False
-        self.match._pending_bowler = None
+        # _pending_bowler is kept: the sim loop gives the hub-selected bowler the
+        # first over (it used to be discarded here, silently handing the over to AI).
         innings = self.match.current_innings
         innings.over_log.clear()
         innings.bouncers_in_over = 0; innings.cutters_in_over = 0
@@ -3442,7 +3474,7 @@ class OverControlHubView(discord.ui.View):
         await interaction.message.edit(view=None)
         self.match.simulation_mode = "whole_match"
         self.match.verbose = True
-        self.match._pending_bowler = None
+        # _pending_bowler kept — the selected bowler opens the verbose sim.
         innings = self.match.current_innings
         innings.over_log.clear()
         innings.bouncers_in_over = 0; innings.cutters_in_over = 0
@@ -3455,7 +3487,7 @@ class OverControlHubView(discord.ui.View):
         await interaction.message.edit(view=None)
         self.match.simulation_mode = "whole_match"
         self.match.verbose = False              # bbb does its own per-ball rendering
-        self.match._pending_bowler = None
+        # _pending_bowler kept — the selected bowler bowls the first broadcast over.
         innings = self.match.current_innings
         innings.over_log.clear()
         innings.bouncers_in_over = 0; innings.cutters_in_over = 0
