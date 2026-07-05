@@ -12209,6 +12209,93 @@ class PrefixCog(commands.Cog):
         await prompt.edit(content=(f"🏆 **Match #{match_id}** ({r_label}) awarded to **{winner}** — walkover recorded.\n"
                                    f"Points table gets the W/L; player stats and NRR are untouched."), view=None)
 
+    @tournament.command(name="scorecard_channel", aliases=["scc", "set_scorecard_channel"], help="[MANAGER] Auto-post every completed match's scoreboard image to a channel (off to disable).\nUsage: tournament scorecard_channel <#channel | off>")
+    async def t_scorecard_channel(self, ctx, target: str):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (str(ctx.author.id) in tourney.get("managers", []))
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        if target.strip().lower() in ("off", "none", "clear", "disable"):
+            tourney.pop("scorecard_channel_id", None)
+            save_tournament(tourney)
+            return await ctx.send("🔕 Scorecard channel cleared — match images no longer auto-post.")
+        ch = None
+        if ctx.message.channel_mentions:
+            ch = ctx.message.channel_mentions[0]
+        elif target.strip().isdigit():
+            ch = ctx.guild.get_channel(int(target.strip()))
+        if ch is None:
+            return await ctx.send("❌ Mention a channel (`cvt scorecard_channel #match-gallery`) or pass its ID, or `off` to disable.")
+        tourney["scorecard_channel_id"] = str(ch.id)
+        save_tournament(tourney)
+        await ctx.send(f"🖼️ **Scorecard channel set:** every completed match's scoreboard image now auto-posts to {ch.mention} "
+                       f"(real matches and sims alike).\n-# `cvt post_scorecards {ch.mention}` back-fills matches already played.")
+
+    @tournament.command(name="post_scorecards", aliases=["dump_scorecards", "scorecards_dump", "psc"], help="[MANAGER] Slowly post EVERY completed match's scoreboard image to a channel — the tournament's permanent gallery/archive. Works after the tournament has finished.\nUsage: tournament post_scorecards [#channel]")
+    async def t_post_scorecards(self, ctx, target: str = None):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (str(ctx.author.id) in tourney.get("managers", []))
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        # NOTE: deliberately NO status check — this is the post-tournament archive dump.
+
+        ch = None
+        if ctx.message.channel_mentions:
+            ch = ctx.message.channel_mentions[0]
+        elif target and target.strip().isdigit():
+            ch = ctx.guild.get_channel(int(target.strip()))
+        elif target is None:
+            sc_id = tourney.get("scorecard_channel_id")
+            ch = self.bot.get_channel(int(sc_id)) if sc_id else ctx.channel
+        if ch is None:
+            return await ctx.send("❌ Couldn't resolve that channel — mention it like `cvt post_scorecards #gallery`.")
+
+        done_matches = sorted((m for m in tourney.get("schedule", []) if m.get("status") == "completed"),
+                              key=lambda m: m.get("match_id", 0))
+        if not done_matches:
+            return await ctx.send("❌ No completed matches to post yet.")
+
+        est = len(done_matches) * 2
+        status = await ctx.send(f"🖼️ Posting **{len(done_matches)}** match scoreboards to {ch.mention}, one by one "
+                                f"(~{est // 60}m {est % 60}s — paced so Discord doesn't rate-limit)…")
+        header = f"📚 **{tourney['name']} — Match Archive** ({len(done_matches)} matches)"
+        try:
+            await ch.send(header)
+        except Exception as e:
+            return await status.edit(content=f"❌ Can't post in {ch.mention}: {e}")
+
+        posted = skipped = 0
+        for i, m in enumerate(done_matches, 1):
+            # Fresh lookup guard: bail out cleanly if the tournament vanishes mid-dump.
+            if get_server_tournament(server_id) is not tourney:
+                break
+            try:
+                full = reconstruct_scorecard_data(tourney, m)
+                if not full:
+                    skipped += 1          # walkovers / manually-recorded results have no card
+                    continue
+                buf = generate_scorecard_from_data(full)
+                r_label = f"Round {m['round']}" if isinstance(m.get("round"), int) else m.get("round", "")
+                await ch.send(f"**Match #{m['match_id']}** · {r_label}",
+                              file=discord.File(fp=buf, filename=f"scorecard_m{m['match_id']}.png"))
+                posted += 1
+            except Exception as e:
+                skipped += 1
+                print(f"⚠️ post_scorecards failed for match {m.get('match_id')}: {e}")
+            # Pacing: one image every ~2s keeps well inside Discord's rate limits
+            # even for a 132-match season dump.
+            await asyncio.sleep(2.0)
+            if i % 20 == 0:
+                try:
+                    await status.edit(content=f"🖼️ Posting to {ch.mention}… **{i}/{len(done_matches)}** done.")
+                except discord.HTTPException:
+                    pass
+
+        note = f"  ·  ⚠️ {skipped} without stored card data (walkovers/manual results)" if skipped else ""
+        await status.edit(content=f"✅ **Archive complete:** {posted} scoreboards posted to {ch.mention}{note}.")
+
     @tournament.command(name="lock_stats", aliases=["lockstats", "stats_lock"], help="[MANAGER] Freeze the player-stats table — matches played while locked record NO player stats (points/NRR still count).\nUsage: tournament lock_stats")
     async def t_lock_stats(self, ctx):
         server_id = str(ctx.guild.id)
@@ -12441,7 +12528,7 @@ class PrefixCog(commands.Cog):
                    "at match start: **paste your XI** (order = batting order, `(C)` = captain) or ✅ **Use Default XI**"),
             inline=False,
         )
-        embed.add_field(name="📊 Stats & standings", value="`standings`/`st` · `status`/`sched` · `bracket`/`br` (ACL) · `leaderboard`/`lb <cat>` · `player_stats` · `squad` · `match_scorecard <id>`", inline=False)
+        embed.add_field(name="📊 Stats & standings", value="`standings`/`st` · `status`/`sched` · `bracket`/`br` (ACL) · `leaderboard`/`lb <cat>` · `player_stats` · `squad` · `match_scorecard <id>`\n`scorecard_channel #ch` — auto-post every match's scoreboard image · `post_scorecards #ch` — slow-dump ALL scoreboards (post-tournament archive)", inline=False)
         embed.add_field(name="🔥 Knockouts (Managers)", value="**ACL:** `gp`  ·  **Round Robin:** `generate_knockouts`  ·  **T20 WC:** `generate_super8`", inline=False)
         embed.add_field(name="⚙️ Admin (prefix-only)", value="`transfer_team` · `replace_player` · `force_delete` · `set_theme` · `set_injury_channel` · `add_injury` · `remove_injury` · `force_result` · `admin_record_result` · `simulate_all` · `award_win <id> <team>` (walkover: W only, no stats/NRR) · `lock_stats`/`unlock_stats` (freeze player-stats recording)", inline=False)
         embed.set_footer(text="Tip: leaderboard categories — runs · wickets · sr · bat_avg · econ · bowl_avg · mvp · fours · sixes · fifties · hundreds")

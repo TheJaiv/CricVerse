@@ -2606,6 +2606,24 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             process_team_stats(t2_name, t2_inn, t1_inn)
             m_data["result"]["stats_delta"] = stats_delta
 
+        # --- SCORECARD GALLERY CHANNEL (cvt scorecard_channel) ---
+        # Auto-post this match's scoreboard image to the configured channel — real
+        # matches AND sims alike, so the channel becomes a complete match gallery.
+        sc_ch_id = tourney.get("scorecard_channel_id")
+        if sc_ch_id:
+            try:
+                sc_ch = self.bot.get_channel(int(sc_ch_id))
+                if sc_ch:
+                    from bot import reconstruct_scorecard_data, generate_scorecard_from_data
+                    _full = reconstruct_scorecard_data(tourney, m_data)
+                    if _full:
+                        _buf = generate_scorecard_from_data(_full)
+                        _rl = _tm_round_label(m_data)
+                        await sc_ch.send(f"**Match #{m_data['match_id']}** · {_rl}",
+                                         file=discord.File(fp=_buf, filename=f"scorecard_m{m_data['match_id']}.png"))
+            except Exception as _sc_err:
+                print(f"⚠️ Scorecard-channel post failed for match {m_data.get('match_id')}: {_sc_err}")
+
         # --- INJURY COUNTDOWN (real matches only; count COMPLETED matches, not started ones) ---
         # Players already injured coming into this match sat it out; now that it has actually
         # FINISHED, burn one match off their spell. Doing this at completion (not at start)
