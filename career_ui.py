@@ -153,7 +153,7 @@ def render_career_card(career: dict) -> io.BytesIO:
 
 # ── Debut: 2-over Academy Trial (every player is an all-rounder; bat trial) ──
 _SKILL_SCALE = 15.0
-_AI_RATING = 72  # academy bowler — a real test for an OVR-68 rookie
+_AI_RATING = 72  # academy bowler — a stern test for a fresh OVR-60 rookie
 
 
 def _eff(r):

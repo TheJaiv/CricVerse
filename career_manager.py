@@ -9,9 +9,9 @@ Design (v2):
   • EVERY player is an all-rounder (bats AND bowls).
   • At creation you choose a BOWLING TYPE (pace / off-spin / leg-spin) and a
     BATTING MINDSET (aggressor / standard / anchor).
-  • Ratings are SYNCED to the main sim: rookies start at OVR 68 (the DB floor —
-    nobody in the sim is rated below ~68), max 99. Progression is deliberately
-    expensive so reaching the 90s is a long grind.
+  • Ratings are SYNCED to the main sim: rookies start at OVR 60 (below the pro
+    floor), max 99. Progression is deliberately expensive so reaching the 90s
+    is a long grind.
 A career is GLOBAL (one identity per Discord user across every server).
 """
 import time
@@ -272,6 +272,10 @@ def upgrade_attribute(career: dict, attr: str, want: int = 1):
 
 
 DAILY_MIN, DAILY_MAX = 25, 55      # tightened — dailies alone are a slow trickle, not a fast-track
+STREAK_BONUS_PER_DAY = 3           # +3 coins per consecutive day beyond the first…
+STREAK_BONUS_CAP_DAYS = 10         # …capped at +30/day so streaks reward habit, not wealth
+STREAK_GRACE = 48 * 3600           # claim within 48h of the last one to keep the streak
+RENAME_COST = 250                  # cv rename — cosmetic, so priced as a luxury
 WEEKLY_AMOUNT  = 800               # PREMIUM ONLY
 MONTHLY_AMOUNT = 3000              # PREMIUM ONLY
 WEEK_BOOST = 1.05                  # 5% coin boost for the week (premium weekly perk)
@@ -319,11 +323,20 @@ def _claim(career, key, cooldown, base):
 
 
 def claim_daily(career: dict):
-    """Returns (amount, error). 24h cooldown."""
+    """Returns (amount, error). 24h cooldown. Consecutive-day claims build a streak
+    (kept if you claim within 48h of the last): +3 coins per extra day, capped +30."""
     now, err = _claim(career, "daily", 86400, 0)
     if err:
         return 0, err
-    amount = int(round(random.randint(DAILY_MIN, DAILY_MAX) * _boost_mult(career)))
+    streak = career.get("daily_streak", {"count": 0, "last": 0})
+    if now - streak.get("last", 0) <= STREAK_GRACE:
+        streak["count"] = streak.get("count", 0) + 1
+    else:
+        streak["count"] = 1
+    streak["last"] = now
+    career["daily_streak"] = streak
+    bonus = min(max(0, streak["count"] - 1), STREAK_BONUS_CAP_DAYS) * STREAK_BONUS_PER_DAY
+    amount = int(round((random.randint(DAILY_MIN, DAILY_MAX) + bonus) * _boost_mult(career)))
     career["coins"] += amount
     async_save_career(career)
     return amount, None

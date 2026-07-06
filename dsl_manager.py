@@ -716,6 +716,34 @@ def aggregate_venue_stats(server_id, current_tourney=None):
     return venues
 
 
+def reset_dsl_server(server_id):
+    """Factory-reset a server's DSL data (owner tool, for wiping TEST seasons before
+    the real league): removes its current DSL tournament from the cache, deletes its
+    archive files on disk, and zeroes the Mongo season counter — so the next
+    `cvt start dsl` is a clean Season 1. The access grant itself is kept.
+    Returns (tournaments_removed, archives_deleted)."""
+    server_id = str(server_id)
+    tours = DB_CACHE.get("tournaments", [])
+    before = len(tours)
+    DB_CACHE["tournaments"] = [t for t in tours
+                               if not (str(t.get("server_id")) == server_id
+                                       and t.get("tournament_type") == DSL_CONFIG["type_key"])]
+    removed_t = before - len(DB_CACHE["tournaments"])
+    files = list_season_archives(server_id)
+    for _, path in files:
+        try:
+            os.remove(path)
+        except OSError as e:
+            print(f"⚠️ dsl_reset: couldn't delete {path}: {e}")
+    entry = _league_access().get(server_id)
+    if entry:
+        entry["last_season"] = 0
+    invalidate_archive_cache(server_id)
+    async_save_to_bin()
+    async_save_tournament_to_bin()
+    return removed_t, len(files)
+
+
 def season_history(server_id, current_tourney=None):
     """[(season, name, champion, runner_up)] oldest→newest; current season appended
     as in-progress (champion None) or completed."""

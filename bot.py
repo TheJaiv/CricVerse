@@ -43,7 +43,7 @@ from dsl_manager import (
     dsl_generate_league_schedule, dsl_generate_playoffs, dsl_bracket_embed,
     write_season_archive, save_uploaded_archive,
     aggregate_player_stats, aggregate_venue_stats, season_history,
-    get_season_summary, season_detail_embed,
+    get_season_summary, season_detail_embed, reset_dsl_server,
 )
 from subscription_manager import (
     load_data_from_bin, load_tournament_data_from_bin,
@@ -60,11 +60,11 @@ from subscription_manager import (
     save_custom_team, get_custom_team, delete_custom_team, list_custom_teams,
 )
 import draft_mode as dm
-# ── Career Mode (WORK IN PROGRESS) ────────────────────────────────────────────
-# Kept OFF by default so the live simulation engine runs undisturbed. Career code
-# loads defensively: any failure here can NEVER crash bot startup. Flip the env
-# var CAREER_MODE=1 only when Career Mode is finished and tested.
-CAREER_MODE_ENABLED = os.environ.get("CAREER_MODE", "0") == "1"
+# ── Career Mode (LIVE) ────────────────────────────────────────────────────────
+# Launched for everyone after the 2026-07-06 hardcore verification pass (see
+# tools/career_flow_test.py). Career code still loads defensively: any failure
+# here can NEVER crash bot startup. Set env var CAREER_MODE=0 to kill-switch it.
+CAREER_MODE_ENABLED = os.environ.get("CAREER_MODE", "1") == "1"
 try:
     import career_manager as CM
     import career_ui
@@ -174,6 +174,17 @@ async def _sync_tier_role(guild, member, career):
         return None, None
 
 # ── Career Mode: club-match lobby (Phase 4.1) ─────────────────────────────────
+def _get_live_lobby(channel_id):
+    """Return the channel's lobby, silently dropping it if it expired (30 min, un-started)."""
+    if not _CAREER_OK:
+        return None
+    lobby = career_match.LOBBIES.get(channel_id)
+    if lobby and lobby.expired():
+        career_match.LOBBIES.pop(channel_id, None)
+        return None
+    return lobby
+
+
 def _lobby_embed(lobby, title):
     n = lobby.count()
     e = discord.Embed(
@@ -2802,8 +2813,15 @@ async def begin_super_over_innings(channel, match):
 
 
 async def trigger_super_over(channel, match: CricketMatch):
-    so_match = CricketMatch(match.p1, match.p2, match.p1_id, match.p2_id, match.team1, match.team2, format_overs=1, pitch=match.pitch, weather=match.weather)
+    # type(match) keeps a ClubMatch Super Over a ClubMatch (per-player turn control).
+    so_match = type(match)(match.p1, match.p2, match.p1_id, match.p2_id, match.team1, match.team2, format_overs=1, pitch=match.pitch, weather=match.weather)
     so_match.is_super_over = True
+    if getattr(match, "is_club", False):
+        so_match.is_club = True
+        so_match._caps = getattr(match, "_caps", {})
+        so_match._cap_a_id = getattr(match, "_cap_a_id", None)
+        so_match._cap_b_id = getattr(match, "_cap_b_id", None)
+        so_match._club_per_side = getattr(match, "_club_per_side", None)
     # Chain every super over back to the ORIGINAL match (not the previous super over),
     # so repeated super overs still finalize the main match and image the decisive result.
     so_match.original_match_object = getattr(match, "original_match_object", match)
@@ -4078,7 +4096,10 @@ def _challenge_batting(lvl, rlo=8, rhi=16):
 
 async def start_scenario_match(channel, author, career, mode="bat", difficulty="medium"):
     if channel.id in active_games or channel.id in active_setups:
-        return await channel.send("❌ A match or setup is already running here. Finish it (or `cv endmatch`) first.")
+        # The entry fee was charged at the confirm step — refund it, don't eat it.
+        career["coins"] += CM.SCENARIO_ENTRY_FEE
+        CM.async_save_career(career)
+        return await channel.send("❌ A match or setup is already running here — entry fee refunded. Finish it (or `cv endmatch`) first.")
     pname = career.get("username", author.display_name)
     eng = CM.career_to_engine(career)
     title, overs = random.choice(_SCENARIO_DEFS)
@@ -4270,7 +4291,10 @@ async def _club_match_payout(channel, match):
     inns = [i for i in (match.innings1, match.innings2) if i]
     target = getattr(match, "target", match.innings1.total_runs + 1)
     inn2 = match.innings2
-    if inn2 and inn2.total_runs >= target:
+    tiebreak = getattr(match, "tiebreak_winner_name", None)
+    if tiebreak:
+        winner = tiebreak   # scores were tied, but a Super Over decided it
+    elif inn2 and inn2.total_runs >= target:
         winner = inn2.batting_team["name"]
     elif inn2 and inn2.total_runs == target - 1:
         winner = None   # tie
@@ -4396,13 +4420,30 @@ def _apply_club_names(match, name_a, name_b):
 
 
 async def _club_begin_toss(channel, match):
-    await channel.send(
+    header = (
         f"🏟️ **CLUB MATCH — {match.team1['name']} vs {match.team2['name']}**\n"
         f"🌱 Pitch: **{match.pitch}**  ·  ⏱️ **{match.format_overs} overs**  ·  "
         f"{getattr(match, '_club_per_side', '')}-a-side\n"
-        f"🧢 Captains: <@{match._cap_a_id}> vs <@{match._cap_b_id}>. Each player bats & bowls their own turn.\n"
-        f"🪙 **Toss!** <@{match._cap_b_id}>, call the coin:",
-        view=TossCallView(match))
+        f"🧢 Captains: <@{match._cap_a_id}> vs <@{match._cap_b_id}>. Each player bats & bowls their own turn.\n")
+
+    # Bots can't click: if either captain is a bot, auto-run the toss so the match
+    # never stalls (a swap can legitimately hand a bot the captaincy).
+    if _is_bot_uid(match._cap_a_id) or _is_bot_uid(match._cap_b_id):
+        flip = random.choice(["Heads", "Tails"])
+        match.toss_winner = random.choice([match.p1_id, match.p2_id])
+        win_team = match.team1["name"] if match.toss_winner == match.p1_id else match.team2["name"]
+        if _is_bot_uid(match.toss_winner):
+            choice = random.choice(["Bat", "Bowl"])
+            apply_toss_decision(match, choice)
+            await channel.send(header + f"🪙 Coin lands **{flip}** — 🤖 **{win_team}** win the toss and **{choice.lower()} first**!")
+            await prompt_club_openers(channel, match)
+        else:
+            await channel.send(header + f"🪙 Coin lands **{flip}** — **{win_team}** win the toss! <@{match.toss_winner}>, choose:",
+                               view=TossDecisionView(match))
+        return
+
+    await channel.send(header + f"🪙 **Toss!** <@{match._cap_b_id}>, call the coin:",
+                       view=TossCallView(match))
 
 
 class ClubNameModal(discord.ui.Modal, title="Name Your Team"):
@@ -5356,6 +5397,22 @@ class TossCallView(discord.ui.View):
     @discord.ui.button(label="Tails", style=discord.ButtonStyle.secondary)
     async def tails(self, interaction, button): await self.handle_call(interaction, "Tails")
 
+def apply_toss_decision(match, choice):
+    """Set batting/bowling order + innings1 from the toss winner's Bat/Bowl choice."""
+    if choice == "Bat":
+        match.batting_first_id = match.toss_winner
+        match.bowling_first_id = match.p1_id if match.toss_winner == match.p2_id else match.p2_id
+        t_bat = match.team1 if match.toss_winner == match.p1_id else match.team2
+        t_bowl = match.team2 if match.toss_winner == match.p1_id else match.team1
+    else:
+        match.bowling_first_id = match.toss_winner
+        match.batting_first_id = match.p1_id if match.toss_winner == match.p2_id else match.p2_id
+        t_bowl = match.team1 if match.toss_winner == match.p1_id else match.team2
+        t_bat = match.team2 if match.toss_winner == match.p1_id else match.team1
+    match.innings1 = InningsState(t_bat, t_bowl)
+    match.current_innings = match.innings1
+
+
 class TossDecisionView(discord.ui.View):
     def __init__(self, match):
         super().__init__(timeout=300)
@@ -5371,19 +5428,7 @@ class TossDecisionView(discord.ui.View):
         return True
         
     async def finalize_toss(self, interaction, choice):
-        if choice == "Bat":
-            self.match.batting_first_id = self.match.toss_winner
-            self.match.bowling_first_id = self.match.p1_id if self.match.toss_winner == self.match.p2_id else self.match.p2_id
-            t_bat = self.match.team1 if self.match.toss_winner == self.match.p1_id else self.match.team2
-            t_bowl = self.match.team2 if self.match.toss_winner == self.match.p1_id else self.match.team1
-        else:
-            self.match.bowling_first_id = self.match.toss_winner
-            self.match.batting_first_id = self.match.p1_id if self.match.toss_winner == self.match.p2_id else self.match.p2_id
-            t_bowl = self.match.team1 if self.match.toss_winner == self.match.p1_id else self.match.team2
-            t_bat = self.match.team2 if self.match.toss_winner == self.match.p1_id else self.match.team1
-
-        self.match.innings1 = InningsState(t_bat, t_bowl)
-        self.match.current_innings = self.match.innings1
+        apply_toss_decision(self.match, choice)
         await interaction.response.defer()
         await interaction.message.edit(view=None)
         if getattr(self.match, "is_club", False):
@@ -9164,6 +9209,34 @@ class PrefixCog(commands.Cog):
             lines.append(f"• `{sid}`{f' — {g.name}' if g else ''} · last archived season: **{last or '—'}**")
         await ctx.send(f"🔵 **{DSL_CONFIG['display_name']} servers:**\n" + "\n".join(lines))
 
+    @commands.command(name="dsl_reset", help="[OWNER] Factory-reset a server's DSL data (wipe TEST seasons): deletes its DSL tournament, archive files, and season counter. Access grant stays.\nUsage: dsl_reset [server_id]")
+    async def dsl_reset_cmd(self, ctx, server_id: str = None):
+        if ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("❌ Owner only.")
+        sid = str(server_id or ctx.guild.id)
+        from dsl_manager import list_season_archives
+        n_arch = len(list_season_archives(sid))
+        has_t = any(str(t.get("server_id")) == sid and t.get("tournament_type") == "dsl"
+                    for t in DB_CACHE.get("tournaments", []))
+        if not n_arch and not has_t:
+            return await ctx.send(f"ℹ️ No DSL data found for server `{sid}` — already clean. Next `cvt start dsl` will be Season 1.")
+        view = SquadConfirmView(ctx.author.id)
+        prompt = await ctx.send(
+            f"⚠️ **Factory-reset DSL for server `{sid}`?** This wipes:\n"
+            f"• current DSL tournament: {'**yes**' if has_t else 'none'}\n"
+            f"• archive files on this host: **{n_arch}**\n"
+            f"• the Mongo season counter → next season becomes **S1**\n"
+            f"(The access grant stays. Archives already committed to GitHub must be deleted from the repo separately!)",
+            view=view)
+        await view.wait()
+        if not view.value:
+            return await prompt.edit(content="❌ Reset cancelled — nothing touched.", view=None)
+        removed_t, removed_a = reset_dsl_server(sid)
+        await prompt.edit(content=(f"🧹 **DSL reset for `{sid}`** — removed {removed_t} tournament(s) and {removed_a} archive file(s); "
+                                   f"season counter zeroed. Next `cvt start dsl` = a fresh **Season 1**.\n"
+                                   f"⚠️ If test archives were committed to GitHub (`dsl_archive/{sid}_s*.json`), delete them from the repo too "
+                                   f"or they'll come back on the next deploy."), view=None)
+
     @commands.command(name="upload_archive", aliases=["dsl_upload"], help="[OWNER] Restore a DSL season archive JSON (attach it, or reply to it).\nUsage: attach <server>_s<N>.json + upload_archive")
     async def upload_archive(self, ctx):
         if ctx.author.id != ADMIN_DISCORD_ID:
@@ -9369,9 +9442,9 @@ class PrefixCog(commands.Cog):
                          "**The loop:** `start_career` → `debut` → earn → `upgrade` → `create_match` 🏆"),
             color=discord.Color.blurple())
         e.add_field(name="🚀 Your Player",
-                    value="`start_career` · `debut` · `profile` · `stats` · `leaderboard`", inline=False)
+                    value="`start_career` · `debut` · `profile` · `stats` · `leaderboard` · `rename`", inline=False)
         e.add_field(name="💰 Earn Coins",
-                    value=("`daily` · `quests` (3/day) · `scenario` (solo practice)\n"
+                    value=("`daily` (🔥 streak bonus!) · `quests` (3/day) · `scenario` (solo practice)\n"
                            "Premium: `weekly` · `monthly`  ·  *bots/AI never pay*"), inline=False)
         e.add_field(name="📈 Improve",
                     value="`upgrade <power|control|bowling|stamina> [n]` · `balance`", inline=False)
@@ -9519,7 +9592,9 @@ class PrefixCog(commands.Cog):
             return await ctx.send(err)
         CM.quest_progress(career, "daily", 1)
         CM.async_save_career(career)
-        await ctx.send(f"🪙 **+{amount} coins!** Daily claimed. Balance: **{career['coins']:,}**.\n-# 📜 Quest progress updated — check `cv quests`.")
+        streak = career.get("daily_streak", {}).get("count", 1)
+        streak_line = f"  ·  🔥 **{streak}-day streak**" + (" (max bonus!)" if streak - 1 >= CM.STREAK_BONUS_CAP_DAYS else f" (+{min(max(0, streak - 1), CM.STREAK_BONUS_CAP_DAYS) * CM.STREAK_BONUS_PER_DAY} bonus)") if streak > 1 else ""
+        await ctx.send(f"🪙 **+{amount} coins!** Daily claimed. Balance: **{career['coins']:,}**.{streak_line}\n-# 📜 Quest progress updated — check `cv quests`. Claim daily to build your 🔥 streak bonus.")
 
     @commands.command(name="quests", aliases=["quest", "dq"], help="View & claim your 3 daily quests.\nUsage: quests")
     async def quests(self, ctx):
@@ -9554,6 +9629,8 @@ class PrefixCog(commands.Cog):
             return await ctx.send("❌ Start a career first: `cv start_career`.")
         if not career.get("debut_done"):
             return await ctx.send("❌ Make your debut first: `cv debut`.")
+        if is_channel_restricted(str(ctx.channel.id)):
+            return await ctx.send("❌ Matches are **disabled** in this channel.")
         if ctx.channel.id in active_games or ctx.channel.id in active_setups:
             return await ctx.send("❌ A match or setup is already running in this channel.")
         fee = CM.SCENARIO_ENTRY_FEE
@@ -9612,6 +9689,30 @@ class PrefixCog(commands.Cog):
         if not career:
             return await ctx.send("❌ Start a career first: `cv start_career`.")
         await ctx.send(f"🪙 **{career.get('username', ctx.author.display_name)}** — **{career['coins']:,} coins**  ·  OVR {career['ovr']} ({career['tier']})")
+
+    @commands.command(name="rename", aliases=["setname"],
+                      help=f"Rename your career player.\nUsage: rename <new name>  (costs coins)")
+    async def rename(self, ctx, *, new_name: str = None):
+        if not _can_use_career(ctx):
+            return await ctx.send(_CAREER_SOON)
+        career = CM.get_career(ctx.author.id)
+        if not career:
+            return await ctx.send("❌ Start a career first: `cv start_career`.")
+        cost = 0 if ctx.author.id == ADMIN_DISCORD_ID else CM.RENAME_COST
+        if not new_name:
+            return await ctx.send(f"✏️ Usage: `cv rename <new name>` (2–16 chars) — costs **{cost}** 🪙.")
+        name = " ".join(str(new_name).split()).strip()[:16]
+        if len(name) < 2:
+            return await ctx.send("❌ Name must be **2–16** characters.")
+        if name == career.get("username"):
+            return await ctx.send("❌ That's already your name.")
+        if career["coins"] < cost:
+            return await ctx.send(f"❌ Renaming costs **{cost}** 🪙 — you have {career['coins']:,}.")
+        old = career.get("username", "?")
+        career["coins"] -= cost
+        career["username"] = name
+        CM.async_save_career(career)
+        await ctx.send(f"✏️ **{old}** is now **{name}**!" + (f"  (−{cost} 🪙 · balance {career['coins']:,})" if cost else ""))
 
     @commands.command(name="upgrade", aliases=["ug", "train"], help="Spend coins to raise an attribute.\nUsage: upgrade <power|control|bowling|stamina> [amount]")
     async def upgrade(self, ctx, attribute: str = None, amount: int = 1):
@@ -9719,9 +9820,11 @@ class PrefixCog(commands.Cog):
             return await ctx.send("❌ Start a career first: `cv start_career`.")
         if not career.get("debut_done"):
             return await ctx.send("❌ Make your debut first: `cv debut`.")
+        if is_channel_restricted(str(ctx.channel.id)):
+            return await ctx.send("❌ Matches are **disabled** in this channel.")
         if ctx.channel.id in active_games or ctx.channel.id in active_setups:
             return await ctx.send("❌ A match or setup is already running in this channel.")
-        if ctx.channel.id in career_match.LOBBIES:
+        if _get_live_lobby(ctx.channel.id):
             return await ctx.send("❌ A club-match lobby already exists here. Use `cv lobby` or `cv cancelmatch`.")
         lobby = career_match.ClubLobby(ctx.channel.id, ctx.author.id, career["username"], overs)
         career_match.LOBBIES[ctx.channel.id] = lobby
@@ -9732,7 +9835,7 @@ class PrefixCog(commands.Cog):
     async def joinmatch(self, ctx):
         if not _can_use_career(ctx):
             return await ctx.send(_CAREER_SOON)
-        lobby = career_match.LOBBIES.get(ctx.channel.id)
+        lobby = _get_live_lobby(ctx.channel.id)
         if not lobby:
             return await ctx.send("❌ No lobby here. Create one with `cv create_match`.")
         if lobby.started:
@@ -9751,7 +9854,7 @@ class PrefixCog(commands.Cog):
     async def leavematch(self, ctx):
         if not _can_use_career(ctx):
             return await ctx.send(_CAREER_SOON)
-        lobby = career_match.LOBBIES.get(ctx.channel.id)
+        lobby = _get_live_lobby(ctx.channel.id)
         if not lobby:
             return await ctx.send("❌ No lobby here.")
         if lobby.started:
@@ -9769,7 +9872,7 @@ class PrefixCog(commands.Cog):
     async def lobby_view(self, ctx):
         if not _can_use_career(ctx):
             return await ctx.send(_CAREER_SOON)
-        lobby = career_match.LOBBIES.get(ctx.channel.id)
+        lobby = _get_live_lobby(ctx.channel.id)
         if not lobby:
             return await ctx.send("❌ No lobby here. Create one with `cv create_match`.")
         await ctx.send(embed=_lobby_embed(lobby, "🏟️ Club Match — Lobby"))
@@ -9779,7 +9882,7 @@ class PrefixCog(commands.Cog):
     async def addbot(self, ctx):
         if not _can_use_career(ctx):
             return await ctx.send(_CAREER_SOON)
-        lobby = career_match.LOBBIES.get(ctx.channel.id)
+        lobby = _get_live_lobby(ctx.channel.id)
         if not lobby:
             return await ctx.send("❌ No lobby here. Create one with `cv create_match`.")
         if lobby.started:
@@ -9797,7 +9900,7 @@ class PrefixCog(commands.Cog):
     async def swap(self, ctx, a: int = None, b: int = None):
         if not _can_use_career(ctx):
             return await ctx.send(_CAREER_SOON)
-        lobby = career_match.LOBBIES.get(ctx.channel.id)
+        lobby = _get_live_lobby(ctx.channel.id)
         if not lobby:
             return await ctx.send("❌ No lobby here. Create one with `cv create_match`.")
         if lobby.started:
@@ -9817,7 +9920,7 @@ class PrefixCog(commands.Cog):
     async def cancelmatch(self, ctx):
         if not _can_use_career(ctx):
             return await ctx.send(_CAREER_SOON)
-        lobby = career_match.LOBBIES.get(ctx.channel.id)
+        lobby = _get_live_lobby(ctx.channel.id)
         if not lobby:
             return await ctx.send("❌ No lobby here.")
         is_admin = ctx.author.id == ADMIN_DISCORD_ID or (ctx.guild and ctx.author.guild_permissions.administrator)
@@ -9831,7 +9934,7 @@ class PrefixCog(commands.Cog):
     async def startmatch(self, ctx):
         if not _can_use_career(ctx):
             return await ctx.send(_CAREER_SOON)
-        lobby = career_match.LOBBIES.get(ctx.channel.id)
+        lobby = _get_live_lobby(ctx.channel.id)
         if not lobby:
             return await ctx.send("❌ No lobby here. Create one with `cv create_match`.")
         is_admin = ctx.author.id == ADMIN_DISCORD_ID or (ctx.guild and ctx.author.guild_permissions.administrator)
@@ -9843,6 +9946,8 @@ class PrefixCog(commands.Cog):
             return await ctx.send("❌ Need at least **2 real players** to start — bots don't count. Get another person to `cv joinmatch`.")
         if not lobby.each_side_has_human():
             return await ctx.send("❌ Each side needs at least **1 real player**. Use `cv swap` to put a human on each team.")
+        if is_channel_restricted(str(ctx.channel.id)):
+            return await ctx.send("❌ Matches are **disabled** in this channel.")
         if ctx.channel.id in active_games or ctx.channel.id in active_setups:
             return await ctx.send("❌ A match is already running in this channel.")
         lobby.started = True

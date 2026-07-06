@@ -19,6 +19,7 @@ LOBBIES = {}          # channel_id -> ClubLobby
 MAX_PER_SIDE = 11     # short-sided is fine; both sides must be EQUAL
 MIN_OVERS, MAX_OVERS = 2, 20
 DEFAULT_OVERS = 5
+LOBBY_TTL = 30 * 60   # un-started lobbies expire after 30 min so they can't block a channel
 
 
 class ClubLobby:
@@ -33,6 +34,9 @@ class ClubLobby:
         self.team_a = []           # ordered: {"id","name","ovr"}  (index 0 = captain)
         self.team_b = []
         self.add(host_id, host_name)
+
+    def expired(self):
+        return (not self.started) and int(time.time()) - self.created_at > LOBBY_TTL
 
     # ── membership ──
     def has(self, uid):
