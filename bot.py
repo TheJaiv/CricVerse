@@ -108,7 +108,7 @@ def _can_use_career(ctx):
             return True
     except Exception:
         pass
-    return False
+    return True
 
 def _is_premium(ctx):
     """Weekly/monthly perks: bot-granted premium pass, Nitro boosters, paid sub tiers, or owner."""

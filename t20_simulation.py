@@ -159,6 +159,25 @@ WEAR_SUSCEPT = {
 }
 # Run-out share of all dismissals (not credited to the bowler).
 T20_RUNOUT_SHARE = 0.07
+
+# ── TAIL STRIKE MANAGEMENT (farming/shielding) ────────────────────────────────
+# With a genuine tailender in the partnership, real sides manage the strike:
+# the TAIL hunts a single to hand the batter strike (but NOT off the over's last
+# ball — a dot there does the job via the end-change), while the BATTER declines
+# early-over singles and cashes boundaries, then takes one off the last ball to
+# keep strike. "Tries, not always" — these are weight nudges, not scripts.
+# DISABLED in clutch chases (see gate in execute_ball_math_t20): needing 2 off 2,
+# the single is always taken no matter who's at the other end.
+T20_TAIL_BAT_MAX        = 65     # pure Bowler role batting below this = "tail"
+T20_SHIELD_SINGLE       = 1.45   # tail on strike, balls 1-5: hunt the single
+T20_SHIELD_BND          = 0.75   #   ...and don't slog
+T20_SHIELD_WKT          = 0.90   #   playing within himself
+T20_SHIELD_LAST_SINGLE  = 0.60   # tail, last ball: DON'T take one (dot keeps partner on strike)
+T20_FARM_SINGLE         = 0.65   # batter with tail behind, balls 1-5: decline the single
+T20_FARM_BND            = 1.12   #   ...score in boundaries instead
+T20_FARM_LAST_SINGLE    = 1.60   # batter, last ball: take ONE to keep the strike
+T20_STRIKE_MGMT_BALLS   = 18     # chase gate: off when ≤ this many balls left (inn 2)
+T20_STRIKE_MGMT_RUNS    = 15     # chase gate: off when ≤ this many runs needed
 # Overstepping no-ball chance per delivery. Real T20 sees ~0.3-0.5 no-balls per
 # INNINGS; the old 0.02 produced ~4.4/innings (10x reality) plus a free-hit spree
 # that quietly inflated every innings and made chases cheaper.
@@ -478,6 +497,13 @@ def get_smart_ai_bowler_t20(innings, pitch, weather="Clear", format_overs=20):
         weights.append(max(1.0, base_score))
 
     return random.choices(valid_bowlers, weights=weights, k=1)[0]
+
+
+def _is_tail(p):
+    """A genuine tailender for strike-management purposes: a pure Bowler-role player
+    (all-rounders excluded) whose batting is below T20_TAIL_BAT_MAX."""
+    role = p.get("role", "")
+    return "Bowler" in role and "All-Rounder" not in role and float(p.get("bat", 50)) <= T20_TAIL_BAT_MAX
 
 
 def _solo_batting(innings):
@@ -1036,6 +1062,38 @@ def execute_ball_math_t20(match):
         # Field-restriction / momentum effects — orthogonal to intent, apply either way.
         if innings.last_ball_boundary: boundary_weight *= 1.15; wicket_weight *= 1.15
         if is_powerplay: boundary_weight *= (1.18 if _T20_INTENT else 1.25); single_weight *= 0.85
+
+        # ── TAIL STRIKE MANAGEMENT ── (see constants) — the tail hunts a single to
+        # hand over strike; the batter shields him: declines early-over singles,
+        # cashes boundaries, takes one off the LAST ball to keep strike. Gated OFF
+        # in clutch chases — needing 2 off 2, the single is taken no matter who's
+        # at the other end.
+        _mgmt_on = not getattr(match, "is_super_over", False)
+        if _mgmt_on and match.current_innings_num == 2 and balls_left > 0:
+            if balls_left <= T20_STRIKE_MGMT_BALLS or runs_needed <= T20_STRIKE_MGMT_RUNS:
+                _mgmt_on = False
+        if _mgmt_on and not (getattr(match, "is_club", False) and _solo_batting(innings)):
+            try:
+                _ns = innings.batting_team["players"][innings.current_non_striker_idx]
+                _ns_live = innings.batting_stats[_ns["name"]].dismissal == "not out"
+            except Exception:
+                _ns_live = False
+            if _ns_live:
+                _last_ball = (total_balls % 6 == 5)
+                _st_tail, _ns_tail = _is_tail(striker), _is_tail(_ns)
+                if _st_tail and not _ns_tail:
+                    if _last_ball:
+                        single_weight *= T20_SHIELD_LAST_SINGLE
+                    else:
+                        single_weight *= T20_SHIELD_SINGLE
+                        boundary_weight *= T20_SHIELD_BND
+                        wicket_weight *= T20_SHIELD_WKT
+                elif _ns_tail and not _st_tail:
+                    if _last_ball:
+                        single_weight *= T20_FARM_LAST_SINGLE
+                    else:
+                        single_weight *= T20_FARM_SINGLE
+                        boundary_weight *= T20_FARM_BND
             
     if "Mystery" in deliv:
         wicket_weight *= 1.6
