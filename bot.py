@@ -35,7 +35,7 @@ from test_image import (
     generate_test_summary_image as _ti_summary,
     generate_test_scorecard_image as _ti_scorecard,
 )
-from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, revert_tournament_match, repair_tournament_schedule, _tm_next_mid, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS, SquadConfirmView, build_squad_confirm_text, build_squad_confirm_embed, match_order_gate, MATCH_ORDER_LABELS
+from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, revert_tournament_match, repair_tournament_schedule, _tm_next_mid, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS, SquadConfirmView, build_squad_confirm_text, build_squad_confirm_embed, match_order_gate, MATCH_ORDER_LABELS, build_tournament_summary_embeds
 import dsl_manager
 from dsl_manager import (
     DSL_CONFIG, is_dsl_enabled, set_dsl_enabled, dsl_enabled_servers,
@@ -11387,6 +11387,23 @@ class PrefixCog(commands.Cog):
         old_mention = f"<@{old_owner_id}>" if old_owner_id else "*(no previous owner)*"
         await ctx.send(f"✅ **{team['name']}** ownership transferred from {old_mention} → {new_owner.mention}.")
 
+    @tournament.command(name="summary", aliases=["recap", "full_summary", "report"], help="The complete tournament report: overview, standings, knockout results, EVERY leaderboard in detail, and match records. Run it (and pin it!) before deleting a finished tournament.\nUsage: tournament summary")
+    async def t_summary(self, ctx):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney:
+            return await ctx.send("❌ No tournament exists in this server.")
+        if tourney.get("status") == "registration":
+            return await ctx.send("❌ Nothing to report yet — the tournament hasn't started.")
+        try:
+            embeds = build_tournament_summary_embeds(tourney)
+        except Exception as e:
+            print(f"⚠️ tournament summary failed: {e}")
+            return await ctx.send(f"❌ Couldn't build the report: {e}")
+        for e in embeds:
+            await ctx.send(embed=e)
+            await asyncio.sleep(0.4)   # gentle pacing — the report is 4-6 embeds
+
     @tournament.command(name="force_delete", help="[ADMIN] Forcefully delete this server's tournament.\nUsage: tournament force_delete")
     async def t_force_delete(self, ctx):
         if not ctx.author.guild_permissions.administrator and ctx.author.id != ADMIN_DISCORD_ID:
@@ -12748,7 +12765,7 @@ class PrefixCog(commands.Cog):
                    "at match start: **paste your XI** (order = batting order, `(C)` = captain) or ✅ **Use Default XI**"),
             inline=False,
         )
-        embed.add_field(name="📊 Stats & standings", value="`standings`/`st` · `status`/`sched` · `bracket`/`br` (ACL) · `leaderboard`/`lb <cat>` · `player_stats` · `squad` · `match_scorecard <id>`\n`scorecard_channel #ch` — auto-post every match's scoreboard image · `post_scorecards #ch` — slow-dump ALL scoreboards (post-tournament archive)", inline=False)
+        embed.add_field(name="📊 Stats & standings", value="`standings`/`st` · `status`/`sched` · `bracket`/`br` (ACL) · `leaderboard`/`lb <cat>` · `player_stats` · `squad` · `match_scorecard <id>`\n`summary`/`recap` — the COMPLETE tournament report (standings + every leaderboard + records) — run & pin before deleting!\n`scorecard_channel #ch` — auto-post every match's scoreboard image · `post_scorecards #ch` — slow-dump ALL scoreboards (post-tournament archive)", inline=False)
         embed.add_field(name="🔥 Knockouts (Managers)", value="**ACL:** `gp`  ·  **Round Robin:** `generate_knockouts`  ·  **T20 WC:** `generate_super8`", inline=False)
         embed.add_field(name="⚙️ Admin (prefix-only)", value="`transfer_team` · `replace_player` · `force_delete` · `set_theme` · `set_injury_channel` · `add_injury` · `remove_injury` · `force_result` · `admin_record_result` · `simulate_all` · `award_win <id> <team>` (walkover: W only, no stats/NRR) · `lock_stats`/`unlock_stats` (freeze player-stats recording)", inline=False)
         embed.set_footer(text="Tip: leaderboard categories — runs · wickets · sr · bat_avg · econ · bowl_avg · mvp · fours · sixes · fifties · hundreds")

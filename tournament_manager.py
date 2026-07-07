@@ -1605,6 +1605,198 @@ _TM_STAT_KEYS = ("matches", "runs", "balls_faced", "outs", "fours", "sixes",
 _TM_STAT_DEFAULT = {k: 0 for k in _TM_STAT_KEYS}
 
 
+# ── Full tournament report (cvt summary) — the keep-before-you-delete record ──
+def _summary_mvp(s):
+    """Same MVP formula as the leaderboard command."""
+    sr = (s["runs"] / s["balls_faced"] * 100) if s["balls_faced"] > 0 else 0
+    bat = float(s["runs"])
+    if sr >= 150:   bat *= 1.30
+    elif sr >= 130: bat *= 1.20
+    elif sr >= 110: bat *= 1.10
+    elif sr < 80 and s["balls_faced"] >= 20: bat *= 0.85
+    bat += s["fifties"] * 15 + s["hundreds"] * 40
+    bat += s["sixes"] * 2 + s["fours"] * 0.5
+    econ = (s["runs_conceded"] / s["balls_bowled"] * 6) if s["balls_bowled"] > 0 else 9.0
+    bowl = float(s["wickets"] * 40)
+    if s["balls_bowled"] >= 12:
+        bowl += max(-25.0, min(25.0, (8.0 - econ) * 5))
+    return bat + bowl
+
+
+def _standings_block(rows, top_n=None):
+    """Fixed-width points table code block from get_tournament_standings-style rows."""
+    out = ["```", f"{'#':<3}{'Team':<19}{'P':>3}{'W':>3}{'L':>3}{'T':>3}{'Pts':>5}{'NRR':>8}", "─" * 47]
+    for i, (nm, d) in enumerate(rows[:top_n] if top_n else rows, 1):
+        out.append(f"{i:<3}{str(nm)[:17]:<19}{d['P']:>3}{d['W']:>3}{d['L']:>3}{d.get('T', 0):>3}{d['Pts']:>5}{d['NRR']:>+8.2f}")
+    out.append("```")
+    return "\n".join(out)
+
+
+def build_tournament_summary_embeds(tourney):
+    """The complete tournament record as a list of embeds: overview, standings,
+    knockout results, every leaderboard in detail, and match records. Designed to
+    be posted (and screenshotted/pinned) before the tournament is deleted."""
+    sched = tourney.get("schedule", [])
+    done = [m for m in sched if m.get("status") == "completed" and m.get("result")]
+    t_type = tourney.get("tournament_type", "round_robin")
+    type_label = {"t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League",
+                  "dsl": "Dominators Super League"}.get(t_type, "Round Robin")
+    gold = discord.Color.gold()
+    embeds = []
+
+    # ── 1. OVERVIEW ────────────────────────────────────────────────────────────
+    champion = (tourney.get("acl_champion") or tourney.get("dsl_champion")
+                or next((m["result"]["winner"] for m in done
+                         if str(m.get("round")) in ("Final", "Grand Final")), None))
+    runner = tourney.get("acl_runner_up") or tourney.get("dsl_runner_up")
+    if champion and not runner:
+        fin = next((m for m in done if str(m.get("round")) in ("Final", "Grand Final")), None)
+        if fin:
+            runner = fin["result"].get("loser") or (fin["team2"] if champion == fin["team1"] else fin["team1"])
+    ties = sum(1 for m in done if m["result"].get("winner") == "TIE")
+    walkovers = sum(1 for m in done if m["result"].get("walkover"))
+    ov = discord.Embed(title=f"📖 {tourney['name']} — Complete Tournament Report", color=gold)
+    desc = f"**{type_label}** · {tourney.get('format_overs', 20)} overs · status: **{tourney.get('status', '?')}**"
+    if tourney.get("season"): desc += f" · Season **{tourney['season']}**"
+    if champion:
+        desc += f"\n\n👑 **CHAMPIONS: {champion}**" + (f"  ·  🥈 Runner-up: **{runner}**" if runner else "")
+    if tourney.get("league_shield"):
+        desc += f"\n🛡️ League Shield: **{tourney['league_shield']}**"
+    ov.description = desc
+    ov.add_field(name="Teams", value=str(len(tourney.get("teams", []))), inline=True)
+    ov.add_field(name="Matches", value=f"{len(done)}/{len(sched)} played", inline=True)
+    ov.add_field(name="Ties / Walkovers", value=f"{ties} / {walkovers}", inline=True)
+    embeds.append(ov)
+
+    # ── 2. STANDINGS ───────────────────────────────────────────────────────────
+    st_e = discord.Embed(title="🏁 Final Standings", color=gold)
+    if t_type == "t20_world_cup":
+        for grp in ["A", "B", "C", "D"]:
+            rows = get_group_standings(tourney, "group", grp)
+            if rows:
+                st_e.add_field(name=f"Group {grp}", value=_standings_block(rows), inline=False)
+        for sg in ["A", "B"]:
+            rows = get_group_standings(tourney, "super8", sg)
+            if rows:
+                st_e.add_field(name=f"Super 8 — Group {sg}", value=_standings_block(rows), inline=False)
+    else:
+        rows = [(n, d) for n, d in get_tournament_standings(tourney) if n != "BYE"]
+        if rows:
+            st_e.description = _standings_block(rows)
+    if st_e.description or st_e.fields:
+        embeds.append(st_e)
+
+    # ── 3. KNOCKOUT / PLAYOFF RESULTS ──────────────────────────────────────────
+    ko = [m for m in done if not isinstance(m.get("round"), int) and m.get("stage") != "group"]
+    if ko:
+        lines = []
+        for m in sorted(ko, key=lambda x: x.get("match_id", 0)):
+            r = m["result"]
+            if r.get("walkover"):
+                lines.append(f"**{m.get('round')}** · {m['team1']} vs {m['team2']} → 🏆 **{r['winner']}** *(walkover)*")
+            else:
+                lines.append(f"**{m.get('round')}** · {m['team1']} {r['t1_runs']}/{r['t1_wickets']} vs "
+                             f"{m['team2']} {r['t2_runs']}/{r['t2_wickets']} → 🏆 **{r['winner']}**")
+        ko_e = discord.Embed(title="🔥 Knockout Stage", description="\n".join(lines[:20]), color=gold)
+        embeds.append(ko_e)
+
+    # ── 4. LEADERBOARDS (all of them, in detail) ───────────────────────────────
+    players = [(t, p, s) for t, m in tourney.get("stats", {}).items() for p, s in m.items()]
+    if players:
+        def top(key_fn, n=10, cond=lambda s: True):
+            pool = [(t, p, s) for t, p, s in players if cond(s)]
+            return sorted(pool, key=lambda x: key_fn(x[2]), reverse=True)[:n]
+
+        def fmt(rows, val_fn):
+            return "\n".join(f"`{i:>2}.` **{p}** ({t}) — {val_fn(s)}"
+                             for i, (t, p, s) in enumerate(rows, 1)) or "—"
+
+        bat_e = discord.Embed(title="🏏 Batting Leaderboards", color=discord.Color.orange())
+        bat_e.add_field(name="🧢 Most Runs", value=fmt(
+            top(lambda s: s["runs"]),
+            lambda s: f"**{s['runs']}** runs · {s['runs']/s['balls_faced']*100 if s['balls_faced'] else 0:.0f} SR · "
+                      f"avg {s['runs']/s['outs'] if s['outs'] else s['runs']:.1f} · {s['fifties']}×50 {s['hundreds']}×100"), inline=False)
+        bat_e.add_field(name="⚡ Best Strike Rate (min 50 runs)", value=fmt(
+            top(lambda s: s["runs"]/s["balls_faced"] if s["balls_faced"] else 0, 5, lambda s: s["runs"] >= 50),
+            lambda s: f"**{s['runs']/s['balls_faced']*100:.1f}** SR ({s['runs']} runs)"), inline=False)
+        bat_e.add_field(name="🧮 Best Average (min 50 runs)", value=fmt(
+            top(lambda s: s["runs"]/max(1, s["outs"]), 5, lambda s: s["runs"] >= 50),
+            lambda s: f"**{s['runs']/max(1, s['outs']):.1f}** avg ({s['runs']} runs, {s['outs']} outs)"), inline=False)
+        bat_e.add_field(name="💣 Most Sixes", value=fmt(
+            top(lambda s: s["sixes"], 5), lambda s: f"**{s['sixes']}** sixes"), inline=True)
+        bat_e.add_field(name="🎯 Most Fours", value=fmt(
+            top(lambda s: s["fours"], 5), lambda s: f"**{s['fours']}** fours"), inline=True)
+        bat_e.add_field(name="🏅 50s / 100s", value=fmt(
+            top(lambda s: s["fifties"] + 2 * s["hundreds"], 5, lambda s: s["fifties"] + s["hundreds"] > 0),
+            lambda s: f"**{s['fifties']}**×50 · **{s['hundreds']}**×100"), inline=True)
+        embeds.append(bat_e)
+
+        bowl_e = discord.Embed(title="🎳 Bowling & MVP Leaderboards", color=discord.Color.purple())
+        bowl_e.add_field(name="🟣 Most Wickets", value=fmt(
+            top(lambda s: s["wickets"]),
+            lambda s: f"**{s['wickets']}** wkts · econ {s['runs_conceded']/s['balls_bowled']*6 if s['balls_bowled'] else 0:.2f} · "
+                      f"{s['balls_bowled']//6}.{s['balls_bowled']%6} ov"), inline=False)
+        bowl_e.add_field(name="🪙 Best Economy (min 5 overs)", value=fmt(
+            sorted([(t, p, s) for t, p, s in players if s["balls_bowled"] >= 30],
+                   key=lambda x: x[2]["runs_conceded"]/x[2]["balls_bowled"])[:5],
+            lambda s: f"**{s['runs_conceded']/s['balls_bowled']*6:.2f}** rpo ({s['wickets']} wkts)"), inline=False)
+        bowl_e.add_field(name="📐 Best Bowling Avg (min 3 wkts)", value=fmt(
+            sorted([(t, p, s) for t, p, s in players if s["wickets"] >= 3],
+                   key=lambda x: x[2]["runs_conceded"]/x[2]["wickets"])[:5],
+            lambda s: f"**{s['runs_conceded']/s['wickets']:.1f}** avg ({s['wickets']} wkts)"), inline=False)
+        bowl_e.add_field(name="🏆 MVP Standings", value=fmt(
+            top(_summary_mvp),
+            lambda s: f"**{_summary_mvp(s):.0f}** pts — {s['runs']}R · {s['wickets']}W"), inline=False)
+        embeds.append(bowl_e)
+
+    # ── 5. MATCH RECORDS ───────────────────────────────────────────────────────
+    real = [m for m in done if not m["result"].get("walkover")]
+    if real:
+        rec_e = discord.Embed(title="📜 Match Records", color=discord.Color.teal())
+
+        def innings_list(m):
+            r = m["result"]
+            return [(m["team1"], r["t1_runs"], r["t1_wickets"], m["team2"], m),
+                    (m["team2"], r["t2_runs"], r["t2_wickets"], m["team1"], m)]
+
+        all_inns = [x for m in real for x in innings_list(m) if x[1] > 0 or x[2] > 0]
+        if all_inns:
+            hi = max(all_inns, key=lambda x: x[1])
+            lo = min(all_inns, key=lambda x: x[1])
+            rec_e.add_field(name="📈 Highest Total",
+                            value=f"**{hi[0]}** {hi[1]}/{hi[2]} vs {hi[3]}  (M#{hi[4]['match_id']})", inline=False)
+            rec_e.add_field(name="📉 Lowest Total",
+                            value=f"**{lo[0]}** {lo[1]}/{lo[2]} vs {lo[3]}  (M#{lo[4]['match_id']})", inline=False)
+
+        margins_r, chases = [], []
+        for m in real:
+            r = m["result"]
+            w, bf = r.get("winner"), r.get("batted_first")
+            if not w or w == "TIE":
+                continue
+            w_runs = r["t1_runs"] if w == m["team1"] else r["t2_runs"]
+            l_runs = r["t2_runs"] if w == m["team1"] else r["t1_runs"]
+            if bf:
+                if w == bf: margins_r.append((w_runs - l_runs, w, m))
+                else: chases.append((w_runs, w, m))
+        if margins_r:
+            big = max(margins_r, key=lambda x: x[0])
+            close = min(margins_r, key=lambda x: x[0])
+            rec_e.add_field(name="💥 Biggest Win (runs)",
+                            value=f"**{big[1]}** by **{big[0]} runs**  (M#{big[2]['match_id']})", inline=True)
+            rec_e.add_field(name="😅 Narrowest Defence",
+                            value=f"**{close[1]}** by **{close[0]} run(s)**  (M#{close[2]['match_id']})", inline=True)
+        if chases:
+            hc = max(chases, key=lambda x: x[0])
+            rec_e.add_field(name="🏃 Highest Successful Chase",
+                            value=f"**{hc[1]}** chased **{hc[0]}**  (M#{hc[2]['match_id']})", inline=False)
+        if rec_e.fields:
+            embeds.append(rec_e)
+
+    embeds[-1].set_footer(text=f"{tourney['name']} · {type_label} · save/pin this report before deleting the tournament")
+    return embeds
+
+
 def _tm_next_mid(tourney):
     """Next free match_id = max existing id + 1. MUST be used instead of len()+1 —
     once any match is removed (e.g. by cancel_match), len()+1 collides with an
