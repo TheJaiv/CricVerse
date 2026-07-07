@@ -7,14 +7,35 @@ import math
 # teams decisively (≤1% upset at 14pt gap, ~0.1% at 24pt gap).
 # ──────────────────────────────────────────────────────────────────────────
 ODI_SKILL_SCALE = 12.8
+# ── DSL LEAGUE-REALISM MODE (matches with tournament_type == "dsl" ONLY) ──────
+# Mirror of the T20 engine's DSL mode, for the ODI-format Dominators Super League:
+# stars keep natural innings-to-innings variance (the consistency shield is off)
+# and rating gaps become realistic odds instead of certainties (flatter skill
+# curve). Upsets breathe; ratings still decide the season table. Non-DSL matches
+# are completely unaffected.
+DSL_ODI_SKILL_SCALE = 24.5
+# Flat wicket trim for DSL: removing the cons shield raises dismissal rates a
+# touch; this rating-independent trim restores the scoring environment.
+DSL_ODI_WKT_TRIM = 0.86
+# ── CHASE BALANCE ─────────────────────────────────────────────────────────────
+# Innings 2 inherits innings 1's pitch wear (a real 100-over feature worth keeping),
+# but unbalanced it made batting first win ~55-58% — a toss-decided format. Real
+# ODI chases win ~50% because knowing the target offsets the older surface. Two
+# proportional counterweights (both teams get them when chasing, so strong-vs-weak
+# is untouched, and low-wear roads are barely touched while crumbling decks get real help):
+ODI_WEAR_CARRY     = 0.65   # fraction of innings-1 wear the chase inherits (was 1.0)
+ODI_CHASE_RELIEF_K = 0.08   # innings-2 wicket relief per point of wear susceptibility
 # Tuned low vs the old (dot=50, wkt=3) baseline, which never bowled teams out
 # and produced 370-run innings. Higher wicket base lets innings actually end.
 # ODI is a singles/strike-rotation game: ~46% dot, ~37% single, only ~10-11%
 # boundary (far less than T20). Boundaries still bring ~55% of runs, but the
 # innings is built on rotation, not the rope.
-ODI_BASE_DOT   = 55.0; ODI_DOT_SENS = 52.0
+# (Dot/boundary bases retuned 2026-07 with the no-ball fix: ~14 no-balls+free-hits
+#  per innings were quietly worth ~25 runs of par — that scoring now comes from
+#  legitimate boundaries and strike rotation instead.)
+ODI_BASE_DOT   = 52.6; ODI_DOT_SENS = 52.0
 ODI_BASE_SINGLE = 47.0
-ODI_BASE_BND   = 9.5;  ODI_BND_SENS = 18.0
+ODI_BASE_BND   = 11.4; ODI_BND_SENS = 18.0
 ODI_BASE_WKT   = 4.0;  ODI_WKT_SENS = 8.5
 # Pitch, weather, ball-age and phase each scale the wicket rate. Over 300 balls
 # their PRODUCT bowls sides out ~100% of the time on bowling-friendly decks.
@@ -35,6 +56,10 @@ WEAR_SUSCEPT = {
 }
 # Run-out share of all dismissals (slightly higher than T20 — more running).
 ODI_RUNOUT_SHARE = 0.075
+# Overstepping no-ball chance per delivery. Real ODIs see well under 1 no-ball an
+# innings; the old 1% + the AI bowling into the 2nd-bouncer rule produced ~14 per
+# innings (≈35 runs of hidden par inflation, free-hit spree included).
+ODI_NOBALL_RATE = 0.003
 
 # ── RATING-SCALED CONSISTENCY (all matches) ──────────────────────────────────
 # Same intent as the T20 engine: cut a HIGH-rated player's match-to-match swing so
@@ -252,14 +277,17 @@ def execute_ball_math_odi(match):
     bat_rating = striker["bat"]
     bowl_rating = bowler["bowl"]
 
-    # Rating-scaled consistency applies to every match (high-rated steadier, low-rated full variance).
-    _cons_bat = odi_cons(striker["bat"])
+    # Rating-scaled consistency applies to every match (high-rated steadier, low-rated
+    # full variance) EXCEPT the DSL league: there the star shield is off and the skill
+    # curve is flatter, so stars can fail like humans — see DSL_ODI_SKILL_SCALE note.
+    _is_dsl = getattr(match, "tournament_type", None) == "dsl"
+    _cons_bat = 0.0 if _is_dsl else odi_cons(striker["bat"])
 
     # ── 2.0 PITCH DETERIORATION ──
     # Surface roughens across the match (innings 2 inherits innings 1's wear),
     # scaled by the pitch's susceptibility so roads stay roads. Worn decks give
     # spin extra turn — a defining feature of a 50-over surface by the back half.
-    _balls_in = innings.total_balls + (match.max_balls if match.current_innings_num == 2 else 0)
+    _balls_in = innings.total_balls + (match.max_balls * ODI_WEAR_CARRY if match.current_innings_num == 2 else 0)
     wear = (_balls_in / (2 * match.max_balls)) * WEAR_SUSCEPT.get(match.pitch, 1.0)
     if "Spin" in bowler["role"]:
         bowl_rating += wear * 5.0
@@ -400,7 +428,12 @@ def execute_ball_math_odi(match):
             if random.random() < 0.08:
                 deliv = random.choice(["Off Cutter", "Leg Cutter", "Knuckle"])
             else:
-                deliv = f"{random.choice(['Inswing', 'Outswing', 'Fast', 'Slow'])} {random.choice(['Bouncer', 'Full', 'Good', 'Yorker'])}"
+                # A real bowler doesn't bowl himself into the 2nd-bouncer no-ball — he
+                # stops at the ODI limit. (Humans picking deliveries can still risk it.)
+                lengths = ['Bouncer', 'Full', 'Good', 'Yorker']
+                if getattr(innings, "bouncers_in_over", 0) >= 1:
+                    lengths = ['Full', 'Good', 'Yorker']
+                deliv = f"{random.choice(['Inswing', 'Outswing', 'Fast', 'Slow'])} {random.choice(lengths)}"
             
     shot = match.current_shot_selection or get_smart_ai_shot_odi(deliv, innings, is_death_overs, striker["archetype"], pressure_multiplier)
         
@@ -412,8 +445,9 @@ def execute_ball_math_odi(match):
     # Logistic response: each rating mapped to an exponential curve, then the
     # batter's share of control = bat_eff / (bat_eff + bowl_eff). Equal ratings
     # → 0.5; gaps between elite ratings matter far more than between poor ones.
-    bat_eff  = math.exp((bat_rating  - 80.0) / ODI_SKILL_SCALE)
-    bowl_eff = math.exp((bowl_rating - 80.0) / ODI_SKILL_SCALE)
+    _scale = DSL_ODI_SKILL_SCALE if _is_dsl else ODI_SKILL_SCALE
+    bat_eff  = math.exp((bat_rating  - 80.0) / _scale)
+    bowl_eff = math.exp((bowl_rating - 80.0) / _scale)
     dominance = bat_eff / (bat_eff + bowl_eff)   # 0..1
     edge = dominance - 0.5                          # ~[-0.45, +0.45]
     diff = edge * 100.0  # legacy scale, kept for any downstream heuristics
@@ -472,7 +506,7 @@ def execute_ball_math_odi(match):
         if free_hit_active: match.last_commentary_prefix = "🛡️ *(Free Hit continues)*\n"
         return
 
-    if not is_no_ball and random.random() < 0.01:
+    if not is_no_ball and random.random() < ODI_NOBALL_RATE:
         is_no_ball = True
         if not free_hit_active:
             prefix += "🚨 **NO BALL!** Overstepping!\n➡️ **NEXT BALL IS A FREE HIT!**\n"
@@ -492,6 +526,11 @@ def execute_ball_math_odi(match):
     single_weight   = ODI_BASE_SINGLE
     boundary_weight = max(1.0,  ODI_BASE_BND  + edge * ODI_BND_SENS)
     wicket_weight   = max(0.6,  ODI_BASE_WKT  - edge * ODI_WKT_SENS)
+    if _is_dsl:
+        wicket_weight *= DSL_ODI_WKT_TRIM   # par-restore for league-realism mode (see constant)
+    if match.current_innings_num == 2:
+        # toss-neutrality counterweight, proportional to how much the deck wears (see constants)
+        wicket_weight *= max(0.75, 1.0 - ODI_CHASE_RELIEF_K * WEAR_SUSCEPT.get(match.pitch, 1.0))
     
     # Pitch Extreme Modifiers (Balanced)
     if match.pitch == "Green" and "Pace" in bowler["role"]:

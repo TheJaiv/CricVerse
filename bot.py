@@ -43,7 +43,7 @@ from dsl_manager import (
     dsl_generate_league_schedule, dsl_generate_playoffs, dsl_bracket_embed,
     write_season_archive, save_uploaded_archive,
     aggregate_player_stats, aggregate_venue_stats, season_history,
-    get_season_summary, season_detail_embed, reset_dsl_server,
+    get_season_summary, season_detail_embed, reset_dsl_server, player_season_history,
 )
 from subscription_manager import (
     load_data_from_bin, load_tournament_data_from_bin,
@@ -5017,16 +5017,18 @@ async def prompt_tournament_xi(channel, state, team_num):
     squad = state.t1_squad if team_num == 1 else state.t2_squad
     default_xi = getattr(state, f"t{team_num}_default_xi", None)
     default_cap = getattr(state, f"t{team_num}_default_captain", None)
+    default_subs = getattr(state, f"t{team_num}_default_subs", None) or []
+    impact_on = getattr(state, "impact_player", False)
 
-    async def _lock_xi(xi, captain_name, via):
+    async def _lock_xi(xi, captain_name, via, subs=None):
         remaining = [p for p in squad if p not in xi and not p.get("injured")]
         if team_num == 1:
-            state.t1_roster = xi; state.t1_subs = []
+            state.t1_roster = xi; state.t1_subs = list(subs) if subs else []
         else:
-            state.t2_roster = xi; state.t2_subs = []
+            state.t2_roster = xi; state.t2_subs = list(subs) if subs else []
 
         async def _after(ch, st):
-            if getattr(st, "impact_player", False) and remaining:
+            if impact_on and not subs and remaining:
                 v = TournamentSubSelectView(st, ch, team_num, remaining)
                 await ch.send(v.get_msg_content(), view=v)
             elif team_num == 1:
@@ -5034,7 +5036,10 @@ async def prompt_tournament_xi(channel, state, team_num):
             else:
                 await proceed_to_conditions(ch, st)
 
-        await channel.send(f"✅ **{t_name} XI locked** ({via}):\n" + format_xi_display(xi))
+        locked = f"✅ **{t_name} XI locked** ({via}):\n" + format_xi_display(xi)
+        if subs:
+            locked += "\n🔄 Impact Subs: " + ", ".join(f"**{p['name']}**" for p in subs)
+        await channel.send(locked)
         if captain_name and captain_name in {p["name"] for p in xi}:
             setattr(state, f"t{team_num}_captain", captain_name)
         await handle_captain_step(channel, state, team_num, xi, _after)
@@ -5045,8 +5050,11 @@ async def prompt_tournament_xi(channel, state, team_num):
     msg = (f"📋 <@{owner_id}> (or Manager) — **{t_name} XI Selection**\n"
            f"**Paste your XI below** — 11 names, one per line. "
            f"⚠️ The order is your exact **batting order**; add `(C)` after a name to set the captain.\n")
+    if impact_on:
+        msg += "🔄 Lines 12-16 (optional): your **Impact Subs** — skips the sub picker.\n"
     if default_xi:
-        msg += "…or press ✅ **Use Default XI** (also works by typing `default`).\n"
+        msg += "…or press ✅ **Use Default XI** (also works by typing `default`)"
+        msg += f" — includes its {len(default_subs)} saved Impact Sub(s).\n" if default_subs else ".\n"
     elif (getattr(state, 'tournament_server_id', None)
           and (getattr(state, f't{team_num}_default_xi', 'x') is None)):
         msg += "-# *(saved default XI unavailable: player injured or no longer in squad)*\n"
@@ -5067,7 +5075,7 @@ async def prompt_tournament_xi(channel, state, team_num):
                 await inter.response.edit_message(view=None)
             except discord.HTTPException:
                 pass
-            await _lock_xi(list(default_xi), default_cap, "default XI")
+            await _lock_xi(list(default_xi), default_cap, "default XI", subs=default_subs)
         btn.callback = _use_default
         view.add_item(btn)
 
@@ -5092,21 +5100,27 @@ async def prompt_tournament_xi(channel, state, team_num):
         if content.lower() in ("default", "default xi", "d"):
             if default_xi:
                 view.done = True
-                return await _lock_xi(list(default_xi), default_cap, "default XI")
+                return await _lock_xi(list(default_xi), default_cap, "default XI", subs=default_subs)
             await reply.reply("❌ No valid default XI saved for this team — paste the 11 names instead.")
             continue
         lines = [l for l in content.split("\n") if l.strip()]
         if len(lines) < 8:
             continue   # ordinary chat — ignore, keep waiting for a pasted XI
-        found, missing, cap_name, cap_err, _low = parse_pasted_roster(content, squad, max_lines=13)
+        found, missing, cap_name, cap_err, _low = parse_pasted_roster(
+            content, squad, max_lines=16 if impact_on else 13)
+        xi, subs = found[:11], found[11:]
         errs = []
         if missing:
             errs.append("Not in the (fit) squad: " + ", ".join(f"**{n}**" for n in missing[:6]))
-        if len(found) != 11:
-            errs.append(f"Need exactly **11** players — found **{len(found)}**.")
+        if len(found) < 11:
+            errs.append(f"Need at least **11** players — found **{len(found)}**.")
+        if not impact_on and len(found) > 11:
+            errs.append(f"No Impact Player rule in this tournament — paste exactly 11 (found {len(found)}).")
         if cap_err == "multiple":
             errs.append("Multiple `(C)` markers — mark exactly one captain (or none).")
-        if len(found) == 11 and not _has_wk(found):
+        if cap_name and len(found) >= 11 and cap_name not in {p["name"] for p in xi}:
+            errs.append(f"Captain **{cap_name}** is among the impact subs — the `(C)` goes on one of the first 11.")
+        if len(xi) == 11 and not _has_wk(xi):
             errs.append("No **Wicket-Keeper** in the XI — include a `WK`-role player.")
         if errs:
             await reply.reply("❌ **Invalid XI:**\n• " + "\n• ".join(errs) + "\n*Fix and paste again.*")
@@ -5114,7 +5128,7 @@ async def prompt_tournament_xi(channel, state, team_num):
         view.done = True
         for item in view.children:
             item.disabled = True
-        return await _lock_xi(found, cap_name, "typed")
+        return await _lock_xi(xi, cap_name, "typed", subs=subs if impact_on else None)
 
 
 # (The old one-by-one TournamentXIView dropdown picker was replaced by the
@@ -7139,6 +7153,9 @@ async def on_start_tournament_match(channel, manager_id, tourney, match_data):
     state.t2_default_xi = resolve_default_xi(t2_data, state.t2_squad)
     state.t1_default_captain = t1_data.get("default_captain")
     state.t2_default_captain = t2_data.get("default_captain")
+    # Default impact subs (impact tournaments): auto-applied with the default XI.
+    state.t1_default_subs = resolve_default_subs(t1_data, state.t1_squad, state.t1_default_xi or [])
+    state.t2_default_subs = resolve_default_subs(t2_data, state.t2_squad, state.t2_default_xi or [])
     state.format_overs = tourney.get("format_overs", 20)
     state.impact_player = tourney.get("impact_player", False)
 
@@ -7585,6 +7602,22 @@ def resolve_default_xi(team_data: dict, fit_squad: list):
     if not _has_wk(xi):
         return None
     return xi
+
+
+def resolve_default_subs(team_data: dict, fit_squad: list, xi: list):
+    """The saved default IMPACT subs resolved against the fit squad — best-effort:
+    invalid entries (injured / left squad / already in the XI) are silently dropped
+    rather than invalidating the whole default. Capped at 5, like the sub picker."""
+    names = team_data.get("default_impact") or []
+    xi_names = {p["name"] for p in xi}
+    by_name = {p["name"].lower(): p for p in fit_squad}
+    subs, seen = [], set()
+    for nm in names:
+        p = by_name.get(str(nm).strip().lower())
+        if p and p["name"] not in xi_names and p["name"] not in seen:
+            subs.append(p)
+            seen.add(p["name"])
+    return subs[:5]
 
 
 def _batting_order(players: list) -> list:
@@ -11661,7 +11694,7 @@ class PrefixCog(commands.Cog):
         await ctx.send(embed=e)
 
     # ── Default XI ────────────────────────────────────────────────────────────────
-    @tournament.command(name="set_default_xi", aliases=["sdxi", "set_default11", "setdefaultxi"], help="[OWNER/MANAGER] Save your team's default XI (paste 11 names; order = batting order; '(C)' marks captain; 'clear' removes).\nUsage: tournament set_default_xi [team]")
+    @tournament.command(name="set_default_xi", aliases=["sdxi", "set_default11", "setdefaultxi"], help="[OWNER/MANAGER] Save your team's default XI (paste 11 names; order = batting order; '(C)' marks captain; impact tournaments: lines 12-16 = Impact Subs; 'clear' removes).\nUsage: tournament set_default_xi [team]")
     async def t_set_default_xi(self, ctx, *, team_name: str = None):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
@@ -11679,8 +11712,11 @@ class PrefixCog(commands.Cog):
         if len(squad) < 11:
             return await ctx.send(f"❌ **{team['name']}** hasn't submitted a squad yet.")
 
+        impact_on = bool(tourney.get("impact_player", False))
+        impact_hint = (" You can add up to **5 Impact Subs** on lines 12-16 — they'll auto-apply with the default XI."
+                       if impact_on else "")
         await ctx.send(f"📋 Paste the **default XI for {team['name']}** — 11 names, one per line "
-                       f"(order = batting order, `(C)` after a name marks the captain). "
+                       f"(order = batting order, `(C)` after a name marks the captain).{impact_hint} "
                        f"Type `clear` to remove the saved default. *3 minutes.*")
         def check(m): return m.author.id == ctx.author.id and m.channel.id == ctx.channel.id
         try:
@@ -11688,26 +11724,37 @@ class PrefixCog(commands.Cog):
         except asyncio.TimeoutError:
             return await ctx.send("⏳ Timed out — run `cvt set_default_xi` again.")
         if msg.content.strip().lower() == "clear":
-            team.pop("default_xi", None); team.pop("default_captain", None)
+            team.pop("default_xi", None); team.pop("default_captain", None); team.pop("default_impact", None)
             save_tournament(tourney)
             return await msg.reply(f"🧹 Default XI cleared for **{team['name']}**.")
 
-        found, missing, cap_name, cap_err, _low = parse_pasted_roster(msg.content, squad, max_lines=13)
+        max_lines = 16 if impact_on else 13
+        found, missing, cap_name, cap_err, _low = parse_pasted_roster(msg.content, squad, max_lines=max_lines)
+        xi, subs = found[:11], found[11:]
         errs = []
         if missing: errs.append("Not in the squad: " + ", ".join(f"**{n}**" for n in missing[:6]))
-        if len(found) != 11: errs.append(f"Need exactly **11** — found **{len(found)}**.")
+        if len(found) < 11: errs.append(f"Need at least **11** — found **{len(found)}**.")
+        if not impact_on and len(found) > 11:
+            errs.append(f"This tournament has **no Impact Player rule** — paste exactly 11 (found {len(found)}).")
         if cap_err == "multiple": errs.append("Multiple `(C)` markers — mark exactly one captain (or none).")
-        if len(found) == 11 and not _has_wk(found): errs.append("No **Wicket-Keeper** — include a `WK`-role player.")
+        if cap_name and len(found) >= 11 and cap_name not in {p["name"] for p in xi}:
+            errs.append(f"Captain **{cap_name}** is in the impact subs — the `(C)` must be on one of the first 11.")
+        if len(xi) == 11 and not _has_wk(xi): errs.append("No **Wicket-Keeper** in the XI — include a `WK`-role player.")
         if errs:
             return await msg.reply("❌ **Invalid XI:**\n• " + "\n• ".join(errs) + "\n*Run `cvt set_default_xi` again.*")
 
-        team["default_xi"] = [p["name"] for p in found]
+        team["default_xi"] = [p["name"] for p in xi]
+        if impact_on and subs:
+            team["default_impact"] = [p["name"] for p in subs]
+        else:
+            team.pop("default_impact", None)
         if cap_name: team["default_captain"] = cap_name
         else: team.pop("default_captain", None)
         save_tournament(tourney)
         cap_note = f"\n🧢 Captain: **{cap_name}**" if cap_name else ""
+        sub_note = ("\n🔄 Impact Subs: " + ", ".join(f"**{p['name']}**" for p in subs)) if (impact_on and subs) else ""
         await msg.reply(f"✅ **Default XI saved for {team['name']}** — offered at every match start and used by sims:\n"
-                        + format_xi_display(found) + cap_note +
+                        + format_xi_display(xi) + cap_note + sub_note +
                         "\n-# invalid automatically if a member is injured or leaves the squad")
 
     @tournament.command(name="default_xi", aliases=["dxi", "defaultxi"], help="View a team's saved default XI.\nUsage: tournament default_xi [team]")
@@ -11737,8 +11784,18 @@ class PrefixCog(commands.Cog):
         fit = resolve_default_xi(team, [p for p in team.get("squad", []) if not p.get("injured")])
         status = "🟢 valid — will be offered at match start" if fit else "🔴 currently INVALID (injury/missing player) — the match will ask for a typed XI"
         cap = team.get("default_captain")
+        desc = "\n".join(lines) + (f"\n🧢 Captain: **{cap}**" if cap else "")
+        imp_names = team.get("default_impact") or []
+        if imp_names:
+            imp_lines = []
+            for nm in imp_names:
+                p = by_name.get(nm.lower())
+                if p is None: imp_lines.append(f"~~{nm}~~ ❌")
+                elif p.get("injured"): imp_lines.append(f"{nm} 🚑")
+                else: imp_lines.append(nm)
+            desc += "\n🔄 Impact Subs: " + ", ".join(imp_lines)
         e = discord.Embed(title=f"📋 {team['name']} — Default XI",
-                          description="\n".join(lines) + (f"\n🧢 Captain: **{cap}**" if cap else ""),
+                          description=desc,
                           color=discord.Color.green() if fit else discord.Color.red())
         e.set_footer(text=status)
         await ctx.send(embed=e)
@@ -11863,10 +11920,29 @@ class PrefixCog(commands.Cog):
             file=file,
         )
 
-    @tournament.command(name="seasons", aliases=["history", "champions", "season"], help="[DSL] Honours board — or one season's full review.\nUsage: tournament seasons [number]\n`cvt season 1` → S1 winner, runner-up, table, Orange/Purple Cap, records…")
-    async def t_seasons(self, ctx, season: int = None):
+    @tournament.command(name="seasons", aliases=["history", "champions", "season"], help="[DSL] Honours board · a season's full review · or a player's stats in that season.\nUsage: tournament seasons [number] [player]\n`cvt season 1` → S1 review · `cvt season 1 Kohli` → Kohli's S1 stats + team")
+    async def t_seasons(self, ctx, season: int = None, *, player: str = None):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
+
+        # `cvt season 1 <player>` → that player's stats IN that season, with his team
+        if season is not None and player:
+            rows = player_season_history(server_id, player, tourney)
+            if not rows:
+                # fuzzy-resolve the name across all seasons, then retry exact
+                agg = aggregate_player_stats(server_id, tourney)
+                close = difflib.get_close_matches(player.strip().lower(), list(agg.keys()), n=1, cutoff=0.5)
+                if close:
+                    rows = player_season_history(server_id, agg[close[0]]["name"], tourney)
+            srows = [r for r in rows if r[0] == season]
+            if not srows:
+                played = sorted({r[0] for r in rows})
+                hint = f" They appear in: {', '.join(f'S{s}' for s in played)}." if played else ""
+                return await ctx.send(f"❌ No stats for **{player}** in **S{season}**.{hint}")
+            for s_no, team, pname, ps in srows:   # usually one; multiple if mid-season transfer
+                await ctx.send(embed=build_player_stats_embed(
+                    ps, pname, team, season_label=f"{DSL_CONFIG['short_name']} Season {s_no}"))
+            return
 
         # `cvt season 1` → the full season review (from the archive JSON / live season)
         if season is not None:
@@ -11920,7 +11996,14 @@ class PrefixCog(commands.Cog):
         e.add_field(name="🎯 Bowling",
                     value=f"**Wickets:** {rec['wickets']}\n**Economy:** {econ:.1f}\n**Overs:** {o}.{b}",
                     inline=True)
-        e.set_footer(text="All seasons combined (archives + current)")
+        # Season-by-season: which team he played for each season, with his headline numbers.
+        rows = player_season_history(server_id, rec["name"], tourney)
+        if rows:
+            hist_lines = []
+            for s_no, team, _pname, ps in sorted(rows, key=lambda r: (r[0] is None, r[0])):
+                hist_lines.append(f"`S{s_no}` **{team}** — {ps.get('runs', 0)} runs · {ps.get('wickets', 0)} wkts ({ps.get('matches', 0)}m)")
+            e.add_field(name="📜 Season history", value="\n".join(hist_lines[:12]), inline=False)
+        e.set_footer(text="All seasons combined (archives + current) · cvt season <n> " + rec["name"] + " for one season's full card")
         await ctx.send(embed=e)
 
     @tournament.command(name="set_team_color", help="[MANAGER] Set a team's scorecard color.\nUsage: tournament set_team_color \"<team_name>\" #RRGGBB")

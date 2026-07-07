@@ -75,12 +75,13 @@ DSL_CONFIG = {
     "league_key": "dsl",                    # archive/league identity (keep stable across renames)
     "display_name": "Dominators Super League",
     "short_name": "DSL",
-    "format_overs": 20,
+    "format_overs": 50,                     # DSL is an ODI league (league-realism mode
+                                            # lives in odi_simulation.py: DSL_ODI_*)
     "team_count": 5,                        # TEST (production: 12)
     "double_round_robin": True,             # home & away legs (5 teams → 20 matches; 12 → 132)
     "min_squad": 11,
     "max_squad": 18,
-    "impact_player": True,
+    "impact_player": False,                 # real ODIs have no impact player (flip to re-enable)
     "injuries": False,
     "conditions_mode": "stadium",           # pitch drawn from the match venue's profile
     "match_order": "random",                # "random" | "sequential" (strict schedule) | "round"
@@ -714,6 +715,27 @@ def aggregate_venue_stats(server_id, current_tourney=None):
         v["avg_2nd"] = v["second_runs"] / n if n else 0.0
         v["bat_first_win_pct"] = (v["bat_first_wins"] / v["decided"] * 100) if v["decided"] else None
     return venues
+
+
+def player_season_history(server_id, player_name, current_tourney=None):
+    """[(season, team, canonical_name, stats)] for every season the player appears
+    in — archives first, then the in-progress season. Exact (case-insensitive)
+    name match; callers can fuzzy-resolve the name via aggregate_player_stats."""
+    pl = str(player_name).strip().lower()
+    rows = []
+
+    def _scan(stats_map, season):
+        for team, players in (stats_map or {}).items():
+            for pname, ps in players.items():
+                if pname.lower() == pl:
+                    rows.append((season, team, pname, ps))
+
+    for s in load_all_seasons(server_id):
+        _scan(s.get("stats"), s.get("season"))
+    cur = _current_if_dsl(server_id, current_tourney)
+    if cur:
+        _scan(cur.get("stats"), cur.get("season"))
+    return rows
 
 
 def reset_dsl_server(server_id):
