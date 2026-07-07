@@ -11817,6 +11817,47 @@ class PrefixCog(commands.Cog):
         e.set_footer(text=status)
         await ctx.send(embed=e)
 
+    @tournament.command(name="duplicates", aliases=["dupes", "duplicate_players", "check_duplicates"], help="List any player who appears in more than one team's squad.\nUsage: tournament duplicates")
+    async def t_duplicates(self, ctx):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        teams = tourney.get("teams", [])
+        if not teams: return await ctx.send("📋 No teams registered yet.")
+
+        # Map each player (case-insensitive) to the list of teams that claim him.
+        owners = {}
+        for t in teams:
+            for p in t.get("squad", []):
+                key = p["name"].strip().lower()
+                entry = owners.setdefault(key, {"name": p["name"], "teams": []})
+                if t["name"] not in entry["teams"]:
+                    entry["teams"].append(t["name"])
+
+        dupes = sorted((e for e in owners.values() if len(e["teams"]) > 1),
+                       key=lambda e: (-len(e["teams"]), e["name"].lower()))
+        submitted = sum(1 for t in teams if t.get("squad"))
+        if not dupes:
+            return await ctx.send(f"✅ **No duplicate players** — every player across the {submitted} submitted squad(s) is in exactly one team.")
+
+        lines = [f"• **{e['name']}** ({len(e['teams'])} teams): "
+                 + " · ".join(f"**{tm}**" for tm in e["teams"]) for e in dupes]
+        e = discord.Embed(
+            title=f"⚠️ {tourney['name']} — Duplicate Players ({len(dupes)})",
+            description="These players appear in more than one squad — fix with `cvt replace_player` before starting:",
+            color=discord.Color.red())
+        # chunk to respect Discord's 1024-char field limit
+        chunk, cur, first = [], 0, True
+        for ln in lines:
+            if cur + len(ln) + 1 > 1000 and chunk:
+                e.add_field(name="Duplicates" if first else "​", value="\n".join(chunk), inline=False)
+                chunk, cur, first = [], 0, False
+            chunk.append(ln); cur += len(ln) + 1
+        if chunk:
+            e.add_field(name="Duplicates" if first else "​", value="\n".join(chunk), inline=False)
+        e.set_footer(text=f"{len(dupes)} duplicated player(s) across {submitted} submitted squad(s)")
+        await ctx.send(embed=e)
+
     @tournament.command(name="fill_squads", aliases=["fillsquads", "autofill_squads"], help="[MANAGER] Auto-fill under-min squads with unpicked players below a rating cap.\nUsage: tournament fill_squads <max_rating>")
     async def t_fill_squads(self, ctx, cap: float):
         server_id = str(ctx.guild.id)
@@ -12755,7 +12796,7 @@ class PrefixCog(commands.Cog):
                    "**6.** after the Final: `cvt end_season` → archive + slot freed for next season"),
             inline=False,
         )
-        embed.add_field(name="🛠️ Setup", value="`create` · `add_team` · `add_manager` · `submit_squad`/`ss` · `fill_squads <cap>` (auto-fill under-min squads) · `set_default_xi`/`sdxi` (paste once, reuse every match) · `start` · `set_team_logo` · `set_team_color`", inline=False)
+        embed.add_field(name="🛠️ Setup", value="`create` · `add_team` · `add_manager` · `submit_squad`/`ss` · `duplicates`/`dupes` (players in 2+ squads) · `fill_squads <cap>` (auto-fill under-min squads) · `set_default_xi`/`sdxi` (paste once, reuse every match) · `start` · `set_team_logo` · `set_team_color`", inline=False)
         embed.add_field(
             name="🏏 Play your matches",
             value=("`fixtures`/`fx` `[team]` — your upcoming + results\n"
