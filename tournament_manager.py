@@ -1829,9 +1829,11 @@ def repair_tournament_schedule(tourney):
 def _match_bracket_rank(tourney, m):
     """How far into the tournament a match sits — higher = later. Used to find
     the matches that were built on (i.e. depend on) another match's result."""
-    if m.get("stage") in ("group", "league") or isinstance(m.get("round"), int):
+    if m.get("stage") in ("group", "league", "ladder") or isinstance(m.get("round"), int):
         return 0
     t_type = tourney.get("tournament_type", "round_robin")
+    if t_type == "rating":
+        return {"Semi-Final 1": 1, "Semi-Final 2": 1, "Final": 2}.get(m.get("round"), 1)
     if t_type == "acl":
         return {"Qualifier": 1, "Eliminator 1": 1, "Eliminator 2": 1,
                 "The Knockout": 2, "Qualifier 2": 3,
@@ -1933,6 +1935,13 @@ def revert_tournament_match(tourney, match_id):
     else:
         stat_note = ""
 
+    # Conquest League: reverse this match's Elo + credits (team-level, not covered by
+    # _revert_match_stats) while the result is still intact — it's cleared just below.
+    if t_type == "rating":
+        from rating_league import revert_match_rating, revert_match_credits
+        revert_match_rating(tourney, m)
+        revert_match_credits(tourney, m)
+
     # Reopen the match itself.
     m["status"] = "pending"
     m["result"] = None
@@ -1990,6 +1999,25 @@ def revert_tournament_match(tourney, match_id):
             for k in ("dsl_champion", "dsl_runner_up"):
                 tourney.pop(k, None)
             _dsl_try_advance(tourney)
+    elif t_type == "rating":
+        from rating_league import RATING_KO_STAGES, _rating_try_advance
+        if m.get("stage") == "ladder":
+            # A changed ladder result restales playoff seeding → drop any generated bracket.
+            ko = [x for x in sched if x.get("stage") in RATING_KO_STAGES]
+            for x in ko:
+                sched.remove(x)
+            removed = ko
+            for k in ("playoff_seeds", "rating_champion", "rating_runner_up"):
+                tourney.pop(k, None)
+        else:
+            for x in sched:
+                if x is m or x.get("stage") not in RATING_KO_STAGES:
+                    continue
+                if x.get("round") == "Final" and _match_bracket_rank(tourney, x) > rank:
+                    x["team1"] = None; x["team2"] = None; x["status"] = "locked"; x["result"] = None
+            for k in ("rating_champion", "rating_runner_up"):
+                tourney.pop(k, None)
+            _rating_try_advance(tourney)
     else:
         # Round Robin / T20 World Cup: drop later-stage matches — they regenerate
         # automatically once the earlier stage is completed again.
@@ -2798,6 +2826,18 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             process_team_stats(t2_name, t2_inn, t1_inn)
             m_data["result"]["stats_delta"] = stats_delta
 
+        # --- CONQUEST (rating) LEAGUE: Elo update, and CREDIT economy for any league ---
+        # Elo uses the result's winner/margin; credits (weak-favouring) use stats_delta
+        # for milestones — so both run AFTER the result + stats_delta are set above.
+        if tourney.get("tournament_type") == "rating":
+            from rating_league import apply_match_rating
+            apply_match_rating(tourney, m_data)
+        try:
+            from rating_league import award_match_credits
+            award_match_credits(tourney, m_data)   # generic; idempotent-guarded
+        except Exception as _cr_err:
+            print(f"⚠️ credit award failed for match {m_data.get('match_id')}: {_cr_err}")
+
         # --- SCORECARD GALLERY CHANNEL (cvt scorecard_channel) ---
         # Auto-post this match's scoreboard image to the configured channel — real
         # matches AND sims alike, so the channel becomes a complete match gallery.
@@ -2915,6 +2955,15 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             # ACL: resolve playoff bracket + Super Cup as feeder results come in
             _acl_try_advance(tourney)
             assign_tournament_conditions(tourney)   # fill conditions on any newly-added matches
+            save_tournament(tourney)
+            return
+
+        if t_type == "rating":
+            # Conquest League: open ladder — no auto-schedule; just resolve any playoff
+            # bracket the manager generated (ladder games simply save the rating update).
+            from rating_league import _rating_try_advance
+            _rating_try_advance(tourney)
+            assign_tournament_conditions(tourney)
             save_tournament(tourney)
             return
 

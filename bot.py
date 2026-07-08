@@ -36,6 +36,13 @@ from test_image import (
     generate_test_scorecard_image as _ti_scorecard,
 )
 from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, revert_tournament_match, repair_tournament_schedule, _tm_next_mid, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS, SquadConfirmView, build_squad_confirm_text, build_squad_confirm_embed, match_order_gate, MATCH_ORDER_LABELS, build_tournament_summary_embeds
+import rating_league
+from rating_league import (
+    RATING_CONFIG, is_rating_tournament, create_rating_tournament, create_open_match,
+    rating_standings, rating_board_embed, rating_bracket_embed,
+    generate_rating_playoffs, apply_tournament_boosts, apply_boost,
+    BOOST_COST, BOOST_MAX_PER_PLAYER, BOOST_MAX_PER_TEAM,
+)
 import dsl_manager
 from dsl_manager import (
     DSL_CONFIG, is_dsl_enabled, set_dsl_enabled, dsl_enabled_servers,
@@ -1405,6 +1412,7 @@ def extract_scoreboard_data(match: CricketMatch) -> dict:
         "match_id": str(getattr(match, "tournament_match_id", "?")),
         "round_label": _round_label,
         "stadium": _stadium,
+        "center_logo": tourney.get("scoreboard_logo") if tourney else None,
         "tourn_name": getattr(match, "tournament_name", "TOURNAMENT").upper(),
         "format_overs": getattr(match, "format_overs", 20),
         "result_str": result_str,
@@ -1553,6 +1561,7 @@ def reconstruct_scorecard_data(tourney: dict, m: dict) -> dict:
         "match_id":        str(m["match_id"]),
         "round_label":     _match_round_label(m),
         "stadium":         m.get("stadium"),
+        "center_logo":     tourney.get("scoreboard_logo"),
         "tourn_name":      tourney["name"].upper(),
         "format_overs":    r.get("format_overs", 20),
         "result_str":      p.get("rs", ""),
@@ -2359,7 +2368,7 @@ def generate_scorecard_from_data(data: dict) -> io.BytesIO:
     # centre logo), format bar, split score band, batter grids, bowler
     # grids, then a navy result/POTM footer. Left column = batting-first
     # team (t1) + the bowlers who bowled to it; right column = t2.
-    W, H = 1200, 820
+    W, H = 1200, 782
     img = Image.new("RGB", (W, H), "#FFFFFF")
     d   = ImageDraw.Draw(img)
 
@@ -2415,6 +2424,28 @@ def generate_scorecard_from_data(data: dict) -> io.BytesIO:
     c_gold  = "#FFD54A"
     tc1 = _hex(t1_data.get("color"))
     tc2 = _hex(t2_data.get("color"))
+    c_navy_rgb = _hex(c_navy)
+    c_gold_rgb = _hex(c_gold)
+
+    # ── Colour + gradient helpers ─────────────────────────────────────
+    def _lerp(a, b, t):
+        return tuple(int(a[k] + (b[k] - a[k]) * t) for k in range(3))
+
+    def _darken(rgb, f=0.62):
+        return tuple(int(c * f) for c in rgb)
+
+    def _lighten(rgb, f=0.35):
+        return tuple(int(c + (255 - c) * f) for c in rgb)
+
+    def _vgrad(x0, y0, x1, y1, top_rgb, bot_rgb):
+        h = max(1, y1 - y0)
+        for i in range(h):
+            d.line([(x0, y0 + i), (x1, y0 + i)], fill=_lerp(top_rgb, bot_rgb, i / h))
+
+    def _hgrad(x0, y0, x1, y1, l_rgb, r_rgb):
+        w = max(1, x1 - x0)
+        for i in range(w):
+            d.line([(x0 + i, y0), (x0 + i, y1)], fill=_lerp(l_rgb, r_rgb, i / w))
 
     def _star(cx, cy, size, fill=c_gold):
         pts = []
@@ -2440,46 +2471,80 @@ def generate_scorecard_from_data(data: dict) -> io.BytesIO:
             ini = fallback_text[:3].upper()
             d.text((cx - get_tw(ini, f_col) / 2, cy - _th(f_col) / 2), ini, fill=c_white, font=f_col)
 
-    # ── 1. Header (0–150): crests, team names, centre logo, match no. ──
-    HDR_MID = 78
-    _paste_logo(t1_data.get("logo_emoji"), 95, HDR_MID, 84, tc1, t1_data["name"])
-    _paste_logo(t2_data.get("logo_emoji"), W - 95, HDR_MID, 84, tc2, t2_data["name"])
+    HALF = W // 2
+
+    # ── 1. Header: soft vertical-gradient bg + crests, names, centre logo ──
+    HDR_H, HDR_MID, LOGO_SZ = 126, 63, 78
+    _vgrad(0, 0, W, HDR_H, (255, 255, 255), (243, 245, 248))
+
+    _paste_logo(t1_data.get("logo_emoji"), 88, HDR_MID, LOGO_SZ, tc1, t1_data["name"])
+    _paste_logo(t2_data.get("logo_emoji"), W - 88, HDR_MID, LOGO_SZ, tc2, t2_data["name"])
 
     n1 = t1_data["name"][:16].upper()
-    d.text((155, HDR_MID - _th(f_name) // 2 - 4), n1, fill=c_navy, font=f_name)
+    d.text((150, HDR_MID - _th(f_name) // 2 - 4), n1, fill=c_navy, font=f_name)
     n2 = t2_data["name"][:16].upper()
-    d.text((W - 155 - get_tw(n2, f_name), HDR_MID - _th(f_name) // 2 - 4), n2, fill=c_navy, font=f_name)
+    d.text((W - 150 - get_tw(n2, f_name), HDR_MID - _th(f_name) // 2 - 4), n2, fill=c_navy, font=f_name)
 
+    # Centre logo: a tournament-set custom logo if present, else the CricVerse default.
+    _center = data.get("center_logo")
+    _logo = None
     try:
-        _lp = "assets/logo.png" if os.path.exists("assets/logo.png") else "assets/logo.jpg"
-        _logo = Image.open(_lp).convert("RGBA").resize((104, 104), Image.LANCZOS)
-        _mask = Image.new("L", (104, 104), 0)
-        ImageDraw.Draw(_mask).ellipse((0, 0, 104, 104), fill=255)
-        img.paste(_logo, (W // 2 - 52, HDR_MID - 52), _mask)
+        if _center:
+            _logo = _fetch_emoji_img(_center, 96)
+        if _logo is None:
+            _lp = "assets/logo.png" if os.path.exists("assets/logo.png") else "assets/logo.jpg"
+            _logo = Image.open(_lp).convert("RGBA").resize((96, 96), Image.LANCZOS)
     except Exception:
-        d.ellipse([(W // 2 - 52, HDR_MID - 52), (W // 2 + 52, HDR_MID + 52)],
+        _logo = None
+    if _logo is not None:
+        _mask = Image.new("L", (96, 96), 0)
+        ImageDraw.Draw(_mask).ellipse((0, 0, 96, 96), fill=255)
+        img.paste(_logo, (W // 2 - 48, HDR_MID - 48), _mask)
+    else:
+        d.ellipse([(W // 2 - 48, HDR_MID - 48), (W // 2 + 48, HDR_MID + 48)],
                   outline=c_grid, width=3)
 
-    _mno = f"MATCH NO. {match_id}"
-    d.text((W - 12 - get_tw(_mno, f_micro), 10), _mno, fill=c_grey, font=f_micro)
+    _mno = tourn_name[:28]
+    d.text((W - 12 - get_tw(_mno, f_micro), 9), _mno, fill=c_grey, font=f_micro)
     _round = str(data.get("round_label") or "").upper()
     if _round:
-        d.text((12, 10), _round, fill=c_grey, font=f_micro)
+        d.text((12, 9), _round, fill=c_grey, font=f_micro)
 
-    # ── 2. Format bar (150–188) ───────────────────────────────────────
-    BAR_Y1, BAR_Y2 = 150, 188
-    d.rectangle([(0, BAR_Y1), (W, BAR_Y2)], fill="#EEF0F3")
+    # Team-coloured accent strip framing the header bottom.
+    _hgrad(0,    HDR_H - 4, HALF, HDR_H, tc1, _lighten(tc1, 0.45))
+    _hgrad(HALF, HDR_H - 4, W,    HDR_H, _lighten(tc2, 0.45), tc2)
+
+    # ── 2. Context bar (compact): "MATCH N • STADIUM • FMT (N OVERS)" ──
+    BAR_Y1, BAR_Y2 = HDR_H, HDR_H + 32
+    _vgrad(0, BAR_Y1, W, BAR_Y2, (238, 240, 243), (227, 230, 235))
     _fmt = "T20" if format_overs <= 20 else "ODI"
-    bar_txt = f"SIMULATION MATCH   •   {_fmt} ({format_overs} OVERS)"
+    _stadium = str(data.get("stadium") or "").strip()
+    _left = f"MATCH {match_id}"
+    if _stadium:
+        _left += f"   •   {_stadium.upper()}"
+    bar_txt = f"{_left}   •   {_fmt} ({format_overs} OVERS)"
     d.text(((W - get_tw(bar_txt, f_bar)) // 2, BAR_Y1 + (BAR_Y2 - BAR_Y1 - _th(f_bar)) // 2),
            bar_txt, fill=c_navy, font=f_bar)
 
-    # ── 3. Score band (188–288): left = tc1, right = tc2 ──────────────
-    SB_Y1, SB_Y2 = 188, 288
+    # ── 3. Score band: diagonal split of two glossy team-colour gradients ──
+    SB_Y1, SB_Y2 = BAR_Y2, BAR_Y2 + 96
     SB_MID = (SB_Y1 + SB_Y2) // 2
-    HALF = W // 2
-    d.rectangle([(0, SB_Y1), (HALF, SB_Y2)], fill=tc1)
-    d.rectangle([(HALF, SB_Y1), (W, SB_Y2)], fill=tc2)
+    _band_h = SB_Y2 - SB_Y1
+    _SEAM = 0   # straight vertical divider between the two teams (no diagonal)
+    _lg_img = Image.new("RGB", (W, _band_h))
+    _rg_img = Image.new("RGB", (W, _band_h))
+    _lgd, _rgd = ImageDraw.Draw(_lg_img), ImageDraw.Draw(_rg_img)
+    _lt, _lb = _lighten(tc1, 0.30), _darken(tc1, 0.80)
+    _rt, _rb = _lighten(tc2, 0.30), _darken(tc2, 0.80)
+    for _i in range(_band_h):
+        _t = _i / _band_h
+        _lgd.line([(0, _i), (W, _i)], fill=_lerp(_lt, _lb, _t))
+        _rgd.line([(0, _i), (W, _i)], fill=_lerp(_rt, _rb, _t))
+    _bmask = Image.new("L", (W, _band_h), 0)
+    ImageDraw.Draw(_bmask).polygon(
+        [(0, 0), (HALF + _SEAM, 0), (HALF - _SEAM, _band_h), (0, _band_h)], fill=255)
+    img.paste(Image.composite(_lg_img, _rg_img, _bmask), (0, SB_Y1))
+    d.line([(HALF + _SEAM, SB_Y1), (HALF - _SEAM, SB_Y2)], fill=c_gold_rgb, width=3)
 
     def _ov_str(td):
         b = td.get("balls", 0)
@@ -2500,9 +2565,6 @@ def generate_scorecard_from_data(data: dict) -> io.BytesIO:
 
     _draw_bat_icon(38, SB_MID, tc1)
     _draw_ball_icon(W - 38, SB_MID, tc2)
-
-    def _darken(rgb, f=0.62):
-        return tuple(int(c * f) for c in rgb)
 
     def _draw_score(td, half_x0, icon_side, chip_x, band_rgb):
         if td.get("yet_to_bat"):
@@ -2527,7 +2589,7 @@ def generate_scorecard_from_data(data: dict) -> io.BytesIO:
     # ── 4 & 5. Stat grids (batters then bowlers) ──────────────────────
     GRID_ROWS = 4
     ROW_H = 50
-    HDR_H = 36
+    GHDR_H = 34
 
     def _grid_col(offset_x):
         # returns (name_x, mid_col_x, right_col_x) for a half starting at offset_x
@@ -2542,17 +2604,22 @@ def generate_scorecard_from_data(data: dict) -> io.BytesIO:
         return bw + 6
 
     def _draw_grid(y_top, kind, col1_hdr, col2_hdr):
-        # Header strips (per side, team-coloured)
-        d.rectangle([(0, y_top), (HALF, y_top + HDR_H)], fill=tc1)
-        d.rectangle([(HALF, y_top), (W, y_top + HDR_H)], fill=tc2)
-        hy = y_top + (HDR_H - _th(f_col)) // 2
+        # Batting strips use the batting team's colour. Bowling strips use the
+        # BOWLING team's colour — and team 1's column lists team 2's bowlers
+        # (they bowled to team 1), so the bowling-bar colours swap sides.
+        left_col  = tc1 if kind == "bat" else tc2
+        right_col = tc2 if kind == "bat" else tc1
+        # Gradient strips: base colour at the outer edge → darker toward the seam.
+        _hgrad(0,    y_top, HALF, y_top + GHDR_H, left_col, _darken(left_col, 0.72))
+        _hgrad(HALF, y_top, W,    y_top + GHDR_H, _darken(right_col, 0.72), right_col)
+        hy = y_top + (GHDR_H - _th(f_col)) // 2
         for offset_x in (0, HALF):
             nx, c1, c2 = _grid_col(offset_x)
             d.text((nx, hy), "BATTER" if kind == "bat" else "BOWLER", fill=c_white, font=f_col)
             d.text((c1 - get_tw(col1_hdr, f_col) // 2, hy), col1_hdr, fill=c_white, font=f_col)
             d.text((c2 - get_tw(col2_hdr, f_col) // 2, hy), col2_hdr, fill=c_white, font=f_col)
 
-        body_top = y_top + HDR_H
+        body_top = y_top + GHDR_H
         for i in range(GRID_ROWS):
             ry = body_top + i * ROW_H
             if i % 2 == 1:
@@ -2566,7 +2633,7 @@ def generate_scorecard_from_data(data: dict) -> io.BytesIO:
             ip_name = (td.get("impact_sub") or "").upper()
             for i, r in enumerate(rows):
                 mid = body_top + i * ROW_H + ROW_H // 2
-                nm = r["name"][:16].upper()
+                nm = r["name"][:22].upper()
                 d.text((nx, mid - _th(f_player) // 2), nm, fill=c_navy, font=f_player)
                 mx = nx + get_tw(nm, f_player) + 8
                 if ip_name and r["name"].upper() == ip_name:
@@ -2582,15 +2649,19 @@ def generate_scorecard_from_data(data: dict) -> io.BytesIO:
                 d.text((c1 - get_tw(v1, f_runs) // 2, mid - _th(f_runs) // 2), v1, fill=c_navy, font=f_runs)
                 d.text((c2 - get_tw(v2, f_balls) // 2, mid - _th(f_balls) // 2), v2, fill=c_grey, font=f_balls)
 
-        _rows(t1_data, 0, tc1)
-        _rows(t2_data, HALF, tc2)
+        _rows(t1_data, 0, left_col)
+        _rows(t2_data, HALF, right_col)
         return body_top + GRID_ROWS * ROW_H
 
     bat_bottom = _draw_grid(SB_Y2, "bat", "R", "B")
     bwl_bottom = _draw_grid(bat_bottom, "bowl", "W-R", "O")
 
-    # ── 6. Footer (result + POTM) ─────────────────────────────────────
-    d.rectangle([(0, bwl_bottom), (W, H)], fill=c_navy)
+    # ── 6. Footer (result + POTM): team-tinted navy gradient ──────────
+    _dt1, _dt2 = _darken(tc1, 0.42), _darken(tc2, 0.42)
+    for x in range(W):
+        t = x / (W - 1)
+        col = _lerp(_dt1, c_navy_rgb, t * 2) if t < 0.5 else _lerp(c_navy_rgb, _dt2, (t - 0.5) * 2)
+        d.line([(x, bwl_bottom), (x, H)], fill=col)
     fy = bwl_bottom + (H - bwl_bottom - _th(f_foot)) // 2
     if potm:
         sep = "   |   "
@@ -5500,8 +5571,8 @@ async def begin_toss(channel, state):
         return await _begin_test_match(channel, state)
 
     _sid = getattr(state, "tournament_server_id", None) or (str(channel.guild.id) if getattr(channel, "guild", None) else None)
-    t1 = {"name": state.t1_name, "players": with_captain(apply_server_overrides(state.t1_roster, _sid)), "subs": apply_server_overrides(getattr(state, 't1_subs', []), _sid), "color": getattr(state, 't1_color', '#6B7280')}
-    t2 = {"name": state.t2_name, "players": with_captain(apply_server_overrides(state.t2_roster, _sid)), "subs": apply_server_overrides(getattr(state, 't2_subs', []), _sid), "color": getattr(state, 't2_color', '#6B7280')}
+    t1 = {"name": state.t1_name, "players": with_captain(apply_tournament_boosts(apply_server_overrides(state.t1_roster, _sid))), "subs": apply_tournament_boosts(apply_server_overrides(getattr(state, 't1_subs', []), _sid)), "color": getattr(state, 't1_color', '#6B7280')}
+    t2 = {"name": state.t2_name, "players": with_captain(apply_tournament_boosts(apply_server_overrides(state.t2_roster, _sid))), "subs": apply_tournament_boosts(apply_server_overrides(getattr(state, 't2_subs', []), _sid)), "color": getattr(state, 't2_color', '#6B7280')}
 
     match = CricketMatch(state.p1, state.p2, state.p1_id, state.p2_id, t1, t2, state.format_overs, state.pitch, state.weather)
     match.impact_player = state.impact_player
@@ -10683,6 +10754,27 @@ class PrefixCog(commands.Cog):
                 return await ctx.send("❌ A different tournament already exists in this server. Finish or `cvt force_delete` it first.")
             # DSL tournament already exists → fall through to the normal start validation.
 
+        # `cvt start rating` / `cvt start conquest` → create the Conquest (rating) League.
+        if league and league.strip().lower() in ("rating", "conquest", "cql", RATING_CONFIG["display_name"].lower()):
+            if not tourney:
+                if not ctx.author.guild_permissions.administrator and ctx.author.id != ADMIN_DISCORD_ID:
+                    return await ctx.send("❌ Only Server Admins can start a Conquest League.")
+                tourney = create_rating_tournament(server_id, ctx.author.id)
+                save_tournament(tourney)
+                return await ctx.send(
+                    f"🟣 **{tourney['name']} ({RATING_CONFIG['short_name']}) — REGISTRATION OPEN!**\n"
+                    f"An **open rating ladder** — challenge anyone, anytime; **skill climbs the ranks, not grinding**. "
+                    f"No elimination; play ≥{RATING_CONFIG['min_games_qualify']} games to make the Top-{RATING_CONFIG['playoff_teams']} playoffs.\n\n"
+                    f"**Next steps:**\n"
+                    f"1️⃣ `cvt add_team \"<name>\" <@owner>` for each team\n"
+                    f"2️⃣ owners `cvt ss` to submit squads (loaded from your auction)\n"
+                    f"3️⃣ `cvt start` → the ladder goes live\n"
+                    f"4️⃣ owners `cvt challenge \"<team>\"` to play · `cvt ratings` for the ladder\n"
+                    f"⚔️ Trades (`cvt trade`) & performance boosts (`cvt boost`) are live all season."
+                )
+            elif not is_rating_tournament(tourney):
+                return await ctx.send("❌ A different tournament already exists in this server. Finish or `cvt force_delete` it first.")
+
         is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (tourney and str(ctx.author.id) in tourney.get("managers", []))
         if not tourney: return await ctx.send("❌ No tournament exists. (DSL servers: `cvt start dsl` to open a season.)")
         if not is_mgr: return await ctx.send("❌ Managers only.")
@@ -10707,6 +10799,9 @@ class PrefixCog(commands.Cog):
         elif t_type == "acl":
             if len(tourney["teams"]) != 14:
                 return f"❌ **ACL requires exactly 14 teams** (currently {len(tourney['teams'])})."
+        elif t_type == "rating":
+            if len(tourney["teams"]) < RATING_CONFIG["playoff_teams"]:
+                return f"❌ **{RATING_CONFIG['short_name']} needs at least {RATING_CONFIG['playoff_teams']} teams** (currently {len(tourney['teams'])})."
         elif t_type == "dsl":
             want = DSL_CONFIG["team_count"]
             if len(tourney["teams"]) != want:
@@ -10750,6 +10845,20 @@ class PrefixCog(commands.Cog):
         """Generate the schedule for the tournament type, assign conditions per the chosen
         mode, mark active, and announce. Conditions mode must already be set on `tourney`."""
         t_type = tourney.get("tournament_type", "round_robin")
+
+        # Conquest League: no schedule — open play. Just go live.
+        if t_type == "rating":
+            tourney["status"] = "active"
+            tourney["current_match_idx"] = 0
+            save_tournament(tourney)
+            n = len(tourney["teams"])
+            return await channel.send(
+                f"🟣 **{tourney['name']} IS LIVE!** — {n} teams on the ladder, all at **{RATING_CONFIG['base_rating']}**.\n"
+                f"⚔️ Owners: `cvt challenge \"<team>\"` to play anyone available · `cvt ratings` for the live ladder.\n"
+                f"📈 Beat higher-rated teams to climb fast; farming weak teams is pointless. Play ≥{RATING_CONFIG['min_games_qualify']} games to qualify.\n"
+                f"💪 Weak squads earn more **credits** — spend them on `cvt boost`. Deal via `cvt trade`.\n"
+                f"🏆 When you're ready to finish, a manager runs `cvt end_league` → Top-{RATING_CONFIG['playoff_teams']} playoffs."
+            )
 
         if t_type == "t20_world_cup":
             teams_by_group = {"A": [], "B": [], "C": [], "D": []}
@@ -11279,11 +11388,223 @@ class PrefixCog(commands.Cog):
             if not _dsl_get(tourney, "Semi-Final 1"):
                 return await ctx.send("ℹ️ The Playoffs haven't been generated yet — they appear automatically once every league match is done.")
             return await ctx.send(embed=dsl_bracket_embed(tourney))
+        if t_type == "rating":
+            from rating_league import _rating_get
+            if not _rating_get(tourney, "Semi-Final 1"):
+                return await ctx.send("ℹ️ Playoffs not generated yet — a manager runs `cvt end_league` once teams have played enough games.")
+            return await ctx.send(embed=rating_bracket_embed(tourney))
         if t_type != "acl":
-            return await ctx.send("❌ The bracket view is for **ACL/DSL** tournaments. Use `cv tournament standings` or `cv tournament status`.")
+            return await ctx.send("❌ The bracket view is for **ACL/DSL/Conquest** tournaments. Use `cv tournament standings` or `cv tournament status`.")
         if not _acl_get(tourney, "Qualifier"):
             return await ctx.send("ℹ️ The Playoffs haven't been generated yet. A Manager runs `cv tournament generate_playoffs` once all 91 league games are done.")
         await ctx.send(embed=acl_bracket_embed(tourney))
+
+    # ── Conquest League: open play, ladder, trades, credits & boosts ──────────────
+    @tournament.command(name="challenge", aliases=["chal", "play_open", "vs"], help="[Conquest/OWNER] Challenge another team to a ladder match — play anyone available.\nUsage: tournament challenge \"<team>\"")
+    async def t_challenge(self, ctx, *, team_name: str):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        if not is_rating_tournament(tourney):
+            return await ctx.send("❌ Open challenges are a **Conquest League** feature.")
+        if tourney["status"] != "active": return await ctx.send("❌ The league isn't live yet.")
+        my = next((t for t in tourney["teams"] if t.get("owner_id") == str(ctx.author.id)), None)
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
+        opp = self._team_by_ref(ctx, tourney, team_name) or next((t for t in tourney["teams"] if t["name"].lower() == team_name.strip().lower()), None)
+        if not opp: return await ctx.send(f"❌ Team **{team_name}** not found.")
+        if not my and not is_mgr:
+            return await ctx.send("❌ You don't own a team here. (Managers can launch any pairing.)")
+        if my and my["name"] == opp["name"]:
+            return await ctx.send("❌ You can't challenge your own team.")
+        if my is None:  # manager launching — needs both teams named? default: pick opp only is ambiguous
+            return await ctx.send("❌ Owners challenge with `cvt challenge \"<team>\"`. Managers: use `cvt play <id>` after a challenge, or own a team.")
+        for tm in (my, opp):
+            if any(len(t.get("squad", [])) < 2 for t in (my, opp)):
+                return await ctx.send("❌ Both teams need submitted squads.")
+        # Playoffs generated → ladder is closed.
+        from rating_league import RATING_KO_STAGES
+        if any(m.get("stage") in RATING_KO_STAGES for m in tourney.get("schedule", [])):
+            return await ctx.send("❌ The ladder is closed — the playoffs have begun.")
+        m = create_open_match(tourney, my["name"], opp["name"])
+        tourney.setdefault("schedule", []).append(m)
+        save_tournament(tourney)
+        await ctx.send(f"⚔️ **Ladder Challenge!** **{my['name']}** vs **{opp['name']}** — Match #{m['match_id']}.\n<@{ctx.author.id}> vs <@{opp['owner_id']}>, get ready to pick your XIs!")
+        self.bot.dispatch("start_tournament_match", ctx.channel, ctx.author.id, tourney, m)
+
+    @tournament.command(name="ratings", aliases=["ladder", "elo"], help="[Conquest] The live rating ladder.\nUsage: tournament ratings")
+    async def t_ratings(self, ctx):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        if not is_rating_tournament(tourney):
+            return await ctx.send("❌ The rating ladder is a **Conquest League** feature. Use `cvt standings`.")
+        await ctx.send(embed=rating_board_embed(tourney))
+
+    @tournament.command(name="end_league", aliases=["endleague", "finish_league"], help="[MANAGER/Conquest] Close the ladder and generate the Top-4 playoffs.\nUsage: tournament end_league")
+    async def t_end_league(self, ctx):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        if not is_rating_tournament(tourney):
+            return await ctx.send("❌ `end_league` is for the **Conquest League**.")
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        ok, msg = generate_rating_playoffs(tourney)
+        if not ok:
+            return await ctx.send(msg)
+        seeds = tourney.get("playoff_seeds", [])
+        await ctx.send(
+            content=(f"🏆 **{tourney['name']} PLAYOFFS ARE SET!**\nTop 4 by rating: {' · '.join(f'**{s}**' for s in seeds)}\n"
+                     f"The ladder is now closed. Owners: `cvt fixtures`/`cvt play <id>` your semis."),
+            embed=rating_bracket_embed(tourney),
+        )
+
+    @tournament.command(name="trade", help="[OWNER] Propose a player-for-player trade (both owners + a manager confirm).\nUsage: tournament trade \"<other team>\" | <my player>, ... | <their player>, ...")
+    async def t_trade(self, ctx, *, spec: str):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        if tourney["status"] not in ("active", "registration"):
+            return await ctx.send("❌ Trades are only allowed while the tournament is running.")
+        parts = [s.strip() for s in spec.split("|")]
+        if len(parts) != 3:
+            return await ctx.send("❌ Format: `cvt trade \"<other team>\" | <my players> | <their players>`\n"
+                                  "Players comma-separated. Example: `cvt trade \"Team B\" | Rohit, Bumrah | Kohli`")
+        other_name, my_raw, their_raw = parts
+        other_name = other_name.strip().strip('"')
+        my_team = next((t for t in tourney["teams"] if t.get("owner_id") == str(ctx.author.id)), None)
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
+        if not my_team and not is_mgr:
+            return await ctx.send("❌ You don't own a team here.")
+        other = next((t for t in tourney["teams"] if t["name"].lower() == other_name.lower()), None)
+        if not other: return await ctx.send(f"❌ Team **{other_name}** not found.")
+        if my_team and my_team["name"] == other["name"]:
+            return await ctx.send("❌ You can't trade with yourself.")
+        if my_team is None:
+            return await ctx.send("❌ Only a team owner can propose a trade.")
+
+        def _resolve(raw, squad):
+            found, missing = [], []
+            for nm in [x.strip() for x in raw.split(",") if x.strip()]:
+                p = next((x for x in squad if x["name"].lower() == nm.lower()), None)
+                if p: found.append(p)
+                else: missing.append(nm)
+            return found, missing
+        my_players, m1 = _resolve(my_raw, my_team.get("squad", []))
+        their_players, m2 = _resolve(their_raw, other.get("squad", []))
+        if m1 or m2:
+            return await ctx.send("❌ Not found — " + ", ".join(f"**{x}**" for x in m1 + m2) +
+                                  f"\n(check each player is in the right squad: yours = {my_team['name']}, theirs = {other['name']})")
+        if not my_players or not their_players:
+            return await ctx.send("❌ Both sides must send at least one player.")
+        # squad-size + live-match guards
+        min_s = tourney.get("min_squad", 11)
+        if len(my_team["squad"]) - len(my_players) + len(their_players) < min_s:
+            return await ctx.send(f"❌ **{my_team['name']}** would fall below the {min_s}-player minimum.")
+        if len(other["squad"]) - len(their_players) + len(my_players) < min_s:
+            return await ctx.send(f"❌ **{other['name']}** would fall below the {min_s}-player minimum.")
+        for tm in (my_team, other):
+            for cid, mt in list(active_games.items()):
+                if getattr(mt, "tournament_server_id", None) == server_id and tm["name"] in (mt.team1.get("name"), mt.team2.get("name")):
+                    return await ctx.send(f"❌ **{tm['name']}** is in a live match right now — finish it before trading.")
+
+        give = ", ".join(f"**{p['name']}**" for p in my_players)
+        get = ", ".join(f"**{p['name']}**" for p in their_players)
+        summary = f"🔁 **Trade proposal**\n**{my_team['name']}** sends: {give}\n**{other['name']}** sends: {get}"
+        # Owner B confirmation, then manager approval, both via SquadConfirmView.
+        vb = SquadConfirmView(int(other["owner_id"]))
+        pb = await ctx.send(summary + f"\n\n<@{other['owner_id']}> — do you **accept** this trade?", view=vb)
+        await vb.wait()
+        if not vb.value:
+            return await pb.edit(content=summary + "\n\n❌ The other owner declined (or it timed out).", view=None)
+        # manager approval — any manager/admin may approve (custom interaction check)
+        mgr_ids = set(tourney.get("managers", [])) | {str(ADMIN_DISCORD_ID)}
+        vm = SquadConfirmView(None)
+        async def _mgr_check(inter):
+            allowed = (str(inter.user.id) in mgr_ids) or inter.user.guild_permissions.administrator
+            if not allowed:
+                await inter.response.send_message("❌ A manager must approve this trade.", ephemeral=True)
+            return allowed
+        vm.interaction_check = _mgr_check
+        pm = await ctx.send(summary + "\n\n🧑‍⚖️ A **manager** must approve — accept to finalise.", view=vm)
+        await vm.wait()
+        if not vm.value:
+            return await pm.edit(content=summary + "\n\n❌ No manager approved (or it timed out).", view=None)
+        # execute
+        for p in my_players:
+            my_team["squad"].remove(p); other["squad"].append(p)
+        for p in their_players:
+            other["squad"].remove(p); my_team["squad"].append(p)
+        # scrub traded-away players from each team's default XI / impact
+        def _scrub(team, gone):
+            names = {p["name"] for p in gone}
+            if team.get("default_xi") and any(n in names for n in team["default_xi"]):
+                team.pop("default_xi", None); team.pop("default_captain", None)
+            if team.get("default_impact"):
+                team["default_impact"] = [n for n in team["default_impact"] if n not in names]
+        _scrub(my_team, my_players); _scrub(other, their_players)
+        save_tournament(tourney)
+        await pm.edit(content=summary + "\n\n✅ **Trade complete!** Squads updated.", view=None)
+
+    @tournament.command(name="boost", help="[OWNER] Spend credits to boost a squad player's bat/bowl (+1).\nUsage: tournament boost \"<player>\" <bat|bowl>")
+    async def t_boost(self, ctx, player_name: str, skill: str):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        team = next((t for t in tourney["teams"] if t.get("owner_id") == str(ctx.author.id)), None)
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
+        if not team:
+            if is_mgr:
+                return await ctx.send("❌ Managers: run boosts from the owning account, or use `cvt boost_team \"<team>\" ...` (owner-driven by design).")
+            return await ctx.send("❌ You don't own a team here.")
+        for cid, mt in list(active_games.items()):
+            if getattr(mt, "tournament_server_id", None) == server_id and team["name"] in (mt.team1.get("name"), mt.team2.get("name")):
+                return await ctx.send(f"❌ **{team['name']}** is in a live match — boost after it finishes.")
+        ok, msg = apply_boost(tourney, team, player_name, skill)
+        if ok:
+            save_tournament(tourney)
+        await ctx.send(msg)
+
+    @tournament.command(name="credits", aliases=["cr"], help="View a team's credit balance (earn by playing — weak teams earn more).\nUsage: tournament credits [team]")
+    async def t_credits(self, ctx, *, team_name: str = None):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        if team_name:
+            team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.strip().lower()), None)
+        else:
+            team = next((t for t in tourney["teams"] if t.get("owner_id") == str(ctx.author.id)), None)
+        if not team: return await ctx.send("❌ Team not found (specify one: `cvt credits <team>`).")
+        e = discord.Embed(title=f"💰 {team['name']} — Credits", color=discord.Color.gold())
+        e.description = (f"**Balance: {team.get('credits', 0)}** credits\n\n"
+                         f"Earn by playing — **weak teams earn more**, and beating a *stronger* team pays a big bonus. "
+                         f"Spend **{BOOST_COST}** on `cvt boost` for +1 to a player (max +{BOOST_MAX_PER_PLAYER}/player, +{BOOST_MAX_PER_TEAM}/squad).")
+        await ctx.send(embed=e)
+
+    @tournament.command(name="boosts", help="View a team's applied player boosts.\nUsage: tournament boosts [team]")
+    async def t_boosts(self, ctx, *, team_name: str = None):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        if team_name:
+            team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.strip().lower()), None)
+        else:
+            team = next((t for t in tourney["teams"] if t.get("owner_id") == str(ctx.author.id)), None)
+        if not team: return await ctx.send("❌ Team not found (specify one: `cvt boosts <team>`).")
+        lines, total = [], 0
+        for p in team.get("squad", []):
+            bb, bo = p.get("tboost_bat", 0), p.get("tboost_bowl", 0)
+            if bb or bo:
+                bits = []
+                if bb: bits.append(f"batting +{bb}")
+                if bo: bits.append(f"bowling +{bo}")
+                lines.append(f"• **{p['name']}** — {', '.join(bits)}")
+                total += bb + bo
+        e = discord.Embed(title=f"⬆️ {team['name']} — Player Boosts",
+                          description="\n".join(lines) if lines else "*No boosts applied yet.*",
+                          color=discord.Color.from_rgb(90, 40, 160))
+        e.set_footer(text=f"{total}/{BOOST_MAX_PER_TEAM} squad boosts used · {team.get('credits', 0)} credits left")
+        await ctx.send(embed=e)
 
     @tournament.command(name="simulate_all", aliases=["simall"], help="[OWNER] Instantly simulate all pending tournament matches.\nUsage: tournament simulate_all")
     async def t_simulate_all(self, ctx):
@@ -11349,8 +11670,8 @@ class PrefixCog(commands.Cog):
                 fit = _available(squad)
                 dxi = resolve_default_xi(tdata, fit)
                 if dxi:
-                    return with_captain(apply_server_overrides(dxi, tourney["server_id"]))
-                return with_captain(_batting_order(_best_xi(apply_server_overrides(fit, tourney["server_id"]))))
+                    return with_captain(apply_tournament_boosts(apply_server_overrides(dxi, tourney["server_id"])))
+                return with_captain(apply_tournament_boosts(_batting_order(_best_xi(apply_server_overrides(fit, tourney["server_id"])))))
             roster1 = _sim_roster(t1_data, s1)
             roster2 = _sim_roster(t2_data, s2)
             # Use the match's assigned conditions if valid; otherwise pick a fully random
@@ -11504,8 +11825,8 @@ class PrefixCog(commands.Cog):
             fit = _available(tdata.get("squad", []))
             dxi = resolve_default_xi(tdata, fit)
             if dxi:
-                return with_captain(apply_server_overrides(dxi, server_id)), "default XI"
-            return with_captain(_batting_order(_best_xi(apply_server_overrides(fit, server_id)))), "best XI"
+                return with_captain(apply_tournament_boosts(apply_server_overrides(dxi, server_id))), "default XI"
+            return with_captain(apply_tournament_boosts(_batting_order(_best_xi(apply_server_overrides(fit, server_id))))), "best XI"
 
         roster1, src1 = _sim_roster(t1_data)
         roster2, src2 = _sim_roster(t2_data)
@@ -12354,6 +12675,52 @@ class PrefixCog(commands.Cog):
         save_tournament(tourney)
         await ctx.send(f"✅ {label} logo for **{team['name']}** set to {raw} — used in {where}.")
 
+    @tournament.command(name="set_scoreboard_logo", aliases=["scoreboard_logo", "set_logo", "center_logo"], help="[MANAGER] Set the centre logo on the default scoreboard.\nUsage: cvt set_scoreboard_logo custom <emoji_or_url>  (or attach an image)\n       cvt set_scoreboard_logo default   (revert to the CricVerse logo)")
+    async def t_set_scoreboard_logo(self, ctx, mode: str = "custom", *, value: str = None):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney:
+            return await ctx.send("❌ No tournament exists.")
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
+        if not is_mgr:
+            return await ctx.send("❌ Managers only.")
+
+        mode = (mode or "custom").lower()
+        if mode in ("default", "reset", "clear", "remove", "cricverse", "none", "off"):
+            tourney.pop("scoreboard_logo", None)
+            save_tournament(tourney)
+            return await ctx.send("✅ Scoreboard centre logo reset to the **default CricVerse logo**.")
+        if mode != "custom":
+            return await ctx.send("❌ First argument must be `custom` or `default`.\nUsage: `cvt set_scoreboard_logo custom <emoji_or_url>` (or attach an image) · `cvt set_scoreboard_logo default`")
+
+        if ctx.message.attachments:
+            att = ctx.message.attachments[0]
+            if not (att.content_type and att.content_type.startswith("image/")):
+                return await ctx.send("❌ Attachment must be an image file.")
+            try:
+                img_bytes = await att.read()
+                import base64 as _b64
+                mime = att.content_type.split(";")[0]
+                tourney["scoreboard_logo"] = f"data:{mime};base64,{_b64.b64encode(img_bytes).decode()}"
+            except Exception:
+                tourney["scoreboard_logo"] = att.url
+            save_tournament(tourney)
+            return await ctx.send("✅ Custom scoreboard centre logo set from uploaded image.")
+        if not value:
+            return await ctx.send("❌ Provide an emoji, a URL, or attach an image — or use `cvt set_scoreboard_logo default` to revert.")
+        import re as _re
+        raw = value.strip()
+        if raw.startswith("http://") or raw.startswith("https://"):
+            tourney["scoreboard_logo"] = raw
+        else:
+            if not _re.match(r'<a?:\w+:\d+>', raw):
+                ge = discord.utils.get(ctx.guild.emojis, name=raw.strip(':'))
+                if ge:
+                    raw = str(ge)
+            tourney["scoreboard_logo"] = raw
+        save_tournament(tourney)
+        await ctx.send(f"✅ Custom scoreboard centre logo set to {raw}.")
+
     @tournament.command(name="set_injury_channel", help="[MANAGER] Set this channel as the injury report channel.\nUsage: tournament set_injury_channel")
     async def t_set_injury_channel(self, ctx):
         server_id = str(ctx.guild.id)
@@ -13022,6 +13389,16 @@ class PrefixCog(commands.Cog):
                    "**6.** after the Final: `cvt end_season` → archive + slot freed for next season"),
             inline=False,
         )
+        embed.add_field(
+            name="🟣 Conquest League (CQL) — open rating ladder",
+            value=("**1.** `cvt start rating` → registration · `cvt add_team \"<team>\" @owner` · owners `cvt ss`\n"
+                   "**2.** `cvt start` → ladder goes live (every team at 1000)\n"
+                   "**3.** owners `cvt challenge \"<team>\"` — play anyone, anytime · `cvt ratings` for the ladder\n"
+                   "**4.** beat *stronger* teams to climb — grinding/farming does nothing\n"
+                   "**5.** `cvt trade` (owners+mgr confirm) · `cvt boost` (spend credits, weak teams earn more) · `cvt credits`\n"
+                   "**6.** a manager `cvt end_league` → Top-4 playoffs (≥10 games to qualify) → champion"),
+            inline=False,
+        )
         embed.add_field(name="🛠️ Setup", value="`create` · `add_team` · `add_manager` · `submit_squad`/`ss` · `duplicates`/`dupes` (players in 2+ squads) · `fill_squads <cap>` (auto-fill under-min squads) · `set_default_xi`/`sdxi` (paste once, reuse every match) · `start` · `set_team_logo` · `set_team_color`", inline=False)
         embed.add_field(
             name="🏏 Play your matches",
@@ -13043,6 +13420,11 @@ class PrefixCog(commands.Cog):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney: return await ctx.send("❌ No tournament exists.")
+
+        # Conquest League: the standings ARE the Elo rating ladder.
+        if tourney.get("tournament_type") == "rating":
+            from rating_league import rating_board_embed
+            return await ctx.send(embed=rating_board_embed(tourney))
 
         # T20 World Cup standings
         if tourney.get("tournament_type") == "t20_world_cup":
