@@ -24,7 +24,7 @@ DSL_ODI_WKT_TRIM = 0.86
 # proportional counterweights (both teams get them when chasing, so strong-vs-weak
 # is untouched, and low-wear roads are barely touched while crumbling decks get real help):
 ODI_WEAR_CARRY     = 0.65   # fraction of innings-1 wear the chase inherits (was 1.0)
-ODI_CHASE_RELIEF_K = 0.08   # innings-2 wicket relief per point of wear susceptibility
+ODI_CHASE_RELIEF_K = 0.062  # innings-2 wicket relief per point of wear susceptibility
 # Tuned low vs the old (dot=50, wkt=3) baseline, which never bowled teams out
 # and produced 370-run innings. Higher wicket base lets innings actually end.
 # ODI is a singles/strike-rotation game: ~46% dot, ~37% single, only ~10-11%
@@ -56,6 +56,55 @@ WEAR_SUSCEPT = {
 }
 # Run-out share of all dismissals (slightly higher than T20 — more running).
 ODI_RUNOUT_SHARE = 0.075
+
+# ── CRUISE CONTROL (chase realism) ────────────────────────────────────────────
+# Audit finding: successful ODI chases finished 8-11 OVERS early (65 balls to
+# spare on Hard) because the chasing side batted at full first-innings aggression
+# regardless of a modest ask. Real ODI chases are knocked off calmly, ~46-48 ov
+# (15-25 balls left). When comfortably AHEAD of the required rate, the batters
+# rotate strike instead of blasting: boundaries down, ones/twos up, and — since
+# they take no risks — fewer wickets, so a cruise doesn't tip into a collapse.
+# Off in the last 5 overs (finish it) and whenever the ask is live.
+ODI_CRUISE_K       = 0.34   # damp strength per run/over of cushion (crr − rrr)
+ODI_CRUISE_MAX     = 2.6    # cap the cushion so a tiny chase doesn't freeze
+ODI_CRUISE_RRR_MAX = 7.0    # only cruise when the ask itself is below this rpo
+
+# ── TAIL STRIKE MANAGEMENT (farming/shielding) ────────────────────────────────
+# Ported from the T20 engine — matters MORE over 50 overs (tails face 55-90 balls
+# a match). The TAIL hunts a single to hand the recognised batter strike (but not
+# off the over's last ball — a dot there keeps his partner on strike via the
+# end-change), while the BATTER shields him: declines early-over singles, cashes
+# boundaries, and takes one off the last ball to keep strike. Weight nudges, not
+# scripts. DISABLED in the clutch (last 18 balls / ≤15 needed) — the run is always
+# taken then no matter who's at the other end.
+ODI_TAIL_BAT_MAX       = 60
+ODI_SHIELD_SINGLE      = 1.45   # tail on strike, balls 1-5: hunt the single
+ODI_SHIELD_BND         = 0.75   #   ...and don't slog
+ODI_SHIELD_WKT         = 0.90
+ODI_SHIELD_LAST_SINGLE = 0.60   # tail, last ball: DON'T take one (keep partner on strike)
+ODI_FARM_SINGLE        = 0.65   # batter with tail behind, balls 1-5: decline the single
+ODI_FARM_BND           = 1.12
+ODI_FARM_LAST_SINGLE   = 1.60   # batter, last ball: take ONE to keep strike
+ODI_STRIKE_MGMT_BALLS  = 18     # chase gate: off when ≤ this many balls left
+ODI_STRIKE_MGMT_RUNS   = 15     # chase gate: off when ≤ this many runs needed
+
+# ── BOWLER-TYPE STRIKE IDENTITY ── {pitch: (favoured, fav_mult, other_mult)}
+# On a turner the spinner out-strikes; on a green top pace does. Paired so the
+# pitch's total wicket rate stays neutral (other_mult tuned for spin bowling ~44%
+# of the balls / pace ~56%). Ported from the T20 engine.
+ODI_TYPE_STRIKE = {
+    "Turning": ("Spin", 1.20, 0.85), "Dusty": ("Spin", 1.16, 0.88),
+    "Worn":    ("Spin", 1.13, 0.90), "Dry":  ("Spin", 1.09, 0.93), "Slow": ("Spin", 1.10, 0.92),
+    "Green":   ("Pace", 1.16, 0.79), "Damp": ("Pace", 1.13, 0.83),
+    "Bouncy":  ("Pace", 1.11, 0.86), "Hard": ("Pace", 1.06, 0.93),
+}
+
+
+def _odi_is_tail(p):
+    """Genuine tailender: a pure Bowler-role player (all-rounders excluded) batting
+    at or below ODI_TAIL_BAT_MAX."""
+    role = p.get("role", "")
+    return "Bowler" in role and "All-Rounder" not in role and float(p.get("bat", 50)) <= ODI_TAIL_BAT_MAX
 # Overstepping no-ball chance per delivery. Real ODIs see well under 1 no-ball an
 # innings; the old 1% + the AI bowling into the 2nd-bouncer rule produced ~14 per
 # innings (≈35 runs of hidden par inflation, free-hit spree included).
@@ -675,6 +724,19 @@ def execute_ball_math_odi(match):
     if wicket_weight > ODI_BASE_WKT:
         wicket_weight = ODI_BASE_WKT + (wicket_weight - ODI_BASE_WKT) * ODI_WKT_COMPRESS
 
+    # ── BOWLER-TYPE STRIKE IDENTITY ── post-compressor so it isn't flattened:
+    # on a turner the spinner hunts while the seamer contains (vice versa on a
+    # green top). Mild paired multipliers keep the pitch's total wicket rate
+    # ~neutral — the SHARE moves, par doesn't. (Ported from the T20 engine.)
+    _ts = ODI_TYPE_STRIKE.get(match.pitch)
+    if _ts:
+        _fav, _fmul, _omul = _ts
+        _role = bowler["role"]
+        if _fav in _role:
+            wicket_weight *= _fmul
+        elif "Pace" in _role or "Spin" in _role:
+            wicket_weight *= _omul
+
     # ── 2.0 BATTING MOMENTUM ──
     # New batsman vulnerable until set, set batsman dangerous. Post-compressor
     # because it's about the player, not the conditions. ODI batsmen take longer
@@ -763,6 +825,18 @@ def execute_ball_math_odi(match):
         if is_collapse: boundary_weight *= 0.7; wicket_weight *= 0.75; single_weight *= 1.2
         if is_set_partnership: wicket_weight *= 0.85
         if has_wickets_in_hand: boundary_weight *= 1.2; wicket_weight *= 1.15; dot_weight *= 0.75
+
+        # ── CRUISE CONTROL ── comfortably ahead of the ask → bat calmly (see constants).
+        if (match.current_innings_num == 2 and balls_left > 0 and not is_death_overs
+                and total_balls >= 30 and not is_collapse):
+            _crr = innings.total_runs / total_balls * 6.0 if total_balls else 0.0
+            _rrr = runs_needed / balls_left * 6.0
+            if _rrr < _crr and _rrr < ODI_CRUISE_RRR_MAX:
+                _damp = min(ODI_CRUISE_MAX, _crr - _rrr) * ODI_CRUISE_K
+                boundary_weight *= max(0.42, 1.0 - _damp)
+                single_weight   *= (1.0 + _damp * 0.6)
+                dot_weight      *= (1.0 + _damp * 0.30)
+                wicket_weight   *= max(0.70, 1.0 - _damp * 0.45)
             
         active_multiplier = pressure_multiplier
         if is_death_overs:
@@ -780,7 +854,35 @@ def execute_ball_math_odi(match):
                 wicket_weight *= (1.0 + (active_multiplier - 1.0) * 0.8)
                 
         if innings.last_ball_boundary: boundary_weight *= 1.15; wicket_weight *= 1.15
-            
+
+        # ── TAIL STRIKE MANAGEMENT ── (see constants) gated OFF in clutch chases.
+        _mgmt_on = True
+        if match.current_innings_num == 2 and balls_left > 0:
+            if balls_left <= ODI_STRIKE_MGMT_BALLS or runs_needed <= ODI_STRIKE_MGMT_RUNS:
+                _mgmt_on = False
+        if _mgmt_on:
+            try:
+                _ns = innings.batting_team["players"][innings.current_non_striker_idx]
+                _ns_live = innings.batting_stats[_ns["name"]].dismissal == "not out"
+            except Exception:
+                _ns_live = False
+            if _ns_live:
+                _last_ball = (total_balls % 6 == 5)
+                _st_tail, _ns_tail = _odi_is_tail(striker), _odi_is_tail(_ns)
+                if _st_tail and not _ns_tail:
+                    if _last_ball:
+                        single_weight *= ODI_SHIELD_LAST_SINGLE
+                    else:
+                        single_weight *= ODI_SHIELD_SINGLE
+                        boundary_weight *= ODI_SHIELD_BND
+                        wicket_weight *= ODI_SHIELD_WKT
+                elif _ns_tail and not _st_tail:
+                    if _last_ball:
+                        single_weight *= ODI_FARM_LAST_SINGLE
+                    else:
+                        single_weight *= ODI_FARM_SINGLE
+                        boundary_weight *= ODI_FARM_BND
+
     if "Mystery" in deliv:
         wicket_weight *= 1.6
         dot_weight *= 1.5

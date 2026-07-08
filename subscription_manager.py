@@ -192,12 +192,27 @@ def get_today_str():
 def reset_daily_quotas():
     today = get_today_str()
     updated = False
+    # Auto-expire timed subscriptions (giveaways etc.): any user sub whose `expires`
+    # date has passed is dropped here — so a month-long grant removes itself with no
+    # manual cleanup. Runs on every get_tier_status/quota check (i.e. whenever the
+    # bot is used), so expired rows vanish lazily but reliably.
+    before = len(DB_CACHE["user_subs"])
+    DB_CACHE["user_subs"] = [u for u in DB_CACHE["user_subs"]
+                             if not (u.get("expires") and u["expires"] < today)]
+    if len(DB_CACHE["user_subs"]) != before:
+        updated = True
     for u in DB_CACHE["user_subs"]:
         if u.get("last_reset") != today:
             u["sims_used"] = 0
             u["server_daily_used"] = 0
             u["last_reset"] = today
             updated = True
+    # Auto-expire timed SERVER subs too (same mechanism as user subs).
+    _sbefore = len(DB_CACHE["server_subs"])
+    DB_CACHE["server_subs"] = [s for s in DB_CACHE["server_subs"]
+                               if not (s.get("expires") and s["expires"] < today)]
+    if len(DB_CACHE["server_subs"]) != _sbefore:
+        updated = True
     for s in DB_CACHE["server_subs"]:
         if s.get("last_reset") != today:
             s["sims_used"] = 0
@@ -277,36 +292,84 @@ def consume_quota(user_id: str, server_id: str, format_val: str, admin_discord_i
 
     return False, "❌ **Access Denied:** You have exhausted your daily limit, or your tier restricts this format. Please contact **frenzy_guy** to upgrade."
 
-def update_user_tier(user_id: str, tier_value: str, tier_name: str, mention: str):
+def update_user_tier(user_id: str, tier_value: str, tier_name: str, mention: str, days: int = 0):
+    """Assign/remove a user's tier. days>0 → auto-expires after that many days
+    (removed by reset_daily_quotas — no manual cleanup); days<=0 → permanent."""
     global DB_CACHE
     DB_CACHE["user_subs"] = [u for u in DB_CACHE["user_subs"] if u["user_id"] != user_id]
     if tier_value == "None":
         msg = f"🚫 Removed subscription from {mention}."
     else:
-        DB_CACHE["user_subs"].append({
+        row = {
             "user_id": user_id,
             "tier": tier_value,
             "sims_used": 0,
             "server_daily_used": 0,
             "last_reset": get_today_str()
-        })
-        msg = f"✅ Assigned **{tier_name}** tier to {mention}."
+        }
+        if days and days > 0:
+            row["expires"] = (datetime.date.today() + datetime.timedelta(days=days)).isoformat()
+            msg = f"✅ Assigned **{tier_name}** tier to {mention} — auto-expires on **{row['expires']}** ({days} days)."
+        else:
+            msg = f"✅ Assigned **{tier_name}** tier to {mention}."
+        DB_CACHE["user_subs"].append(row)
     async_save_to_bin()
     return msg
 
-def update_server_tier(server_id: str, tier_value: str, tier_name: str):
+def bulk_grant_tier(user_ids, tier_value: str, days: int = 0):
+    """Grant one tier to many users at once, optionally with an auto-expiry.
+    days>0 → expires that many days from today (auto-removed by reset_daily_quotas);
+    days<=0 → permanent. Existing subs for those users are replaced. Returns
+    (granted_count, expires_str_or_None)."""
+    global DB_CACHE
+    ids = {str(u) for u in user_ids}
+    if not ids:
+        return 0, None
+    expires = None
+    if days and days > 0:
+        expires = (datetime.date.today() + datetime.timedelta(days=days)).isoformat()
+    # Drop any existing sub for these users, then re-add fresh.
+    DB_CACHE["user_subs"] = [u for u in DB_CACHE["user_subs"] if u["user_id"] not in ids]
+    for uid in ids:
+        row = {"user_id": uid, "tier": tier_value, "sims_used": 0,
+               "server_daily_used": 0, "last_reset": get_today_str()}
+        if expires:
+            row["expires"] = expires
+        DB_CACHE["user_subs"].append(row)
+    async_save_to_bin()
+    return len(ids), expires
+
+
+def list_expiring_subs():
+    """[(kind, id, tier, expires)] for every timed sub (user + server), soonest first.
+    kind is "user" or "server"."""
+    rows = [("user", u["user_id"], u["tier"], u["expires"])
+            for u in DB_CACHE["user_subs"] if u.get("expires")]
+    rows += [("server", s["server_id"], s["tier"], s["expires"])
+             for s in DB_CACHE["server_subs"] if s.get("expires")]
+    return sorted(rows, key=lambda r: r[3])
+
+
+def update_server_tier(server_id: str, tier_value: str, tier_name: str, days: int = 0):
+    """Assign/remove a server's tier. days>0 → auto-expires after that many days
+    (removed by reset_daily_quotas); days<=0 → permanent."""
     global DB_CACHE
     DB_CACHE["server_subs"] = [s for s in DB_CACHE["server_subs"] if s["server_id"] != server_id]
     if tier_value == "None":
         msg = f"🚫 Removed subscription from Server ID `{server_id}`."
     else:
-        DB_CACHE["server_subs"].append({
+        row = {
             "server_id": server_id,
             "tier": tier_value,
             "sims_used": 0,
             "last_reset": get_today_str()
-        })
-        msg = f"✅ Assigned **{tier_name}** tier to Server `{server_id}`."
+        }
+        if days and days > 0:
+            row["expires"] = (datetime.date.today() + datetime.timedelta(days=days)).isoformat()
+            msg = f"✅ Assigned **{tier_name}** tier to Server `{server_id}` — auto-expires on **{row['expires']}** ({days} days)."
+        else:
+            msg = f"✅ Assigned **{tier_name}** tier to Server `{server_id}`."
+        DB_CACHE["server_subs"].append(row)
     async_save_to_bin()
     return msg
 

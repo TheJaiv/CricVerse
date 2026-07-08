@@ -50,6 +50,7 @@ from subscription_manager import (
     save_data_to_bin, save_tournament_data_to_bin,
     check_potential_quota, consume_quota,
     update_user_tier, update_server_tier, get_auth_admins, toggle_auth_admin,
+    bulk_grant_tier, list_expiring_subs,
     get_all_players, add_player, add_players_bulk, update_player, delete_players, clean_duplicate_players,
     get_tier_status, is_channel_restricted, toggle_restricted_channel,
     is_ratings_channel, toggle_ratings_channel,
@@ -2353,89 +2354,256 @@ def generate_scorecard_from_data(data: dict) -> io.BytesIO:
             print(f"⚠️ Crimson Cricket scoreboard error: {e}. Falling back to default.")
             pass
 
-    # Dark blurred stadium/background proxy
-    img = Image.new("RGB", (1200, 900), color="#101820") 
-    d = ImageDraw.Draw(img)
+    # ── Default "broadcast" scoreboard ───────────────────────────────
+    # Side-by-side two-team layout: white header (team names + crests +
+    # centre logo), format bar, split score band, batter grids, bowler
+    # grids, then a navy result/POTM footer. Left column = batting-first
+    # team (t1) + the bowlers who bowled to it; right column = t2.
+    W, H = 1200, 820
+    img = Image.new("RGB", (W, H), "#FFFFFF")
+    d   = ImageDraw.Draw(img)
 
-    try:
-        font_huge = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 46)
-        font_large = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 36)
-        font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 28)
-        font_bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 22)
-        font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 18)
-    except:
-        font_huge = font_large = font_title = font_bold = font_small = ImageFont.load_default()
+    # Fonts — prefer bundled DejaVu (Linux host), fall back to macOS/Windows,
+    # then PIL's default so a missing font never crashes the render.
+    def _font(size, bold=True):
+        cands = ([
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+            "/Library/Fonts/Arial Bold.ttf",
+            "C:/Windows/Fonts/arialbd.ttf",
+        ] if bold else [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/Library/Fonts/Arial.ttf",
+            "C:/Windows/Fonts/arial.ttf",
+        ])
+        for p in cands:
+            try: return ImageFont.truetype(p, size)
+            except Exception: continue
+        return ImageFont.load_default()
+
+    f_name   = _font(42)   # team names in the header
+    f_score  = _font(46)   # big score
+    f_bar    = _font(22)   # format bar
+    f_ovr    = _font(16, bold=False)
+    f_col    = _font(16)   # column headers
+    f_player = _font(22)   # batter/bowler names
+    f_runs   = _font(22)
+    f_balls  = _font(17, bold=False)
+    f_foot   = _font(24)
+    f_micro  = _font(15, bold=False)
 
     def get_tw(text, font):
         if hasattr(font, 'getbbox'): return font.getbbox(text)[2]
         return len(text) * 12
-        
-    c_panel_bg = "#F8F9FA"
-    c_header = "#0B2B5C"
-    c_team_bar = "#1DA1F2"
-    c_grid_line = "#E2E8F0"
-    c_text_navy = "#0F172A"
-    c_text_grey = "#64748B"
+
+    def _th(font):
+        if hasattr(font, 'getbbox'):
+            bb = font.getbbox("Ag"); return bb[3] - bb[1]
+        return 14
+
+    def _hex(h, default="#6B7280"):
+        h = (h or default).lstrip("#")
+        try: return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+        except Exception: return (107, 114, 128)
+
+    c_navy  = "#0A0F24"
     c_white = "#FFFFFF"
-    
-    # Main Panel Rounding Setup (100px padding left/right)
-    d.rounded_rectangle([(100, 80), (1100, 820)], radius=20, fill=c_panel_bg)
+    c_grid  = "#E6E8EC"
+    c_alt   = "#F4F5F7"
+    c_grey  = "#8A94A6"
+    c_gold  = "#FFD54A"
+    tc1 = _hex(t1_data.get("color"))
+    tc2 = _hex(t2_data.get("color"))
 
-    # 1. Main Header Block (80 to 180px)
-    d.rounded_rectangle([(100, 80), (1100, 200)], radius=20, fill=c_header)
-    d.rectangle([(100, 120), (1100, 180)], fill=c_header) # square bottom for seamless connection
-    
-    d.text((140, 100), tourn_name[:30], fill=c_white, font=font_huge)
-    d.text((140, 145), f"MATCH {match_id} - {format_overs} OVERS", fill="#A5F3FC", font=font_small)
-    d.text((1060 - get_tw("SERVER LOGO", font_bold), 115), "SERVER LOGO", fill=c_white, font=font_bold)
+    def _star(cx, cy, size, fill=c_gold):
+        pts = []
+        for i in range(10):
+            ang = math.pi * i / 5 - math.pi / 2
+            r = size if i % 2 == 0 else size * 0.42
+            pts.append((cx + r * math.cos(ang), cy + r * math.sin(ang)))
+        d.polygon(pts, fill=fill)
 
-    def draw_team_section(td, y_start):
-        d.rectangle([(100, y_start), (1100, y_start + 60)], fill=c_team_bar)
-        d.rectangle([(140, y_start + 18), (170, y_start + 42)], fill=c_header)
-        d.text((185, y_start + 12), td["name"], fill=c_white, font=font_large)
-        if td["yet_to_bat"]:
-            score_txt, overs_txt = "YET TO BAT", ""
+    def _paste_logo(emoji_str, cx, cy, size, fallback_color, fallback_text):
+        """Paste a team crest centred at (cx, cy); draw a colour-disc
+        placeholder with initials when no logo image is available."""
+        logo = None
+        try:
+            logo = _fetch_emoji_img(emoji_str, size) if emoji_str else None
+        except Exception:
+            logo = None
+        x0, y0 = int(cx - size / 2), int(cy - size / 2)
+        if logo:
+            img.paste(logo, (x0, y0), logo)
         else:
-            score_txt = f"{td['runs']}-{td['wickets']}"
-            b = td.get("balls", 0)
-            _ov = f"{b // 6}" if b % 6 == 0 else f"{b // 6}.{b % 6}"
-            overs_txt = f"OVERS {_ov}"
-        sw = get_tw(score_txt, font_huge)
-        d.text((1060 - sw, y_start + 5), score_txt, fill=c_white, font=font_huge)
-        if overs_txt:
-            d.text((1060 - sw - get_tw(overs_txt, font_bold) - 20, y_start + 18), overs_txt, fill=c_white, font=font_bold)
-        g_y = y_start + 60
-        if td["yet_to_bat"]: return
-        d.line([(600, g_y), (600, g_y + 210)], fill=c_grid_line, width=2)
-        d.text((140, g_y + 10), "BATTER", fill=c_text_grey, font=font_small)
-        d.text((490 - get_tw("R", font_small)//2, g_y + 10), "R", fill=c_text_grey, font=font_small)
-        d.text((550 - get_tw("B", font_small)//2, g_y + 10), "B", fill=c_text_grey, font=font_small)
-        for idx, b in enumerate(td["batters"][:4]):
-            r_y = g_y + 40 + idx * 40
-            d.line([(100, r_y), (600, r_y)], fill=c_grid_line, width=1)
-            runs = f"{b['runs']}{'*' if b.get('not_out') else ''}"
-            d.text((140, r_y + 8), b["name"][:16].upper(), fill=c_text_navy, font=font_bold)
-            d.text((490 - get_tw(runs, font_bold)//2, r_y + 8), runs, fill=c_text_navy, font=font_bold)
-            d.text((550 - get_tw(str(b["balls"]), font_small)//2, r_y + 8), str(b["balls"]), fill=c_text_grey, font=font_bold)
-        d.text((640, g_y + 10), "BOWLER", fill=c_text_grey, font=font_small)
-        d.text((950 - get_tw("W-R", font_small)//2, g_y + 10), "W-R", fill=c_text_grey, font=font_small)
-        d.text((1050 - get_tw("O", font_small)//2, g_y + 10), "O", fill=c_text_grey, font=font_small)
-        for idx, bw in enumerate(td["bowlers"][:4]):
-            r_y = g_y + 40 + idx * 40
-            d.line([(600, r_y), (1100, r_y)], fill=c_grid_line, width=1)
-            wr = f"{bw['wickets']}-{bw['runs']}"
-            d.text((640, r_y + 8), bw["name"][:16].upper(), fill=c_text_navy, font=font_bold)
-            d.text((950 - get_tw(wr, font_bold)//2, r_y + 8), wr, fill=c_text_navy, font=font_bold)
-            d.text((1050 - get_tw(bw["overs"], font_small)//2, r_y + 8), bw["overs"], fill=c_text_grey, font=font_bold)
+            d.ellipse([(x0, y0), (x0 + size, y0 + size)], fill=fallback_color)
+            ini = fallback_text[:3].upper()
+            d.text((cx - get_tw(ini, f_col) / 2, cy - _th(f_col) / 2), ini, fill=c_white, font=f_col)
 
-    draw_team_section(t1_data, 180)
-    draw_team_section(t2_data, 450)
+    # ── 1. Header (0–150): crests, team names, centre logo, match no. ──
+    HDR_MID = 78
+    _paste_logo(t1_data.get("logo_emoji"), 95, HDR_MID, 84, tc1, t1_data["name"])
+    _paste_logo(t2_data.get("logo_emoji"), W - 95, HDR_MID, 84, tc2, t2_data["name"])
 
-    d.rounded_rectangle([(100, 720), (1100, 820)], radius=20, fill=c_header)
-    d.rectangle([(100, 720), (1100, 780)], fill=c_header)
-    footer = result_str
-    if potm: footer += f"  •  POTM: {potm.upper()}"
-    d.text((600 - get_tw(footer, font_title)//2, 755), footer, fill=c_white, font=font_title)
+    n1 = t1_data["name"][:16].upper()
+    d.text((155, HDR_MID - _th(f_name) // 2 - 4), n1, fill=c_navy, font=f_name)
+    n2 = t2_data["name"][:16].upper()
+    d.text((W - 155 - get_tw(n2, f_name), HDR_MID - _th(f_name) // 2 - 4), n2, fill=c_navy, font=f_name)
+
+    try:
+        _lp = "assets/logo.png" if os.path.exists("assets/logo.png") else "assets/logo.jpg"
+        _logo = Image.open(_lp).convert("RGBA").resize((104, 104), Image.LANCZOS)
+        _mask = Image.new("L", (104, 104), 0)
+        ImageDraw.Draw(_mask).ellipse((0, 0, 104, 104), fill=255)
+        img.paste(_logo, (W // 2 - 52, HDR_MID - 52), _mask)
+    except Exception:
+        d.ellipse([(W // 2 - 52, HDR_MID - 52), (W // 2 + 52, HDR_MID + 52)],
+                  outline=c_grid, width=3)
+
+    _mno = f"MATCH NO. {match_id}"
+    d.text((W - 12 - get_tw(_mno, f_micro), 10), _mno, fill=c_grey, font=f_micro)
+    _round = str(data.get("round_label") or "").upper()
+    if _round:
+        d.text((12, 10), _round, fill=c_grey, font=f_micro)
+
+    # ── 2. Format bar (150–188) ───────────────────────────────────────
+    BAR_Y1, BAR_Y2 = 150, 188
+    d.rectangle([(0, BAR_Y1), (W, BAR_Y2)], fill="#EEF0F3")
+    _fmt = "T20" if format_overs <= 20 else "ODI"
+    bar_txt = f"SIMULATION MATCH   •   {_fmt} ({format_overs} OVERS)"
+    d.text(((W - get_tw(bar_txt, f_bar)) // 2, BAR_Y1 + (BAR_Y2 - BAR_Y1 - _th(f_bar)) // 2),
+           bar_txt, fill=c_navy, font=f_bar)
+
+    # ── 3. Score band (188–288): left = tc1, right = tc2 ──────────────
+    SB_Y1, SB_Y2 = 188, 288
+    SB_MID = (SB_Y1 + SB_Y2) // 2
+    HALF = W // 2
+    d.rectangle([(0, SB_Y1), (HALF, SB_Y2)], fill=tc1)
+    d.rectangle([(HALF, SB_Y1), (W, SB_Y2)], fill=tc2)
+
+    def _ov_str(td):
+        b = td.get("balls", 0)
+        if td.get("yet_to_bat") or b == 0: return f"{format_overs}.0"
+        return f"{b // 6}.{b % 6}"
+
+    def _draw_bat_icon(cx, cy, col):
+        d.ellipse([(cx - 30, cy - 30), (cx + 30, cy + 30)], fill=c_white)
+        d.line([(cx - 13, cy + 15), (cx + 4, cy - 3)], fill=col, width=9)
+        d.line([(cx + 4, cy - 3), (cx + 12, cy - 11)], fill=col, width=3)
+        d.ellipse([(cx + 10, cy - 14), (cx + 16, cy - 8)], fill=col)
+
+    def _draw_ball_icon(cx, cy, col):
+        d.ellipse([(cx - 30, cy - 30), (cx + 30, cy + 30)], fill=c_white)
+        d.ellipse([(cx - 16, cy - 16), (cx + 16, cy + 16)], fill=col)
+        d.line([(cx - 11, cy - 7), (cx + 11, cy + 9)], fill=c_white, width=2)
+        d.line([(cx - 8, cy - 11), (cx + 9, cy + 2)], fill=c_white, width=1)
+
+    _draw_bat_icon(38, SB_MID, tc1)
+    _draw_ball_icon(W - 38, SB_MID, tc2)
+
+    def _darken(rgb, f=0.62):
+        return tuple(int(c * f) for c in rgb)
+
+    def _draw_score(td, half_x0, icon_side, chip_x, band_rgb):
+        if td.get("yet_to_bat"):
+            s = "YET TO BAT"
+            d.text((half_x0 + (HALF - get_tw(s, f_score)) // 2, SB_MID - _th(f_score) // 2),
+                   s, fill=c_white, font=f_score)
+            return
+        s = f"{td['runs']}-{td['wickets']}"
+        # Score sits toward the outer edge, overs chip toward centre.
+        s_cx = half_x0 + (285 if icon_side == "left" else HALF - 285)
+        d.text((s_cx - get_tw(s, f_score) // 2, SB_MID - _th(f_score) // 2), s, fill=c_white, font=f_score)
+        ov = f"{_ov_str(td)} OVERS"
+        cw = get_tw(ov, f_ovr) + 24
+        cy1, cy2 = SB_MID - 17, SB_MID + 17
+        cx1 = chip_x if icon_side == "left" else chip_x - cw
+        d.rounded_rectangle([(cx1, cy1), (cx1 + cw, cy2)], radius=8, fill=_darken(band_rgb))
+        d.text((cx1 + 12, SB_MID - _th(f_ovr) // 2 - 1), ov, fill=c_white, font=f_ovr)
+
+    _draw_score(t1_data, 0,    "left",  HALF - 150, tc1)
+    _draw_score(t2_data, HALF, "right", HALF + 150, tc2)
+
+    # ── 4 & 5. Stat grids (batters then bowlers) ──────────────────────
+    GRID_ROWS = 4
+    ROW_H = 50
+    HDR_H = 36
+
+    def _grid_col(offset_x):
+        # returns (name_x, mid_col_x, right_col_x) for a half starting at offset_x
+        return offset_x + 40, offset_x + HALF - 150, offset_x + HALF - 55
+
+    def _ip_badge(bx, mid, col):
+        bw = get_tw("IP", f_col) + 8
+        bh = _th(f_col) + 6
+        by = mid - bh // 2
+        d.rounded_rectangle([(bx, by), (bx + bw, by + bh)], radius=3, fill=col)
+        d.text((bx + 4, by + 3), "IP", fill=c_white, font=f_col)
+        return bw + 6
+
+    def _draw_grid(y_top, kind, col1_hdr, col2_hdr):
+        # Header strips (per side, team-coloured)
+        d.rectangle([(0, y_top), (HALF, y_top + HDR_H)], fill=tc1)
+        d.rectangle([(HALF, y_top), (W, y_top + HDR_H)], fill=tc2)
+        hy = y_top + (HDR_H - _th(f_col)) // 2
+        for offset_x in (0, HALF):
+            nx, c1, c2 = _grid_col(offset_x)
+            d.text((nx, hy), "BATTER" if kind == "bat" else "BOWLER", fill=c_white, font=f_col)
+            d.text((c1 - get_tw(col1_hdr, f_col) // 2, hy), col1_hdr, fill=c_white, font=f_col)
+            d.text((c2 - get_tw(col2_hdr, f_col) // 2, hy), col2_hdr, fill=c_white, font=f_col)
+
+        body_top = y_top + HDR_H
+        for i in range(GRID_ROWS):
+            ry = body_top + i * ROW_H
+            if i % 2 == 1:
+                d.rectangle([(0, ry), (W, ry + ROW_H)], fill=c_alt)
+            d.line([(0, ry + ROW_H), (W, ry + ROW_H)], fill=c_grid, width=1)
+        d.line([(HALF, body_top), (HALF, body_top + GRID_ROWS * ROW_H)], fill=c_grid, width=2)
+
+        def _rows(td, offset_x, col):
+            nx, c1, c2 = _grid_col(offset_x)
+            rows = td["batters"][:4] if kind == "bat" else td["bowlers"][:4]
+            ip_name = (td.get("impact_sub") or "").upper()
+            for i, r in enumerate(rows):
+                mid = body_top + i * ROW_H + ROW_H // 2
+                nm = r["name"][:16].upper()
+                d.text((nx, mid - _th(f_player) // 2), nm, fill=c_navy, font=f_player)
+                mx = nx + get_tw(nm, f_player) + 8
+                if ip_name and r["name"].upper() == ip_name:
+                    mx += _ip_badge(mx, mid, col)
+                if potm and r["name"].upper() == potm.upper():
+                    _star(mx + 9, mid, 9)
+                if kind == "bat":
+                    v1 = f"{r['runs']}{'*' if r.get('not_out') else ''}"
+                    v2 = str(r["balls"])
+                else:
+                    v1 = f"{r['wickets']}-{r['runs']}"
+                    v2 = r["overs"]
+                d.text((c1 - get_tw(v1, f_runs) // 2, mid - _th(f_runs) // 2), v1, fill=c_navy, font=f_runs)
+                d.text((c2 - get_tw(v2, f_balls) // 2, mid - _th(f_balls) // 2), v2, fill=c_grey, font=f_balls)
+
+        _rows(t1_data, 0, tc1)
+        _rows(t2_data, HALF, tc2)
+        return body_top + GRID_ROWS * ROW_H
+
+    bat_bottom = _draw_grid(SB_Y2, "bat", "R", "B")
+    bwl_bottom = _draw_grid(bat_bottom, "bowl", "W-R", "O")
+
+    # ── 6. Footer (result + POTM) ─────────────────────────────────────
+    d.rectangle([(0, bwl_bottom), (W, H)], fill=c_navy)
+    fy = bwl_bottom + (H - bwl_bottom - _th(f_foot)) // 2
+    if potm:
+        sep = "   |   "
+        potm_txt = f"POTM: {potm.upper()}"
+        total = get_tw(result_str, f_foot) + get_tw(sep, f_foot) + get_tw(potm_txt, f_foot)
+        cx = (W - total) // 2
+        d.text((cx, fy), result_str, fill=c_white, font=f_foot)
+        cx += get_tw(result_str, f_foot)
+        d.text((cx, fy), sep, fill=c_grey, font=f_foot)
+        cx += get_tw(sep, f_foot)
+        d.text((cx, fy), potm_txt, fill=c_gold, font=f_foot)
+    else:
+        d.text(((W - get_tw(result_str, f_foot)) // 2, fy), result_str, fill=c_white, font=f_foot)
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -8026,10 +8194,11 @@ async def log_db_update(action: str, player_name: str, user: discord.User, detai
     app_commands.Choice(name="Career Beta (Career Mode Access)", value="Career Beta"),
     app_commands.Choice(name="None (Remove)", value="None")
 ])
-async def set_user_tier_cmd(interaction: discord.Interaction, user: discord.Member, tier: app_commands.Choice[str]):
+@app_commands.describe(days="Optional: auto-remove the tier after this many days (0/blank = permanent).")
+async def set_user_tier_cmd(interaction: discord.Interaction, user: discord.Member, tier: app_commands.Choice[str], days: int = 0):
     if interaction.user.id != ADMIN_DISCORD_ID:
         return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
-    msg = update_user_tier(str(user.id), tier.value, tier.name, user.mention)
+    msg = update_user_tier(str(user.id), tier.value, tier.name, user.mention, days=days)
     await interaction.response.send_message(msg, ephemeral=True)
 
 @bot.tree.command(name="set_server_tier", description="[OWNER] Assign a subscription tier to a server.")
@@ -8040,10 +8209,11 @@ async def set_user_tier_cmd(interaction: discord.Interaction, user: discord.Memb
     app_commands.Choice(name="Diamond (Unlimited + Tournament)", value="Diamond"),
     app_commands.Choice(name="None (Remove)", value="None")
 ])
-async def set_server_tier_cmd(interaction: discord.Interaction, server_id: str, tier: app_commands.Choice[str]):
+@app_commands.describe(days="Optional: auto-remove the tier after this many days (0/blank = permanent).")
+async def set_server_tier_cmd(interaction: discord.Interaction, server_id: str, tier: app_commands.Choice[str], days: int = 0):
     if interaction.user.id != ADMIN_DISCORD_ID:
         return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
-    msg = update_server_tier(server_id, tier.value, tier.name)
+    msg = update_server_tier(server_id, tier.value, tier.name, days=days)
     await interaction.response.send_message(msg, ephemeral=True)
 
 # ==========================================
@@ -9328,7 +9498,7 @@ class PrefixCog(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ Error during sync: {e}")
 
-    @commands.command(name="set_user_tier", aliases=["sut"], help="[OWNER] Assign subscription tier to a user.\nUsage: set_user_tier @user <tier>\nTiers: Basic, Standard, Single, Server Pro, Career Beta, None")
+    @commands.command(name="set_user_tier", aliases=["sut"], help="[OWNER] Assign subscription tier to a user (optional auto-expiry).\nUsage: set_user_tier @user <tier> [days]\nTiers: Basic, Standard, Single, Server Pro, Career Beta, None\n`days` optional — e.g. `sut @user Standard 30` auto-removes after 30 days.")
     async def set_user_tier(self, ctx, user: discord.Member, *, tier: str):
         if ctx.author.id != ADMIN_DISCORD_ID:
             return await ctx.send("❌ Owner only.")
@@ -9340,13 +9510,65 @@ class PrefixCog(commands.Cog):
             "Career Beta": "Career Beta (Career Mode Access)",
             "None": "None (Remove)"
         }
+        # Optional trailing day-count: "Standard 30" → 30-day auto-expiry.
+        days = 0
         tier = tier.strip()
+        parts = tier.rsplit(None, 1)
+        if len(parts) == 2 and parts[1].isdigit():
+            tier, days = parts[0].strip(), int(parts[1])
         if tier not in valid:
             return await ctx.send(f"❌ Invalid tier. Choose from: {', '.join(valid.keys())}")
-        msg = update_user_tier(str(user.id), tier, valid[tier], user.mention)
+        msg = update_user_tier(str(user.id), tier, valid[tier], user.mention, days=days)
         await ctx.send(msg)
 
-    @commands.command(name="set_server_tier", aliases=["sst"], help="[OWNER] Assign subscription tier to a server.\nUsage: set_server_tier <server_id> <tier>\nTiers: Bronze, Silver, Gold, Diamond, None")
+    @commands.command(name="giveaway_tier", aliases=["gift_tier", "bulk_tier"], help="[OWNER] Grant a tier to MANY users at once, auto-expiring after N days.\nUsage: giveaway_tier <tier> <days> <@user/id> <@user/id> …  (days=0 = permanent)\nPaste any mix of mentions and raw IDs; they auto-remove when the days run out.")
+    async def giveaway_tier(self, ctx, tier: str, days: int, *, targets: str = ""):
+        if ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("❌ Owner only.")
+        valid = {
+            "Basic": "Basic (1 Sim/Day | T20/ODI)",
+            "Standard": "Standard (1 Sim/Day | All)",
+            "Single": "Single (1 Match Consumable)",
+            "Server Pro": "Server Pro (Unlimited on Silver/Diamond)",
+            "Career Beta": "Career Beta (Career Mode Access)",
+        }
+        tier = tier.strip()
+        if tier not in valid:
+            return await ctx.send(f"❌ Invalid tier. Choose from: {', '.join(valid)} *(cannot bulk-remove; use `None` via set_user_tier)*")
+        # Collect user IDs from mentions AND raw numeric IDs pasted in the message.
+        ids = {str(m.id) for m in ctx.message.mentions}
+        ids |= set(re.findall(r'\b(\d{15,20})\b', targets))
+        if not ids:
+            return await ctx.send("❌ No users found. Paste mentions and/or raw user IDs after the tier & days.\n"
+                                  "Example: `cv giveaway_tier Standard 30 @a @b 123456789012345678`")
+        count, expires = bulk_grant_tier(ids, tier, days)
+        if expires:
+            await ctx.send(f"🎁 Granted **{valid[tier]}** to **{count}** user(s) — auto-expires on **{expires}** "
+                           f"({days} days). No cleanup needed; they'll be removed automatically.\n"
+                           f"-# Check anytime with `cv expiring_tiers`.")
+        else:
+            await ctx.send(f"🎁 Granted **{valid[tier]}** to **{count}** user(s) — **permanent** (no expiry).")
+
+    @commands.command(name="expiring_tiers", aliases=["giveaway_list", "timed_tiers"], help="[OWNER] List every timed subscription and when it expires.\nUsage: expiring_tiers")
+    async def expiring_tiers(self, ctx):
+        if ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("❌ Owner only.")
+        rows = list_expiring_subs()
+        if not rows:
+            return await ctx.send("📭 No timed subscriptions active.")
+        from datetime import date
+        lines = []
+        for kind, ident, tier, exp in rows[:40]:
+            left = (date.fromisoformat(exp) - date.today()).days
+            who = f"<@{ident}>" if kind == "user" else f"Server `{ident}`"
+            lines.append(f"• {who} — **{tier}** · expires **{exp}** ({left}d left)")
+        e = discord.Embed(title=f"⏳ Timed Subscriptions ({len(rows)})",
+                          description="\n".join(lines), color=discord.Color.blurple())
+        if len(rows) > 40:
+            e.set_footer(text=f"showing 40 of {len(rows)} · expired ones auto-remove on next use")
+        await ctx.send(embed=e)
+
+    @commands.command(name="set_server_tier", aliases=["sst"], help="[OWNER] Assign subscription tier to a server (optional auto-expiry).\nUsage: set_server_tier <server_id> <tier> [days]\nTiers: Bronze, Silver, Gold, Diamond, None\n`days` optional — e.g. `sst 12345 Gold 30` auto-removes after 30 days.")
     async def set_server_tier(self, ctx, server_id: str, *, tier: str):
         if ctx.author.id != ADMIN_DISCORD_ID:
             return await ctx.send("❌ Owner only.")
@@ -9357,10 +9579,14 @@ class PrefixCog(commands.Cog):
             "Diamond": "Diamond (Unlimited + Tournament)",
             "None": "None (Remove)"
         }
+        days = 0
         tier = tier.strip()
+        parts = tier.rsplit(None, 1)
+        if len(parts) == 2 and parts[1].isdigit():
+            tier, days = parts[0].strip(), int(parts[1])
         if tier not in valid:
             return await ctx.send(f"❌ Invalid tier. Choose from: {', '.join(valid.keys())}")
-        msg = update_server_tier(server_id, tier, valid[tier])
+        msg = update_server_tier(server_id, tier, valid[tier], days=days)
         await ctx.send(msg)
 
     @commands.command(name="authadmin", aliases=["aa"], help="[OWNER] Toggle admin permissions for a user.\nUsage: authadmin @user")
