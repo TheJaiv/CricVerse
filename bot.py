@@ -12451,7 +12451,7 @@ class PrefixCog(commands.Cog):
         filled = sum(len(ps) for ps in plan.values())
         await prompt.edit(content=f"✅ **Auto-fill complete** — added **{filled}** player(s):\n{summary}{short}", view=None)
 
-    @tournament.command(name="venue_stats", aliases=["pitch_stats", "vs", "venuestats"], help="[DSL] All-time venue numbers across every season.\nUsage: tournament venue_stats [venue]")
+    @tournament.command(name="venue_stats", aliases=["pitch_stats", "venuestats"], help="[DSL] All-time venue numbers across every season.\nUsage: tournament venue_stats [venue]")
     async def t_venue_stats(self, ctx, *, venue: str = None):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)   # may be None between seasons — that's fine
