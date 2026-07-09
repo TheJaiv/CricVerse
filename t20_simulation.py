@@ -1023,7 +1023,7 @@ def execute_ball_math_t20(match):
             # Vaibhav swings even harder than a maxed intent: more boundaries, far fewer
             # dots — and a much higher chance of holing out.
             if striker["archetype"] == "Vaibhav":
-                boundary_weight *= 2.0; wicket_weight *= 1.18; dot_weight *= 0.33
+                boundary_weight *= 2.0; wicket_weight *= 0.95; dot_weight *= 0.33
         else:
             # Required run rate (chase only) tells set batters when to lift the tempo.
             _rrr_now = (runs_needed / balls_left * 6) if (match.current_innings_num == 2 and balls_left > 0) else 0.0

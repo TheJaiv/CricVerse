@@ -805,7 +805,7 @@ def execute_ball_math_odi(match):
         if striker["archetype"] == "Vaibhav":
             # Ultra-aggressor: goes for everything every ball → 200+ SR, but the wicket
             # column is the price. Boundaries and risk both spike, dots collapse.
-            boundary_weight *= 2.5; wicket_weight *= 1.32; dot_weight *= 0.3; single_weight *= 0.85
+            boundary_weight *= 2.5; wicket_weight *= 1.1; dot_weight *= 0.3; single_weight *= 0.85
         elif striker["archetype"] == "Aggressor":
             boundary_weight *= 1.15; wicket_weight *= 1.15
         elif striker["archetype"] == "Anchor":
