@@ -409,6 +409,114 @@ TEAMS_DATA = {
 }
 
 
+# ── Player-test helpers (cv testplayer) — build two balanced XIs whose OVR is scaled
+#    relative to the tested players, so a single player can be watched in a fair (or
+#    deliberately easy/hard) context. The balanced template above is recentred to a
+#    target OVR; role structure + internal spread are preserved. ──
+_TEST_WK_SLOT = (85, 10, "Finisher", "Batter_WK")
+
+def _clamp_rt(x):
+    return max(20, min(99, int(round(x))))
+
+def _scaled_xi_from_template(slots, name_prefix, start_idx, target_ovr):
+    """Build filler/opponent players from balanced template `slots`, recentred so the
+    XI's average OVR ≈ target_ovr (primary skill shifted fully, secondary half)."""
+    base = [_player_overall({"bat": b, "bowl": bo, "role": r}) for (b, bo, a, r) in _EQUAL_TEMPLATE]
+    delta = target_ovr - (sum(base) / len(base))
+    out = []
+    for j, (b, bo, a, r) in enumerate(slots):
+        if r.startswith("All-Rounder"):
+            nb, nbo = b + delta, bo + delta
+        elif r.startswith("Bowler"):
+            nb, nbo = b + delta * 0.5, bo + delta
+        else:
+            nb, nbo = b + delta, bo + delta * 0.5
+        out.append({"name": f"{name_prefix} {start_idx + j + 1}", "bat": _clamp_rt(nb),
+                    "bowl": _clamp_rt(nbo), "archetype": a, "role": r})
+    return out
+
+def build_test_home_xi(tested, target_ovr):
+    """Tested players (their REAL ratings) + balanced fillers scaled to target_ovr,
+    completing a legal XI (keeper guaranteed when there's room to add one)."""
+    core = [dict(p) for p in tested][:11]
+    need = 11 - len(core)
+    slots = [_EQUAL_TEMPLATE[(len(core) + i) % len(_EQUAL_TEMPLATE)] for i in range(need)]
+    fillers = _scaled_xi_from_template(slots, "Home Net", len(core), target_ovr) if need else []
+    xi = core + fillers
+    if not _has_wk(xi):
+        wk = _scaled_xi_from_template([_TEST_WK_SLOT], "Home Keeper", 0, target_ovr)[0]
+        wk["name"] = "Home Keeper"
+        if fillers:
+            xi[-1] = wk
+        elif len(xi) < 11:
+            xi.append(wk)
+    return xi[:11]
+
+def build_test_away_xi(target_ovr):
+    """A full balanced opposition XI recentred to target_ovr."""
+    return _scaled_xi_from_template(list(_EQUAL_TEMPLATE), "Net", 0, target_ovr)
+
+# difficulty → OVR offset applied to every non-tested player, relative to the tested avg
+_TEST_DIFFICULTY = {"weak": -8, "balanced": 0, "tough": +8}
+
+
+class _TestDifficultyView(discord.ui.View):
+    """Weak / Balanced / Tough picker for cv testplayer. Sets .value then stops."""
+    def __init__(self, owner_id):
+        super().__init__(timeout=90)
+        self.owner_id = owner_id
+        self.value = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("❌ Only the tester can choose.", ephemeral=True)
+            return False
+        return True
+
+    async def _pick(self, interaction, value, label):
+        self.value = value
+        await interaction.response.edit_message(content=f"⚔️ Opposition strength: **{label}**", view=None)
+        self.stop()
+
+    @discord.ui.button(label="Weak", style=discord.ButtonStyle.success, emoji="🟢")
+    async def btn_weak(self, interaction, button):
+        await self._pick(interaction, "weak", "Weak (lower OVR)")
+
+    @discord.ui.button(label="Balanced", style=discord.ButtonStyle.primary, emoji="🟡")
+    async def btn_balanced(self, interaction, button):
+        await self._pick(interaction, "balanced", "Balanced (same OVR)")
+
+    @discord.ui.button(label="Tough", style=discord.ButtonStyle.danger, emoji="🔴")
+    async def btn_tough(self, interaction, button):
+        await self._pick(interaction, "tough", "Tough (higher OVR)")
+
+
+class _TestFormatView(discord.ui.View):
+    """T20 / ODI picker for cv testplayer. Sets .value (overs) then stops."""
+    def __init__(self, owner_id):
+        super().__init__(timeout=90)
+        self.owner_id = owner_id
+        self.value = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("❌ Only the tester can choose.", ephemeral=True)
+            return False
+        return True
+
+    async def _pick(self, interaction, overs, label):
+        self.value = overs
+        await interaction.response.edit_message(content=f"🏏 Format: **{label}**", view=None)
+        self.stop()
+
+    @discord.ui.button(label="T20 (20 overs)", style=discord.ButtonStyle.primary)
+    async def btn_t20(self, interaction, button):
+        await self._pick(interaction, 20, "T20")
+
+    @discord.ui.button(label="ODI (50 overs)", style=discord.ButtonStyle.secondary)
+    async def btn_odi(self, interaction, button):
+        await self._pick(interaction, 50, "ODI")
+
 class BatterStats:
     def __init__(self, profile):
         self.profile = profile
@@ -7699,6 +7807,7 @@ def _help_match_embed():
     e = discord.Embed(title="🎮 Match Play", color=discord.Color.green())
     e.add_field(name="/match [@opponent]  ·  `cv match`  ·  `cv m`",  value="Start an interactive match vs a user, or leave blank to play vs AI.", inline=False)
     e.add_field(name="/simulatematch",                                  value="Instantly simulate a full match — pick teams, format and conditions.", inline=False)
+    e.add_field(name="`cv testplayer`  ·  `cv tp`",                    value="Test player(s) in a live match: pick 1-5 players, they slot into a balanced XI vs a Weak/Balanced/Tough opposition, then the normal pitch → toss → match flow runs.", inline=False)
     e.add_field(name="TEST format in /match",                           value="Select 'TEST (90 overs)' in the format dropdown to play a 5-day Test with session/innings/full-match modes.", inline=False)
     e.add_field(name="/impactplayer",                                   value="During an active match, swap in your Impact Player (if rule is on).", inline=False)
     e.add_field(name="`cv resume`  ·  `cv forcehub`",                  value="Match stuck with no buttons (Discord hiccup ate the prompt)? Re-shows the lost over hub / bowler pick / next-batter prompt — no progress is lost.", inline=False)
@@ -8668,6 +8777,114 @@ class PrefixCog(commands.Cog):
             await ctx.send("🛑 **Match and setup forcefully terminated.** Memory cleared.")
         else:
             await ctx.send("⚠️ There is no active match or setup running in this channel.")
+
+    @commands.command(name="testplayer", aliases=["tp", "playertest", "test_player"],
+                      help="Test player(s) in a live match — your picks slot into a balanced XI vs a balanced XI, then the normal pitch/toss/match flow runs.\nUsage: testplayer")
+    async def testplayer(self, ctx):
+        if is_channel_restricted(str(ctx.channel.id)):
+            return await ctx.send("❌ Matches are **disabled** in this channel.")
+        allowed, reason = await asyncio.to_thread(check_potential_quota, str(ctx.author.id), str(ctx.guild.id) if ctx.guild else None, str(ADMIN_DISCORD_ID))
+        if not allowed:
+            return await ctx.send(reason)
+        if ctx.channel.id in active_games or ctx.channel.id in active_setups:
+            return await ctx.send("❌ A match or setup is already in progress. Use `cv endmatch` to cancel it.")
+
+        state = MatchSetupState(ctx.author, None, ctx.author.id, None)
+        state.impact_player = False
+        active_setups[ctx.channel.id] = ("testplayer_setup", state)
+        setup_states[ctx.channel.id] = state
+
+        def _alive():   # endmatch clears the dicts — abort quietly if that happened
+            return active_setups.get(ctx.channel.id, (None, None))[1] is state
+
+        def _cleanup():
+            if _alive():
+                del active_setups[ctx.channel.id]
+                setup_states.pop(ctx.channel.id, None)
+
+        def chk(m):
+            return (m.author.id == ctx.author.id and m.channel.id == ctx.channel.id
+                    and m.content.strip() and not m.content.lower().startswith("cv"))
+
+        async def _ask(prompt):
+            await ctx.send(prompt)
+            try:
+                msg = await self.bot.wait_for("message", timeout=90.0, check=chk)
+            except asyncio.TimeoutError:
+                return None
+            return msg.content.strip() if _alive() else None
+
+        try:
+            # ── 1: how many players to test ──
+            raw = await _ask("🧪 **Player Test** — how many players do you want to test? *(1-5)*")
+            if raw is None:
+                return await ctx.send("⏳ **Cancelled** — no reply.")
+            if not raw.isdigit() or not 1 <= int(raw) <= 5:
+                return await ctx.send("❌ Cancelled — reply with a number **1-5** next time.")
+            n = int(raw)
+
+            # ── 2: collect the player names (real DB ratings, server overrides applied) ──
+            pool = apply_server_overrides(get_all_players(), str(ctx.guild.id) if ctx.guild else None)
+            by_name = {p["name"].lower(): p for p in pool}
+            tested = []
+            for i in range(n):
+                got = None
+                for attempt in range(3):
+                    left = f"  *({2 - attempt} retries left)*" if attempt else ""
+                    raw = await _ask(f"🧪 Player **{i + 1}/{n}** — type the player's name:{left}")
+                    if raw is None:
+                        return await ctx.send("⏳ **Cancelled** — no reply.")
+                    cand = by_name.get(raw.lower())
+                    if not cand:
+                        close = difflib.get_close_matches(raw.lower(), list(by_name.keys()), n=1, cutoff=0.6)
+                        cand = by_name.get(close[0]) if close else None
+                    if not cand:
+                        await ctx.send("❌ Player not found in the database — check the spelling.")
+                        continue
+                    if any(t["name"] == cand["name"] for t in tested):
+                        await ctx.send(f"❌ **{cand['name']}** is already being tested — pick someone else.")
+                        continue
+                    got = cand
+                    break
+                if not got:
+                    return await ctx.send("❌ **Test cancelled** — couldn't resolve that player.")
+                tested.append(dict(got))
+                await ctx.send(f"✅ **{got['name']}** — {_role_short(got)} · {got.get('archetype', 'Standard')}")
+
+            # ── 3: difficulty of everyone else, relative to the tested players ──
+            avg_ovr = sum(_player_overall(p) for p in tested) / len(tested)
+            view = _TestDifficultyView(ctx.author.id)
+            await ctx.send("⚔️ **What type of other players do you need?**\n"
+                           "🟢 **Weak** — lower OVR than your test players\n"
+                           "🟡 **Balanced** — nearly the same\n"
+                           "🔴 **Tough** — higher OVR", view=view)
+            await view.wait()
+            if view.value is None or not _alive():
+                return await ctx.send("⏳ **Cancelled** — no difficulty chosen.")
+            target = max(40.0, min(95.0, avg_ovr + _TEST_DIFFICULTY[view.value]))
+
+            # ── 4: format, then hand off to the NORMAL pitch/weather → toss → match flow ──
+            fview = _TestFormatView(ctx.author.id)
+            await ctx.send("🏏 **Format?**", view=fview)
+            await fview.wait()
+            if fview.value is None or not _alive():
+                return await ctx.send("⏳ **Cancelled** — no format chosen.")
+            state.format_overs = fview.value
+
+            state.t1_name = "Test XI"
+            state.t1_roster = build_test_home_xi(tested, target)
+            state.t2_name = "Net Opposition"
+            state.t2_roster = build_test_away_xi(target)
+            state.home_team_id = ctx.author.id
+
+            _cleanup()   # views/toss take over from here, exactly like a normal match
+            names = ", ".join(p["name"] for p in tested)
+            await ctx.send(f"🧪 **Test ready!** Watching: **{names}**  ·  Opposition: **{view.value.title()}**\n"
+                           f"**{state.t1_name}** (your picks + balanced fillers)  vs  **{state.t2_name}**")
+            await proceed_to_conditions(ctx.channel, state)
+            return
+        finally:
+            _cleanup()
 
     # ── DRAFT MODE (blind, knowledge-based) ──────────────────────────────────
     @commands.group(name="draft", invoke_without_command=True,
