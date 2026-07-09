@@ -903,9 +903,25 @@ def _build_status_pages(tourney):
             pages.append(("Knockouts", "knockout", None, ko))
     else:
         rounds = sorted(set(m["round"] for m in schedule if isinstance(m.get("round"), int)))
-        for r in rounds:
-            matches = [m for m in schedule if m.get("round") == r]
-            pages.append((f"Round {r}", "round", r, matches))
+        if t_type == "double_round_robin":
+            chunk_rounds, chunk_matches = [], []
+            for r in rounds:
+                matches = [m for m in schedule if m.get("round") == r]
+                if chunk_matches and len(chunk_matches) + len(matches) > _FLAT_PAGE_SIZE:
+                    first, last = chunk_rounds[0], chunk_rounds[-1]
+                    title = f"Round {first}" if first == last else f"Rounds {first}-{last}"
+                    pages.append((title, "round", (first, last), chunk_matches))
+                    chunk_rounds, chunk_matches = [], []
+                chunk_rounds.append(r)
+                chunk_matches.extend(matches)
+            if chunk_matches:
+                first, last = chunk_rounds[0], chunk_rounds[-1]
+                title = f"Round {first}" if first == last else f"Rounds {first}-{last}"
+                pages.append((title, "round", (first, last), chunk_matches))
+        else:
+            for r in rounds:
+                matches = [m for m in schedule if m.get("round") == r]
+                pages.append((f"Round {r}", "round", r, matches))
         ko = [m for m in schedule if not isinstance(m.get("round"), int)]
         if ko:
             pages.append(("Knockouts", "knockout", None, ko))
@@ -946,7 +962,15 @@ def _build_status_embed(tourney, page_info):
     )
 
     lines = []
+    show_round_headers = (stage_type == "round" and isinstance(group_key, tuple))
+    last_round = None
     for m in matches:
+        if show_round_headers and m.get("round") != last_round:
+            if lines:
+                lines.append("")
+            last_round = m.get("round")
+            lines.append(f"**Round {last_round}**")
+
         # Stage tag for flat view
         if stage_type == "flat":
             ms, mg = m.get("stage", ""), m.get("group", "")
