@@ -298,7 +298,7 @@ def _t20_intent(match, innings, b_stats, archetype, total_balls, balls_left):
         intent *= T20_INTENT_REBUILD
 
     # ── Batter: archetype + new-batsman caution. ──
-    intent += {"Aggressor": 0.10, "Finisher": 0.06, "Standard": 0.0, "Anchor": -0.10}.get(archetype, 0.0)
+    intent += {"Vaibhav": 0.32, "Aggressor": 0.10, "Finisher": 0.06, "Standard": 0.0, "Anchor": -0.10}.get(archetype, 0.0)
     if b_stats.balls_faced < 5:
         intent -= 0.10
 
@@ -311,6 +311,11 @@ def _t20_intent(match, innings, b_stats, archetype, total_balls, balls_left):
         _rrr2 = max(0.0, getattr(match, "target", innings.total_runs + 1) - innings.total_runs) / B * 6.0
         if _rrr2 < _pr2 * T20_CHASE_GO_GATE:
             intent = min(intent, T20_CHASE_CRUISE_INTENT)
+
+    # ── VAIBHAV: relentless ultra-aggression — never throttles down, floors intent near
+    #    the top so he swings from ball one (SR 200+ … and pays for it in wickets). ──
+    if archetype == "Vaibhav":
+        intent = max(intent, 0.9)
 
     return max(0.0, min(1.0, intent))
 
@@ -1015,13 +1020,19 @@ def execute_ball_math_t20(match):
             boundary_weight *= (T20_INTENT_BND[0] + _intent * T20_INTENT_BND[1])
             wicket_weight   *= (T20_INTENT_WKT[0] + _intent * T20_INTENT_WKT[1])
             dot_weight      *= (T20_INTENT_DOT[0] + _intent * T20_INTENT_DOT[1])
+            # Vaibhav swings even harder than a maxed intent: more boundaries, far fewer
+            # dots — and a much higher chance of holing out.
+            if striker["archetype"] == "Vaibhav":
+                boundary_weight *= 2.3; wicket_weight *= 1.45; dot_weight *= 0.3
         else:
             # Required run rate (chase only) tells set batters when to lift the tempo.
             _rrr_now = (runs_needed / balls_left * 6) if (match.current_innings_num == 2 and balls_left > 0) else 0.0
             _set = b_stats.balls_faced >= 18
             _lift = is_death_overs or _rrr_now >= 9.0   # death overs OR the ask has climbed above par
 
-            if striker["archetype"] == "Aggressor":
+            if striker["archetype"] == "Vaibhav":
+                boundary_weight *= 1.7; wicket_weight *= 1.55; dot_weight *= 0.5
+            elif striker["archetype"] == "Aggressor":
                 boundary_weight *= 1.2; wicket_weight *= 1.15
             elif striker["archetype"] == "Anchor":
                 if _set and _lift:

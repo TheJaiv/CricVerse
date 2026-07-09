@@ -2057,6 +2057,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
     @app_commands.choices(event_type=[
         app_commands.Choice(name="Round Robin", value="round_robin"),
         app_commands.Choice(name="T20 World Cup (4 Groups → Super 8 → Final)", value="t20_world_cup"),
+        app_commands.Choice(name="CCODI (2 Groups of 5 → Double RR → Semis → Final)", value="ccodi"),
         app_commands.Choice(name="ACL (14 Teams → League → Playoffs → Super Cup)", value="acl"),
     ])
     @app_commands.choices(conditions=[
@@ -2095,7 +2096,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         if max_squad < min_squad: return await interaction.response.send_message("❌ Max squad size cannot be less than Min squad size.", ephemeral=True)
 
         t_type = event_type.value if event_type else "round_robin"
-        type_label = {"t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League"}.get(t_type, "Round Robin")
+        type_label = {"t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League"}.get(t_type, "Round Robin")
 
         stadium_mode = stadiums.value if stadiums else "random"
         cond_mode = conditions.value if conditions else "manual"
@@ -2279,7 +2280,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         # Registration phase — no schedule yet
         if tourney["status"] == "registration":
             t_type = tourney.get("tournament_type", "round_robin")
-            type_label = {"t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League"}.get(t_type, "Round Robin")
+            type_label = {"t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League"}.get(t_type, "Round Robin")
             embed = discord.Embed(title=f"🏆 {tourney['name']}", color=discord.Color.gold())
             embed.description = f"📝 **Registration Phase** · {type_label}"
             team_lines = []
@@ -2722,6 +2723,30 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
              "team1": b_top2[0], "team2": a_top2[1], "status": "pending", "result": None},
         ])
 
+    def _try_generate_ccodi_semis(self, tourney: dict):
+        """Auto-generate crossover semis when BOTH CCODI groups are complete.
+        A1 vs B2 · B1 vs A2 (top 2 of each group of 5)."""
+        grp = [m for m in tourney["schedule"] if m.get("stage") == "group"]
+        if not grp:
+            return
+        if any(m["status"] == "pending" for m in grp):
+            return
+        if any(m.get("round") == "Semi-Final 1" for m in tourney["schedule"]):
+            return
+        a_st = get_group_standings(tourney, "group", "A")
+        b_st = get_group_standings(tourney, "group", "B")
+        a_top2 = [n for n, _ in a_st if n != "BYE"][:2]
+        b_top2 = [n for n, _ in b_st if n != "BYE"][:2]
+        if len(a_top2) < 2 or len(b_top2) < 2:
+            return
+        max_id = max(m["match_id"] for m in tourney["schedule"])
+        tourney["schedule"].extend([
+            {"match_id": max_id + 1, "round": "Semi-Final 1", "stage": "knockout",
+             "team1": a_top2[0], "team2": b_top2[1], "status": "pending", "result": None},   # A1 v B2
+            {"match_id": max_id + 2, "round": "Semi-Final 2", "stage": "knockout",
+             "team1": b_top2[0], "team2": a_top2[1], "status": "pending", "result": None},   # B1 v A2
+        ])
+
     @commands.Cog.listener()
     async def on_tournament_match_complete(self, match, channel=None):
         server_id = match.tournament_server_id
@@ -2982,7 +3007,11 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             # Super 8 complete → auto-generate Semi-Finals
             self._try_generate_semis(tourney)
 
-        # SF complete → auto-generate Final (works for both formats)
+        if t_type == "ccodi":
+            # Both groups complete → auto-generate crossover Semi-Finals
+            self._try_generate_ccodi_semis(tourney)
+
+        # SF complete → auto-generate Final (works for all group formats)
         sf1 = next((m for m in tourney["schedule"] if m.get("round") == "Semi-Final 1"), None)
         sf2 = next((m for m in tourney["schedule"] if m.get("round") == "Semi-Final 2"), None)
         if sf1 and sf2 and sf1["status"] == "completed" and sf2["status"] == "completed":

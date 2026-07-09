@@ -309,7 +309,7 @@ def _get_delivery(bowler: dict, innings: TestInnings) -> str:
 
 # Batting-style tempo multiplier applied to match intent (syncs Test SR with style):
 # Aggressors push the tempo up, Anchors grind it down, bowlers (Wicket-Takers) just survive.
-_ARCH_TEMPO = {"Aggressor": 1.18, "Finisher": 1.06, "Anchor": 0.84, "Wicket-Taker": 0.74}
+_ARCH_TEMPO = {"Vaibhav": 1.34, "Aggressor": 1.18, "Finisher": 1.06, "Anchor": 0.84, "Wicket-Taker": 0.74}
 
 # Wicket multiplier when a batter is in full survival/block-for-the-draw mode. Low enough
 # that blocking is genuinely hard to break in a short defence, high enough that a long
@@ -729,7 +729,9 @@ def execute_test_ball(match: TestMatch) -> bool:
         # Aggressors take a touch more risk, Anchors are harder to dislodge, Finishers
         # cut loose once the tail is exposed.
         arch = striker.get("archetype", "")
-        if arch == "Aggressor":
+        if arch == "Vaibhav":
+            four_w *= 1.35; six_w *= 1.5; wkt_w *= 1.5   # attacks relentlessly, gifts his wicket
+        elif arch == "Aggressor":
             wkt_w *= 1.06
         elif arch == "Anchor":
             wkt_w *= 0.82

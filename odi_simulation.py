@@ -151,8 +151,9 @@ def get_smart_ai_shot_odi(deliv, innings, is_death_overs, archetype, pressure_mu
     is_middle = 60 <= total_balls < 240
     is_collapse = ((innings.wickets >= 3 and total_balls < 120) or (innings.wickets >= 5 and total_balls < 240)) and innings.partnership_runs < 40
 
-    # High pressure forces aggressive mindset (RRR > ~7-8 depending on phase)
-    force_aggression = pressure_multiplier > 1.2 or is_death_overs
+    # High pressure forces aggressive mindset (RRR > ~7-8 depending on phase).
+    # Vaibhav is ALWAYS in that mindset — he attacks in every phase.
+    force_aggression = pressure_multiplier > 1.2 or is_death_overs or archetype == "Vaibhav"
         
     if is_collapse and not force_aggression:
         if "Yorker" in deliv: return random.choices(["Block", "Defensive", "Drive"], weights=[40, 30, 30], k=1)[0]
@@ -528,6 +529,7 @@ def execute_ball_math_odi(match):
             innings.total_runs += 1
             if not hasattr(innings, "extras"): innings.extras = 0
             innings.extras += 1
+            innings.wides = getattr(innings, "wides", 0) + 1
             bow_stats.runs_conceded += 1
             innings.over_log.append("<:wide:1520143046900191344>")
             nth = {2: "2nd", 3: "3rd"}.get(innings.cutters_in_over, f"{innings.cutters_in_over}th")
@@ -549,6 +551,7 @@ def execute_ball_math_odi(match):
         innings.total_runs += 1
         if not hasattr(innings, 'extras'): innings.extras = 0
         innings.extras += 1
+        innings.wides = getattr(innings, "wides", 0) + 1
         bow_stats.runs_conceded += 1
         innings.over_log.append("<:wide:1520143046900191344>")
         match.last_commentary = prefix + f"**{bowler['name']}** bowled a **Wide!**\n💥 **Result:** 1 Extra Run"
@@ -565,6 +568,7 @@ def execute_ball_math_odi(match):
     if is_no_ball:
         if not hasattr(innings, 'extras'): innings.extras = 0
         innings.extras += 1
+        innings.noballs = getattr(innings, "noballs", 0) + 1
         innings.total_runs += 1
         bow_stats.runs_conceded += 1
         if not is_bouncer_no_ball:  # Only front-foot no balls give free hits in ODI
@@ -798,7 +802,11 @@ def execute_ball_math_odi(match):
         _set = b_stats.balls_faced >= 35
         _lift = is_death_overs or _rrr_now >= 7.0   # death overs OR the ask has climbed above par
 
-        if striker["archetype"] == "Aggressor":
+        if striker["archetype"] == "Vaibhav":
+            # Ultra-aggressor: goes for everything every ball → 200+ SR, but the wicket
+            # column is the price. Boundaries and risk both spike, dots collapse.
+            boundary_weight *= 2.9; wicket_weight *= 1.6; dot_weight *= 0.26; single_weight *= 0.85
+        elif striker["archetype"] == "Aggressor":
             boundary_weight *= 1.15; wicket_weight *= 1.15
         elif striker["archetype"] == "Anchor":
             # ODI anchor: a LONG, slow build — safety is paid for with tempo (more dots,
@@ -1008,6 +1016,7 @@ def execute_ball_math_odi(match):
             innings.total_runs += runs
             if not hasattr(innings, 'extras'): innings.extras = 0
             innings.extras += runs
+            innings.legbyes = getattr(innings, "legbyes", 0) + runs
             outcome_text = f"{runs} Leg Byes"
             log_entry = f"{runs}LB"
         else:

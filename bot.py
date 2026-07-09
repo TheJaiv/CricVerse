@@ -2681,7 +2681,217 @@ def generate_scorecard_from_data(data: dict) -> io.BytesIO:
     buf.seek(0)
     return buf
 
+def _ccodi_font(size, bold=True, italic=False):
+    """CCODI scorecard font: DejaVu on the Linux host, Arial fallback locally."""
+    variants = ([  # (path candidates) in preference order
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf" if bold else "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/Library/Fonts/Arial Bold.ttf" if bold else "/Library/Fonts/Arial.ttf",
+    ])
+    for p in variants:
+        try:
+            return ImageFont.truetype(p, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+# ── CCODI scorecard layout (measured on assets/ccodi_scorecard.png, 1538×1022) ──
+# One coordinate block per innings panel; edit the numbers here to nudge alignment.
+_CCODI_PANELS = {
+    1: {"flag_cy": 315, "name_cy": 398, "innings_cy": 438, "score_cy": 322,
+        "overs_box": (290, 398, 500, 442), "overs_cy": 406,
+        "extras_y": 484, "rr_y": 519, "bg": (2, 24, 96), "bat_y0": 279, "bowl_y0": 278},
+    2: {"flag_cy": 653, "name_cy": 736, "innings_cy": 776, "score_cy": 660,
+        "overs_box": (290, 736, 500, 780), "overs_cy": 744,
+        "extras_y": 830, "rr_y": 865, "bg": (1, 65, 16), "bat_y0": 617, "bowl_y0": 623},
+}
+_CCODI_BAT_ROW_H = 41     # 5 batter rows (band ends at the EXTRAS/RR strip)
+_CCODI_BOWL_ROW_H = 41    # 7 bowler rows seated in the template's baked grid cells (separators
+                          # ~41px apart); first row aligns with batters, last sits at the RR line
+_CCODI_LEFT_CX = 152     # centre of the flag / team-name / innings block
+_CCODI_SCORE_CX = 393    # centre of the big total + overs block
+_CCODI_FLAG_SZ = 108
+_CCODI_EXTRAS_VX = 378   # x-start of the EXTRAS value (after the "EXTRAS" label ~x302-365)
+_CCODI_RR_VX = 340       # x-start of the RR value (after the "RR" label ~x302-322)
+# Column CENTRES, from the template grid separators — numbers are centre-aligned in
+# each cell (matching the centred headers). Batters seps: 741,800,855,908,961,1020.
+# Bowlers seps: 1205,1258,1309,1358,1408,1494. (name columns are left-aligned.)
+_CCODI_BAT_COLS = {"name": 545, "R": 773, "B": 830, "4s": 884, "6s": 936, "SR": 995}
+_CCODI_BOWL_COLS = {"name": 1040, "O": 1236, "M": 1284, "R": 1331, "W": 1381, "ECON": 1437}
+_CCODI_ROW_H = 42
+
+
+# Panel recolour boxes + the template's base fill hue (PIL HSV 0-255: blue≈170, green≈85).
+_CCODI_RECOLOR = {
+    1: {"box": (34, 216, 1504, 551), "hue_lo": 150, "hue_hi": 200},   # blue innings-1 panel
+    2: {"box": (34, 555, 1504, 899), "hue_lo": 52, "hue_hi": 118},    # green innings-2 panel
+}
+
+
+def _ccodi_recolor_panel(img, box, hex_color, hue_lo, hue_hi):
+    """Hue-shift a panel's SATURATED base-hue fill to the team's colour, leaving the
+    crimson borders and stadium background untouched. Skips grey/undefined colours."""
+    import colorsys
+    from PIL import ImageChops
+    try:
+        r, g, b = (int(hex_color.lstrip("#")[i:i+2], 16) for i in (0, 2, 4))
+    except Exception:
+        return
+    hh, ss, _vv = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+    if ss < 0.22:            # grey / default colour → keep the template panel as-is
+        return
+    target_h = int(hh * 255)
+    region = img.crop(box).convert("HSV")
+    h, s, v = region.split()
+    satmask = s.point(lambda p: 255 if p > 55 else 0)
+    huemask = h.point(lambda p: 255 if hue_lo <= p <= hue_hi else 0)
+    mask = ImageChops.multiply(satmask, huemask)
+    h = Image.composite(Image.new("L", region.size, target_h), h, mask)
+    img.paste(Image.merge("HSV", (h, s, v)).convert("RGB"), (box[0], box[1]))
+
+
+def generate_ccodi_scorecard(match: CricketMatch) -> io.BytesIO:
+    """CCODI-branded ODI scorecard onto assets/ccodi_scorecard.png from the live match
+    (full 4s/6s/econ + extras breakdown). Panels tint to each team's colour."""
+    img = Image.open("assets/ccodi_scorecard.png").convert("RGB")
+    d = ImageDraw.Draw(img)
+    f_name = _ccodi_font(28); f_score = _ccodi_font(52); f_overs = _ccodi_font(22, italic=True)
+    f_inns = _ccodi_font(18); f_row = _ccodi_font(20, bold=False); f_rowb = _ccodi_font(21)
+    f_bowl = _ccodi_font(19, bold=False); f_bowlb = _ccodi_font(20)   # 7-row bowler table (taller band)
+    f_ext = _ccodi_font(19, bold=False); f_res = _ccodi_font(38)
+    WHITE = "#FFFFFF"; DIM = "#C9D4F0"; GDIM = "#CDE8D2"
+
+    def _rt(x, y, s, font, fill=WHITE):
+        d.text((x - font.getbbox(str(s))[2], y), str(s), font=font, fill=fill)
+    def _ct(cx, y, s, font, fill=WHITE):
+        d.text((cx - font.getbbox(str(s))[2] / 2, y), str(s), font=font, fill=fill)
+
+    # Team logo/colour lookup (the match's team dicts carry no logos → read the tourney).
+    tourney = None
+    if getattr(match, "tournament_server_id", None):
+        tourney = next((t for t in DB_CACHE.get("tournaments", []) if t.get("server_id") == match.tournament_server_id), None)
+    def _team_meta(name):
+        if not tourney: return None, "#334155"
+        t = next((x for x in tourney.get("teams", []) if x["name"] == name), None)
+        if not t: return None, "#334155"
+        return (t.get("logo_match") or t.get("logo_standings")), t.get("color", "#334155")
+
+    inns = [match.innings1]
+    if match.current_innings_num == 2 and match.innings2:
+        inns.append(match.innings2)
+
+    # Tint each panel to its team's colour (before any text is drawn).
+    for idx, inn in enumerate(inns, 1):
+        _, colr = _team_meta(inn.batting_team["name"])
+        RC = _CCODI_RECOLOR[idx]
+        _ccodi_recolor_panel(img, RC["box"], colr, RC["hue_lo"], RC["hue_hi"])
+
+    for idx, inn in enumerate(inns, 1):
+        P = _CCODI_PANELS[idx]
+        dim = DIM if idx == 1 else GDIM
+        tname = inn.batting_team["name"]
+        logo, colr = _team_meta(tname)
+
+        # ── far-left block: flag/emoji · team name · INNINGS n ──
+        sz = _CCODI_FLAG_SZ
+        x0, y0 = int(_CCODI_LEFT_CX - sz / 2), int(P["flag_cy"] - sz / 2)
+        crest = None
+        try:
+            crest = _fetch_emoji_img(logo, sz) if logo else None
+        except Exception:
+            crest = None
+        if crest:
+            img.paste(crest, (x0, y0), crest)
+        else:
+            try: fill = tuple(int(colr.lstrip("#")[i:i+2], 16) for i in (0, 2, 4))
+            except Exception: fill = (51, 65, 85)
+            d.rounded_rectangle([(x0, y0), (x0 + sz, y0 + sz)], radius=12, fill=fill)
+            _ct(_CCODI_LEFT_CX, P["flag_cy"] - 18, tname[:3].upper(), f_name)
+        _ct(_CCODI_LEFT_CX, P["name_cy"], tname.upper()[:14], f_name)
+        _ct(_CCODI_LEFT_CX, P["innings_cy"], f"INNINGS {idx}", f_inns, dim)
+
+        # ── middle: big total + overs (cover the template's placeholder, redraw) ──
+        _ct(_CCODI_SCORE_CX, P["score_cy"], f"{inn.total_runs}/{inn.wickets}", f_score)
+        overs = f"{inn.total_balls // 6}.{inn.total_balls % 6}"
+        bx = P["overs_box"]
+        d.rectangle(bx, fill=img.getpixel((bx[0] - 6, bx[1] - 4)))   # cover placeholder w/ tinted panel
+        _ct(_CCODI_SCORE_CX, P["overs_cy"], f"{overs} OVERS", f_overs)
+
+        # ── EXTRAS (with breakdown) + RR ──
+        extras = getattr(inn, "extras", 0)
+        byes = getattr(inn, "byes", 0); lb = getattr(inn, "legbyes", 0)
+        nb = getattr(inn, "noballs", 0); wd = getattr(inn, "wides", 0)
+        ext_txt = f"{extras}  (B {byes}, LB {lb}, NB {nb}, WD {wd})"
+        d.text((_CCODI_EXTRAS_VX, P["extras_y"]), ext_txt, font=f_ext, fill=dim)
+        rr = (inn.total_runs / inn.total_balls * 6) if inn.total_balls else 0.0
+        d.text((_CCODI_RR_VX, P["rr_y"]), f"{rr:.2f}", font=f_ext, fill=dim)
+
+        def _fit(s, font, maxw):   # truncate a name to fit a column width
+            if font.getbbox(s)[2] <= maxw:
+                return s
+            while s and font.getbbox(s + "…")[2] > maxw:
+                s = s[:-1]
+            return s + "…"
+
+        # ── batters: top 5 by runs, centred numbers, integer SR ──
+        bats = sorted([b for b in inn.batting_stats.values() if b.balls_faced > 0 or b.dismissal != "not out"],
+                      key=lambda x: x.runs_scored, reverse=True)[:5]
+        y = P["bat_y0"]; C = _CCODI_BAT_COLS
+        for b in bats:
+            sr = (b.runs_scored / b.balls_faced * 100) if b.balls_faced else 0.0
+            star = "*" if b.dismissal == "not out" else ""
+            d.text((C["name"], y), _fit(f"{b.profile['name']}{star}", f_row, 190), font=f_row, fill=WHITE)
+            _ct(C["R"], y, b.runs_scored, f_rowb)
+            _ct(C["B"], y, b.balls_faced, f_row, dim)
+            _ct(C["4s"], y, getattr(b, "fours", 0), f_row, dim)
+            _ct(C["6s"], y, getattr(b, "sixes", 0), f_row, dim)
+            _ct(C["SR"], y, f"{sr:.0f}", f_row, dim)
+            y += _CCODI_BAT_ROW_H
+
+        # ── bowlers: top 7 by wickets, tighter rows, smaller font ──
+        bowls = sorted([b for b in inn.bowling_stats.values() if b.balls_bowled > 0],
+                       key=lambda x: (x.wickets_taken, -x.runs_conceded), reverse=True)[:7]
+        y = P["bowl_y0"]; C = _CCODI_BOWL_COLS
+        for b in bowls:
+            ov = f"{b.balls_bowled // 6}.{b.balls_bowled % 6}"
+            econ = (b.runs_conceded / b.balls_bowled * 6) if b.balls_bowled else 0.0
+            d.text((C["name"], y), _fit(b.profile["name"], f_bowl, 155), font=f_bowl, fill=WHITE)
+            _ct(C["O"], y, ov, f_bowl, dim)
+            _ct(C["M"], y, getattr(b, "maidens", 0), f_bowl, dim)
+            _ct(C["R"], y, b.runs_conceded, f_bowl, dim)
+            _ct(C["W"], y, b.wickets_taken, f_bowlb)
+            _ct(C["ECON"], y, f"{econ:.2f}", f_bowl, dim)
+            y += _CCODI_BOWL_ROW_H
+
+    # ── result banner (bottom ribbon) — only once the chase is done ──
+    if len(inns) == 2:
+        i1, i2 = match.innings1, match.innings2
+        target = getattr(match, "target", i1.total_runs + 1)
+        mw = _match_max_wickets(match)
+        if getattr(match, "tiebreak_winner_name", None):
+            res = f"{match.tiebreak_winner_name.upper()} WON (SUPER OVER)"
+        elif i2.total_runs >= target:
+            res = f"{i2.batting_team['name'].upper()} WON BY {mw - i2.wickets} WICKETS"
+        elif i2.total_runs == target - 1:
+            res = "MATCH TIED"
+        else:
+            res = f"{i1.batting_team['name'].upper()} WON BY {(target - 1) - i2.total_runs} RUNS"
+        _ct(769, 958, res, f_res)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
 def generate_tournament_score_image(match: CricketMatch) -> io.BytesIO:
+    # CCODI has its own branded template rendered straight from the match object.
+    if getattr(match, "tournament_type", None) == "ccodi":
+        try:
+            return generate_ccodi_scorecard(match)
+        except Exception as _e:
+            print(f"⚠️ CCODI scorecard render failed, using generic: {_e}")
     return generate_scorecard_from_data(extract_scoreboard_data(match))
 
 # ==========================================
@@ -7874,7 +8084,8 @@ def _batting_order(players: list) -> list:
         score = 100.0 - bat                       # better batters earlier
         if "Bowler" in role:        score += 80   # tail, no matter the rating
         elif "All-Rounder" in role: score += 35   # lower-middle (6-8)
-        if arch == "Aggressor":     score -= 6    # push openers up a touch
+        if arch == "Vaibhav":       score -= 8    # ultra-aggressor — bat him at the top
+        elif arch == "Aggressor":   score -= 6    # push openers up a touch
         elif arch == "Anchor":      score -= 2    # top order
         elif arch == "Finisher":    score += 8    # slot finishers at 5-7
         return score
@@ -7984,6 +8195,7 @@ async def playerlist_cmd(interaction: discord.Interaction):
         app_commands.Choice(name="Anchor", value="Anchor"),
         app_commands.Choice(name="Finisher", value="Finisher"),
         app_commands.Choice(name="Standard", value="Standard"),
+        app_commands.Choice(name="Vaibhav (ultra-aggressive)", value="Vaibhav"),
     ],
 )
 async def srating_slash(interaction: discord.Interaction, player: str = None, bat: int = None, bowl: int = None,
@@ -8068,6 +8280,7 @@ _ARCH_OPTIONS = [
     discord.SelectOption(label="Anchor",    value="Anchor"),
     discord.SelectOption(label="Finisher",  value="Finisher"),
     discord.SelectOption(label="Standard",  value="Standard"),
+    discord.SelectOption(label="Vaibhav", value="Vaibhav", description="Ultra-aggressive — 200+ SR, high wicket risk"),
 ]
 
 class AddPlayerModal(discord.ui.Modal, title="Add New Player"):
@@ -9167,7 +9380,7 @@ class PrefixCog(commands.Cog):
         if ctx.author.id != ADMIN_DISCORD_ID and str(ctx.author.id) not in admins:
             return await ctx.send("❌ Access Denied: Admin only.")
         valid_roles = ["Batter", "Batter_WK", "Bowler_Pace", "Bowler_Spin_Off", "Bowler_Spin_Leg", "All-Rounder_Pace", "All-Rounder_Spin_Off", "All-Rounder_Spin_Leg"]
-        valid_archs = ["Aggressor", "Anchor", "Finisher", "Standard"]
+        valid_archs = ["Aggressor", "Anchor", "Finisher", "Standard", "Vaibhav"]
         if not (0 <= bat <= 100 and 0 <= bowl <= 100):
             return await ctx.send("❌ Bat/Bowl ratings must be 0-100.")
         if role not in valid_roles:
@@ -9186,7 +9399,7 @@ class PrefixCog(commands.Cog):
         if ctx.author.id != ADMIN_DISCORD_ID and str(ctx.author.id) not in admins:
             return await ctx.send("❌ Access Denied: Admin only.")
         valid_roles = ["Batter", "Batter_WK", "Bowler_Pace", "Bowler_Spin_Off", "Bowler_Spin_Leg", "All-Rounder_Pace", "All-Rounder_Spin_Off", "All-Rounder_Spin_Leg"]
-        valid_archs = ["Aggressor", "Anchor", "Finisher", "Standard"]
+        valid_archs = ["Aggressor", "Anchor", "Finisher", "Standard", "Vaibhav"]
         all_p = get_all_players()
         cur = next((p for p in all_p if p["name"].lower() == name.strip().lower()), None)
         if not cur:
@@ -9227,7 +9440,7 @@ class PrefixCog(commands.Cog):
             return await ctx.send(f"ℹ️ **{name}** has no override on this server.")
 
         valid_roles = ["Batter", "Batter_WK", "Bowler_Pace", "Bowler_Spin_Off", "Bowler_Spin_Leg", "All-Rounder_Pace", "All-Rounder_Spin_Off", "All-Rounder_Spin_Leg"]
-        valid_archs = ["Aggressor", "Anchor", "Finisher", "Standard"]
+        valid_archs = ["Aggressor", "Anchor", "Finisher", "Standard", "Vaibhav"]
         fields = {}
         for a in args:
             if "=" not in a:
@@ -10371,6 +10584,7 @@ class PrefixCog(commands.Cog):
             "roundrobin": "round_robin", "round_robin": "round_robin", "rr": "round_robin",
             "t20wc": "t20_world_cup", "t20_world_cup": "t20_world_cup", "worldcup": "t20_world_cup", "wc": "t20_world_cup",
             "acl": "acl",
+            "ccodi": "ccodi",   # 10 teams · 2 groups of 5 · double round robin · top-2 → crossover semis → final
         }
         cond_map = {"manual": "manual", "auto": "auto", "home": "home", "home_pitch": "home", "homepitch": "home"}
         order_map = {"random": "random", "any": "random",
@@ -10433,7 +10647,7 @@ class PrefixCog(commands.Cog):
             "stadiums": default_stadium_pool(t_type),
         }
         save_tournament(t_data)
-        type_label = {"t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League"}.get(t_type, "Round Robin")
+        type_label = {"t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League"}.get(t_type, "Round Robin")
         extra = ""
         if t_type == "acl":
             extra = "\n🔴 **ACL needs exactly 14 teams** — each plays every other once (91 matches) → Top 6 Playoffs → Super Cup."
@@ -10452,25 +10666,40 @@ class PrefixCog(commands.Cog):
             extra += f"\n{MATCH_ORDER_LABELS[kwargs['match_order']]}"
         await ctx.send(f"🏆 **Tournament Created:** `{name}`  ·  {type_label}\nUse `cv tournament add_team` to get started!{extra}")
 
-    @tournament.command(name="add_team", help="[MANAGER] Add a team and assign an Owner.\nUsage: tournament add_team \"<team_name>\" <@owner>")
-    async def t_add_team(self, ctx, team_name: str, owner: discord.Member):
+    @tournament.command(name="add_team", help="[MANAGER] Add a team and assign an Owner.\nUsage: tournament add_team \"<team_name>\" <@owner> [group]\nGroup (A/B/C/D) required for T20 World Cup & CCODI.")
+    async def t_add_team(self, ctx, team_name: str, owner: discord.Member, group: str = None):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
-        
+
         is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (str(ctx.author.id) in tourney.get("managers", []))
 
         if not tourney: return await ctx.send("❌ No tournament exists.")
         if not is_mgr: return await ctx.send("❌ Managers only.")
         if tourney["status"] != "registration": return await ctx.send("❌ Cannot add teams after tournament has started.")
-        
+
         if any(t["name"].lower() == team_name.lower() for t in tourney["teams"]):
             return await ctx.send("❌ Team name already exists.")
         if any(t["owner_id"] == str(owner.id) for t in tourney["teams"]):
             return await ctx.send(f"❌ {owner.mention} already owns a team.")
-                
-        tourney["teams"].append({"name": team_name, "owner_id": str(owner.id), "squad": []})
+
+        # Group-based events need a group assignment (A/B for CCODI, A–D for T20 WC).
+        t_type = tourney.get("tournament_type", "round_robin")
+        group_val = None
+        if t_type in ("t20_world_cup", "ccodi"):
+            valid_groups = ["A", "B"] if t_type == "ccodi" else ["A", "B", "C", "D"]
+            cap = 5 if t_type == "ccodi" else 4
+            if not group:
+                return await ctx.send(f"❌ **Group ({'/'.join(valid_groups)}) is required** — `cvt add_team \"<team>\" @owner <group>`.")
+            group_val = group.strip().upper()
+            if group_val not in valid_groups:
+                return await ctx.send(f"❌ Group must be **{', '.join(valid_groups)}**.")
+            if sum(1 for t in tourney["teams"] if t.get("group") == group_val) >= cap:
+                return await ctx.send(f"❌ Group **{group_val}** already has {cap} teams.")
+
+        tourney["teams"].append({"name": team_name, "owner_id": str(owner.id), "squad": [], "group": group_val})
         save_tournament(tourney)
-        await ctx.send(f"✅ Team **{team_name}** added! Owner: {owner.mention}")
+        grp_txt = f" · Group **{group_val}**" if group_val else ""
+        await ctx.send(f"✅ Team **{team_name}**{grp_txt} added! Owner: {owner.mention}")
 
     @tournament.command(name="replace_player", help="[MANAGER] Replace a player in a team's squad.\nUsage: tournament replace_player \"<team>\" \"<out_player>\" \"<in_player>\"")
     async def t_replace_player(self, ctx, team_name: str, out_player: str, in_player: str):
@@ -10796,6 +11025,11 @@ class PrefixCog(commands.Cog):
             for grp in ["A", "B", "C", "D"]:
                 if len([t for t in tourney["teams"] if t.get("group") == grp]) != 4:
                     return f"❌ Group **{grp}** needs exactly 4 teams."
+        elif t_type == "ccodi":
+            for grp in ["A", "B"]:
+                n = len([t for t in tourney["teams"] if t.get("group") == grp])
+                if n != 5:
+                    return f"❌ **CCODI:** Group **{grp}** needs exactly 5 teams (currently {n})."
         elif t_type == "acl":
             if len(tourney["teams"]) != 14:
                 return f"❌ **ACL requires exactly 14 teams** (currently {len(tourney['teams'])})."
@@ -10890,6 +11124,47 @@ class PrefixCog(commands.Cog):
             groups_txt = "\n".join(f"**Group {g}:** {' · '.join(teams_by_group[g])}" for g in "ABCD")
             return await channel.send(f"🏆 **TOURNAMENT STARTED: {tourney['name']}!** — T20 World Cup\n{groups_txt}\nGenerated **{len(schedule)} group stage matches** (interleaved){self._cond_note(tourney)}. Use `cv tournament status` to view fixtures!")
 
+        # CCODI — 2 groups of 5, DOUBLE round robin → top 2 per group → crossover semis → final
+        if t_type == "ccodi":
+            teams_by_group = {"A": [], "B": []}
+            for t in tourney["teams"]:
+                teams_by_group.setdefault(t.get("group"), []).append(t["name"])
+            all_matches = []
+            for group in ("A", "B"):
+                base = list(teams_by_group[group])
+                random.shuffle(base)
+                teams = base + (["BYE"] if len(base) % 2 else [])
+                n = len(teams)
+                leg1 = []
+                for r in range(n - 1):
+                    for i in range(n // 2):
+                        a, b = teams[i], teams[n - 1 - i]
+                        if a == "BYE" or b == "BYE":
+                            continue
+                        leg1.append((a, b) if r % 2 == 0 else (b, a))
+                    teams.insert(1, teams.pop())
+                # double round robin: leg 2 mirrors leg 1 with home/away swapped
+                for leg, pairs in ((1, leg1), (2, [(y, x) for (x, y) in leg1])):
+                    for a, b in pairs:
+                        all_matches.append({
+                            "round": f"Group {group}", "stage": "group", "group": group,
+                            "team1": a, "team2": b, "status": "pending", "result": None,
+                        })
+            random.shuffle(all_matches)
+            tourney["schedule"] = [dict(m, match_id=i + 1) for i, m in enumerate(all_matches)]
+            tourney["status"] = "active"
+            tourney["current_match_idx"] = 0
+            assign_tournament_conditions(tourney)
+            save_tournament(tourney)
+            groups_txt = "\n".join(f"**Group {g}:** {' · '.join(teams_by_group[g])}" for g in ("A", "B"))
+            return await channel.send(
+                f"🏏 **CCODI STARTED: {tourney['name']}!**\n{groups_txt}\n"
+                f"Generated **{len(tourney['schedule'])} group matches** — each group is a **double round robin** "
+                f"(every team plays every other twice){self._cond_note(tourney)}.\n"
+                f"Top 2 from each group reach the **Semi-Finals** (A1 vs B2 · B1 vs A2) → **Final**. "
+                f"`cv tournament status` for fixtures · `cv tournament standings` for the tables."
+            )
+
         # DSL — Dominators Super League (home/away league on home grounds → Top-4 Playoffs)
         if t_type == "dsl":
             tourney["schedule"] = dsl_generate_league_schedule(tourney)
@@ -10976,7 +11251,7 @@ class PrefixCog(commands.Cog):
 
         if tourney["status"] == "registration":
             t_type = tourney.get("tournament_type", "round_robin")
-            type_label = {"t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League"}.get(t_type, "Round Robin")
+            type_label = {"t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League"}.get(t_type, "Round Robin")
             embed = discord.Embed(title=f"🏆 {tourney['name']}", color=discord.Color.gold())
             cmode = tourney.get("conditions_mode", "manual")
             cmode_txt = {"auto": "🎲 Auto conditions", "home": "🏟️ Home-Pitch conditions"}.get(cmode, "🎛️ Manual conditions")
@@ -11011,7 +11286,7 @@ class PrefixCog(commands.Cog):
             return await ctx.send(embed=embed)
 
         t_type = tourney.get("tournament_type", "round_robin")
-        if t_type == "t20_world_cup":
+        if t_type in ("t20_world_cup", "ccodi"):
             pages = _build_flat_pages(tourney)
             hint = "Use `cvt groups` to view fixtures by group."
         else:
@@ -11048,8 +11323,8 @@ class PrefixCog(commands.Cog):
         tourney = get_server_tournament(server_id)
         if not tourney:
             return await ctx.send("❌ No tournament exists in this server.")
-        if tourney.get("tournament_type") != "t20_world_cup":
-            return await ctx.send("❌ This command is only available for T20 World Cup tournaments.")
+        if tourney.get("tournament_type") not in ("t20_world_cup", "ccodi"):
+            return await ctx.send("❌ This command is only available for group-based tournaments (T20 World Cup / CCODI).")
         if tourney["status"] == "registration":
             return await ctx.send("❌ Tournament hasn't started yet. Use `cv tournament status` to see registration info.")
 
@@ -13363,57 +13638,134 @@ class PrefixCog(commands.Cog):
 
     @tournament.command(name="help_guide", aliases=["help", "commands", "guide"], help="Show the tournament commands guide.\nUsage: cvt help")
     async def t_help_guide(self, ctx):
-        embed = discord.Embed(
-            title="🏆 Tournament Guide  ·  `cvt …`",
-            description="Event types: **Round Robin** · **T20 World Cup** · **ACL** (14 teams → League → Playoffs → Super Cup) · **DSL** (recurring seasons — owner-granted servers).",
+        # ── Card 1: quickstart flows per event type ──
+        qs = discord.Embed(
+            title="🏆 Tournament Guide  ·  Quickstarts",
+            description=("Event types: **Round Robin** · **T20 World Cup** (4 groups → Super 8 → KO) · "
+                         "**ACL** (14 teams → League → Playoffs → Super Cup) · **CCODI** (10 teams, ODI, "
+                         "2 groups of 5, double round robin → crossover semis) · **DSL** (recurring seasons) · "
+                         "**Conquest** (open Elo ladder).\nFull command list is in the second card below. ⬇️"),
             color=discord.Color.gold(),
         )
-        embed.add_field(
-            name="🔴 ACL Quickstart",
+        qs.add_field(
+            name="🔴 ACL",
             value=("**1.** `cvt create \"ACL S1\" t20 event=acl`\n"
-                   "**2.** `cvt add_team \"<team>\" @owner` ×**14**\n"
-                   "**3.** each owner: `cvt ss` (submit_squad)\n"
-                   "**4.** `cvt start` → 91 league matches\n"
-                   "**5.** `cvt fx` (your fixtures) → `cvt play <id>` your games\n"
-                   "**6.** after all 91: Manager `cvt gp` (generate_playoffs)\n"
-                   "**7.** `cvt br` (bracket) → Playoffs → **Super Cup** 👑"),
+                   "**2.** `cvt add_team \"<team>\" @owner` ×**14** · owners `cvt ss`\n"
+                   "**3.** `cvt start` → 91 league matches · `cvt fx` → `cvt play <id>`\n"
+                   "**4.** after all 91: mgr `cvt gp` → `cvt br` → Playoffs → **Super Cup** 👑"),
             inline=False,
         )
-        embed.add_field(
-            name="🔵 DSL Quickstart (Dominators Super League)",
+        qs.add_field(
+            name="🟠 CCODI (10 teams · ODI)",
+            value=("**1.** `cvt create \"CCODI S1\" odi event=ccodi`\n"
+                   "**2.** `cvt add_team \"<team>\" @owner A` — **group A/B required**, 5 per group\n"
+                   "**3.** owners `cvt ss` · `cvt start` → double round robin (40 group games)\n"
+                   "**4.** top 2 per group → **crossover semis** (A1 v B2, B1 v A2) → Final, auto-generated"),
+            inline=False,
+        )
+        qs.add_field(
+            name="🔵 DSL (Dominators Super League)",
             value=("**1.** `cvt start dsl` — opens a preconfigured season (S1, S2, …)\n"
                    "**2.** `cvt add_team \"<team>\" @owner` ×12 · owners `cvt ss`\n"
-                   "**3.** `cvt set_home_stadium \"<team>\" <venue>` — every ground has **one fixed pitch**\n"
-                   "**4.** `cvt start` → home & away league → Top-4 Playoffs auto-generate\n"
-                   "**5.** `cvt venue_stats` · `cvt career <player>` · `cvt seasons` — all-time numbers\n"
-                   "**6.** after the Final: `cvt end_season` → archive + slot freed for next season"),
+                   "**3.** `cvt set_home_stadium \"<team>\" <venue>` — one fixed pitch per ground\n"
+                   "**4.** `cvt start` → home & away → Top-4 Playoffs · after the Final `cvt end_season`"),
             inline=False,
         )
-        embed.add_field(
-            name="🟣 Conquest League (CQL) — open rating ladder",
-            value=("**1.** `cvt start rating` → registration · `cvt add_team \"<team>\" @owner` · owners `cvt ss`\n"
-                   "**2.** `cvt start` → ladder goes live (every team at 1000)\n"
-                   "**3.** owners `cvt challenge \"<team>\"` — play anyone, anytime · `cvt ratings` for the ladder\n"
-                   "**4.** beat *stronger* teams to climb — grinding/farming does nothing\n"
-                   "**5.** `cvt trade` (owners+mgr confirm) · `cvt boost` (spend credits, weak teams earn more) · `cvt credits`\n"
-                   "**6.** a manager `cvt end_league` → Top-4 playoffs (≥10 games to qualify) → champion"),
+        qs.add_field(
+            name="🟣 Conquest (open rating ladder)",
+            value=("**1.** `cvt start rating` · `cvt add_team \"<team>\" @owner` · owners `cvt ss`\n"
+                   "**2.** `cvt start` → ladder live (every team at 1000)\n"
+                   "**3.** `cvt challenge \"<team>\"` anytime · `cvt ratings` · beat *stronger* teams to climb\n"
+                   "**4.** `cvt trade` · `cvt boost` (spend credits) · mgr `cvt end_league` → Top-4 (≥10 games)"),
             inline=False,
         )
-        embed.add_field(name="🛠️ Setup", value="`create` · `add_team` · `add_manager` · `submit_squad`/`ss` · `duplicates`/`dupes` (players in 2+ squads) · `fill_squads <cap>` (auto-fill under-min squads) · `set_default_xi`/`sdxi` (paste once, reuse every match) · `start` · `set_team_logo` · `set_team_color`", inline=False)
-        embed.add_field(
-            name="🏏 Play your matches",
-            value=("`fixtures`/`fx` `[team]` — your upcoming + results\n"
-                   "`play <id>` — **owners launch any of their own**; managers any\n"
-                   "`next_match`/`nm` — your earliest pending · `play_next`/`pn` — [MGR] next in order\n"
-                   "`sim <id>` — [MGR] instantly simulate one match (default XIs, full stats/scorecard)\n"
-                   "at match start: **paste your XI** (order = batting order, `(C)` = captain) or ✅ **Use Default XI**"),
+        qs.set_footer(text="At match start: paste your XI (order = batting order, (C) = captain) or ✅ Use Default XI")
+
+        # ── Card 2: the complete command reference ──
+        ref = discord.Embed(title="📖 Tournament Command Reference  ·  `cvt …`", color=discord.Color.blurple())
+        ref.add_field(
+            name="🛠️ Setup & squads",
+            value=("`create \"<name>\" <format> [event=acl/t20wc/ccodi]`\n"
+                   "`add_team \"<team>\" @owner [group]` — group A/B for CCODI & T20 WC\n"
+                   "`add_manager @user` · `remove_team \"<team>\"`\n"
+                   "`submit_squad`/`ss` — owners paste a full squad\n"
+                   "`add_player`/`ap` `[@owner] <p1>, <p2>…` — **add player(s)** (pre-start)\n"
+                   "`remove_player`/`rmp` `[@owner] <p1>, <p2>…` — drop player(s) (pre-start)\n"
+                   "`squad [team|@owner]` — view squad + ratings\n"
+                   "`duplicates`/`dupes` — players in 2+ squads · `fill_squads <cap>` — auto-fill under-min\n"
+                   "`set_default_xi`/`sdxi` · `default_xi`/`dxi [team]` — save & view a reusable XI\n"
+                   "`dev_setup [no]` — [OWNER] fill random squads & auto-start (testing)"),
             inline=False,
         )
-        embed.add_field(name="📊 Stats & standings", value="`standings`/`st` · `status`/`sched` · `bracket`/`br` (ACL) · `leaderboard`/`lb <cat>` · `player_stats` · `squad` · `match_scorecard <id>`\n`summary`/`recap` — the COMPLETE tournament report (standings + every leaderboard + records) — run & pin before deleting!\n`scorecard_channel #ch` — auto-post every match's scoreboard image · `post_scorecards #ch` — slow-dump ALL scoreboards (post-tournament archive)", inline=False)
-        embed.add_field(name="🔥 Knockouts (Managers)", value="**ACL:** `gp`  ·  **Round Robin:** `generate_knockouts`  ·  **T20 WC:** `generate_super8`", inline=False)
-        embed.add_field(name="⚙️ Admin (prefix-only)", value="`transfer_team` · `replace_player` · `force_delete` · `set_theme` · `set_injury_channel` · `add_injury` · `remove_injury` · `force_result` · `admin_record_result` · `simulate_all` · `award_win <id> <team>` (walkover: W only, no stats/NRR) · `lock_stats`/`unlock_stats` (freeze player-stats recording)", inline=False)
-        embed.set_footer(text="Tip: leaderboard categories — runs · wickets · sr · bat_avg · econ · bowl_avg · mvp · fours · sixes · fifties · hundreds")
-        await ctx.send(embed=embed)
+        ref.add_field(
+            name="▶️ Running matches",
+            value=("`start` — begin & generate the schedule\n"
+                   "`fixtures`/`fx [team]` — upcoming + results · `next_match`/`nm` — your earliest pending\n"
+                   "`play <id>` — owners launch their own, managers any\n"
+                   "`play_next`/`pn` — [MGR] next in order · `sim <id>` — [MGR] instant-sim one\n"
+                   "`simulate_all`/`simall` — [MGR] sim every remaining match\n"
+                   "`cancel_match <id>` (redo) — [MGR] wipe a result to replay\n"
+                   "`force_result <id> …` — [MGR] set a result manually\n"
+                   "`set_schedule` — [OWNER] custom fixture order · `repair_schedule` (fix_ids) — [MGR] fix dup IDs"),
+            inline=False,
+        )
+        ref.add_field(
+            name="🏟️ Stadiums & conditions",
+            value=("`stadiums [venue]` — the pool / one venue's stats\n"
+                   "`stadium_add \"<name>\"` · `stadium_remove \"<name>\"` · `stadium_clear` — [MGR] edit ACL pool\n"
+                   "`reroll_stadiums` — [MGR] reassign venues to upcoming matches\n"
+                   "`set_stadium <id> <name|none>` — [MGR] set one match's venue\n"
+                   "`set_home_pitch \"<team>\" <pitch>` · `set_home_stadium \"<team>\" <venue>` — [MGR] home ground\n"
+                   "`home_stadiums`/`hs` · `homepitch` — list home grounds/pitches\n"
+                   "`set_conditions <id> <pitch> [weather]` — [MGR] override a pending match"),
+            inline=False,
+        )
+        ref.add_field(
+            name="🟣 Conquest ladder (rating type)",
+            value=("`challenge`/`vs \"<team>\"` — play anyone, anytime\n"
+                   "`ratings`/`ladder`/`elo` — the Elo ladder\n"
+                   "`trade \"<team>\" | mine | theirs` — owners + mgr confirm\n"
+                   "`boost \"<player>\" bat|bowl` — spend credits (+1) · `credits`/`cr [team]` · `boosts [team]`\n"
+                   "`end_league` — [MGR] close the season → Top-4 playoffs"),
+            inline=False,
+        )
+        ref.add_field(
+            name="🔥 Knockouts (Managers)",
+            value=("`generate_knockouts` — Semis for Round Robin / T20 WC\n"
+                   "`generate_playoffs`/`gp` — ACL Top-6 / DSL Top-4\n"
+                   "`bracket`/`br` — the knockout bracket\n"
+                   "*(CCODI semis auto-generate once both groups finish.)*"),
+            inline=False,
+        )
+        ref.add_field(
+            name="📊 Stats & standings",
+            value=("`standings`/`st` — points table / group tables / Elo ladder · `status`/`sched` · `groups`\n"
+                   "`leaderboard`/`lb <cat>` (categories in the footer) · `player_stats`/`ps <player>`\n"
+                   "`match_scorecard <id>` — a completed match's image\n"
+                   "`career <player>` · `seasons`/`season [n] [player]` · `venue_stats [venue]` — [DSL] all-time\n"
+                   "`summary`/`recap` — the COMPLETE report (run & pin before deleting!)"),
+            inline=False,
+        )
+        ref.add_field(
+            name="🎨 Cosmetics · 📮 scorecards & logging",
+            value=("`set_team_logo <standings|match> \"<team>\" <emoji|url>` · `set_team_color \"<team>\" <hex>`\n"
+                   "`set_scoreboard_logo custom <emoji|url>` / `… default` · `set_theme` — [ADMIN]\n"
+                   "`scorecard_channel`/`scc #ch` — auto-post every match image\n"
+                   "`post_scorecards`/`psc #ch` — slow-dump ALL scorecards (archive)\n"
+                   "`set_log_channel [off]` — [MGR] audit-log every change\n"
+                   "`set_injury_channel #ch` · `add_injury` · `remove_injury`"),
+            inline=False,
+        )
+        ref.add_field(
+            name="⚙️ Admin (prefix-only)",
+            value=("`transfer_team` · `replace_player` · `force_delete`\n"
+                   "`award_win`/`walkover <id> <team>` — W only, no stats/NRR\n"
+                   "`lock_stats`/`unlock_stats` — freeze player-stat recording\n"
+                   "`admin_record_result` · `admin_restore_schedule` · `end_season`"),
+            inline=False,
+        )
+        ref.set_footer(text="leaderboard categories — runs · wickets · sr · bat_avg · econ · bowl_avg · mvp · fours · sixes · fifties · hundreds")
+        await ctx.send(embeds=[qs, ref])
 
     @tournament.command(name="standings", aliases=["st", "table"], help="View the Tournament Points Table & NRR.\nUsage: tournament standings")
     async def t_standings(self, ctx):
@@ -13425,6 +13777,32 @@ class PrefixCog(commands.Cog):
         if tourney.get("tournament_type") == "rating":
             from rating_league import rating_board_embed
             return await ctx.send(embed=rating_board_embed(tourney))
+
+        # CCODI: two group tables (top 2 qualify) + knockouts. (Custom points-table
+        # IMAGE goes here once the design is provided — this embed is the fallback.)
+        if tourney.get("tournament_type") == "ccodi":
+            from tournament_manager import get_group_standings
+            e = discord.Embed(title=f"🏏 {tourney['name']} — Standings", color=discord.Color.blue())
+            for grp in ("A", "B"):
+                st = [(n, d) for n, d in get_group_standings(tourney, "group", grp) if n != "BYE"]
+                if not st:
+                    continue
+                rows = ["```", f"{'':2}{'Team':<16}{'P':>3}{'W':>3}{'L':>3}{'Pts':>4}{'NRR':>7}", "─" * 40]
+                for i, (nm, d) in enumerate(st, 1):
+                    arrow = "▶ " if i <= 2 else "  "
+                    rows.append(f"{arrow}{nm[:14]:<16}{d['P']:>3}{d['W']:>3}{d['L']:>3}{d['Pts']:>4}{d['NRR']:>+7.2f}")
+                rows.append("```")
+                e.add_field(name=f"Group {grp}", value="\n".join(rows), inline=False)
+            ko = [m for m in tourney.get("schedule", []) if m.get("stage") == "knockout"]
+            if ko:
+                kl = []
+                for m in sorted(ko, key=lambda x: x.get("match_id", 0)):
+                    r = m.get("result")
+                    tail = f" → 🏆 **{r['winner']}**" if r else " *(pending)*"
+                    kl.append(f"**{m.get('round')}**: {m['team1']} vs {m['team2']}{tail}")
+                e.add_field(name="🔥 Knockouts", value="\n".join(kl), inline=False)
+            e.set_footer(text="▶ = qualifies for the Semi-Finals (top 2 per group)")
+            return await ctx.send(embed=e)
 
         # T20 World Cup standings
         if tourney.get("tournament_type") == "t20_world_cup":
