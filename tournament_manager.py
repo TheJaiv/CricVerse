@@ -139,6 +139,48 @@ def save_tournament(t_data):
     tourneys.append(t_data)
     async_save_tournament_to_bin()
 
+def generate_round_robin_schedule(team_names, *, double=False, stage=None, shuffle=True):
+    """Circle-method fixtures for single/double round robin.
+    Double mode mirrors leg 1 with home/away swapped and keeps round numbers ordered.
+    """
+    teams = list(team_names)
+    if shuffle:
+        random.shuffle(teams)
+    if len(teams) % 2 != 0:
+        teams.append("BYE")
+
+    n = len(teams)
+    leg1_rounds = []
+    for r in range(n - 1):
+        round_matches = []
+        for i in range(n // 2):
+            t1, t2 = teams[i], teams[n - 1 - i]
+            if t1 == "BYE" or t2 == "BYE":
+                continue
+            a, b = (t1, t2) if r % 2 == 0 else (t2, t1)
+            match = {"round": r + 1, "team1": a, "team2": b, "status": "pending", "result": None}
+            if stage:
+                match["stage"] = stage
+            round_matches.append(match)
+        if shuffle:
+            random.shuffle(round_matches)
+        leg1_rounds.append(round_matches)
+        teams.insert(1, teams.pop())
+
+    all_matches = []
+    for round_matches in leg1_rounds:
+        all_matches.extend(round_matches)
+    if double:
+        offset = n - 1
+        for round_matches in leg1_rounds:
+            for m in round_matches:
+                mirrored = dict(m)
+                mirrored["round"] = m["round"] + offset
+                mirrored["team1"], mirrored["team2"] = m["team2"], m["team1"]
+                all_matches.append(mirrored)
+
+    return [dict(m, match_id=i + 1) for i, m in enumerate(all_matches)]
+
 def get_tournament_standings(tourney):
     teams = {t["name"]: {"P":0, "W":0, "L":0, "T":0, "Pts":0, "RF":0, "OF":0.0, "RA":0, "OA":0.0} for t in tourney["teams"]}
     for m in tourney.get("schedule", []):
@@ -1639,8 +1681,9 @@ def build_tournament_summary_embeds(tourney):
     sched = tourney.get("schedule", [])
     done = [m for m in sched if m.get("status") == "completed" and m.get("result")]
     t_type = tourney.get("tournament_type", "round_robin")
-    type_label = {"t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League",
-                  "dsl": "Dominators Super League"}.get(t_type, "Round Robin")
+    type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup",
+                  "acl": "Akatsuki Cricket League", "ccodi": "CCODI",
+                  "dsl": "Dominators Super League", "rating": "Conquest League"}.get(t_type, "Round Robin")
     gold = discord.Color.gold()
     embeds = []
 
@@ -2056,6 +2099,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
     ])
     @app_commands.choices(event_type=[
         app_commands.Choice(name="Round Robin", value="round_robin"),
+        app_commands.Choice(name="Double Round Robin", value="double_round_robin"),
         app_commands.Choice(name="T20 World Cup (4 Groups → Super 8 → Final)", value="t20_world_cup"),
         app_commands.Choice(name="CCODI (2 Groups of 5 → Double RR → Semis → Final)", value="ccodi"),
         app_commands.Choice(name="ACL (14 Teams → League → Playoffs → Super Cup)", value="acl"),
@@ -2096,7 +2140,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         if max_squad < min_squad: return await interaction.response.send_message("❌ Max squad size cannot be less than Min squad size.", ephemeral=True)
 
         t_type = event_type.value if event_type else "round_robin"
-        type_label = {"t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League"}.get(t_type, "Round Robin")
+        type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League"}.get(t_type, "Round Robin")
 
         stadium_mode = stadiums.value if stadiums else "random"
         cond_mode = conditions.value if conditions else "manual"
@@ -2128,6 +2172,8 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         extra = ""
         if t_type == "t20_world_cup":
             extra = "\n⚠️ **T20 World Cup requires exactly 16 teams (4 groups of 4). Assign each team a group (A/B/C/D) when using `/tournament add_team`.**"
+        elif t_type == "double_round_robin":
+            extra = "\n🔁 **Double Round Robin:** every team plays every other team twice, once each way."
         elif t_type == "acl":
             extra = "\n🔴 **ACL requires exactly 14 teams.** Each plays every other once (91 league matches) → Top 6 Playoffs → Super Cup. No groups needed — just `/tournament add_team` for all 14."
             extra += f"\n🏟️ **Stadiums:** {len(DEFAULT_ACL_STADIUMS)} venues pre-loaded — fixtures get a random one at start. Edit the pool with `cvt stadium_add` / `cvt stadiums` before starting."
@@ -2280,7 +2326,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         # Registration phase — no schedule yet
         if tourney["status"] == "registration":
             t_type = tourney.get("tournament_type", "round_robin")
-            type_label = {"t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League"}.get(t_type, "Round Robin")
+            type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League"}.get(t_type, "Round Robin")
             embed = discord.Embed(title=f"🏆 {tourney['name']}", color=discord.Color.gold())
             embed.description = f"📝 **Registration Phase** · {type_label}"
             team_lines = []
@@ -2315,7 +2361,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
 
         await interaction.response.send_message(embed=embed, view=view)
 
-    @app_commands.command(name="generate_knockouts", description="[MANAGER] Generate Semi-Finals for Top 4 teams. (Round Robin only)")
+    @app_commands.command(name="generate_knockouts", description="[MANAGER] Generate Semi-Finals for Top 4 teams. (Round Robin / Double RR only)")
     async def generate_knockouts(self, interaction: discord.Interaction):
         server_id = str(interaction.guild.id)
         tourney = get_server_tournament(server_id)
@@ -3366,7 +3412,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
     async def tournament_help(self, interaction: discord.Interaction):
         embed = discord.Embed(
             title="🏆 Tournament Guide",
-            description="Three event types: **Round Robin**, **T20 World Cup**, and **ACL** (14 teams → League → Playoffs → Super Cup).\nEvery command works as both `/tournament …` and the shorter `cvt …`.",
+            description="Event types: **Round Robin**, **Double Round Robin**, **T20 World Cup**, **CCODI**, and **ACL** (14 teams → League → Playoffs → Super Cup).\nEvery command works as both `/tournament …` and the shorter `cvt …`.",
             color=discord.Color.gold(),
         )
         embed.add_field(
@@ -3401,7 +3447,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         )
         embed.add_field(
             name="🔥 Knockouts (Managers)",
-            value=("**ACL:** `generate_playoffs`/`gp`  ·  **Round Robin:** `generate_knockouts`  ·  **T20 WC:** `generate_super8`"),
+            value=("**ACL:** `generate_playoffs`/`gp`  ·  **Round Robin/Double RR:** `generate_knockouts`  ·  **T20 WC:** `generate_super8`"),
             inline=False,
         )
         embed.set_footer(text="More admin tools are prefix-only: cvt transfer_team · replace_player · force_delete · set_theme · remove_injury · repair_schedule · simulate_all")

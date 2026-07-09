@@ -35,7 +35,7 @@ from test_image import (
     generate_test_summary_image as _ti_summary,
     generate_test_scorecard_image as _ti_scorecard,
 )
-from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, revert_tournament_match, repair_tournament_schedule, _tm_next_mid, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS, SquadConfirmView, build_squad_confirm_text, build_squad_confirm_embed, match_order_gate, MATCH_ORDER_LABELS, build_tournament_summary_embeds
+from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, revert_tournament_match, repair_tournament_schedule, _tm_next_mid, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS, SquadConfirmView, build_squad_confirm_text, build_squad_confirm_embed, match_order_gate, MATCH_ORDER_LABELS, build_tournament_summary_embeds, generate_round_robin_schedule
 import rating_league
 from rating_league import (
     RATING_CONFIG, is_rating_tournament, create_rating_tournament, create_open_match,
@@ -10577,11 +10577,13 @@ class PrefixCog(commands.Cog):
     async def tournament(self, ctx):
         await ctx.send_help(ctx.command)
 
-    @tournament.command(name="create", help="[ADMIN] Create a new tournament.\nUsage: tournament create \"<name>\" <format> [event=roundrobin/t20wc/acl] [impact_player=true/false] [injuries=true/false] [order=random/schedule/round]")
+    @tournament.command(name="create", help="[ADMIN] Create a new tournament.\nUsage: tournament create \"<name>\" <format> [event=roundrobin/double_rr/t20wc/acl] [impact_player=true/false] [injuries=true/false] [order=random/schedule/round]")
     async def t_create(self, ctx, name: str, format_str: str, *options: str):
         kwargs = { 'impact_player': False, 'injuries': False, 'conditions': 'manual', 'match_order': 'random', 'stadium_mode': 'random' }
         event_map = {
             "roundrobin": "round_robin", "round_robin": "round_robin", "rr": "round_robin",
+            "double": "double_round_robin", "double_rr": "double_round_robin", "drr": "double_round_robin",
+            "double_roundrobin": "double_round_robin", "double_round_robin": "double_round_robin",
             "t20wc": "t20_world_cup", "t20_world_cup": "t20_world_cup", "worldcup": "t20_world_cup", "wc": "t20_world_cup",
             "acl": "acl",
             "ccodi": "ccodi",   # 10 teams · 2 groups of 5 · double round robin · top-2 → crossover semis → final
@@ -10614,7 +10616,7 @@ class PrefixCog(commands.Cog):
                 elif key in ('event', 'event_type', 'type'):
                     et = event_map.get(value.strip().lower())
                     if not et:
-                        return await ctx.send(f"❌ Invalid event `{value}`. Use `roundrobin`, `t20wc`, or `acl`.")
+                        return await ctx.send(f"❌ Invalid event `{value}`. Use `roundrobin`, `double_rr`, `t20wc`, `ccodi`, or `acl`.")
                     t_type = et
             except ValueError:
                 return await ctx.send(f"❌ Invalid option format: `{opt}`. Must be `key=value`.")
@@ -10647,13 +10649,15 @@ class PrefixCog(commands.Cog):
             "stadiums": default_stadium_pool(t_type),
         }
         save_tournament(t_data)
-        type_label = {"t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League"}.get(t_type, "Round Robin")
+        type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League"}.get(t_type, "Round Robin")
         extra = ""
         if t_type == "acl":
             extra = "\n🔴 **ACL needs exactly 14 teams** — each plays every other once (91 matches) → Top 6 Playoffs → Super Cup."
             extra += f"\n🏟️ **Stadiums:** {len(DEFAULT_ACL_STADIUMS)} venues pre-loaded — fixtures get a random one at start. Edit with `cvt stadium_add`/`cvt stadiums` before `cvt start`."
         elif t_type == "t20_world_cup":
             extra = "\n⚠️ **T20 World Cup needs exactly 16 teams** in 4 groups of 4."
+        elif t_type == "double_round_robin":
+            extra = "\n🔁 **Double Round Robin:** every team plays every other team twice, once each way."
         if kwargs['stadium_mode'] == "linked":
             extra += ("\n🏟️ **Stadiums: Linked** — every team sets a home ground with a FIXED pitch: "
                       "`cvt set_home_stadium \"<team>\" <stadium name> <pitch>`. Home fixtures are played there, "
@@ -11212,23 +11216,26 @@ class PrefixCog(commands.Cog):
                 f"🏆 After all 91 league games, a Manager runs `cv tournament generate_playoffs` to start the Top-6 Playoffs."
             )
 
+        # Double Round Robin
+        if t_type == "double_round_robin":
+            teams = [t["name"] for t in tourney["teams"]]
+            schedule = generate_round_robin_schedule(teams, double=True, stage="league")
+            tourney["schedule"] = schedule
+            tourney["status"] = "active"
+            tourney["current_match_idx"] = 0
+            assign_tournament_conditions(tourney)
+            save_tournament(tourney)
+            per_team = max(0, (len(teams) - 1) * 2)
+            return await channel.send(
+                f"🔁 **DOUBLE ROUND ROBIN STARTED: {tourney['name']}!**\n"
+                f"Generated **{len(schedule)} matches** ({len(teams)} teams, {per_team} per team): "
+                f"everyone plays everyone twice, once each way{self._cond_note(tourney)}.\n"
+                f"Use `cv tournament status` to view fixtures · `cv tournament standings` for the table."
+            )
+
         # Round Robin
         teams = [t["name"] for t in tourney["teams"]]
-        if len(teams) % 2 != 0:
-            teams.append("BYE")
-        n = len(teams)
-        matchups = []
-        for r in range(n - 1):
-            round_matches = []
-            for i in range(n // 2):
-                t1, t2 = teams[i], teams[n - 1 - i]
-                if t1 != "BYE" and t2 != "BYE":
-                    round_matches.append((t1, t2) if r % 2 == 0 else (t2, t1))
-            random.shuffle(round_matches)
-            for m in round_matches:
-                matchups.append({"round": r + 1, "team1": m[0], "team2": m[1]})
-            teams.insert(1, teams.pop())
-        schedule = [{"match_id": i + 1, "round": m["round"], "team1": m["team1"], "team2": m["team2"], "status": "pending", "result": None} for i, m in enumerate(matchups)]
+        schedule = generate_round_robin_schedule(teams)
         tourney["schedule"] = schedule
         tourney["status"] = "active"
         tourney["current_match_idx"] = 0
@@ -11251,7 +11258,7 @@ class PrefixCog(commands.Cog):
 
         if tourney["status"] == "registration":
             t_type = tourney.get("tournament_type", "round_robin")
-            type_label = {"t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League"}.get(t_type, "Round Robin")
+            type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League"}.get(t_type, "Round Robin")
             embed = discord.Embed(title=f"🏆 {tourney['name']}", color=discord.Color.gold())
             cmode = tourney.get("conditions_mode", "manual")
             cmode_txt = {"auto": "🎲 Auto conditions", "home": "🏟️ Home-Pitch conditions"}.get(cmode, "🎛️ Manual conditions")
@@ -13537,15 +13544,12 @@ class PrefixCog(commands.Cog):
     async def _do_restore_schedule_prefix(self, ctx, tourney):
         teams = [t["name"] for t in tourney["teams"]]
         if len(teams) < 2: return await ctx.send("❌ Need at least 2 teams.")
-        if len(teams) % 2 != 0: teams.append("BYE")
-        n = len(teams); matchups = []
-        for r in range(n - 1):
-            for i in range(n // 2):
-                t1, t2 = teams[i], teams[n - 1 - i]
-                if t1 != "BYE" and t2 != "BYE":
-                    matchups.append({"round": r + 1, "team1": t1 if r % 2 == 0 else t2, "team2": t2 if r % 2 == 0 else t1})
-            teams.insert(1, teams.pop())
-        schedule = [{"match_id": i + 1, "round": m["round"], "team1": m["team1"], "team2": m["team2"], "status": "pending", "result": None} for i, m in enumerate(matchups)]
+        schedule = generate_round_robin_schedule(
+            teams,
+            double=(tourney.get("tournament_type") == "double_round_robin"),
+            stage=("league" if tourney.get("tournament_type") == "double_round_robin" else None),
+            shuffle=False,
+        )
         tourney["schedule"] = schedule; tourney["status"] = "active"; tourney["current_match_idx"] = 0
         save_tournament(tourney)
         r1 = [m for m in schedule if m["round"] == 1]
@@ -13641,7 +13645,7 @@ class PrefixCog(commands.Cog):
         # ── Card 1: quickstart flows per event type ──
         qs = discord.Embed(
             title="🏆 Tournament Guide  ·  Quickstarts",
-            description=("Event types: **Round Robin** · **T20 World Cup** (4 groups → Super 8 → KO) · "
+            description=("Event types: **Round Robin** · **Double Round Robin** · **T20 World Cup** (4 groups → Super 8 → KO) · "
                          "**ACL** (14 teams → League → Playoffs → Super Cup) · **CCODI** (10 teams, ODI, "
                          "2 groups of 5, double round robin → crossover semis) · **DSL** (recurring seasons) · "
                          "**Conquest** (open Elo ladder).\nFull command list is in the second card below. ⬇️"),
@@ -13661,6 +13665,14 @@ class PrefixCog(commands.Cog):
                    "**2.** `cvt add_team \"<team>\" @owner A` — **group A/B required**, 5 per group\n"
                    "**3.** owners `cvt ss` · `cvt start` → double round robin (40 group games)\n"
                    "**4.** top 2 per group → **crossover semis** (A1 v B2, B1 v A2) → Final, auto-generated"),
+            inline=False,
+        )
+        qs.add_field(
+            name="🔁 Double Round Robin",
+            value=("**1.** `cvt create \"League S1\" t20 event=double_rr`\n"
+                   "**2.** `cvt add_team \"<team>\" @owner` for every team · owners `cvt ss`\n"
+                   "**3.** `cvt start` → everyone plays everyone twice, once each way\n"
+                   "**4.** after league matches: mgr `cvt generate_knockouts` for Top-4 semis"),
             inline=False,
         )
         qs.add_field(
@@ -13685,7 +13697,7 @@ class PrefixCog(commands.Cog):
         ref = discord.Embed(title="📖 Tournament Command Reference  ·  `cvt …`", color=discord.Color.blurple())
         ref.add_field(
             name="🛠️ Setup & squads",
-            value=("`create \"<name>\" <format> [event=acl/t20wc/ccodi]`\n"
+            value=("`create \"<name>\" <format> [event=roundrobin/double_rr/acl/t20wc/ccodi]`\n"
                    "`add_team \"<team>\" @owner [group]` — group A/B for CCODI & T20 WC\n"
                    "`add_manager @user` · `remove_team \"<team>\"`\n"
                    "`submit_squad`/`ss` — owners paste a full squad\n"
@@ -13731,7 +13743,7 @@ class PrefixCog(commands.Cog):
         )
         ref.add_field(
             name="🔥 Knockouts (Managers)",
-            value=("`generate_knockouts` — Semis for Round Robin / T20 WC\n"
+            value=("`generate_knockouts` — Semis for Round Robin / Double RR / T20 WC\n"
                    "`generate_playoffs`/`gp` — ACL Top-6 / DSL Top-4\n"
                    "`bracket`/`br` — the knockout bracket\n"
                    "*(CCODI semis auto-generate once both groups finish.)*"),
