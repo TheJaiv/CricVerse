@@ -408,6 +408,7 @@ TEAMS_DATA = {
     "Team 2": {"name": "The Rivals",       "players": _build_equal_xi(_RIVAL_NAMES)},
 }
 
+
 class BatterStats:
     def __init__(self, profile):
         self.profile = profile
