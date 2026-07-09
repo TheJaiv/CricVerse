@@ -747,10 +747,20 @@ def execute_ball_math_odi(match):
     # to "get in" than in T20, so the vulnerable window runs ~10 balls.
     _bf = b_stats.balls_faced
     if _bf < 10:
-        wicket_weight *= (1.20 - _bf * 0.018)   # ~1.20 first ball → ~1.04 at 10
-        boundary_weight *= (0.80 + _bf * 0.020)
+        _new_wkt = 1.20 - _bf * 0.018            # ~1.20 first ball → ~1.04 at 10
+        _new_bnd = 0.80 + _bf * 0.020
+        if striker["archetype"] == "Vaibhav":    # fearless — minimal "play yourself in" death risk
+            _new_wkt = 1.0 + (_new_wkt - 1.0) * 0.3
+            _new_bnd = max(_new_bnd, 0.98)
+        wicket_weight *= _new_wkt
+        boundary_weight *= _new_bnd
     elif _bf >= 25:
         boundary_weight *= 1.10                  # well set — cashing in
+
+    # ── VAIBHAV CONVERSION: past ~30 he's set → cashes in and is hard to dislodge,
+    #    snowballing a start into a big 80-100 (most innings still end sub-30).
+    if striker["archetype"] == "Vaibhav" and b_stats.runs_scored >= 30:
+        boundary_weight *= 1.4; wicket_weight *= 0.5; dot_weight *= 0.85
 
     # ── RATING-SCALED CONSISTENCY (tournament only; high-rated → steadier) ──
     # Protect elite batters through the set phase (fewer freak cheap dismissals)

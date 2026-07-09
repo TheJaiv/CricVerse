@@ -977,10 +977,23 @@ def execute_ball_math_t20(match):
     # yourself in vs seeing it like a beachball" texture of an innings.
     _bf = b_stats.balls_faced
     if _bf < 6:
-        wicket_weight *= (1.32 - _bf * 0.045)   # ~1.32 first ball → ~1.05 at 6
-        boundary_weight *= (0.78 + _bf * 0.035)
+        _new_wkt = 1.32 - _bf * 0.045            # ~1.32 first ball → ~1.05 at 6
+        _new_bnd = 0.78 + _bf * 0.035
+        if striker["archetype"] == "Vaibhav":
+            # Fearless from ball one — he doesn't nick off "playing himself in", so the
+            # new-batsman death penalty is essentially gone (he still cashes early).
+            _new_wkt = 1.0 + (_new_wkt - 1.0) * 0.1
+            _new_bnd = max(_new_bnd, 0.98)
+        wicket_weight *= _new_wkt
+        boundary_weight *= _new_bnd
     elif _bf >= 15:
         boundary_weight *= 1.10                  # set — cashing in
+
+    # ── VAIBHAV CONVERSION: once he's crossed ~30 he's "in the zone" — he cashes in
+    #    hard and becomes very hard to dislodge, so a start snowballs into an 80-100.
+    #    (Most innings still end as a sub-30 cameo — this is the reward for surviving.)
+    if striker["archetype"] == "Vaibhav" and b_stats.runs_scored >= 30:
+        boundary_weight *= 1.4; wicket_weight *= 0.5; dot_weight *= 0.85
 
     # 🚨 TACTICAL USER BALANCING & SPIN LOGIC
     if "Yorker" in deliv:
@@ -1023,7 +1036,7 @@ def execute_ball_math_t20(match):
             # Vaibhav swings even harder than a maxed intent: more boundaries, far fewer
             # dots — and a much higher chance of holing out.
             if striker["archetype"] == "Vaibhav":
-                boundary_weight *= 2.0; wicket_weight *= 0.95; dot_weight *= 0.33
+                boundary_weight *= 2.0; wicket_weight *= 0.82; dot_weight *= 0.33
         else:
             # Required run rate (chase only) tells set batters when to lift the tempo.
             _rrr_now = (runs_needed / balls_left * 6) if (match.current_innings_num == 2 and balls_left > 0) else 0.0
