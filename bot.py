@@ -435,21 +435,27 @@ def _scaled_xi_from_template(slots, name_prefix, start_idx, target_ovr):
                     "bowl": _clamp_rt(nbo), "archetype": a, "role": r})
     return out
 
-def build_test_home_xi(tested, target_ovr):
+def build_test_home_xi(tested, target_ovr, prefix="Home Net"):
     """Tested players (their REAL ratings) + balanced fillers scaled to target_ovr,
-    completing a legal XI (keeper guaranteed when there's room to add one)."""
+    completing a legal XI (keeper guaranteed)."""
     core = [dict(p) for p in tested][:11]
     need = 11 - len(core)
     slots = [_EQUAL_TEMPLATE[(len(core) + i) % len(_EQUAL_TEMPLATE)] for i in range(need)]
-    fillers = _scaled_xi_from_template(slots, "Home Net", len(core), target_ovr) if need else []
+    fillers = _scaled_xi_from_template(slots, prefix, len(core), target_ovr) if need else []
     xi = core + fillers
     if not _has_wk(xi):
-        wk = _scaled_xi_from_template([_TEST_WK_SLOT], "Home Keeper", 0, target_ovr)[0]
-        wk["name"] = "Home Keeper"
+        wk = _scaled_xi_from_template([_TEST_WK_SLOT], prefix, 0, target_ovr)[0]
+        wk["name"] = f"{prefix} Keeper"
         if fillers:
             xi[-1] = wk
         elif len(xi) < 11:
             xi.append(wk)
+        else:
+            # full tested XI, no keeper — hand the gloves to the best pure batter
+            cand = max((p for p in xi if (p.get("role") or "").startswith("Batter")),
+                       key=lambda p: p.get("bat", 0), default=None)
+            if cand:
+                cand["role"] = "Batter_WK"
     return xi[:11]
 
 def build_test_away_xi(target_ovr):
@@ -7807,7 +7813,7 @@ def _help_match_embed():
     e = discord.Embed(title="🎮 Match Play", color=discord.Color.green())
     e.add_field(name="/match [@opponent]  ·  `cv match`  ·  `cv m`",  value="Start an interactive match vs a user, or leave blank to play vs AI.", inline=False)
     e.add_field(name="/simulatematch",                                  value="Instantly simulate a full match — pick teams, format and conditions.", inline=False)
-    e.add_field(name="`cv testplayer`  ·  `cv tp`",                    value="Test player(s) in a live match: pick 1-5 players, they slot into a balanced XI vs a Weak/Balanced/Tough opposition, then the normal pitch → toss → match flow runs.", inline=False)
+    e.add_field(name="`cv testplayer`  ·  `cv tp`",                    value="Test up to **22 players** in a live match: paste all the names at once. 1-11 join a balanced XI vs a Weak/Balanced/Tough net side; 12-22 split into two even Test XIs that play each other. Batting order is engine-decided, then the normal pitch → toss → match flow runs.", inline=False)
     e.add_field(name="TEST format in /match",                           value="Select 'TEST (90 overs)' in the format dropdown to play a 5-day Test with session/innings/full-match modes.", inline=False)
     e.add_field(name="/impactplayer",                                   value="During an active match, swap in your Impact Player (if rule is on).", inline=False)
     e.add_field(name="`cv resume`  ·  `cv forcehub`",                  value="Match stuck with no buttons (Discord hiccup ate the prompt)? Re-shows the lost over hub / bowler pick / next-batter prompt — no progress is lost.", inline=False)
@@ -8779,7 +8785,7 @@ class PrefixCog(commands.Cog):
             await ctx.send("⚠️ There is no active match or setup running in this channel.")
 
     @commands.command(name="testplayer", aliases=["tp", "playertest", "test_player"],
-                      help="Test player(s) in a live match — your picks slot into a balanced XI vs a balanced XI, then the normal pitch/toss/match flow runs.\nUsage: testplayer")
+                      help="Test up to 22 players in a live match. 1-11: they join a balanced XI vs a Weak/Balanced/Tough net side. 12-22: split into two even Test XIs that play each other. Batting order is engine-decided.\nUsage: testplayer")
     async def testplayer(self, ctx):
         if is_channel_restricted(str(ctx.channel.id)):
             return await ctx.send("❌ Matches are **disabled** in this channel.")
@@ -8815,41 +8821,50 @@ class PrefixCog(commands.Cog):
             return msg.content.strip() if _alive() else None
 
         try:
-            # ── 1: how many players to test ──
-            raw = await _ask("🧪 **Player Test** — how many players do you want to test? *(1-5)*")
+            # ── 1: collect ALL the names in one message (real DB ratings, overrides applied) ──
+            raw = await _ask("🧪 **Player Test** — paste **all the players you want to test** in one message\n"
+                             "*(one per line or comma-separated · **1-11** = they join one XI vs a net side · "
+                             "**12-22** = split into two Test XIs that play each other)*")
             if raw is None:
                 return await ctx.send("⏳ **Cancelled** — no reply.")
-            if not raw.isdigit() or not 1 <= int(raw) <= 5:
-                return await ctx.send("❌ Cancelled — reply with a number **1-5** next time.")
-            n = int(raw)
 
-            # ── 2: collect the player names (real DB ratings, server overrides applied) ──
             pool = apply_server_overrides(get_all_players(), str(ctx.guild.id) if ctx.guild else None)
             by_name = {p["name"].lower(): p for p in pool}
-            tested = []
-            for i in range(n):
-                got = None
-                for attempt in range(3):
-                    left = f"  *({2 - attempt} retries left)*" if attempt else ""
-                    raw = await _ask(f"🧪 Player **{i + 1}/{n}** — type the player's name:{left}")
+            tested = None
+            for attempt in range(3):
+                names = [s.strip() for line in raw.splitlines() for s in line.split(",") if s.strip()]
+                if not 1 <= len(names) <= 22:
+                    raw = await _ask(f"❌ That's **{len(names)}** names — I need **1-22**. Paste the list again:")
                     if raw is None:
                         return await ctx.send("⏳ **Cancelled** — no reply.")
-                    cand = by_name.get(raw.lower())
+                    continue
+                found, missing, seen = [], [], set()
+                for nm in names:
+                    cand = by_name.get(nm.lower())
                     if not cand:
-                        close = difflib.get_close_matches(raw.lower(), list(by_name.keys()), n=1, cutoff=0.6)
+                        close = difflib.get_close_matches(nm.lower(), list(by_name.keys()), n=1, cutoff=0.6)
                         cand = by_name.get(close[0]) if close else None
                     if not cand:
-                        await ctx.send("❌ Player not found in the database — check the spelling.")
-                        continue
-                    if any(t["name"] == cand["name"] for t in tested):
-                        await ctx.send(f"❌ **{cand['name']}** is already being tested — pick someone else.")
-                        continue
-                    got = cand
-                    break
-                if not got:
-                    return await ctx.send("❌ **Test cancelled** — couldn't resolve that player.")
-                tested.append(dict(got))
-                await ctx.send(f"✅ **{got['name']}** — {_role_short(got)} · {got.get('archetype', 'Standard')}")
+                        missing.append(nm)
+                    elif cand["name"] not in seen:
+                        seen.add(cand["name"])
+                        found.append(dict(cand))
+                if missing:
+                    err = ""
+                    if found:
+                        err += f"✅ **Found:** {', '.join(p['name'] for p in found)}\n"
+                    err += (f"❌ **Not in the DB:** {', '.join(missing)}\n\n"
+                            "Check the spellings and paste the **full list** again:")
+                    raw = await _ask(err)
+                    if raw is None:
+                        return await ctx.send("⏳ **Cancelled** — no reply.")
+                    continue
+                tested = found
+                break
+            if tested is None:
+                return await ctx.send("❌ **Test cancelled** — couldn't resolve the list.")
+            await ctx.send(f"✅ **Testing {len(tested)}:** " +
+                           ", ".join(f"{p['name']} ({_role_short(p)})" for p in tested))
 
             # ── 3: difficulty of everyone else, relative to the tested players ──
             avg_ovr = sum(_player_overall(p) for p in tested) / len(tested)
@@ -8871,16 +8886,34 @@ class PrefixCog(commands.Cog):
                 return await ctx.send("⏳ **Cancelled** — no format chosen.")
             state.format_overs = fview.value
 
-            state.t1_name = "Test XI"
-            state.t1_roster = build_test_home_xi(tested, target)
-            state.t2_name = "Net Opposition"
-            state.t2_roster = build_test_away_xi(target)
+            # Batting order is decided by the ENGINE (_batting_order: rating + archetype +
+            # role), not by entry order — tested players slot wherever they belong.
+            if len(tested) <= 11:
+                state.t1_name = "Test XI"
+                state.t1_roster = _batting_order(build_test_home_xi(tested, target))
+                state.t2_name = "Net Opposition"
+                state.t2_roster = _batting_order(build_test_away_xi(target))
+            else:
+                # 12-22 tested → snake-split by OVR into two even sides that play EACH
+                # OTHER; fillers (at the chosen difficulty) complete each XI.
+                ranked = sorted(tested, key=_player_overall, reverse=True)
+                side_a, side_b = [], []
+                for i, p in enumerate(ranked):
+                    (side_a if i % 4 in (0, 3) else side_b).append(p)
+                state.t1_name = "Test XI A"
+                state.t1_roster = _batting_order(build_test_home_xi(side_a, target, prefix="A Net"))
+                state.t2_name = "Test XI B"
+                state.t2_roster = _batting_order(build_test_home_xi(side_b, target, prefix="B Net"))
             state.home_team_id = ctx.author.id
 
             _cleanup()   # views/toss take over from here, exactly like a normal match
-            names = ", ".join(p["name"] for p in tested)
-            await ctx.send(f"🧪 **Test ready!** Watching: **{names}**  ·  Opposition: **{view.value.title()}**\n"
-                           f"**{state.t1_name}** (your picks + balanced fillers)  vs  **{state.t2_name}**")
+            if len(tested) <= 11:
+                vs_line = f"**{state.t1_name}** (your picks + balanced fillers)  vs  **{state.t2_name}**"
+            else:
+                a_names = ", ".join(p["name"] for p in state.t1_roster if any(t["name"] == p["name"] for t in tested))
+                b_names = ", ".join(p["name"] for p in state.t2_roster if any(t["name"] == p["name"] for t in tested))
+                vs_line = f"**{state.t1_name}:** {a_names}\n**{state.t2_name}:** {b_names}"
+            await ctx.send(f"🧪 **Test ready!**  ·  Fillers/opposition: **{view.value.title()}**\n{vs_line}")
             await proceed_to_conditions(ctx.channel, state)
             return
         finally:
