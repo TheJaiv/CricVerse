@@ -466,6 +466,21 @@ def build_test_away_xi(target_ovr):
 _TEST_DIFFICULTY = {"weak": -8, "balanced": 0, "tough": +8}
 
 
+def _apply_order_pins(xi, pins):
+    """Re-seat pinned players ("Virat Kohli 3" → position 3) inside an engine-ordered
+    XI. Unpinned players keep their engine order around the pins. `pins` maps player
+    name → 1-based position; names not in this XI are ignored (split mode)."""
+    mine = {n: pos for n, pos in pins.items() if any(p["name"] == n for p in xi)}
+    if not mine:
+        return xi
+    rest = [p for p in xi if p["name"] not in mine]
+    out = rest
+    for name, pos in sorted(mine.items(), key=lambda kv: kv[1]):
+        player = next(p for p in xi if p["name"] == name)
+        out.insert(min(max(pos - 1, 0), len(out)), player)
+    return out
+
+
 class _TestDifficultyView(discord.ui.View):
     """Weak / Balanced / Tough picker for cv testplayer. Sets .value then stops."""
     def __init__(self, owner_id):
@@ -7813,7 +7828,7 @@ def _help_match_embed():
     e = discord.Embed(title="🎮 Match Play", color=discord.Color.green())
     e.add_field(name="/match [@opponent]  ·  `cv match`  ·  `cv m`",  value="Start an interactive match vs a user, or leave blank to play vs AI.", inline=False)
     e.add_field(name="/simulatematch",                                  value="Instantly simulate a full match — pick teams, format and conditions.", inline=False)
-    e.add_field(name="`cv testplayer`  ·  `cv tp`",                    value="Test up to **22 players** in a live match: paste all the names at once. 1-11 join a balanced XI vs a Weak/Balanced/Tough net side; 12-22 split into two even Test XIs that play each other. Batting order is engine-decided, then the normal pitch → toss → match flow runs.", inline=False)
+    e.add_field(name="`cv testplayer`  ·  `cv tp`",                    value="Test up to **22 players** in a live match: paste all the names at once. 1-11 join a balanced XI vs a Weak/Balanced/Tough net side; 12-22 split into two even Test XIs that play each other. Engine picks the batting order — `Virat Kohli 3` **pins him to bat #3**. Then the normal pitch → toss → match flow runs.", inline=False)
     e.add_field(name="TEST format in /match",                           value="Select 'TEST (90 overs)' in the format dropdown to play a 5-day Test with session/innings/full-match modes.", inline=False)
     e.add_field(name="/impactplayer",                                   value="During an active match, swap in your Impact Player (if rule is on).", inline=False)
     e.add_field(name="`cv resume`  ·  `cv forcehub`",                  value="Match stuck with no buttons (Discord hiccup ate the prompt)? Re-shows the lost over hub / bowler pick / next-batter prompt — no progress is lost.", inline=False)
@@ -8785,7 +8800,7 @@ class PrefixCog(commands.Cog):
             await ctx.send("⚠️ There is no active match or setup running in this channel.")
 
     @commands.command(name="testplayer", aliases=["tp", "playertest", "test_player"],
-                      help="Test up to 22 players in a live match. 1-11: they join a balanced XI vs a Weak/Balanced/Tough net side. 12-22: split into two even Test XIs that play each other. Batting order is engine-decided.\nUsage: testplayer")
+                      help="Test up to 22 players in a live match. 1-11: they join a balanced XI vs a Weak/Balanced/Tough net side. 12-22: split into two even Test XIs that play each other. Engine picks the batting order — add a number after a name (\"Virat Kohli 3\") to pin their spot.\nUsage: testplayer")
     async def testplayer(self, ctx):
         if is_channel_restricted(str(ctx.channel.id)):
             return await ctx.send("❌ Matches are **disabled** in this channel.")
@@ -8803,10 +8818,15 @@ class PrefixCog(commands.Cog):
         def _alive():   # endmatch clears the dicts — abort quietly if that happened
             return active_setups.get(ctx.channel.id, (None, None))[1] is state
 
+        handed_off = False
+
         def _cleanup():
             if _alive():
                 del active_setups[ctx.channel.id]
-                setup_states.pop(ctx.channel.id, None)
+                # On hand-off, setup_states must SURVIVE until begin_toss pops it —
+                # endmatch flags state.cancelled through it, and cv order edits it.
+                if not handed_off:
+                    setup_states.pop(ctx.channel.id, None)
 
         def chk(m):
             return (m.author.id == ctx.author.id and m.channel.id == ctx.channel.id
@@ -8824,7 +8844,9 @@ class PrefixCog(commands.Cog):
             # ── 1: collect ALL the names in one message (real DB ratings, overrides applied) ──
             raw = await _ask("🧪 **Player Test** — paste **all the players you want to test** in one message\n"
                              "*(one per line or comma-separated · **1-11** = they join one XI vs a net side · "
-                             "**12-22** = split into two Test XIs that play each other)*")
+                             "**12-22** = split into two Test XIs that play each other)*\n"
+                             "-# ✏️ A number **pins the batting spot** — `Virat Kohli 3` or `3. Virat Kohli` bats at #3. "
+                             "No number = the engine picks the order.")
             if raw is None:
                 return await ctx.send("⏳ **Cancelled** — no reply.")
 
@@ -8838,8 +8860,18 @@ class PrefixCog(commands.Cog):
                     if raw is None:
                         return await ctx.send("⏳ **Cancelled** — no reply.")
                     continue
-                found, missing, seen = [], [], set()
+                found, missing, seen, pins = [], [], set(), {}
                 for nm in names:
+                    # a 1-11 pins the batting position — both "Virat Kohli 3" and
+                    # "3. Virat Kohli" work (so a pasted numbered list IS the order)
+                    pin = None
+                    pm = re.match(r"^(\d{1,2})\s*[.):\-]?\s+(.*\S)$", nm)
+                    if pm and 1 <= int(pm.group(1)) <= 11:
+                        nm, pin = pm.group(2), int(pm.group(1))
+                    else:
+                        pm = re.match(r"^(.*\S)\s+(\d{1,2})$", nm)
+                        if pm and 1 <= int(pm.group(2)) <= 11:
+                            nm, pin = pm.group(1), int(pm.group(2))
                     cand = by_name.get(nm.lower())
                     if not cand:
                         close = difflib.get_close_matches(nm.lower(), list(by_name.keys()), n=1, cutoff=0.6)
@@ -8849,6 +8881,8 @@ class PrefixCog(commands.Cog):
                     elif cand["name"] not in seen:
                         seen.add(cand["name"])
                         found.append(dict(cand))
+                        if pin:
+                            pins[cand["name"]] = pin
                 if missing:
                     err = ""
                     if found:
@@ -8864,7 +8898,9 @@ class PrefixCog(commands.Cog):
             if tested is None:
                 return await ctx.send("❌ **Test cancelled** — couldn't resolve the list.")
             await ctx.send(f"✅ **Testing {len(tested)}:** " +
-                           ", ".join(f"{p['name']} ({_role_short(p)})" for p in tested))
+                           ", ".join(f"{p['name']} ({_role_short(p)}" +
+                                     (f" · pinned #{pins[p['name']]})" if p["name"] in pins else ")")
+                                     for p in tested))
 
             # ── 3: difficulty of everyone else, relative to the tested players ──
             avg_ovr = sum(_player_overall(p) for p in tested) / len(tested)
@@ -8886,11 +8922,11 @@ class PrefixCog(commands.Cog):
                 return await ctx.send("⏳ **Cancelled** — no format chosen.")
             state.format_overs = fview.value
 
-            # Batting order is decided by the ENGINE (_batting_order: rating + archetype +
-            # role), not by entry order — tested players slot wherever they belong.
+            # Batting order: the ENGINE decides (_batting_order: rating + archetype +
+            # role) — except players PINNED with a trailing number, who bat exactly there.
             if len(tested) <= 11:
                 state.t1_name = "Test XI"
-                state.t1_roster = _batting_order(build_test_home_xi(tested, target))
+                state.t1_roster = _apply_order_pins(_batting_order(build_test_home_xi(tested, target)), pins)
                 state.t2_name = "Net Opposition"
                 state.t2_roster = _batting_order(build_test_away_xi(target))
             else:
@@ -8901,11 +8937,12 @@ class PrefixCog(commands.Cog):
                 for i, p in enumerate(ranked):
                     (side_a if i % 4 in (0, 3) else side_b).append(p)
                 state.t1_name = "Test XI A"
-                state.t1_roster = _batting_order(build_test_home_xi(side_a, target, prefix="A Net"))
+                state.t1_roster = _apply_order_pins(_batting_order(build_test_home_xi(side_a, target, prefix="A Net")), pins)
                 state.t2_name = "Test XI B"
-                state.t2_roster = _batting_order(build_test_home_xi(side_b, target, prefix="B Net"))
+                state.t2_roster = _apply_order_pins(_batting_order(build_test_home_xi(side_b, target, prefix="B Net")), pins)
             state.home_team_id = ctx.author.id
 
+            handed_off = True
             _cleanup()   # views/toss take over from here, exactly like a normal match
             if len(tested) <= 11:
                 vs_line = f"**{state.t1_name}** (your picks + balanced fillers)  vs  **{state.t2_name}**"
@@ -8913,7 +8950,8 @@ class PrefixCog(commands.Cog):
                 a_names = ", ".join(p["name"] for p in state.t1_roster if any(t["name"] == p["name"] for t in tested))
                 b_names = ", ".join(p["name"] for p in state.t2_roster if any(t["name"] == p["name"] for t in tested))
                 vs_line = f"**{state.t1_name}:** {a_names}\n**{state.t2_name}:** {b_names}"
-            await ctx.send(f"🧪 **Test ready!**  ·  Fillers/opposition: **{view.value.title()}**\n{vs_line}")
+            await ctx.send(f"🧪 **Test ready!**  ·  Fillers/opposition: **{view.value.title()}**\n{vs_line}\n"
+                           f"-# ✏️ Tip: `Virat Kohli 3` (or `3. Virat Kohli`) in the list pins him to bat #3 — no number = engine decides.")
             await proceed_to_conditions(ctx.channel, state)
             return
         finally:
