@@ -379,7 +379,10 @@ def get_smart_ai_bowler_t20(innings, pitch, weather="Clear", format_overs=20):
     def _live(p):   return not getattr(innings.bowling_stats.get(p["name"]), "is_subbed_out", False)
     def _quota(p):  return innings.bowling_stats[p["name"]].balls_bowled // 6 < bowler_quota
     def _nc(p):     return not innings.current_bowler or innings.current_bowler["name"] != p["name"]
-    def _main(p):   return "Bowler" in p["role"] or "All-Rounder" in p["role"]
+    # 'avoid_bowl' (the typed 'L' marker) drops a player out of the MAIN attack, so he
+    # only surfaces via the part-timer / last-resort pools below — i.e. he bowls only
+    # once the frontline has run out of quota.
+    def _main(p):   return ("Bowler" in p["role"] or "All-Rounder" in p["role"]) and not p.get("avoid_bowl")
 
     all_live = [p for p in innings.bowling_team["players"] if _live(p)]
     mains    = [p for p in all_live if _main(p)]
@@ -1330,9 +1333,11 @@ def execute_ball_math_t20(match):
         match.free_hit = False
         if innings.total_balls % 6 == 0:
             match.over_completed = True
-            # End-of-over strike rotation: runs of 1/3 already swapped mid-ball.
-            # Suppressed in career last-man (solo) batting so the lone batsman keeps strike.
-            if (outcome == "wicket" or runs not in [1, 3]) and not (getattr(match, "is_club", False) and _solo_batting(innings)):
+            # End-of-over END CHANGE: ALWAYS switch — a 1/3 off the last ball already
+            # crossed the batters mid-ball, so this second switch puts the single-taker
+            # BACK on strike ("single to keep the strike"); a 0/2/4/6 hands it to the
+            # partner. Suppressed in career last-man (solo) batting only.
+            if not (getattr(match, "is_club", False) and _solo_batting(innings)):
                 innings.current_striker_idx, innings.current_non_striker_idx = innings.current_non_striker_idx, innings.current_striker_idx
         
     match.last_commentary = prefix + f"**{bowler['name']}** bowled a **{deliv}**\n**{striker['name']}** played: **{shot}**\n💥 **Result:** {outcome_text}"

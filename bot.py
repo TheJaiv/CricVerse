@@ -853,13 +853,18 @@ def try_ai_impact_player(match: CricketMatch, innings: InningsState):
 
     return announcements
 
+# Engine choice is by MATCH LENGTH, not an exact 50-over check: a DLS-reduced ODI
+# (e.g. 48 or 40 overs) must KEEP ODI pacing — only a genuinely short match plays
+# T20-style. The ODI engine scales its phases (powerplay/death) to max_balls.
+_ODI_ENGINE_MIN_OVERS = 35
+
 def get_smart_ai_bowler(innings, pitch, weather="Clear", format_overs=20):
-    if format_overs == 50:
+    if format_overs >= _ODI_ENGINE_MIN_OVERS:
         return get_smart_ai_bowler_odi(innings, pitch, weather, format_overs)
     return get_smart_ai_bowler_t20(innings, pitch, weather, format_overs)
 
 def execute_ball_math(match: CricketMatch):
-    if match.format_overs == 50:
+    if match.format_overs >= _ODI_ENGINE_MIN_OVERS:
         return execute_ball_math_odi(match)
     return execute_ball_math_t20(match)
 
@@ -3502,7 +3507,8 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
         is_tied = (inn2.total_runs == target - 1)
         
         if is_tied and not getattr(match, "tie_accepted", False) and not getattr(match, 'is_super_over', False):
-            if match.format_overs != 50:
+            # DLS may have reduced format_overs — judge the tie rule by the ORIGINAL format.
+            if getattr(match, "original_format_overs", match.format_overs) != 50:
                 # Show the completed (tied) scoreboard before the Super Over begins.
                 try:
                     _tie_img = generate_tournament_score_image(match) if getattr(match, "tournament_server_id", None) else generate_final_score_image(match)
@@ -4335,11 +4341,21 @@ class DRSView(discord.ui.View):
 
             if getattr(self.match, "pending_next_batter", False):
                 self.match.pending_next_batter = False
+                # No replacement was promoted yet — the reprieved batter still holds
+                # his crease end (after a last-ball wicket the end-change moved him to
+                # the non-striker end; that's where he belongs for the new over).
             else:
                 innings.next_batter_idx -= 1
-
-            innings.current_striker_idx = self.match.prev_striker_idx
-            innings.batting_stats[innings.batting_team["players"][innings.current_striker_idx]["name"]].dismissal = "not out"
+                _nb = innings.next_batter_idx
+                # Un-promote the auto-promoted new man from whichever end he took —
+                # if the over ended after the wicket, the end-change parked him at
+                # the NON-striker end (blindly restoring the striker would point both
+                # ends at the same batter and kill strike rotation).
+                if innings.current_striker_idx == _nb:
+                    innings.current_striker_idx = self.match.prev_striker_idx
+                elif innings.current_non_striker_idx == _nb:
+                    innings.current_non_striker_idx = self.match.prev_striker_idx
+            innings.batting_stats[innings.batting_team["players"][self.match.prev_striker_idx]["name"]].dismissal = "not out"
             innings.bowling_stats[innings.current_bowler["name"]].wickets_taken -= 1
             if innings.over_log and innings.over_log[-1] == "<:wicket:1520143043683156051>":
                 innings.over_log[-1] = "<:0run:1520141253604544633>"
@@ -4464,10 +4480,17 @@ async def prompt_batter_shot(channel, match: CricketMatch, prev=None):
                     innings.wickets -= 1
                     if getattr(match, "pending_next_batter", False):
                         match.pending_next_batter = False
+                        # reprieved batter still holds his crease end (see DRS view note)
                     else:
                         innings.next_batter_idx -= 1
-                    innings.current_striker_idx = match.prev_striker_idx
-                    innings.batting_stats[innings.batting_team["players"][innings.current_striker_idx]["name"]].dismissal = "not out"
+                        _nb = innings.next_batter_idx
+                        # un-promote the new man from whichever end he took (after a
+                        # last-ball wicket the end-change parked him at the non-striker end)
+                        if innings.current_striker_idx == _nb:
+                            innings.current_striker_idx = match.prev_striker_idx
+                        elif innings.current_non_striker_idx == _nb:
+                            innings.current_non_striker_idx = match.prev_striker_idx
+                    innings.batting_stats[innings.batting_team["players"][match.prev_striker_idx]["name"]].dismissal = "not out"
                     innings.bowling_stats[innings.current_bowler["name"]].wickets_taken -= 1
                     if innings.over_log and innings.over_log[-1] == "<:wicket:1520143043683156051>":
                         innings.over_log[-1] = "<:0run:1520141253604544633>"
@@ -5212,6 +5235,19 @@ def _strip_captain_mark(line):
     return line[:m.start()].rstrip(), True, (m.group(1) == "c")
 
 
+# 'L' = a reluctant bowler: the AI should avoid giving them overs unless the frontline
+# attack runs out of quota. Written as a trailing '(L)' or a bare trailing ' L'.
+_NOBOWL_MARK_RE = re.compile(r"\s*(?:\(\s*l\s*\)|\s+l)\s*$", re.IGNORECASE)
+
+
+def _strip_nobowl_mark(line):
+    """(clean_line, marked) — pull a trailing 'don't bowl him' marker off a typed line."""
+    m = _NOBOWL_MARK_RE.search(line)
+    if not m:
+        return line, False
+    return line[:m.start()].rstrip(), True
+
+
 def _has_wk(players):
     """True if the XI contains at least one wicket-keeper (any 'WK' role)."""
     return any("WK" in (p.get("role") or "") for p in players)
@@ -5295,7 +5331,12 @@ def parse_pasted_roster(raw_text, db_players, max_lines=16):
 
     lines = [l.strip() for l in raw_text.split("\n") if l.strip()]
     for line in lines[:max_lines]:
-        core, marked, low = _strip_captain_mark(line)
+        # Strip the no-bowl 'L' on both sides of the captain mark so "X (C) L" and
+        # "X L (C)" both work.
+        core, _nb1 = _strip_nobowl_mark(line)
+        core, marked, low = _strip_captain_mark(core)
+        core, _nb2 = _strip_nobowl_mark(core)
+        nobowl = _nb1 or _nb2
         if marked:
             captain_marks += 1
             lowercase_mark_used = lowercase_mark_used or low
@@ -5315,6 +5356,10 @@ def parse_pasted_roster(raw_text, db_players, max_lines=16):
 
         # 3. Duplicate check before adding to the team
         if matched_player:
+            if nobowl:
+                # Copy first — the matched dict is the shared DB object.
+                matched_player = dict(matched_player)
+                matched_player["avoid_bowl"] = True
             if matched_player["name"] not in seen_names:
                 found_players.append(matched_player)
                 seen_names.add(matched_player["name"])
@@ -5332,7 +5377,8 @@ def format_xi_display(players):
     lines = []
     for i, p in enumerate(players, 1):
         role_short = p["role"].replace("All-Rounder", "AR").replace("Bowler", "BWL").replace("Batter", "BAT").replace("_", " ")
-        lines.append(f"`{i:>2}.` **{p['name']}** — {role_short}")
+        mark = " · 🚫 no-bowl (L)" if p.get("avoid_bowl") else ""
+        lines.append(f"`{i:>2}.` **{p['name']}** — {role_short}{mark}")
     return "\n".join(lines)
 
 
@@ -9417,16 +9463,20 @@ class PrefixCog(commands.Cog):
                           f"ranked by average advantage + worst-case floor")
         await working.edit(content=None, embed=e)
 
-    @commands.command(name="bestxi", aliases=["bxi", "optimizexi"], help="[OWNER] Find the best XI from your squad for a chosen pitch vs an opponent.\nUsage: bestxi  → paste squad → pick pitch + what the other team is good at (or paste their XI)")
-    async def bestxi(self, ctx):
+    @commands.command(name="bestxi", aliases=["bxi", "optimizexi"], help="[OWNER] Find the best XI from your squad for a chosen pitch vs an opponent.\nUsage: bestxi [odi]  → paste squad → pick pitch + what the other team is good at (or paste their XI).\nDefaults to T20; pass `odi` for 50 overs.")
+    async def bestxi(self, ctx, fmt: str = None):
         if ctx.author.id != ADMIN_DISCORD_ID:
             return await ctx.send("🔒 Owner only.")
         from tools.lineup_optimizer import recommend_xi, PITCHES, category
 
+        is_odi = (fmt or "").strip().lower() in ("odi", "50", "od", "50ov")
+        format_overs = 50 if is_odi else 20
+        fmt_label = "ODI · 50 ov" if is_odi else "T20 · 20 ov"
+
         # 1) squad (with confirm)
         squad = await self._roster_collect(
-            ctx, "🧠 **Best XI Finder** (owner) — paste your **SQUAD** (11–30 names, "
-            "one per line). You have 3 minutes.", 30, 11, "Your SQUAD")
+            ctx, f"🧠 **Best XI Finder** ({fmt_label}, owner) — paste your **SQUAD** "
+            f"(11–30 names, one per line). You have 3 minutes.", 30, 11, "Your SQUAD")
         if squad is None:
             return await ctx.send("⏳ Timed out — run `cv bestxi` again.")
 
@@ -9508,11 +9558,12 @@ class PrefixCog(commands.Cog):
             opp_spec = opp_players[:11]
 
         opp_label = "their XI" if view.opp == "custom" else f"a {view.opp}-strong side"
-        working = await ctx.send(f"🧠 Simulating the best XI on **{view.pitch}** "
-                                 f"({view.weather}) vs {opp_label}… (~10s)")
+        eta = "~20s" if is_odi else "~10s"
+        working = await ctx.send(f"🧠 Simulating the best **{fmt_label}** XI on "
+                                 f"**{view.pitch}** ({view.weather}) vs {opp_label}… {eta}")
         try:
             r = await asyncio.to_thread(recommend_xi, squad, view.pitch, opp_spec,
-                                        view.weather)
+                                        view.weather, format_overs)
         except Exception as ex:
             return await working.edit(content=f"❌ Error: {ex}")
 
@@ -9524,7 +9575,8 @@ class PrefixCog(commands.Cog):
             wk = " (WK)" if "WK" in p["role"] else ""
             c = " 🧢" if p["name"] == cap else ""
             rows.append(f"`{i:>2}.` {p['name']}{wk} · {p['bat']}/{p['bowl']}{c}")
-        e = discord.Embed(title=f"🧠 Best XI · {view.pitch} / {view.weather} vs {opp_label}",
+        e = discord.Embed(title=f"🧠 Best XI ({fmt_label}) · {view.pitch} / {view.weather} "
+                                f"vs {opp_label}",
                           description="\n".join(rows), color=0x2ecc71)
         e.add_field(name="🧢 Captain", value=cap, inline=True)
         e.add_field(name="⚡ Impact Player",
@@ -9539,8 +9591,8 @@ class PrefixCog(commands.Cog):
         if r["benched"]:
             e.add_field(name="Left out",
                         value=", ".join(p["name"] for p in r["benched"][:14]), inline=False)
-        e.set_footer(text=f"Squad {len(squad)} · team OVR {r['ref_ovr']} · owner-only · "
-                          f"batting order optimised for this deck")
+        e.set_footer(text=f"{fmt_label} · squad {len(squad)} · team OVR {r['ref_ovr']} · "
+                          f"owner-only · batting order optimised for this deck")
         await working.edit(content=None, embed=e)
 
     @commands.command(name="playerlistratings", aliases=["plr", "plratings"], help="[OWNER] Download the full player database WITH ratings.\nUsage: plr")

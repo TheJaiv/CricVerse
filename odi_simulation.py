@@ -35,16 +35,23 @@ ODI_CHASE_RELIEF_K = 0.062  # innings-2 wicket relief per point of wear suscepti
 #  legitimate boundaries and strike rotation instead.)
 ODI_BASE_DOT   = 52.6; ODI_DOT_SENS = 52.0
 ODI_BASE_SINGLE = 47.0
-ODI_BASE_BND   = 11.4; ODI_BND_SENS = 18.0
+ODI_BASE_BND   = 11.6; ODI_BND_SENS = 18.0   # +0.2 with the 2026-07-10 end-change fix (tails keeping strike off last-ball singles trimmed par ~5-10 on wicket decks)
 ODI_BASE_WKT   = 4.0;  ODI_WKT_SENS = 8.5
 # Pitch, weather, ball-age and phase each scale the wicket rate. Over 300 balls
 # their PRODUCT bowls sides out ~100% of the time on bowling-friendly decks.
 # After those environmental multipliers we pull the combined inflation partway
 # back toward baseline so even green/overcast/cracked tracks let teams bat deep.
-ODI_WKT_COMPRESS = 0.34
+ODI_WKT_COMPRESS = 0.315
 # Batting-paradise floor (see T20 note): a road/dead deck caps how cheaply a side
 # folds, lifting the low tail without changing the boundary-driven mean.
 ODI_BAT_PITCH_WKT_CAP = 7.0
+# Bowling-deck ceiling (mirror of T20_BOWL_PITCH_WKT_CAP): even a minefield
+# bottoms out. Caps the stacked env x slog x mismatch wicket spikes that the
+# skill-anchored compressor now lets through, holding all-out at the levels
+# Jaiv calibrated (the old flat-anchor compressor was acting as this cap by
+# accident — it just also crushed every good bowler's edge on the way).
+ODI_BOWL_PITCH_WKT_CAP = 10.0
+ODI_BOWL_DECKS = ("Cracked", "Sticky", "Turning", "Worn", "Dusty", "Dry", "Green", "Damp", "Bouncy", "Soft", "Two-Paced", "Slow")
 
 # ── 2.0: PITCH DETERIORATION ──
 # How fast each surface wears over 100 overs. Dust bowls / worn / cracked decks
@@ -145,11 +152,11 @@ SPIN_SHOT_MATRIX = {
     "Mystery": ["Block", "Sweep", "Drive"] 
 }
 
-def get_smart_ai_shot_odi(deliv, innings, is_death_overs, archetype, pressure_multiplier=1.0):
+def get_smart_ai_shot_odi(deliv, innings, is_death_overs, archetype, pressure_multiplier=1.0, max_balls=300):
     total_balls = innings.total_balls
-    is_powerplay = total_balls < 60
-    is_middle = 60 <= total_balls < 240
-    is_collapse = ((innings.wickets >= 3 and total_balls < 120) or (innings.wickets >= 5 and total_balls < 240)) and innings.partnership_runs < 40
+    is_powerplay = total_balls < max_balls * 0.2
+    is_middle = max_balls * 0.2 <= total_balls < max_balls * 0.8
+    is_collapse = ((innings.wickets >= 3 and total_balls < max_balls * 0.4) or (innings.wickets >= 5 and total_balls < max_balls * 0.8)) and innings.partnership_runs < 40
 
     # High pressure forces aggressive mindset (RRR > ~7-8 depending on phase).
     # Vaibhav is ALWAYS in that mindset — he attacks in every phase.
@@ -195,7 +202,10 @@ def get_smart_ai_bowler_odi(innings, pitch, weather="Clear", format_overs=50):
     def _live(p):   return not getattr(innings.bowling_stats.get(p["name"]), "is_subbed_out", False)
     def _quota(p):  return innings.bowling_stats[p["name"]].balls_bowled // 6 < bowler_quota
     def _nc(p):     return not innings.current_bowler or innings.current_bowler["name"] != p["name"]
-    def _main(p):   return "Bowler" in p["role"] or "All-Rounder" in p["role"]
+    # 'avoid_bowl' (the typed 'L' marker) drops a player out of the MAIN attack, so he
+    # only surfaces via the part-timer / last-resort pools below — i.e. he bowls only
+    # once the frontline has run out of quota.
+    def _main(p):   return ("Bowler" in p["role"] or "All-Rounder" in p["role"]) and not p.get("avoid_bowl")
 
     all_live = [p for p in innings.bowling_team["players"] if _live(p)]
     mains    = [p for p in all_live if _main(p)]
@@ -301,7 +311,7 @@ def get_smart_ai_bowler_odi(innings, pitch, weather="Clear", format_overs=50):
             base_score *= 8.0
 
         # Light saving penalty: Finisher pace before over 20, only if overs to spare
-        if current_over < 20 and p["archetype"] == "Finisher" and "Pace" in p["role"]:
+        if current_over < format_overs * 0.4 and p["archetype"] == "Finisher" and "Pace" in p["role"]:
             if overs_left >= 5 and overs_remaining >= 30:
                 base_score *= 0.35
 
@@ -427,13 +437,18 @@ def execute_ball_math_odi(match):
         bowl_rating -= 5
         
     total_balls = innings.total_balls
-    is_powerplay = total_balls < 60
-    is_middle = 60 <= total_balls < 240
-    is_death_overs = total_balls >= 240
-    
-    is_collapse = ((innings.wickets >= 3 and total_balls < 120) or (innings.wickets >= 5 and total_balls < 240)) and innings.partnership_runs < 40
+    # Phases scale with the innings length so DLS-reduced ODIs (48, 44, 40 overs …)
+    # keep proper ODI pacing: powerplay = first 20%, death = last 20% of the innings
+    # (at a full 50 overs these are the classic 60 / 240 balls).
+    _mb = match.max_balls
+    _pp_end, _death_start = _mb * 0.2, _mb * 0.8
+    is_powerplay = total_balls < _pp_end
+    is_middle = _pp_end <= total_balls < _death_start
+    is_death_overs = total_balls >= _death_start
+
+    is_collapse = ((innings.wickets >= 3 and total_balls < _mb * 0.4) or (innings.wickets >= 5 and total_balls < _death_start)) and innings.partnership_runs < 40
     is_set_partnership = innings.partnership_runs >= 50
-    has_wickets_in_hand = innings.total_balls >= 240 and innings.wickets <= 4
+    has_wickets_in_hand = total_balls >= _death_start and innings.wickets <= 4
 
     pressure_multiplier = 1.0
     runs_needed = 0
@@ -445,15 +460,16 @@ def execute_ball_math_odi(match):
             rrr = (runs_needed / balls_left) * 6
             
             # Smart Chasing Phase: Teams delay heavy panic until the later overs
-            if total_balls < 120:  # Overs 1-20
+            # (fractions of the innings so DLS-reduced matches panic on the same curve)
+            if total_balls < _mb * 0.4:      # first 40% (overs 1-20 of 50)
                 threshold = 8.0
                 max_p = 1.20
                 scale = 0.05
-            elif total_balls < 210:  # Overs 21-35
+            elif total_balls < _mb * 0.7:    # 40-70% (overs 21-35 of 50)
                 threshold = 7.5
                 max_p = 1.35
                 scale = 0.08
-            else:  # Overs 36-50
+            else:                            # last 30% (overs 36-50 of 50)
                 threshold = 6.5
                 max_p = 1.60
                 scale = 0.12
@@ -485,7 +501,7 @@ def execute_ball_math_odi(match):
                     lengths = ['Full', 'Good', 'Yorker']
                 deliv = f"{random.choice(['Inswing', 'Outswing', 'Fast', 'Slow'])} {random.choice(lengths)}"
             
-    shot = match.current_shot_selection or get_smart_ai_shot_odi(deliv, innings, is_death_overs, striker["archetype"], pressure_multiplier)
+    shot = match.current_shot_selection or get_smart_ai_shot_odi(deliv, innings, is_death_overs, striker["archetype"], pressure_multiplier, max_balls=_mb)
         
     match.current_delivery_selection = None
     match.current_shot_selection = None
@@ -579,11 +595,28 @@ def execute_ball_math_odi(match):
     single_weight   = ODI_BASE_SINGLE
     boundary_weight = max(1.0,  ODI_BASE_BND  + edge * ODI_BND_SENS)
     wicket_weight   = max(0.6,  ODI_BASE_WKT  - edge * ODI_WKT_SENS)
+    # The compressor below squeezes environmental inflation back toward THIS
+    # skill-driven baseline (not the flat ODI_BASE_WKT — that crushed an elite
+    # bowler's edge by ×0.34 while leaving a weak bowler's discount untouched,
+    # so a 76 could out-bowl a 93 on helpful decks). Equal ratings → identical
+    # behavior to the old flat anchor. Mode-level flat trims (DSL, chase relief)
+    # apply AFTER compression so they scale the result without moving the anchor.
+    # Mismatch restraint, TAIL-ONLY: an elite-vs-frontline contest (97v85 →
+    # anchor ~5.8) rides the skill edge in full — a 97 must FEEL like a 97 —
+    # but a bowler-vs-TAIL mismatch (bat 40 → anchor ~7.1) would slaughter
+    # tails ~40% faster than the calibrated all-out levels (measured: Cracked
+    # all-out 67→85%), so only tail anchors are capped.
+    # DSL keeps the original FLAT anchor: the league is calibrated for
+    # "rating gaps are odds, not certainties" (star P(<20) ~51%, gap ~92.5%),
+    # and the skill anchor re-rigged that by shielding dominant batters from
+    # environmental wicket inflation. Normal/casual/other tournaments get the
+    # full skill-anchored compressor.
     if _is_dsl:
-        wicket_weight *= DSL_ODI_WKT_TRIM   # par-restore for league-realism mode (see constant)
-    if match.current_innings_num == 2:
-        # toss-neutrality counterweight, proportional to how much the deck wears (see constants)
-        wicket_weight *= max(0.75, 1.0 - ODI_CHASE_RELIEF_K * WEAR_SUSCEPT.get(match.pitch, 1.0))
+        _wkt_anchor = ODI_BASE_WKT
+    else:
+        _wkt_anchor = wicket_weight
+        if float(striker.get("bat", 50)) < 65:
+            _wkt_anchor = min(_wkt_anchor, ODI_BASE_WKT * 1.22)
     
     # Pitch Extreme Modifiers (Balanced)
     if match.pitch == "Green" and "Pace" in bowler["role"]:
@@ -641,7 +674,7 @@ def execute_ball_math_odi(match):
         boundary_weight *= 0.65
         dot_weight *= 1.35
     elif match.pitch == "Flat":
-        boundary_weight *= 1.16
+        boundary_weight *= 1.18
         wicket_weight *= 0.92
         dot_weight *= 0.96
         
@@ -716,17 +749,35 @@ def execute_ball_math_odi(match):
         boundary_weight *= 1.15
         dot_weight *= 1.10
     elif is_middle:
-        single_weight *= 1.15 # Strike rotation (but batters still find the rope)
-        dot_weight *= 0.90
+        # ── THE SQUEEZE ── field spread, batters rotate: real ODI middle overs run
+        # ~5.0-5.5 rpo — no faster than the powerplay, NOT an acceleration. Rotation
+        # stays (singles up) but the rope is guarded: boundaries cost more, dots
+        # return. (Measured pre-fix: mid RR 6.2 vs PP 5.0 on Hard — backwards
+        # cricket; the runs move to the death lift below so par is unchanged.)
+        single_weight *= 1.18
+        boundary_weight *= 0.77
+        dot_weight *= 1.02
+    elif is_death_overs:
+        # ── THE LAUNCH ── real ODI death overs are the fastest phase by ~2.5 rpo
+        # over the middle. The chase/first-innings aggression multipliers add the
+        # rest; this is the structural slog-phase scoring lift.
+        boundary_weight *= 1.32
+        dot_weight *= 0.82
 
     # ── ENVIRONMENTAL WICKET COMPRESSOR ──────────────────────────────────
     # Everything above (pitch + weather + ball-age + phase) has scaled the
-    # wicket rate. Compress that *combined* inflation back toward baseline so
-    # bowling decks don't fold sides 100% of the time over 50 overs. Per-ball
-    # tactical wicket logic (shot choice, archetypes, collapse) comes AFTER
-    # this line and keeps its full effect.
-    if wicket_weight > ODI_BASE_WKT:
-        wicket_weight = ODI_BASE_WKT + (wicket_weight - ODI_BASE_WKT) * ODI_WKT_COMPRESS
+    # wicket rate. Compress that *combined* inflation back toward the SKILL
+    # baseline (see _wkt_anchor note) so bowling decks don't fold sides 100%
+    # of the time over 50 overs — while the bowler's rating edge survives at
+    # full strength. Per-ball tactical wicket logic (shot choice, archetypes,
+    # collapse) comes AFTER this line and keeps its full effect.
+    if wicket_weight > _wkt_anchor:
+        wicket_weight = _wkt_anchor + (wicket_weight - _wkt_anchor) * ODI_WKT_COMPRESS
+    if _is_dsl:
+        wicket_weight *= DSL_ODI_WKT_TRIM   # par-restore for league-realism mode (see constant)
+    if match.current_innings_num == 2:
+        # toss-neutrality counterweight, proportional to how much the deck wears (see constants)
+        wicket_weight *= max(0.75, 1.0 - ODI_CHASE_RELIEF_K * WEAR_SUSCEPT.get(match.pitch, 1.0))
 
     # ── BOWLER-TYPE STRIKE IDENTITY ── post-compressor so it isn't flattened:
     # on a turner the spinner hunts while the seamer contains (vice versa on a
@@ -740,6 +791,21 @@ def execute_ball_math_odi(match):
             wicket_weight *= _fmul
         elif "Pace" in _role or "Spin" in _role:
             wicket_weight *= _omul
+
+    # ── MIDDLE-OVERS SPIN THREAT ── post-compressor (pre-compressor it gets
+    # flattened ×0.34 like the old type-strike bug). In real ODIs the middle is
+    # where spin HUNTS — batters must manufacture risk against a gripping ball
+    # — while pace containment overs are the safer matchup. Paired (spin bowls
+    # ~60% of mid balls) so the phase's total wicket rate stays ~neutral: the
+    # SHARE moves toward spin, par doesn't. (Measured pre-fix: same-rating spin
+    # averaged ~2x worse than pace on neutral decks; T20 has them at par.)
+    # Skipped on spin-favoured decks — there ODI_TYPE_STRIKE already gives spin
+    # its edge, and stacking both craters par (measured: Turning 240 → 207).
+    if is_middle and not (_ts and _ts[0] == "Spin"):
+        if _is_spin_b:
+            wicket_weight *= 1.16
+        elif _is_pace_b:
+            wicket_weight *= 0.90
 
     # ── 2.0 BATTING MOMENTUM ──
     # New batsman vulnerable until set, set batsman dangerous. Post-compressor
@@ -866,7 +932,7 @@ def execute_ball_math_odi(match):
                     
         if active_multiplier > 1.0:
             boundary_weight *= active_multiplier
-            if total_balls < 240:
+            if total_balls < _death_start:
                 wicket_weight *= (1.0 + (active_multiplier - 1.0) * 0.5)
             else:
                 wicket_weight *= (1.0 + (active_multiplier - 1.0) * 0.8)
@@ -937,10 +1003,12 @@ def execute_ball_math_odi(match):
     elif is_cutter and shot in ["Drive", "Cut"]: wicket_weight *= 1.25; four_weight *= 0.85
         
     # 🚨 ANTI-OVERCOOK SAFETIES (Prevents stacked conditions from breaking the game)
-    four_weight = max(0.5, min(four_weight, 25.0)) # Hard cap to prevent 450+ scores
+    four_weight = max(0.5, min(four_weight, 27.0)) # Hard cap to prevent 450+ scores
     six_weight = max(0.1, min(six_weight, 15.0))
     if match.pitch in ("Flat", "Dead"):
         wicket_weight = min(wicket_weight, ODI_BAT_PITCH_WKT_CAP)  # batting-paradise floor
+    elif match.pitch in ODI_BOWL_DECKS:
+        wicket_weight = min(wicket_weight, ODI_BOWL_PITCH_WKT_CAP)  # minefield ceiling
     wicket_weight = max(1.0, min(wicket_weight, 25.0)) # Hard cap to prevent 10/10 scenarios
     dot_weight = max(15.0, min(dot_weight, 120.0))
 
@@ -1059,10 +1127,10 @@ def execute_ball_math_odi(match):
         match.free_hit = False
         if innings.total_balls % 6 == 0:
             match.over_completed = True
-            # End-of-over strike rotation: the ends switch, so the non-striker takes
-            # strike for the next over — UNLESS the last ball was a 1/3 (already swapped
-            # mid-ball above, which nets back to the same batter keeping strike).
-            if outcome == "wicket" or runs not in [1, 3]:
-                innings.current_striker_idx, innings.current_non_striker_idx = innings.current_non_striker_idx, innings.current_striker_idx
+            # End-of-over END CHANGE: ALWAYS switch. A 1/3 off the last ball has already
+            # crossed the batters mid-ball, so this switch puts the single-taker BACK on
+            # strike (the classic "single to keep the strike"); a 0/2/4/6 left them in
+            # place, so the switch hands strike to the partner for the new over.
+            innings.current_striker_idx, innings.current_non_striker_idx = innings.current_non_striker_idx, innings.current_striker_idx
 
     match.last_commentary = prefix + f"**{bowler['name']}** bowled a **{deliv}**\n**{striker['name']}** played: **{shot}**\n💥 **Result:** {outcome_text}"

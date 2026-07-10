@@ -896,13 +896,11 @@ def execute_test_ball(match: TestMatch) -> bool:
     if innings.total_balls % 6 == 0:
         match.over_completed = True
         innings.mystery_bowled_this_over = False
-        if outcome != "wicket" and outcome != "dot" and \
-                runs not in [1, 3]:   # end-of-over strike rotation
-            innings.current_striker_idx, innings.current_non_striker_idx = (
-                innings.current_non_striker_idx, innings.current_striker_idx)
-        elif outcome == "dot":   # always swap on last ball dot
-            innings.current_striker_idx, innings.current_non_striker_idx = (
-                innings.current_non_striker_idx, innings.current_striker_idx)
+        # End-of-over END CHANGE: ALWAYS switch — a 1/3 off the last ball already
+        # crossed the batters mid-ball, so this second switch puts the single-taker
+        # BACK on strike ("single to keep the strike"); otherwise the partner faces.
+        innings.current_striker_idx, innings.current_non_striker_idx = (
+            innings.current_non_striker_idx, innings.current_striker_idx)
 
         innings.prev_bowler    = innings.current_bowler
         innings.current_bowler = None   # new bowler must be chosen next over
