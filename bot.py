@@ -13586,6 +13586,8 @@ class PrefixCog(commands.Cog):
         _skipped = 0
         _used_curated = False
         try:
+            if tourney.get("tournament_type") == "ccodi":
+                raise FileNotFoundError   # CCODI drafts straight from the full player DB
             with open("message (13) copy 2.txt", encoding="utf-8") as _fh:
                 _lines = _fh.read().splitlines()
             _dbmap = {p["name"].lower(): p for p in db_players}
