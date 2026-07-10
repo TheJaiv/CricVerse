@@ -35,7 +35,7 @@ from test_image import (
     generate_test_summary_image as _ti_summary,
     generate_test_scorecard_image as _ti_scorecard,
 )
-from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, revert_tournament_match, repair_tournament_schedule, _tm_next_mid, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS, SquadConfirmView, build_squad_confirm_text, build_squad_confirm_embed, match_order_gate, MATCH_ORDER_LABELS, build_tournament_summary_embeds, generate_round_robin_schedule
+from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_ccodi_round_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, revert_tournament_match, repair_tournament_schedule, _tm_next_mid, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS, SquadConfirmView, build_squad_confirm_text, build_squad_confirm_embed, match_order_gate, MATCH_ORDER_LABELS, build_tournament_summary_embeds, generate_round_robin_schedule
 import rating_league
 from rating_league import (
     RATING_CONFIG, is_rating_tournament, create_rating_tournament, create_open_match,
@@ -3118,13 +3118,17 @@ async def loop_current_innings_bbb(interaction, match: CricketMatch):
             return True
         return False
 
+    match._bbb_active = True   # lets `cv verbose` know a bbb broadcast owns this match
     while True:
         # /endmatch must stop a ball-by-ball broadcast INSTANTLY.
         if active_games.get(channel.id) is not match:
+            match._bbb_active = False
             return
         innings = match.current_innings
 
         if _innings_over(innings):
+            match._bbb_active = False
+            match._switch_to_verbose = False
             orig_sim_only = getattr(match, 'sim_only', False)
             match.sim_only = False   # return to the hub for the next innings
             await handle_innings_end(interaction, match)
@@ -3146,6 +3150,7 @@ async def loop_current_innings_bbb(interaction, match: CricketMatch):
                     await channel.send("🚨 **CRITICAL ERROR:** Could not find a valid bowler. Match stopped.")
                     if channel.id in active_games:
                         del active_games[channel.id]
+                    match._bbb_active = False
                     return
                 innings.current_bowler = new_bowler
 
@@ -3158,6 +3163,7 @@ async def loop_current_innings_bbb(interaction, match: CricketMatch):
         # Bowl the over, one legal delivery at a time, editing the card after each.
         while True:
             if active_games.get(channel.id) is not match:
+                match._bbb_active = False
                 return   # /endmatch mid-over — stop dead, no more balls or edits
             if _innings_over(innings):
                 break   # outer loop renders the final state + ends the innings cleanly
@@ -3177,6 +3183,20 @@ async def loop_current_innings_bbb(interaction, match: CricketMatch):
         innings.over_log.clear()
         innings.bouncers_in_over = 0; innings.cutters_in_over = 0
         innings.mystery_bowled_this_over = False
+
+        # `cv verbose` was typed during this over: the over is now complete (or the
+        # innings ended mid-over) — hand the REST of the match to the verbose sim.
+        # sim_only=True keeps innings 2 auto-simming instead of returning to the hub;
+        # match end still flows through handle_innings_end, so tournament stats,
+        # standings and the result dispatch are recorded exactly as normal.
+        if getattr(match, '_switch_to_verbose', False):
+            match._switch_to_verbose = False
+            match._bbb_active = False
+            match.verbose = True
+            match.sim_only = True
+            await channel.send("📋 **Over complete — switching to verbose simulation.** The rest of the match will be simmed over-by-over.")
+            await loop_entire_match_simulation(interaction, match)
+            return
 
 
 async def loop_entire_match_simulation(interaction, match: CricketMatch):
@@ -7889,6 +7909,7 @@ def _help_match_embed():
     e.add_field(name="`cv testplayer`  ·  `cv tp`",                    value="Test up to **22 players** in a live match: paste all the names at once. 1-11 join a balanced XI vs a Weak/Balanced/Tough net side; 12-22 split into two even Test XIs that play each other. Engine picks the batting order — `Virat Kohli 3` **pins him to bat #3**. Then the normal pitch → toss → match flow runs.\n-# Player tests don't use your daily match allowance or global match totals.", inline=False)
     e.add_field(name="TEST format in /match",                           value="Select 'TEST (90 overs)' in the format dropdown to play a 5-day Test with session/innings/full-match modes.", inline=False)
     e.add_field(name="/impactplayer",                                   value="During an active match, swap in your Impact Player (if rule is on).", inline=False)
+    e.add_field(name="`cv verbose`  ·  `cv vb`",                       value="During a 🎬 Ball-by-Ball broadcast: finishes the current over ball-by-ball, then sims the **rest of the match** in verbose (one card per over). Tournament stats & results record as normal.", inline=False)
     e.add_field(name="`cv resume`  ·  `cv forcehub`",                  value="Match stuck with no buttons (Discord hiccup ate the prompt)? Re-shows the lost over hub / bowler pick / next-batter prompt — no progress is lost.", inline=False)
     e.add_field(name="/endmatch  ·  `cv endmatch`  ·  `cv em`",       value="Force-cancel the current match or setup in this channel.", inline=False)
     e.add_field(name="/my_tier",                                        value="Check your subscription tier and remaining daily match limits.", inline=False)
@@ -8848,6 +8869,16 @@ class PrefixCog(commands.Cog):
         setup_states[ctx.channel.id] = state
         opp_str = opponent.mention if opponent else "🤖 AI"
         await ctx.send(f"🏏 **Match Setup**\n**Host:** {ctx.author.mention}\n**Opponent:** {opp_str}\n\nStep 1: Select Format below:", view=FormatSelectView(state, ctx.channel))
+
+    @commands.command(name="verbose", aliases=["vb"], help="During a Ball-by-Ball broadcast: finish the current over ball-by-ball, then sim the REST of the match in verbose (one scoreboard card per over). Works in tournament matches too — stats and the result are recorded as normal.\nUsage: verbose")
+    async def verbose(self, ctx):
+        match = active_games.get(ctx.channel.id)
+        if not match or not getattr(match, '_bbb_active', False):
+            return await ctx.send("⚠️ No Ball-by-Ball broadcast is running in this channel — `cv verbose` only works while a 🎬 Ball-by-Ball sim is live.")
+        if getattr(match, '_switch_to_verbose', False):
+            return await ctx.send("⏳ Already queued — the verbose sim takes over as soon as this over ends.")
+        match._switch_to_verbose = True
+        await ctx.send("📋 **Got it!** Finishing this over ball-by-ball, then simming the rest of the match in verbose.")
 
     @commands.command(name="endmatch", aliases=["em"], help="Force cancel the current match or setup in this channel.\nUsage: endmatch")
     async def endmatch(self, ctx):
@@ -10937,7 +10968,7 @@ class PrefixCog(commands.Cog):
             "double_roundrobin": "double_round_robin", "double_round_robin": "double_round_robin",
             "t20wc": "t20_world_cup", "t20_world_cup": "t20_world_cup", "worldcup": "t20_world_cup", "wc": "t20_world_cup",
             "acl": "acl",
-            "ccodi": "ccodi",   # 10 teams · 2 groups of 5 · double round robin · top-2 → crossover semis → final
+            "ccodi": "ccodi",   # 10 teams · 2 groups of 5 · round-wise double RR · top-2 → KO1/KO2 → Q1/Eliminator → Q2 → Final
         }
         cond_map = {"manual": "manual", "auto": "auto", "home": "home", "home_pitch": "home", "homepitch": "home"}
         order_map = {"random": "random", "any": "random",
@@ -11007,6 +11038,12 @@ class PrefixCog(commands.Cog):
             extra += f"\n🏟️ **Stadiums:** {len(DEFAULT_ACL_STADIUMS)} venues pre-loaded — fixtures get a random one at start. Edit with `cvt stadium_add`/`cvt stadiums` before `cvt start`."
         elif t_type == "t20_world_cup":
             extra = "\n⚠️ **T20 World Cup needs exactly 16 teams** in 4 groups of 4."
+        elif t_type == "ccodi":
+            extra = ("\n🏏 **CCODI needs exactly 10 teams** in 2 groups of 5 (`cvt add_team \"<team>\" @owner A/B`).\n"
+                     "🗓️ Round-wise double round robin (10 rounds × 4 matches, one game per team per round) — "
+                     "**5 stadiums** pre-loaded, no venue repeats within a round "
+                     "(edit with `cvt stadium_add`/`cvt stadiums`).\n"
+                     "🏆 Top 2 per group → KO1 (A1vB1) & KO2 (A2vB2) → Qualifier 1 / Eliminator → Qualifier 2 → Final.")
         elif t_type == "double_round_robin":
             extra = "\n🔁 **Double Round Robin:** every team plays every other team twice, once each way."
         if kwargs['stadium_mode'] == "linked":
@@ -11492,12 +11529,16 @@ class PrefixCog(commands.Cog):
             groups_txt = "\n".join(f"**Group {g}:** {' · '.join(teams_by_group[g])}" for g in "ABCD")
             return await channel.send(f"🏆 **TOURNAMENT STARTED: {tourney['name']}!** — T20 World Cup\n{groups_txt}\nGenerated **{len(schedule)} group stage matches** (interleaved){self._cond_note(tourney)}. Use `cv tournament status` to view fixtures!")
 
-        # CCODI — 2 groups of 5, DOUBLE round robin → top 2 per group → crossover semis → final
+        # CCODI — 2 groups of 5, DOUBLE round robin organised into ROUNDS (each team
+        # plays at most once per round; venues never repeat within a round) → top 2
+        # per group → IPL-style knockout ladder (KO1/KO2 → Q1/Eliminator → Q2 → Final).
         if t_type == "ccodi":
             teams_by_group = {"A": [], "B": []}
             for t in tourney["teams"]:
                 teams_by_group.setdefault(t.get("group"), []).append(t["name"])
-            all_matches = []
+            # Circle method per group → per-round pair lists (5 teams + BYE = 5 rounds
+            # a leg, 2 matches + 1 bye per round). Leg 2 mirrors leg 1 home/away.
+            rounds_by_group = {}
             for group in ("A", "B"):
                 base = list(teams_by_group[group])
                 random.shuffle(base)
@@ -11505,32 +11546,42 @@ class PrefixCog(commands.Cog):
                 n = len(teams)
                 leg1 = []
                 for r in range(n - 1):
+                    pairs = []
                     for i in range(n // 2):
                         a, b = teams[i], teams[n - 1 - i]
                         if a == "BYE" or b == "BYE":
                             continue
-                        leg1.append((a, b) if r % 2 == 0 else (b, a))
+                        pairs.append((a, b) if r % 2 == 0 else (b, a))
+                    leg1.append(pairs)
                     teams.insert(1, teams.pop())
-                # double round robin: leg 2 mirrors leg 1 with home/away swapped
-                for leg, pairs in ((1, leg1), (2, [(y, x) for (x, y) in leg1])):
-                    for a, b in pairs:
-                        all_matches.append({
-                            "round": f"Group {group}", "stage": "group", "group": group,
-                            "team1": a, "team2": b, "status": "pending", "result": None,
-                        })
-            random.shuffle(all_matches)
-            tourney["schedule"] = [dict(m, match_id=i + 1) for i, m in enumerate(all_matches)]
+                rounds_by_group[group] = leg1 + [[(b, a) for (a, b) in pairs] for pairs in leg1]
+            # Global rounds: round r = group A's round r + group B's round r (4 matches).
+            schedule, mid = [], 1
+            for r in range(len(rounds_by_group["A"])):
+                rnd_matches = ([("A", a, b) for a, b in rounds_by_group["A"][r]] +
+                               [("B", a, b) for a, b in rounds_by_group["B"][r]])
+                random.shuffle(rnd_matches)
+                for group, a, b in rnd_matches:
+                    schedule.append({
+                        "match_id": mid, "round": r + 1, "stage": "group", "group": group,
+                        "team1": a, "team2": b, "status": "pending", "result": None,
+                    })
+                    mid += 1
+            tourney["schedule"] = schedule
             tourney["status"] = "active"
             tourney["current_match_idx"] = 0
-            assign_tournament_conditions(tourney)
+            assign_tournament_conditions(tourney)   # round-aware venues + conditions
             save_tournament(tourney)
+            n_rounds = len(rounds_by_group["A"])
             groups_txt = "\n".join(f"**Group {g}:** {' · '.join(teams_by_group[g])}" for g in ("A", "B"))
             return await channel.send(
                 f"🏏 **CCODI STARTED: {tourney['name']}!**\n{groups_txt}\n"
-                f"Generated **{len(tourney['schedule'])} group matches** — each group is a **double round robin** "
-                f"(every team plays every other twice){self._cond_note(tourney)}.\n"
-                f"Top 2 from each group reach the **Semi-Finals** (A1 vs B2 · B1 vs A2) → **Final**. "
-                f"`cv tournament status` for fixtures · `cv tournament standings` for the tables."
+                f"Generated **{len(schedule)} group matches** across **{n_rounds} rounds** — each group is a "
+                f"**double round robin**; every team plays at most once per round and no venue repeats within a "
+                f"round{self._cond_note(tourney)}.\n"
+                f"🏆 Top 2 per group → **Knockout 1** (A1 v B1) & **Knockout 2** (A2 v B2) → winners to "
+                f"**Qualifier 1**, losers to the **Eliminator** → **Qualifier 2** → **Final**.\n"
+                f"`cv tournament status` for the round-wise fixtures · `cv tournament standings` for the tables."
             )
 
         # DSL — Dominators Super League (home/away league on home grounds → Top-4 Playoffs)
@@ -11657,7 +11708,13 @@ class PrefixCog(commands.Cog):
             return await ctx.send(embed=embed)
 
         t_type = tourney.get("tournament_type", "round_robin")
-        if t_type in ("t20_world_cup", "ccodi"):
+        _ccodi_roundwise = (t_type == "ccodi" and
+                            any(isinstance(m.get("round"), int) for m in tourney.get("schedule", [])))
+        if _ccodi_roundwise:
+            # New CCODI seasons: one page per round (4 matches, distinct venues) + knockouts.
+            pages = _build_ccodi_round_pages(tourney)
+            hint = "Round-wise fixtures — every team plays once per round. `cvt groups` for group views."
+        elif t_type in ("t20_world_cup", "ccodi"):
             pages = _build_flat_pages(tourney)
             hint = "Use `cvt groups` to view fixtures by group."
         else:
@@ -14016,7 +14073,7 @@ class PrefixCog(commands.Cog):
             title="🏆 Tournament Guide  ·  Quickstarts",
             description=("Event types: **Round Robin** · **Double Round Robin** · **T20 World Cup** (4 groups → Super 8 → KO) · "
                          "**ACL** (14 teams → League → Playoffs → Super Cup) · **CCODI** (10 teams, ODI, "
-                         "2 groups of 5, double round robin → crossover semis) · **DSL** (recurring seasons) · "
+                         "2 groups of 5, round-wise double RR → Qualifiers ladder) · **DSL** (recurring seasons) · "
                          "**Conquest** (open Elo ladder).\nFull command list is in the second card below. ⬇️"),
             color=discord.Color.gold(),
         )
@@ -14033,7 +14090,7 @@ class PrefixCog(commands.Cog):
             value=("**1.** `cvt create \"CCODI S1\" odi event=ccodi`\n"
                    "**2.** `cvt add_team \"<team>\" @owner A` — **group A/B required**, 5 per group\n"
                    "**3.** owners `cvt ss` · `cvt start` → double round robin (40 group games)\n"
-                   "**4.** top 2 per group → **crossover semis** (A1 v B2, B1 v A2) → Final, auto-generated"),
+                   "**4.** top 2 per group → **KO1** (A1 v B1) & **KO2** (A2 v B2) → **Qualifier 1**/**Eliminator** → **Qualifier 2** → Final — all auto-generated"),
             inline=False,
         )
         qs.add_field(
@@ -14196,7 +14253,7 @@ class PrefixCog(commands.Cog):
                     tail = f" → 🏆 **{r['winner']}**" if r else " *(pending)*"
                     kl.append(f"**{m.get('round')}**: {m['team1']} vs {m['team2']}{tail}")
                 e.add_field(name="🔥 Knockouts", value="\n".join(kl), inline=False)
-            e.set_footer(text="▶ = qualifies for the Semi-Finals (top 2 per group)")
+            e.set_footer(text="▶ = reaches the knockouts (top 2 per group → KO1/KO2 → Q1/Eliminator → Q2 → Final)")
             return await ctx.send(embed=e)
 
         # T20 World Cup standings

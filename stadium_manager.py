@@ -20,8 +20,9 @@
 import random
 
 # Tournament types for which stadiums are active. Add types here to enable elsewhere.
-# ("dsl" venues are NOT random — each team has a home ground; see dsl_manager.py.)
-STADIUM_TOURNEY_TYPES = {"acl", "dsl"}
+# ("dsl" venues are NOT random — each team has a home ground; see dsl_manager.py.
+#  "ccodi" venues are ROUND-AWARE — every venue is used at most once per round.)
+STADIUM_TOURNEY_TYPES = {"acl", "dsl", "ccodi"}
 
 # Starter pool seeded onto new ACL tournaments. Cosmetic — rename/replace freely with
 # cvt stadium_add / stadium_remove / stadium_clear before the tournament starts.
@@ -36,6 +37,16 @@ DEFAULT_ACL_STADIUMS = [
     "Hokage Park",
     "Valley of the End Arena",
     "Rain Village Stadium",
+]
+
+# Starter pool for new CCODI seasons — 5 venues (a CCODI round has 4 matches, so no
+# venue ever repeats within a round and the pool rotates evenly across rounds).
+DEFAULT_CCODI_STADIUMS = [
+    "Crimson Bowl",
+    "Sapphire Oval",
+    "Golden Palm Stadium",
+    "Thunder Ridge Ground",
+    "Royal Crown Arena",
 ]
 
 
@@ -54,6 +65,8 @@ def stadiums_enabled(tourney):
 
 def default_stadium_pool(tournament_type):
     """The pool to seed onto a freshly-created tournament of this type."""
+    if tournament_type == "ccodi":
+        return list(DEFAULT_CCODI_STADIUMS)
     if tournament_type in STADIUM_TOURNEY_TYPES:
         return list(DEFAULT_ACL_STADIUMS)
     return []
@@ -72,6 +85,37 @@ def canonical_stadium(name, pool):
     return next((s for s in pool if s.lower() == nm), None)
 
 
+def _assign_ccodi_stadiums(tourney):
+    """CCODI: round-aware venues — every stadium is used AT MOST ONCE per round
+    (a round has 4 matches, the pool 5 venues), rotating the pool start by round
+    number so all venues cycle evenly across the season. Knockouts get a random
+    venue. Idempotent: already-assigned / completed matches are respected, and a
+    manager's cvt set_stadium pick is treated as that round's 'used' venue.
+    Legacy CCODI seasons (string rounds, empty pool) are untouched."""
+    pool = get_stadium_pool(tourney)
+    if not pool:
+        return
+    schedule = tourney.get("schedule", [])
+    by_round = {}
+    ko = []
+    for m in schedule:
+        if m.get("stage") == "group" and isinstance(m.get("round"), int):
+            by_round.setdefault(m["round"], []).append(m)
+        else:
+            ko.append(m)
+    for rnd, ms in by_round.items():
+        used = {m.get("stadium") for m in ms if m.get("stadium")}
+        rotation = [pool[(rnd - 1 + i) % len(pool)] for i in range(len(pool))]
+        avail = [v for v in rotation if v not in used]
+        for m in ms:
+            if m.get("status") == "completed" or m.get("stadium"):
+                continue
+            m["stadium"] = avail.pop(0) if avail else random.choice(pool)
+    for m in ko:
+        if m.get("status") != "completed" and not m.get("stadium"):
+            m["stadium"] = random.choice(pool)
+
+
 def assign_stadiums(tourney):
     """Idempotently assign a random stadium from the pool to each non-completed match
     that doesn't already have one. No-op when stadiums are disabled or the pool is empty.
@@ -82,6 +126,8 @@ def assign_stadiums(tourney):
         # DSL: league matches at the home (team1) team's ground, playoffs per policy.
         from dsl_manager import assign_dsl_stadiums   # lazy — avoids circular import
         return assign_dsl_stadiums(tourney)
+    if tourney.get("tournament_type") == "ccodi":
+        return _assign_ccodi_stadiums(tourney)
     if linked_stadiums(tourney):
         # Linked mode: each fixture is played at the HOME (team1) team's stadium.
         # Knockouts (where team1 is a seed, not a host) get a random linked ground.
@@ -116,6 +162,17 @@ def reroll_stadiums(tourney):
     pool = get_stadium_pool(tourney)
     if not pool:
         return 0
+    if tourney.get("tournament_type") == "ccodi":
+        # Round-aware reroll: clear pending venues, then reassign with a random
+        # rotation offset so uniqueness-per-round is preserved.
+        n = 0
+        for m in tourney.get("schedule", []):
+            if m.get("status") != "completed" and m.get("stadium"):
+                m["stadium"] = None
+                n += 1
+        random.shuffle(tourney["stadiums"])
+        _assign_ccodi_stadiums(tourney)
+        return n
     n = 0
     for m in tourney.get("schedule", []):
         if m.get("status") == "completed":

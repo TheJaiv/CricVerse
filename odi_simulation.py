@@ -16,7 +16,7 @@ ODI_SKILL_SCALE = 12.8
 DSL_ODI_SKILL_SCALE = 24.5
 # Flat wicket trim for DSL: removing the cons shield raises dismissal rates a
 # touch; this rating-independent trim restores the scoring environment.
-DSL_ODI_WKT_TRIM = 0.86
+DSL_ODI_WKT_TRIM = 0.89
 # ── CHASE BALANCE ─────────────────────────────────────────────────────────────
 # Innings 2 inherits innings 1's pitch wear (a real 100-over feature worth keeping),
 # but unbalanced it made batting first win ~55-58% — a toss-decided format. Real
@@ -24,7 +24,7 @@ DSL_ODI_WKT_TRIM = 0.86
 # proportional counterweights (both teams get them when chasing, so strong-vs-weak
 # is untouched, and low-wear roads are barely touched while crumbling decks get real help):
 ODI_WEAR_CARRY     = 0.65   # fraction of innings-1 wear the chase inherits (was 1.0)
-ODI_CHASE_RELIEF_K = 0.062  # innings-2 wicket relief per point of wear susceptibility
+ODI_CHASE_RELIEF_K = 0.075  # innings-2 wicket relief per point of wear susceptibility
 # Tuned low vs the old (dot=50, wkt=3) baseline, which never bowled teams out
 # and produced 370-run innings. Higher wicket base lets innings actually end.
 # ODI is a singles/strike-rotation game: ~46% dot, ~37% single, only ~10-11%
@@ -35,7 +35,14 @@ ODI_CHASE_RELIEF_K = 0.062  # innings-2 wicket relief per point of wear suscepti
 #  legitimate boundaries and strike rotation instead.)
 ODI_BASE_DOT   = 52.6; ODI_DOT_SENS = 52.0
 ODI_BASE_SINGLE = 47.0
-ODI_BASE_BND   = 11.6; ODI_BND_SENS = 18.0   # +0.2 with the 2026-07-10 end-change fix (tails keeping strike off last-ball singles trimmed par ~5-10 on wicket decks)
+# Rotation is a SKILL vs a dominant bowler: an out-skilled batter (a 48-bat
+# tailender facing a 95 attack) can't just milk singles at will — past a real
+# MISMATCH threshold (edge < -0.25 ≈ a 13+ rating gap) the single weight
+# shrinks steeply. Normal contests (top order vs any attack, tail vs modest
+# attack) are untouched, so par between real batting orders doesn't move.
+ODI_SINGLE_MISMATCH_EDGE = -0.25
+ODI_SINGLE_SENS_NEG = 1.6
+ODI_BASE_BND   = 11.9; ODI_BND_SENS = 18.0   # +0.2 with the 2026-07-10 end-change fix (tails keeping strike off last-ball singles trimmed par ~5-10 on wicket decks)
 ODI_BASE_WKT   = 4.0;  ODI_WKT_SENS = 8.5
 # Pitch, weather, ball-age and phase each scale the wicket rate. Over 300 balls
 # their PRODUCT bowls sides out ~100% of the time on bowling-friendly decks.
@@ -592,7 +599,7 @@ def execute_ball_math_odi(match):
 
     # Baseline ODI Weights - High discipline, lower boundary frequency
     dot_weight      = max(14.0, ODI_BASE_DOT  - edge * ODI_DOT_SENS)
-    single_weight   = ODI_BASE_SINGLE
+    single_weight   = ODI_BASE_SINGLE * max(0.45, 1.0 + min(0.0, edge - ODI_SINGLE_MISMATCH_EDGE) * ODI_SINGLE_SENS_NEG)
     boundary_weight = max(1.0,  ODI_BASE_BND  + edge * ODI_BND_SENS)
     wicket_weight   = max(0.6,  ODI_BASE_WKT  - edge * ODI_WKT_SENS)
     # The compressor below squeezes environmental inflation back toward THIS
@@ -616,7 +623,13 @@ def execute_ball_math_odi(match):
     else:
         _wkt_anchor = wicket_weight
         if float(striker.get("bat", 50)) < 65:
-            _wkt_anchor = min(_wkt_anchor, ODI_BASE_WKT * 1.22)
+            # The tail cap SCALES with the bowler's class: at 85-bowl it sits at
+            # the calibrated 1.22 (all-out levels untouched), but a 95+ spearhead
+            # blows through it — a 48-bat tailender must not survive an elite
+            # attack longer than an average one (measured pre-fix: 15.2 balls vs
+            # 96-attack, 11.9 vs 80 — backwards).
+            _cap = 1.22 + max(0.0, float(bowler.get("bowl", 80)) - 85.0) * 0.035
+            _wkt_anchor = min(_wkt_anchor, ODI_BASE_WKT * _cap)
     
     # Pitch Extreme Modifiers (Balanced)
     if match.pitch == "Green" and "Pace" in bowler["role"]:
@@ -746,7 +759,7 @@ def execute_ball_math_odi(match):
     if is_powerplay:
         if "Pace" in bowler["role"]:
             wicket_weight *= 1.12
-        boundary_weight *= 1.15
+        boundary_weight *= 1.20   # field up, ring gaps — the PP is for cashing in
         dot_weight *= 1.10
     elif is_middle:
         # ── THE SQUEEZE ── field spread, batters rotate: real ODI middle overs run
@@ -759,10 +772,17 @@ def execute_ball_math_odi(match):
         dot_weight *= 1.02
     elif is_death_overs:
         # ── THE LAUNCH ── real ODI death overs are the fastest phase by ~2.5 rpo
-        # over the middle. The chase/first-innings aggression multipliers add the
-        # rest; this is the structural slog-phase scoring lift.
-        boundary_weight *= 1.32
-        dot_weight *= 0.82
+        # over the middle. FIRST INNINGS ONLY at full strength: in a chase the
+        # urgency already comes from the RRR pressure multipliers, and stacking
+        # the structural launch on top made the death a cheat code — a chaser
+        # could idle to rrr ~8 and reliably blast home (measured: 49% wins on a
+        # steep death ask; real feel ~30-40%).
+        if match.current_innings_num == 1:
+            boundary_weight *= 1.32
+            dot_weight *= 0.82
+        else:
+            boundary_weight *= 1.10
+            dot_weight *= 0.92
 
     # ── ENVIRONMENTAL WICKET COMPRESSOR ──────────────────────────────────
     # Everything above (pitch + weather + ball-age + phase) has scaled the
@@ -934,6 +954,10 @@ def execute_ball_math_odi(match):
             boundary_weight *= active_multiplier
             if total_balls < _death_start:
                 wicket_weight *= (1.0 + (active_multiplier - 1.0) * 0.5)
+            elif match.current_innings_num == 2:
+                # blasting BEHIND the rate at the death is properly risky — the
+                # bowling side holds the cards (part of the cheat-code fix)
+                wicket_weight *= (1.0 + (active_multiplier - 1.0) * 0.95)
             else:
                 wicket_weight *= (1.0 + (active_multiplier - 1.0) * 0.8)
                 

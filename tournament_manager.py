@@ -965,6 +965,15 @@ def _build_status_pages(tourney):
         ko = [m for m in schedule if m.get("stage") == "knockout"]
         if ko:
             pages.append(("Knockouts", "knockout", None, ko))
+    elif t_type == "ccodi":
+        # Per-group pages (with standings) + knockouts — used by cvt groups.
+        for grp in ["A", "B"]:
+            matches = [m for m in schedule if m.get("stage") == "group" and m.get("group") == grp]
+            if matches:
+                pages.append((f"Group {grp}", "group", grp, matches))
+        ko = [m for m in schedule if m.get("stage") == "knockout"]
+        if ko:
+            pages.append(("Knockouts", "knockout", None, ko))
     else:
         rounds = sorted(set(m["round"] for m in schedule if isinstance(m.get("round"), int)))
         if t_type == "double_round_robin":
@@ -990,6 +999,20 @@ def _build_status_pages(tourney):
         if ko:
             pages.append(("Knockouts", "knockout", None, ko))
 
+    return pages
+
+
+def _build_ccodi_round_pages(tourney):
+    """One page per round (4 matches, distinct venues) + a Knockouts page —
+    the round-wise cvt status view for new CCODI seasons."""
+    schedule = tourney.get("schedule", [])
+    pages = []
+    rounds = sorted({m["round"] for m in schedule if isinstance(m.get("round"), int)})
+    for r in rounds:
+        pages.append((f"Round {r}", "round", r, [m for m in schedule if m.get("round") == r]))
+    ko = [m for m in schedule if m.get("stage") == "knockout"]
+    if ko:
+        pages.append(("Knockouts", "knockout", None, ko))
     return pages
 
 
@@ -1971,6 +1994,11 @@ def _match_bracket_rank(tourney, m):
                 "Grand Final": 4, "Super League Qualifier": 4, "Super Cup": 5}.get(m.get("round"), 1)
     if t_type == "dsl":
         return {"Semi-Final 1": 1, "Semi-Final 2": 1, "Final": 2}.get(m.get("round"), 1)
+    if t_type == "ccodi":
+        return {"Knockout 1": 1, "Knockout 2": 1, "Qualifier 1": 2, "Eliminator": 2,
+                "Qualifier 2": 3, "Final": 4,
+                # legacy crossover-semis seasons
+                "Semi-Final 1": 1, "Semi-Final 2": 1}.get(m.get("round"), 1)
     if m.get("stage") == "super8":
         return 1
     return 4 if str(m.get("round")) == "Final" else 3   # knockout: Semi-Finals(3) < Final(4)
@@ -2189,7 +2217,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         app_commands.Choice(name="Round Robin", value="round_robin"),
         app_commands.Choice(name="Double Round Robin", value="double_round_robin"),
         app_commands.Choice(name="T20 World Cup (4 Groups → Super 8 → Final)", value="t20_world_cup"),
-        app_commands.Choice(name="CCODI (2 Groups of 5 → Double RR → Semis → Final)", value="ccodi"),
+        app_commands.Choice(name="CCODI (2 Groups of 5 → Double RR → Qualifiers → Final)", value="ccodi"),
         app_commands.Choice(name="ACL (14 Teams → League → Playoffs → Super Cup)", value="acl"),
     ])
     @app_commands.choices(conditions=[
@@ -2857,29 +2885,67 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
              "team1": b_top2[0], "team2": a_top2[1], "status": "pending", "result": None},
         ])
 
-    def _try_generate_ccodi_semis(self, tourney: dict):
-        """Auto-generate crossover semis when BOTH CCODI groups are complete.
-        A1 vs B2 · B1 vs A2 (top 2 of each group of 5)."""
-        grp = [m for m in tourney["schedule"] if m.get("stage") == "group"]
-        if not grp:
+    def _ccodi_try_advance(self, tourney: dict):
+        """CCODI IPL-style knockout ladder, generated progressively:
+          Knockout 1: A1 vs B1        Knockout 2: A2 vs B2
+          Qualifier 1: W(KO1) vs W(KO2)   Eliminator: L(KO1) vs L(KO2)
+          Qualifier 2: L(Q1) vs W(Eliminator)
+          Final:       W(Q1) vs W(Q2)
+        LEGACY GUARD: seasons that already generated the old crossover semis keep
+        finishing on that bracket (the generic SF→Final block handles them)."""
+        sched = tourney["schedule"]
+        if any(m.get("round") == "Semi-Final 1" for m in sched):
+            return   # legacy crossover-semis season — don't touch it
+
+        def _get(round_name):
+            return next((m for m in sched if m.get("round") == round_name), None)
+
+        def _add(round_name, t1, t2):
+            sched.append({"match_id": _tm_next_mid(tourney), "round": round_name,
+                          "stage": "knockout", "team1": t1, "team2": t2,
+                          "status": "pending", "result": None})
+
+        def _done(m):
+            return m and m["status"] == "completed" and m.get("result")
+
+        def _wl(m):
+            w = m["result"]["winner"]
+            l = m["result"].get("loser") or (m["team2"] if w == m["team1"] else m["team1"])
+            return w, l
+
+        # Stage 1: both groups complete → Knockout 1 (A1 v B1) + Knockout 2 (A2 v B2)
+        grp = [m for m in sched if m.get("stage") == "group"]
+        if not grp or any(m["status"] == "pending" for m in grp):
             return
-        if any(m["status"] == "pending" for m in grp):
+        if not _get("Knockout 1"):
+            a_top2 = [n for n, _ in get_group_standings(tourney, "group", "A") if n != "BYE"][:2]
+            b_top2 = [n for n, _ in get_group_standings(tourney, "group", "B") if n != "BYE"][:2]
+            if len(a_top2) < 2 or len(b_top2) < 2:
+                return
+            _add("Knockout 1", a_top2[0], b_top2[0])   # A1 v B1
+            _add("Knockout 2", a_top2[1], b_top2[1])   # A2 v B2
             return
-        if any(m.get("round") == "Semi-Final 1" for m in tourney["schedule"]):
+
+        # Stage 2: KO1 + KO2 complete → Qualifier 1 (winners) + Eliminator (losers)
+        ko1, ko2 = _get("Knockout 1"), _get("Knockout 2")
+        if _done(ko1) and _done(ko2) and not _get("Qualifier 1"):
+            w1, l1 = _wl(ko1); w2, l2 = _wl(ko2)
+            _add("Qualifier 1", w1, w2)
+            _add("Eliminator", l1, l2)
             return
-        a_st = get_group_standings(tourney, "group", "A")
-        b_st = get_group_standings(tourney, "group", "B")
-        a_top2 = [n for n, _ in a_st if n != "BYE"][:2]
-        b_top2 = [n for n, _ in b_st if n != "BYE"][:2]
-        if len(a_top2) < 2 or len(b_top2) < 2:
+
+        # Stage 3: Q1 + Eliminator complete → Qualifier 2 (Q1 loser v Eliminator winner)
+        q1, elim = _get("Qualifier 1"), _get("Eliminator")
+        if _done(q1) and _done(elim) and not _get("Qualifier 2"):
+            _, lq1 = _wl(q1); welim, _ = _wl(elim)
+            _add("Qualifier 2", lq1, welim)
             return
-        max_id = max(m["match_id"] for m in tourney["schedule"])
-        tourney["schedule"].extend([
-            {"match_id": max_id + 1, "round": "Semi-Final 1", "stage": "knockout",
-             "team1": a_top2[0], "team2": b_top2[1], "status": "pending", "result": None},   # A1 v B2
-            {"match_id": max_id + 2, "round": "Semi-Final 2", "stage": "knockout",
-             "team1": b_top2[0], "team2": a_top2[1], "status": "pending", "result": None},   # B1 v A2
-        ])
+
+        # Stage 4: Q2 complete → Final (Q1 winner v Q2 winner)
+        q2 = _get("Qualifier 2")
+        if _done(q1) and _done(q2) and not _get("Final"):
+            wq1, _ = _wl(q1); wq2, _ = _wl(q2)
+            _add("Final", wq1, wq2)
 
     @commands.Cog.listener()
     async def on_tournament_match_complete(self, match, channel=None):
@@ -3142,8 +3208,9 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             self._try_generate_semis(tourney)
 
         if t_type == "ccodi":
-            # Both groups complete → auto-generate crossover Semi-Finals
-            self._try_generate_ccodi_semis(tourney)
+            # Groups done → KO1/KO2 → Q1/Eliminator → Q2 → Final (legacy semis
+            # seasons are left to the generic SF→Final block below).
+            self._ccodi_try_advance(tourney)
 
         # SF complete → auto-generate Final (works for all group formats)
         sf1 = next((m for m in tourney["schedule"] if m.get("round") == "Semi-Final 1"), None)
