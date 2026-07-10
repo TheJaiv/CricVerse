@@ -3534,7 +3534,8 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
 
         # Increment counter BEFORE generating image so the scorecard shows the correct match number.
         # Skip super overs — they're continuations, not standalone matches.
-        if not getattr(match_to_finalize, 'is_super_over', False):
+        if (not getattr(match_to_finalize, 'is_super_over', False)
+                and not getattr(match_to_finalize, 'is_player_test', False)):
             _base = getattr(match_to_finalize, 'original_format_overs', match_to_finalize.format_overs)
             _increment_match_count("odi" if _base == 50 else "t20")
 
@@ -5189,6 +5190,9 @@ class MatchSetupState:
         self.tournament_name = "TOURNAMENT"
         self.home_team_id = p1_id
         self.sim_only = False
+        # Player-test matches are a sandbox for evaluating players.  They must not
+        # consume a subscriber's daily allowance or advance the public match totals.
+        self.is_player_test = False
 
 
 # ── Captain & Wicket-Keeper rules (enforced at the start of every match setup) ──
@@ -5373,10 +5377,12 @@ class FormatSelectView(discord.ui.View):
         else:
             await interaction.response.defer()
 
-            # Test format is now open to everyone 🎉
-            allowed, reason = await asyncio.to_thread(consume_quota, str(interaction.user.id), str(interaction.guild.id) if interaction.guild else None, val, str(ADMIN_DISCORD_ID))
-            if not allowed:
-                return await interaction.followup.send(reason, ephemeral=True)
+            # Player tests are deliberately quota-free; all other setup flows still
+            # reserve their daily allowance once a format has been selected.
+            if not getattr(self.state, "is_player_test", False):
+                allowed, reason = await asyncio.to_thread(consume_quota, str(interaction.user.id), str(interaction.guild.id) if interaction.guild else None, val, str(ADMIN_DISCORD_ID))
+                if not allowed:
+                    return await interaction.followup.send(reason, ephemeral=True)
 
             self.state.format_overs = int(val)
             if val == "20":
@@ -5403,9 +5409,10 @@ class CustomOversModal(discord.ui.Modal, title="Custom Over Count"):
         
     
         await interaction.response.defer()
-        allowed, reason = await asyncio.to_thread(consume_quota, str(interaction.user.id), str(interaction.guild.id) if interaction.guild else None, "custom", str(ADMIN_DISCORD_ID))
-        if not allowed:
-            return await interaction.followup.send(reason, ephemeral=True)
+        if not getattr(self.state, "is_player_test", False):
+            allowed, reason = await asyncio.to_thread(consume_quota, str(interaction.user.id), str(interaction.guild.id) if interaction.guild else None, "custom", str(ADMIN_DISCORD_ID))
+            if not allowed:
+                return await interaction.followup.send(reason, ephemeral=True)
 
         self.state.format_overs = val
         # 🚨 FIX: Atomic edit prevents the crash
@@ -5916,6 +5923,7 @@ async def begin_toss(channel, state):
 
     match = CricketMatch(state.p1, state.p2, state.p1_id, state.p2_id, t1, t2, state.format_overs, state.pitch, state.weather)
     match.impact_player = state.impact_player
+    match.is_player_test = getattr(state, "is_player_test", False)
     match.tournament_server_id = getattr(state, "tournament_server_id", None)
     match.tournament_match_id = getattr(state, "tournament_match_id", None)
     match.manager_id = getattr(state, "manager_id", None)
@@ -6758,8 +6766,9 @@ class TestImageToggleView(discord.ui.View):
 
 
 async def _test_finish_match(match: TestMatchObj, channel_id: int, channel):
-    """Shared finish routine: increment counter, post final scorecard, clean up."""
-    _increment_match_count("test")
+    """Post a Test result, advancing the counter unless this is a player test."""
+    if not getattr(match, "is_player_test", False):
+        _increment_match_count("test")
     result_text = match.result or "Match Drawn"
     try:
         file = discord.File(fp=generate_test_summary_image(match), filename="test_summary.png")
@@ -7593,6 +7602,7 @@ class TestTossDecisionView(discord.ui.View):
         t_bowl = losing_team  if choice == "Bat" else winning_team
 
         match          = TestMatchObj(t_bat, t_bowl, state.pitch, state.weather, pink_ball=getattr(state, "pink_ball", False))
+        match.is_player_test = getattr(state, "is_player_test", False)
         match.host_id  = state.p1_id
         match.p2_id    = getattr(state, "p2_id", None)
         match.host_team = t1            # team identity → owner (NOT bat/bowl order)
@@ -7629,6 +7639,7 @@ async def _begin_test_match(channel, state):
             f"🪙 **Toss!** **{winner_team['name']}** wins and elects to **{decision}** first!\n"
             f"*Simulating 5-day Test... ⚙️*")
         match = TestMatchObj(t_bat, t_bowl, state.pitch, weather, pink_ball=getattr(state, "pink_ball", False))
+        match.is_player_test = getattr(state, "is_player_test", False)
         active_test_matches[channel.id] = match
         await asyncio.to_thread(_test_sim_match, match)
         await _test_finish_match(match, channel.id, channel)
@@ -7643,6 +7654,7 @@ async def _begin_test_match(channel, state):
             f"🪙 **Toss!** AI wins and elects to **{ai_choice}** first! "
             f"**{t_bat['name']}** will bat.\n\nChoose simulation mode:")
         match          = TestMatchObj(t_bat, t_bowl, state.pitch, weather)
+        match.is_player_test = getattr(state, "is_player_test", False)
         match.host_id  = state.p1_id
         match.p2_id    = getattr(state, "p2_id", None)
         match.host_team = t1            # host owns team 1; AI owns team 2
@@ -7828,7 +7840,7 @@ def _help_match_embed():
     e = discord.Embed(title="🎮 Match Play", color=discord.Color.green())
     e.add_field(name="/match [@opponent]  ·  `cv match`  ·  `cv m`",  value="Start an interactive match vs a user, or leave blank to play vs AI.", inline=False)
     e.add_field(name="/simulatematch",                                  value="Instantly simulate a full match — pick teams, format and conditions.", inline=False)
-    e.add_field(name="`cv testplayer`  ·  `cv tp`",                    value="Test up to **22 players** in a live match: paste all the names at once. 1-11 join a balanced XI vs a Weak/Balanced/Tough net side; 12-22 split into two even Test XIs that play each other. Engine picks the batting order — `Virat Kohli 3` **pins him to bat #3**. Then the normal pitch → toss → match flow runs.", inline=False)
+    e.add_field(name="`cv testplayer`  ·  `cv tp`",                    value="Test up to **22 players** in a live match: paste all the names at once. 1-11 join a balanced XI vs a Weak/Balanced/Tough net side; 12-22 split into two even Test XIs that play each other. Engine picks the batting order — `Virat Kohli 3` **pins him to bat #3**. Then the normal pitch → toss → match flow runs.\n-# Player tests don't use your daily match allowance or global match totals.", inline=False)
     e.add_field(name="TEST format in /match",                           value="Select 'TEST (90 overs)' in the format dropdown to play a 5-day Test with session/innings/full-match modes.", inline=False)
     e.add_field(name="/impactplayer",                                   value="During an active match, swap in your Impact Player (if rule is on).", inline=False)
     e.add_field(name="`cv resume`  ·  `cv forcehub`",                  value="Match stuck with no buttons (Discord hiccup ate the prompt)? Re-shows the lost over hub / bowler pick / next-batter prompt — no progress is lost.", inline=False)
@@ -8804,14 +8816,12 @@ class PrefixCog(commands.Cog):
     async def testplayer(self, ctx):
         if is_channel_restricted(str(ctx.channel.id)):
             return await ctx.send("❌ Matches are **disabled** in this channel.")
-        allowed, reason = await asyncio.to_thread(check_potential_quota, str(ctx.author.id), str(ctx.guild.id) if ctx.guild else None, str(ADMIN_DISCORD_ID))
-        if not allowed:
-            return await ctx.send(reason)
         if ctx.channel.id in active_games or ctx.channel.id in active_setups:
             return await ctx.send("❌ A match or setup is already in progress. Use `cv endmatch` to cancel it.")
 
         state = MatchSetupState(ctx.author, None, ctx.author.id, None)
         state.impact_player = False
+        state.is_player_test = True
         active_setups[ctx.channel.id] = ("testplayer_setup", state)
         setup_states[ctx.channel.id] = state
 
@@ -10959,35 +10969,48 @@ class PrefixCog(commands.Cog):
             extra += f"\n{MATCH_ORDER_LABELS[kwargs['match_order']]}"
         await ctx.send(f"🏆 **Tournament Created:** `{name}`  ·  {type_label}\nUse `cv tournament add_team` to get started!{extra}")
 
-    @tournament.command(name="add_team", help="[MANAGER] Add a team and assign an Owner.\nUsage: tournament add_team \"<team_name>\" <@owner> [group]\nGroup (A/B/C/D) required for T20 World Cup & CCODI.")
-    async def t_add_team(self, ctx, team_name: str, owner: discord.Member, group: str = None):
+    @tournament.command(name="add_team", help="[MANAGER] Add a team and assign an Owner.\nUsage: tournament add_team \"<team_name>\" <@owner> [group]\nGroup (A/B/C/D) required for T20 World Cup & CCODI. Order doesn't matter — the @owner and group are found anywhere in the line.")
+    async def t_add_team(self, ctx, *, args: str = ""):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
 
         is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (str(ctx.author.id) in tourney.get("managers", []))
-
-        if not tourney: return await ctx.send("❌ No tournament exists.")
         if not is_mgr: return await ctx.send("❌ Managers only.")
         if tourney["status"] != "registration": return await ctx.send("❌ Cannot add teams after tournament has started.")
 
-        if any(t["name"].lower() == team_name.lower() for t in tourney["teams"]):
-            return await ctx.send("❌ Team name already exists.")
-        if any(t["owner_id"] == str(owner.id) for t in tourney["teams"]):
-            return await ctx.send(f"❌ {owner.mention} already owns a team.")
+        # Flexible parsing: the @owner mention and the group letter are found ANYWHERE in
+        # the line (quoted or unquoted team names, any argument order, `group=A` too).
+        if not ctx.message.mentions:
+            return await ctx.send("❌ Ping the team's owner — `cvt add_team \"<team>\" @owner [group]`.")
+        owner = ctx.message.mentions[0]
+        txt = re.sub(r"<@!?\d+>", "", args).strip()
 
-        # Group-based events need a group assignment (A/B for CCODI, A–D for T20 WC).
         t_type = tourney.get("tournament_type", "round_robin")
         group_val = None
         if t_type in ("t20_world_cup", "ccodi"):
             valid_groups = ["A", "B"] if t_type == "ccodi" else ["A", "B", "C", "D"]
             cap = 5 if t_type == "ccodi" else 4
-            if not group:
+            gm = (re.search(r"(?:^|\s)group\s*[=:]?\s*([a-dA-D])(?=\s|$)", txt)
+                  or re.search(r"(?:^|\s)([a-dA-D])\s*$", txt)
+                  or re.search(r"^\s*([a-dA-D])(?=\s)", txt))
+            if not gm:
                 return await ctx.send(f"❌ **Group ({'/'.join(valid_groups)}) is required** — `cvt add_team \"<team>\" @owner <group>`.")
-            group_val = group.strip().upper()
+            group_val = gm.group(1).upper()
+            txt = (txt[:gm.start()] + " " + txt[gm.end():]).strip()
             if group_val not in valid_groups:
                 return await ctx.send(f"❌ Group must be **{', '.join(valid_groups)}**.")
             if sum(1 for t in tourney["teams"] if t.get("group") == group_val) >= cap:
                 return await ctx.send(f"❌ Group **{group_val}** already has {cap} teams.")
+
+        team_name = txt.strip().strip('"').strip("'").strip()[:30]
+        if not team_name:
+            return await ctx.send("❌ Missing the team name — `cvt add_team \"<team>\" @owner [group]`.")
+
+        if any(t["name"].lower() == team_name.lower() for t in tourney["teams"]):
+            return await ctx.send("❌ Team name already exists.")
+        if any(t["owner_id"] == str(owner.id) for t in tourney["teams"]):
+            return await ctx.send(f"❌ {owner.mention} already owns a team.")
 
         tourney["teams"].append({"name": team_name, "owner_id": str(owner.id), "squad": [], "group": group_val})
         save_tournament(tourney)
@@ -13497,6 +13520,11 @@ class PrefixCog(commands.Cog):
                 ("New York Empires", None), ("Los Angeles Vipers", None), ("Cape Town Cobalts", None),
                 ("Kingston Calypso", None), ("Cairo Pharaohs", None),
             ]
+        elif t_type == "ccodi":
+            team_config = [
+                ("India", "A"), ("Australia", "A"), ("England", "A"), ("New Zealand", "A"), ("Pakistan", "A"),
+                ("South Africa", "B"), ("Sri Lanka", "B"), ("Bangladesh", "B"), ("West Indies", "B"), ("Afghanistan", "B"),
+            ]
         elif t_type == "dsl":
             team_config = [
                 ("Mumbai Dominators", None), ("Chennai Chargers", None), ("Bangalore Blasters", None),
@@ -14079,10 +14107,24 @@ class PrefixCog(commands.Cog):
             from rating_league import rating_board_embed
             return await ctx.send(embed=rating_board_embed(tourney))
 
-        # CCODI: two group tables (top 2 qualify) + knockouts. (Custom points-table
-        # IMAGE goes here once the design is provided — this embed is the fallback.)
+        # CCODI: custom points-table image (assets/ccodi_table.png) with logos; the
+        # text embed below is the fallback if the render fails.
         if tourney.get("tournament_type") == "ccodi":
-            from tournament_manager import get_group_standings
+            from tournament_manager import get_group_standings, generate_ccodi_points_table
+            try:
+                buf = generate_ccodi_points_table(tourney)
+                ko = [m for m in tourney.get("schedule", []) if m.get("stage") == "knockout"]
+                ko_txt = None
+                if ko:
+                    kl = []
+                    for m in sorted(ko, key=lambda x: x.get("match_id", 0)):
+                        r = m.get("result")
+                        tail = f" → 🏆 **{r['winner']}**" if r else " *(pending)*"
+                        kl.append(f"**{m.get('round')}**: {m['team1']} vs {m['team2']}{tail}")
+                    ko_txt = "🔥 **Knockouts**\n" + "\n".join(kl)
+                return await ctx.send(content=ko_txt, file=discord.File(fp=buf, filename="ccodi_points_table.png"))
+            except Exception as _e:
+                print(f"⚠️ CCODI points table image failed: {_e}")
             e = discord.Embed(title=f"🏏 {tourney['name']} — Standings", color=discord.Color.blue())
             for grp in ("A", "B"):
                 st = [(n, d) for n, d in get_group_standings(tourney, "group", grp) if n != "BYE"]

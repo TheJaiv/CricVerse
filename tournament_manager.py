@@ -348,6 +348,70 @@ def generate_t20wc_points_table(tourney) -> io.BytesIO:
     return buf
 
 
+def generate_ccodi_points_table(tourney) -> io.BytesIO:
+    """Fill assets/ccodi_table.png (dark navy, Group A left / Group B right, 5 rows each,
+    POS digits baked in) with live group standings — team logos included. Top-2 (the
+    semi-final qualifiers) get gold names + points."""
+    img = Image.open("assets/ccodi_table.png").convert("RGBA")
+    d = ImageDraw.Draw(img)
+
+    team_logos = {t["name"]: t.get("logo_standings") or t.get("logo_match") for t in tourney.get("teams", [])}
+    f_name = _acl_pt_font(22)
+    f_stat = _acl_pt_font(24)
+    WHITE = (255, 255, 255); GOLD = (240, 194, 66); DIM = (201, 212, 240)
+
+    # Measured on the template: stat-column header centres; logo x = team cell's left edge.
+    COLS = {
+        "A": {"logo": 192, "name_max": 406, "P": 430, "W": 483, "L": 537, "NR": 593, "PTS": 660, "NRR": 738},
+        "B": {"logo": 882, "name_max": 1100, "P": 1125, "W": 1178, "L": 1232, "NR": 1288, "PTS": 1354, "NRR": 1434},
+    }
+    ROWS = [436, 517, 597, 674, 754]   # row y-centres (aligned to the baked POS digits)
+    LOGO_SZ = 42
+
+    def _ct(cx, cy, s, f, fill=WHITE):
+        bb = f.getbbox(str(s))
+        d.text((cx - bb[2] / 2, cy - (bb[3] + bb[1]) / 2), str(s), font=f, fill=fill)
+
+    def _fit(s, f, maxw):
+        if f.getbbox(s)[2] <= maxw:
+            return s
+        while s and f.getbbox(s + "…")[2] > maxw:
+            s = s[:-1]
+        return s + "…"
+
+    for grp in ("A", "B"):
+        C = COLS[grp]
+        rows = [(n, st) for n, st in get_group_standings(tourney, "group", grp) if n != "BYE"]
+        for i, (nm, st) in enumerate(rows[:5]):
+            cy = ROWS[i]
+            x = C["logo"]
+            logo = _fetch_emoji_img(team_logos.get(nm), LOGO_SZ)
+            if logo:
+                img.paste(logo, (x, cy - LOGO_SZ // 2), logo)
+            x += LOGO_SZ + 8
+            # shrink the font until the FULL name fits (floor 15px, then truncate)
+            nf = f_name
+            for fs in (22, 20, 18, 16, 15):
+                nf = _acl_pt_font(fs)
+                if nf.getbbox(nm.upper())[2] <= C["name_max"] - x:
+                    break
+            nm_txt = _fit(nm.upper(), nf, C["name_max"] - x)
+            bb = nf.getbbox(nm_txt)
+            d.text((x, cy - (bb[3] + bb[1]) / 2), nm_txt, font=nf,
+                   fill=GOLD if i < 2 else WHITE)
+            _ct(C["P"],   cy, st["P"], f_stat, DIM)
+            _ct(C["W"],   cy, st["W"], f_stat, WHITE)
+            _ct(C["L"],   cy, st["L"], f_stat, DIM)
+            _ct(C["NR"],  cy, st.get("T", 0), f_stat, DIM)
+            _ct(C["PTS"], cy, st["Pts"], f_stat, GOLD if i < 2 else WHITE)
+            _ct(C["NRR"], cy, f"{st['NRR']:+.2f}", f_stat, DIM)
+
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
 def _acl_pt_font(size):
     for p in ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
               "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
