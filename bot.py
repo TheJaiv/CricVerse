@@ -980,9 +980,12 @@ def get_player_of_the_match(match: CricketMatch) -> str:
     # Format-aware anchors. Judged by the T20 pars (SR 120, econ 10) every ODI
     # spell looked golden — 10 overs at 5.0 econ banked ~150 pts, more than a
     # century — and normal ODI strike rates were taxed. ODI par: SR ~95, econ ~5.8.
+    # ODI economy is BOOST-ONLY (Jaiv): a tight spell adds points, an expensive one
+    # never subtracts from the wickets taken. T20 keeps its −30 economy floor.
     _odi = match.format_overs >= _ODI_ENGINE_MIN_OVERS
     _sr_par = 95.0 if _odi else 120.0
     _eco_par, _eco_rate = (5.8, 2.0) if _odi else (10.0, 3.0)
+    _eco_floor = 0.0 if _odi else -30.0
 
     winning_team = None
     if match.current_innings_num == 2 and match.innings2:
@@ -1007,7 +1010,7 @@ def get_player_of_the_match(match: CricketMatch) -> str:
             bowl = match.innings1.bowling_stats[p_name]
             if bowl.balls_bowled > 0:
                 eco = (bowl.runs_conceded / bowl.balls_bowled) * 6
-                eco_pts = max(-30.0, (_eco_par - eco) * (bowl.balls_bowled / 6) * _eco_rate)
+                eco_pts = max(_eco_floor, (_eco_par - eco) * (bowl.balls_bowled / 6) * _eco_rate)
                 impact += (bowl.wickets_taken * 40) + eco_pts
 
         # Analyze innings 2 impact
@@ -1021,7 +1024,7 @@ def get_player_of_the_match(match: CricketMatch) -> str:
                 bowl = match.innings2.bowling_stats[p_name]
                 if bowl.balls_bowled > 0:
                     eco = (bowl.runs_conceded / bowl.balls_bowled) * 6
-                    eco_pts = max(-30.0, (_eco_par - eco) * (bowl.balls_bowled / 6) * _eco_rate)
+                    eco_pts = max(_eco_floor, (_eco_par - eco) * (bowl.balls_bowled / 6) * _eco_rate)
                     impact += (bowl.wickets_taken * 40) + eco_pts
         
         # Determine team for multiplier

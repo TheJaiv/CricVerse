@@ -1760,17 +1760,19 @@ _TM_STAT_DEFAULT = {k: 0 for k in _TM_STAT_KEYS}
 
 # ── Full tournament report (cvt summary) — the keep-before-you-delete record ──
 def _summary_mvp(s, odi=False):
-    """Same MVP formula as the leaderboard command. Format-aware: the SR tiers
-    and the economy anchor were T20 numbers (SR 110+ earns a bonus, econ 8 is
-    par) — judged by those, every ODI batter reads "slow" and every ODI bowler
-    reads like a miser. ODI uses its own anchors (SR ~90 par, econ ~5.8 par)."""
+    """Same MVP formula as the leaderboard command. Format-aware: the SR tiers and
+    economy anchor were T20 numbers (SR 110+ earns a bonus, econ 8 is par) — judged by
+    those, every ODI batter reads "slow" and every ODI bowler "miserly", so ODI uses its
+    own anchors (SR ~90 par, econ ~5.8 par).
+    ODI scoring is BOOST-ONLY (Jaiv): a high SR / good economy is a bonus on top of runs /
+    wickets, but a low SR is never a penalty (runs stand on their own) and a bowler is never
+    docked for going for runs (the wickets stand on their own). T20 keeps its penalties."""
     sr = (s["runs"] / s["balls_faced"] * 100) if s["balls_faced"] > 0 else 0
     bat = float(s["runs"])
     if odi:
-        if sr >= 115:   bat *= 1.30
+        if sr >= 115:   bat *= 1.30      # ODI: SR is a bonus only — no low-SR penalty
         elif sr >= 100: bat *= 1.20
         elif sr >= 90:  bat *= 1.10
-        elif sr < 65 and s["balls_faced"] >= 30: bat *= 0.85
     else:
         if sr >= 150:   bat *= 1.30
         elif sr >= 130: bat *= 1.20
@@ -1782,7 +1784,7 @@ def _summary_mvp(s, odi=False):
     bowl = float(s["wickets"] * 40)
     if odi:
         if s["balls_bowled"] >= 30:
-            bowl += max(-25.0, min(25.0, (5.8 - econ) * 6))
+            bowl += max(0.0, min(25.0, (5.8 - econ) * 6))    # ODI: economy is a bonus only
     elif s["balls_bowled"] >= 12:
         bowl += max(-25.0, min(25.0, (8.0 - econ) * 5))
     return bat + bowl
