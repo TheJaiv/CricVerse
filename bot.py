@@ -13536,6 +13536,32 @@ class PrefixCog(commands.Cog):
         save_tournament(tourney)
         await ctx.send(f"✅ Injury cleared for **{player['name']}** ({team['name']}).")
 
+    @tournament.command(name="clear_injuries", aliases=["clearinjuries", "clear_all_injuries", "heal_all"],
+                        help="[MANAGER] Clear EVERY injury in the tournament at once.\nUsage: cvt clear_injuries")
+    async def t_clear_injuries(self, ctx):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        healed = []
+        for team in tourney.get("teams", []):
+            for p in team.get("squad", []):
+                if p.get("injured"):
+                    p.pop("injured", None)
+                    p.pop("injury_until_match", None)
+                    p.pop("injury_severity", None)
+                    p.pop("injury_matches_left", None)
+                    healed.append(f"**{p['name']}** ({team['name']})")
+        tourney["pending_injury_news"] = []
+        if not healed:
+            return await ctx.send("ℹ️ No injured players — the tournament is fully fit.")
+        save_tournament(tourney)
+        listing = "\n".join(f"• {h}" for h in healed[:25])
+        if len(healed) > 25:
+            listing += f"\n… and {len(healed) - 25} more"
+        await ctx.send(f"🏥 **All injuries cleared!** {len(healed)} player{'s' if len(healed) != 1 else ''} back to full fitness:\n{listing}")
+
     @tournament.command(name="add_injury", help="[MANAGER] Manually injure a player for N matches.\nUsage: cvt add_injury \"<team_name>\" \"<player_name>\" [matches=1]")
     async def t_add_injury(self, ctx, team_name: str, player_name: str, matches: int = 1):
         server_id = str(ctx.guild.id)
@@ -14271,7 +14297,7 @@ class PrefixCog(commands.Cog):
                    "`scorecard_channel`/`scc #ch` — auto-post every match image\n"
                    "`post_scorecards`/`psc #ch` — slow-dump ALL scorecards (archive)\n"
                    "`set_log_channel [off]` — [MGR] audit-log every change\n"
-                   "`set_injury_channel #ch` · `add_injury` · `remove_injury`"),
+                   "`set_injury_channel #ch` · `add_injury` · `remove_injury` · `clear_injuries` (heal ALL)"),
             inline=False,
         )
         ref.add_field(
