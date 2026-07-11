@@ -1597,13 +1597,20 @@ def extract_scorecard_players(match: CricketMatch) -> dict:
         if not inn: return []
         active = [b for b in inn.batting_stats.values() if b.balls_faced > 0 or b.dismissal != "not out"]
         ordered = sorted(active, key=lambda x: x.runs_scored, reverse=True)
-        return [[b.profile["name"], b.runs_scored, b.balls_faced, b.dismissal] for b in ordered]
+        return [[b.profile["name"], b.runs_scored, b.balls_faced, b.dismissal,
+                 getattr(b, "fours", 0), getattr(b, "sixes", 0)] for b in ordered]
 
     def _bowl(inn):
         if not inn: return []
         active = [b for b in inn.bowling_stats.values() if b.balls_bowled > 0]
         ordered = sorted(active, key=lambda x: (x.wickets_taken, -x.runs_conceded), reverse=True)
-        return [[b.profile["name"], b.wickets_taken, b.runs_conceded, f"{b.balls_bowled//6}.{b.balls_bowled%6}"] for b in ordered]
+        return [[b.profile["name"], b.wickets_taken, b.runs_conceded, f"{b.balls_bowled//6}.{b.balls_bowled%6}",
+                 getattr(b, "maidens", 0)] for b in ordered]
+
+    def _extras(inn):
+        if not inn: return None
+        return [getattr(inn, "extras", 0), getattr(inn, "byes", 0), getattr(inn, "legbyes", 0),
+                getattr(inn, "noballs", 0), getattr(inn, "wides", 0)]
 
     # bf=1 means m["team1"] batted first, bf=2 means m["team2"] batted first
     team1_bats_first = (match.team1["name"] == inn1.batting_team["name"])
@@ -1636,6 +1643,8 @@ def extract_scorecard_players(match: CricketMatch) -> dict:
         "w1": _bowl(inn2),  # batting-first team's bowlers (bowled in inn2)
         "b2": _bat(inn2),   # batting-second team's batters
         "w2": _bowl(inn1),  # batting-second team's bowlers (bowled in inn1)
+        "x1": _extras(inn1),  # [extras, byes, legbyes, noballs, wides] per innings —
+        "x2": _extras(inn2),  #   feeds the CCODI card's EXTRAS breakdown from storage
     }
 
 
@@ -1674,10 +1683,12 @@ def reconstruct_scorecard_data(tourney: dict, m: dict) -> dict:
             else:
                 dismissal = d4 or "not out"
                 not_out = (dismissal == "not out")
-            out.append({"name": a[0], "runs": a[1], "balls": a[2], "not_out": not_out, "dismissal": dismissal})
+            out.append({"name": a[0], "runs": a[1], "balls": a[2], "not_out": not_out, "dismissal": dismissal,
+                        "fours": a[4] if len(a) > 4 else None, "sixes": a[5] if len(a) > 5 else None})
         return out
     def _bowl(arrays):
-        return [{"name": a[0], "wickets": a[1], "runs": a[2], "overs": a[3]} for a in (arrays or [])]
+        return [{"name": a[0], "wickets": a[1], "runs": a[2], "overs": a[3],
+                 "maidens": a[4] if len(a) > 4 else 0} for a in (arrays or [])]
 
     # bf=1 → team1 batted first; bf=2 → team2 batted first
     # result stores t1_*/t2_* keyed to m["team1"]/m["team2"], not batting order
@@ -1701,8 +1712,10 @@ def reconstruct_scorecard_data(tourney: dict, m: dict) -> dict:
         "format_overs":    r.get("format_overs", 20),
         "result_str":      p.get("rs", ""),
         "potm":            p.get("p"),
+        "server_id":       tourney.get("server_id"),
         "t1": {
             "name":       top_name.upper(),
+            "raw_name":   top_name,
             "color":      top_team.get("color", "#6B7280"),
             "logo_emoji": top_team.get("logo_match") or top_team.get("logo_standings"),
             "runs":       top_r,
@@ -1712,9 +1725,11 @@ def reconstruct_scorecard_data(tourney: dict, m: dict) -> dict:
             "batters":    _bat(p.get("b1")),
             "bowlers":    _bowl(p.get("w2")),
             "impact_sub": p.get("i1"),
+            "extras":     p.get("x1"),
         },
         "t2": {
             "name":       bot_name.upper(),
+            "raw_name":   bot_name,
             "color":      bot_team.get("color", "#6B7280"),
             "logo_emoji": bot_team.get("logo_match") or bot_team.get("logo_standings"),
             "runs":       bot_r,
@@ -1724,6 +1739,7 @@ def reconstruct_scorecard_data(tourney: dict, m: dict) -> dict:
             "batters":    _bat(p.get("b2")),
             "bowlers":    _bowl(p.get("w1")),
             "impact_sub": p.get("i2"),
+            "extras":     p.get("x2"),
         },
     }
 
@@ -3028,6 +3044,46 @@ def generate_tournament_score_image(match: CricketMatch) -> io.BytesIO:
         except Exception as _e:
             print(f"⚠️ CCODI scorecard render failed, using generic: {_e}")
     return generate_scorecard_from_data(extract_scoreboard_data(match))
+
+
+def generate_ccodi_scorecard_from_data(data: dict):
+    """Rebuild a match-like object from STORED scorecard data (reconstruct_scorecard_data)
+    and render the CCODI template — so `cvt match_scorecard` / `post_scorecards` show the
+    branded card, not the generic one. Returns None for matches stored before the CCODI
+    fields (no 4s/6s) — those keep the generic card rather than showing wrong zeros."""
+    from types import SimpleNamespace as _NS
+    t1, t2 = data.get("t1"), data.get("t2")
+    if not t1 or not t2 or not t1.get("batters") or not t2.get("batters"):
+        return None
+    if all(b.get("fours") is None for b in t1["batters"] + t2["batters"]):
+        return None   # pre-CCODI storage → fall back to the generic card
+
+    def _inn(td):
+        bats = {}
+        for b in td.get("batters", []):
+            dis = b.get("dismissal") or ("not out" if b.get("not_out") else "c. Fielder")
+            bats[b["name"]] = _NS(runs_scored=b["runs"], balls_faced=b["balls"],
+                                  fours=b.get("fours") or 0, sixes=b.get("sixes") or 0,
+                                  dismissal=dis, profile={"name": b["name"]})
+        bowls = {}
+        for w in td.get("bowlers", []):
+            parts = str(w.get("overs", "0.0")).split(".")
+            balls = int(parts[0]) * 6 + (int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0)
+            bowls[w["name"]] = _NS(balls_bowled=balls, runs_conceded=w["runs"],
+                                   wickets_taken=w["wickets"], maidens=w.get("maidens") or 0,
+                                   profile={"name": w["name"]})
+        ex = td.get("extras") or [0, 0, 0, 0, 0]
+        return _NS(batting_team={"name": td.get("raw_name") or td["name"]},
+                   total_runs=td["runs"], wickets=td["wickets"], total_balls=td.get("balls") or 0,
+                   extras=ex[0], byes=ex[1], legbyes=ex[2], noballs=ex[3], wides=ex[4],
+                   batting_stats=bats, bowling_stats=bowls)
+
+    rs = data.get("result_str") or ""
+    tiebreak = rs.split(" WON")[0].strip() if "(SUPER OVER)" in rs else None
+    m = _NS(tournament_server_id=data.get("server_id"), tournament_type="ccodi",
+            innings1=_inn(t1), innings2=_inn(t2), current_innings_num=2,
+            target=t1["runs"] + 1, tiebreak_winner_name=tiebreak)
+    return generate_ccodi_scorecard(m)
 
 # ==========================================
 # 🔄 5. MATCH PROGRESSION & LOOPS
@@ -9610,8 +9666,9 @@ class PrefixCog(commands.Cog):
                                 f"vs {opp_label}",
                           description="\n".join(rows), color=0x2ecc71)
         e.add_field(name="🧢 Captain", value=cap, inline=True)
-        e.add_field(name="⚡ Impact Player",
-                    value=(f"{imp['name']} ({category(imp)})" if imp else "—"), inline=True)
+        if imp:   # impact player is a T20-only rule — omit the field for ODIs
+            e.add_field(name="⚡ Impact Player",
+                        value=f"{imp['name']} ({category(imp)})", inline=True)
         e.add_field(name="Win %", value=f"{r['winpct']:.0f}%", inline=True)
         toss = r.get("toss")
         if toss:
@@ -13532,7 +13589,14 @@ class PrefixCog(commands.Cog):
         if full_data:
             sent = False
             try:
-                img_buf = generate_scorecard_from_data(full_data)
+                img_buf = None
+                if tourney.get("tournament_type") == "ccodi":
+                    try:
+                        img_buf = generate_ccodi_scorecard_from_data(full_data)
+                    except Exception as _ce:
+                        print(f"⚠️ CCODI stored-card render failed, using generic: {_ce}")
+                if img_buf is None:
+                    img_buf = generate_scorecard_from_data(full_data)
                 file = discord.File(fp=img_buf, filename=f"scorecard_m{match_id}.png")
                 await ctx.send(embed=embed, file=file)
                 sent = True
@@ -13857,7 +13921,14 @@ class PrefixCog(commands.Cog):
                 if not full:
                     skipped += 1          # walkovers / manually-recorded results have no card
                     continue
-                buf = generate_scorecard_from_data(full)
+                buf = None
+                if tourney.get("tournament_type") == "ccodi":
+                    try:
+                        buf = generate_ccodi_scorecard_from_data(full)
+                    except Exception as _ce:
+                        print(f"⚠️ CCODI stored-card render failed, using generic: {_ce}")
+                if buf is None:
+                    buf = generate_scorecard_from_data(full)
                 r_label = f"Round {m['round']}" if isinstance(m.get("round"), int) else m.get("round", "")
                 await ch.send(f"**Match #{m['match_id']}** · {r_label}",
                               file=discord.File(fp=buf, filename=f"scorecard_m{m['match_id']}.png"))
