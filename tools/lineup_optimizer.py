@@ -197,11 +197,16 @@ def _apply_captain(players, captain_name=None):
     cap["bowl"] = min(99, cap["bowl"] + 1)
 
 
-def _my_bench(order, squad):
-    """Impact bench = the best leftover SPECIALISTS not in this XI. All-rounders are
-    excluded on purpose: an AR already bats and bowls across both innings, so using
-    one as the impact (single-phase) sub wastes the slot."""
-    if not (IMPACT_ON and squad):
+def _impact_on(format_overs):
+    """Impact player is a T20-only rule — never in ODIs (or other formats)."""
+    return IMPACT_ON and format_overs == 20
+
+
+def _my_bench(order, squad, format_overs=20):
+    """Impact bench = the best leftover SPECIALISTS not in this XI. Empty unless it's
+    a T20 (impact is a T20-only rule). All-rounders are excluded on purpose: an AR
+    already bats and bowls across both innings, so using one wastes the slot."""
+    if not (_impact_on(format_overs) and squad):
         return []
     names = {p["name"] for p in order}
     rest = sorted((p for p in squad if p["name"] not in names and category(p) != "AR"),
@@ -209,12 +214,12 @@ def _my_bench(order, squad):
     return [dict(p) for p in rest[:BENCH_SIZE]]
 
 
-def _build_opponent(opp_ovr):
+def _build_opponent(opp_ovr, format_overs=20):
     """A fresh balanced opponent at `opp_ovr`, with the SAME perks as us: a captain
-    +1 and an impact bench (one batting, one bowling option)."""
+    +1, and (T20 only) an impact bench."""
     opp = build_team("OPP", opp_ovr, opp_ovr)
     _apply_captain(opp["players"])
-    if IMPACT_ON:
+    if _impact_on(format_overs):
         opp["subs"] = [
             {"name": "OPP_IMP_BAT", "bat": min(99, opp_ovr), "bowl": 35,
              "role": "Batter", "archetype": "Finisher"},
@@ -228,7 +233,7 @@ def _build_opponent(opp_ovr):
 FIELD_KINDS = ["balanced", "spin", "pace", "bat"]
 
 
-def _variant_opponent(opp_ovr, kind):
+def _variant_opponent(opp_ovr, kind, format_overs=20):
     """A fixed opponent of a given STYLE at `opp_ovr` (with the same perks as us).
     Used to test whether a pitch suits us against a varied field, not just one
     balanced side: spin-strong/pace-strong sides neutralise turning/green decks."""
@@ -242,7 +247,7 @@ def _variant_opponent(opp_ovr, kind):
         elif kind == "bat" and c == "BAT":
             p["bat"] = min(99, p["bat"] + 5)
     _apply_captain(opp["players"])
-    if IMPACT_ON:
+    if _impact_on(format_overs):
         bowl_role = "Bowler_Spin_Off" if kind == "spin" else "Bowler_Pace"
         opp["subs"] = [
             {"name": "OPP_IMP_BAT", "bat": min(99, opp_ovr), "bowl": 35,
@@ -348,12 +353,12 @@ def _eval_one(order, pitch, opp_ovr, n, format_overs, base_seed, squad=None):
         opp = _build_opponent(opp_ovr)         # fresh balanced side, same perks
         if i % 2 == 0:
             m = CricketMatch(me, opp, format_overs, pitch, "Clear")
-            m.impact_player = IMPACT_ON
+            m.impact_player = IMPACT_ON and format_overs == 20   # T20-only rule
             run_full_match(m)
             s_me, s_opp = m.innings1.total_runs, m.innings2.total_runs
         else:
             m = CricketMatch(opp, me, format_overs, pitch, "Clear")
-            m.impact_player = IMPACT_ON
+            m.impact_player = IMPACT_ON and format_overs == 20   # T20-only rule
             run_full_match(m)
             s_opp, s_me = m.innings1.total_runs, m.innings2.total_runs
         if s_me > s_opp:
@@ -418,12 +423,12 @@ def collect_player_stats(order, n, format_overs, seed, opp_ovr, squad=None):
         opp = _build_opponent(opp_ovr)
         if i % 2 == 0:
             m = CricketMatch(me, opp, format_overs, pitch, "Clear")
-            m.impact_player = IMPACT_ON
+            m.impact_player = IMPACT_ON and format_overs == 20   # T20-only rule
             run_full_match(m)
             bat_inn, bowl_inn = m.innings1, m.innings2
         else:
             m = CricketMatch(opp, me, format_overs, pitch, "Clear")
-            m.impact_player = IMPACT_ON
+            m.impact_player = IMPACT_ON and format_overs == 20   # T20-only rule
             run_full_match(m)
             bat_inn, bowl_inn = m.innings2, m.innings1
         for nm, bs in bat_inn.batting_stats.items():
@@ -506,12 +511,12 @@ def _win_pct_fixed_innings(order, pitch, opp_ovr, n, format_overs, seed, me_firs
         opp = _build_opponent(opp_ovr)
         if me_first:
             m = CricketMatch(me, opp, format_overs, pitch, "Clear")
-            m.impact_player = IMPACT_ON
+            m.impact_player = IMPACT_ON and format_overs == 20   # T20-only rule
             run_full_match(m)
             s_me, s_opp = m.innings1.total_runs, m.innings2.total_runs
         else:
             m = CricketMatch(opp, me, format_overs, pitch, "Clear")
-            m.impact_player = IMPACT_ON
+            m.impact_player = IMPACT_ON and format_overs == 20   # T20-only rule
             run_full_match(m)
             s_opp, s_me = m.innings1.total_runs, m.innings2.total_runs
         if s_me > s_opp:
@@ -557,7 +562,7 @@ def _winpct_vs_kind(order, pitch, opp_ovr, kind, n, format_overs, seed, squad):
     random.seed(seed)
     me_players = [dict(p) for p in order]
     _apply_captain(me_players)
-    me_subs = _my_bench(order, squad)
+    me_subs = _my_bench(order, squad, format_overs)
     w = t = 0
     for i in range(n):
         me = {"name": "YOU", "players": [dict(p) for p in me_players],
@@ -567,7 +572,7 @@ def _winpct_vs_kind(order, pitch, opp_ovr, kind, n, format_overs, seed, squad):
             m = CricketMatch(me, opp, format_overs, pitch, "Clear")
         else:
             m = CricketMatch(opp, me, format_overs, pitch, "Clear")
-        m.impact_player = IMPACT_ON
+        m.impact_player = IMPACT_ON and format_overs == 20   # T20-only rule
         run_full_match(m)
         if i % 2 == 0:
             sm, so = m.innings1.total_runs, m.innings2.total_runs
@@ -635,7 +640,7 @@ def _captain_winpct(order, captain_name, pitch, opp_ovr, squad, n, format_overs,
     random.seed(seed)
     me_players = [dict(p) for p in order]
     _apply_captain(me_players, captain_name)
-    me_subs = _my_bench(order, squad)
+    me_subs = _my_bench(order, squad, format_overs)
     w = t = 0
     for i in range(n):
         me = {"name": "YOU", "players": [dict(p) for p in me_players],
@@ -645,7 +650,7 @@ def _captain_winpct(order, captain_name, pitch, opp_ovr, squad, n, format_overs,
             m = CricketMatch(me, opp, format_overs, pitch, "Clear")
         else:
             m = CricketMatch(opp, me, format_overs, pitch, "Clear")
-        m.impact_player = IMPACT_ON
+        m.impact_player = IMPACT_ON and format_overs == 20   # T20-only rule
         run_full_match(m)
         if i % 2 == 0:
             sm, so = m.innings1.total_runs, m.innings2.total_runs
@@ -723,7 +728,7 @@ def impact_usage_stats(order, opp_ovr, squad, n, format_overs, seed):
             m = CricketMatch(me, opp, format_overs, pitch, "Clear")
         else:
             m = CricketMatch(opp, me, format_overs, pitch, "Clear")
-        m.impact_player = IMPACT_ON
+        m.impact_player = IMPACT_ON and format_overs == 20   # T20-only rule
         run_full_match(m)
         ev = [e for e in m.impact_log if e[0] == my_id]
         if ev:
@@ -1067,7 +1072,7 @@ def _winpct_vs_team(order, pitch, opp_factory, n, format_overs, seed, squad,
     random.seed(seed)
     me_players = [dict(p) for p in order]
     _apply_captain(me_players)
-    me_subs = _my_bench(order, squad)
+    me_subs = _my_bench(order, squad, format_overs)
     w = t = 0
     for i in range(n):
         me = {"name": "YOU", "players": [dict(p) for p in me_players],
@@ -1077,7 +1082,7 @@ def _winpct_vs_team(order, pitch, opp_factory, n, format_overs, seed, squad,
             m = CricketMatch(me, opp, format_overs, pitch, weather)
         else:
             m = CricketMatch(opp, me, format_overs, pitch, weather)
-        m.impact_player = IMPACT_ON
+        m.impact_player = IMPACT_ON and format_overs == 20   # T20-only rule
         run_full_match(m)
         if i % 2 == 0:
             sm, so = m.innings1.total_runs, m.innings2.total_runs
@@ -1095,7 +1100,7 @@ def _winpct_innings_vs_team(order, pitch, opp_factory, n, format_overs, seed, sq
     random.seed(seed)
     me_players = [dict(p) for p in order]
     _apply_captain(me_players)
-    me_subs = _my_bench(order, squad)
+    me_subs = _my_bench(order, squad, format_overs)
     w = t = 0
     for _ in range(n):
         me = {"name": "YOU", "players": [dict(p) for p in me_players],
@@ -1103,12 +1108,12 @@ def _winpct_innings_vs_team(order, pitch, opp_factory, n, format_overs, seed, sq
         opp = opp_factory()
         if me_first:
             m = CricketMatch(me, opp, format_overs, pitch, weather)
-            m.impact_player = IMPACT_ON
+            m.impact_player = IMPACT_ON and format_overs == 20   # T20-only rule
             run_full_match(m)
             sm, so = m.innings1.total_runs, m.innings2.total_runs
         else:
             m = CricketMatch(opp, me, format_overs, pitch, weather)
-            m.impact_player = IMPACT_ON
+            m.impact_player = IMPACT_ON and format_overs == 20   # T20-only rule
             run_full_match(m)
             so, sm = m.innings1.total_runs, m.innings2.total_runs
         w += sm > so
@@ -1116,11 +1121,11 @@ def _winpct_innings_vs_team(order, pitch, opp_factory, n, format_overs, seed, sq
     return 100.0 * (w + 0.5 * t) / n
 
 
-def _opponent_factory(opp_spec, ref_ovr):
+def _opponent_factory(opp_spec, ref_ovr, format_overs=20):
     """opp_spec is a STYLE string ('balanced'/'spin'/'pace'/'bat') -> a fresh varied
     side each match; OR a list of 11 player dicts -> that exact XI (with perks)."""
     if isinstance(opp_spec, str):
-        return lambda: _variant_opponent(ref_ovr, opp_spec)
+        return lambda: _variant_opponent(ref_ovr, opp_spec, format_overs)
     opp_xi = [_norm(p) for p in opp_spec]
     o = team_ovr(opp_xi)
 
@@ -1128,7 +1133,7 @@ def _opponent_factory(opp_spec, ref_ovr):
         players = [dict(p) for p in _default_order(opp_xi)]
         _apply_captain(players)
         team = {"name": "OPP", "players": players, "subs": []}
-        if IMPACT_ON:
+        if _impact_on(format_overs):
             team["subs"] = [
                 {"name": "OPP_IMP_BAT", "bat": min(99, o), "bowl": 35,
                  "role": "Batter", "archetype": "Finisher"},
@@ -1146,7 +1151,7 @@ def recommend_xi(squad, pitch, opp_spec, weather="Clear", format_overs=20, n_coa
     Single-process and quick (~a few thousand matches) so a bot can await it."""
     squad = [_norm(p) for p in squad]
     ref_ovr = team_ovr(sorted(squad, key=lambda p: -player_ovr(p))[:11])
-    opp_factory = _opponent_factory(opp_spec, ref_ovr)
+    opp_factory = _opponent_factory(opp_spec, ref_ovr, format_overs)
 
     # Candidate XIs: legal combos from an OVR pool, pitch-aware-prefiltered.
     pool = _selection_pool(squad, max_combos)
@@ -1182,7 +1187,8 @@ def recommend_xi(squad, pitch, opp_spec, weather="Clear", format_overs=20, n_coa
     ff = _winpct_innings_vs_team(best_order, pitch, opp_factory, toss_n, format_overs,
                                  seed + 2500, squad, me_first=False, weather=weather)
 
-    bench = _my_bench(best_order, squad)
+    # Impact player is a T20-only rule — no impact 12th man in ODIs.
+    bench = _my_bench(best_order, squad) if format_overs == 20 else []
     chosen = {p["name"] for p in best_order}
     return {
         "order": best_order,
@@ -1296,14 +1302,11 @@ def _report(best_order, best_overall, best_grid, fine, finalists, fine_n):
 # ─────────────────────────────────────────────────────────────────────────────
 
 MY_SQUAD = [
-    "Rashid Khan", "Kagiso Rabada", "Yuzvendra Chahal", "Siraj Ullah Khadem", "Shreyas Iyer",
-    "Tilak Varma", "Scott Boland", "Anrich Nortje", "Waqas Maqsood",
-    "Hashmatullah Shahidi", "Shan Masood", "Priyansh Arya", "Ben Foakes", "Daryl Mitchell",
-    "Billy Stanlake", "Will Jacks", "Jediah Blades", "Aashirvad Suryavanshi", "Washington Sundar",
-    "Jaskaran Malhotra", "Vihaan Malhotra", "Thomas Balkin", "Shai Hope", "Peter Handscomb",
-    "Prabsimran Singh"
+    "Sachin Tendulkar", "Virat Kohli", "Jasprit Bumrah", "Chris Gayle", "Vijay Merchant",
+    "Everton Weekes", "MS Dhoni", "Garfield Sobers", "Mike Procter", "Bob Appleyard",
+    "Tim Southee", "Dennis Lillee", "Bill O'Reilly", "Anil Kumble", "Jim Laker",
+    "Shane Watson", "Richard Hadlee"
 ]
-
 def _cli():
     ap = argparse.ArgumentParser(description="CricVerse lineup optimizer")
     ap.add_argument("--odi", action="store_true", help="50-over format (default T20)")
