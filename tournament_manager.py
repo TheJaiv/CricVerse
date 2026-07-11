@@ -3084,10 +3084,17 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             try:
                 sc_ch = self.bot.get_channel(int(sc_ch_id))
                 if sc_ch:
-                    from bot import reconstruct_scorecard_data, generate_scorecard_from_data
+                    from bot import reconstruct_scorecard_data, generate_scorecard_from_data, generate_ccodi_scorecard_from_data
                     _full = reconstruct_scorecard_data(tourney, m_data)
                     if _full:
-                        _buf = generate_scorecard_from_data(_full)
+                        _buf = None
+                        if tourney.get("tournament_type") == "ccodi":
+                            try:
+                                _buf = generate_ccodi_scorecard_from_data(_full)
+                            except Exception as _ce:
+                                print(f"⚠️ CCODI gallery card failed, using generic: {_ce}")
+                        if _buf is None:
+                            _buf = generate_scorecard_from_data(_full)
                         _rl = _tm_round_label(m_data)
                         await sc_ch.send(f"**Match #{m_data['match_id']}** · {_rl}",
                                          file=discord.File(fp=_buf, filename=f"scorecard_m{m_data['match_id']}.png"))

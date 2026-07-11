@@ -3022,7 +3022,7 @@ def generate_ccodi_scorecard(match: CricketMatch) -> io.BytesIO:
             _ct(C["ECON"], y, f"{econ:.2f}", f_bowl, dim)
             y += _CCODI_BOWL_ROW_H
 
-    # ── result banner (bottom ribbon) — only once the chase is done ──
+    # ── result banner + POTM (bottom ribbon, y≈918-992) — only once the chase is done ──
     if len(inns) == 2:
         i1, i2 = match.innings1, match.innings2
         target = getattr(match, "target", i1.total_runs + 1)
@@ -3035,7 +3035,22 @@ def generate_ccodi_scorecard(match: CricketMatch) -> io.BytesIO:
             res = "MATCH TIED"
         else:
             res = f"{i1.batting_team['name'].upper()} WON BY {(target - 1) - i2.total_runs} RUNS"
-        _ct(769, 958, res, f_res)
+
+        def _ctv(cx, cy, s, font, fill=WHITE):   # centred on BOTH axes (ribbon layout)
+            bb = font.getbbox(str(s))
+            d.text((cx - bb[2] / 2, cy - (bb[3] + bb[1]) / 2), str(s), font=font, fill=fill)
+
+        potm = getattr(match, "_potm_name", None)
+        if potm is None:
+            try:
+                potm = get_player_of_the_match(match)
+            except Exception:
+                potm = None
+        if potm:
+            _ctv(769, 942, res, _ccodi_font(34))
+            _ctv(769, 977, f"PLAYER OF THE MATCH  •  {str(potm).upper()}", _ccodi_font(19), (240, 194, 66))
+        else:
+            _ctv(769, 955, res, f_res)   # no POTM → single line, dead-centre of the ribbon
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -3089,7 +3104,8 @@ def generate_ccodi_scorecard_from_data(data: dict):
     tiebreak = rs.split(" WON")[0].strip() if "(SUPER OVER)" in rs else None
     m = _NS(tournament_server_id=data.get("server_id"), tournament_type="ccodi",
             innings1=_inn(t1), innings2=_inn(t2), current_innings_num=2,
-            target=t1["runs"] + 1, tiebreak_winner_name=tiebreak)
+            target=t1["runs"] + 1, tiebreak_winner_name=tiebreak,
+            _potm_name=data.get("potm"))
     return generate_ccodi_scorecard(m)
 
 # ==========================================
