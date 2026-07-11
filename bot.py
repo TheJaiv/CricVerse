@@ -35,7 +35,7 @@ from test_image import (
     generate_test_summary_image as _ti_summary,
     generate_test_scorecard_image as _ti_scorecard,
 )
-from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_ccodi_round_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, revert_tournament_match, repair_tournament_schedule, _tm_next_mid, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS, SquadConfirmView, build_squad_confirm_text, build_squad_confirm_embed, match_order_gate, MATCH_ORDER_LABELS, build_tournament_summary_embeds, generate_round_robin_schedule
+from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_ccodi_round_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, revert_tournament_match, rebuild_tournament_stats, repair_tournament_schedule, _tm_next_mid, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS, SquadConfirmView, build_squad_confirm_text, build_squad_confirm_embed, match_order_gate, MATCH_ORDER_LABELS, build_tournament_summary_embeds, generate_round_robin_schedule
 import rating_league
 from rating_league import (
     RATING_CONFIG, is_rating_tournament, create_rating_tournament, create_open_match,
@@ -14025,6 +14025,27 @@ class PrefixCog(commands.Cog):
         await ctx.send("🔓 **Stats table UNLOCKED** — player stats record normally again. "
                        "*(Matches played during the lock stay excluded.)*")
 
+    @tournament.command(name="rebuild_stats", aliases=["rebuildstats", "fix_stats", "recount_stats"],
+                        help="[MANAGER] Recompute the whole player-stats leaderboard from the schedule — fixes double-counted stats from a match that was recorded twice.\nUsage: tournament rebuild_stats")
+    async def t_rebuild_stats(self, ctx):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (str(ctx.author.id) in tourney.get("managers", []))
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+
+        counted, exact, approx, players = rebuild_tournament_stats(tourney)
+        save_tournament(tourney)
+        msg = (f"🧮 **Leaderboard rebuilt from the schedule.**\n"
+               f"• Counted **{counted}** completed match{'es' if counted != 1 else ''} — each contributes exactly once, "
+               f"so any double-counted stats are now corrected.\n"
+               f"• **{players}** players tallied.")
+        if approx:
+            msg += (f"\n⚠️ {approx} older match{'es' if approx != 1 else ''} had no exact stats snapshot — those were "
+                    f"rebuilt best-effort from their scorecards (a benched player's match count may be off by a little).")
+        msg += "\n📊 `cvt leaderboard` to check · points & NRR were never affected (they come straight from results)."
+        await ctx.send(msg)
+
     @tournament.command(name="admin_record_result", help="[MANAGER] Manually record a match result.\nUsage: tournament admin_record_result <id> <winner> <t1_r> <t1_w> <t1_b> <t2_r> <t2_w> <t2_b>")
     async def t_admin_record_result(self, ctx, match_id: int, winner: str, t1_runs: int, t1_wickets: int, t1_balls: int, t2_runs: int, t2_wickets: int, t2_balls: int):
         server_id = str(ctx.guild.id)
@@ -14321,6 +14342,7 @@ class PrefixCog(commands.Cog):
             value=("`transfer_team` · `replace_player` · `force_delete`\n"
                    "`award_win`/`walkover <id> <team>` — W only, no stats/NRR\n"
                    "`lock_stats`/`unlock_stats` — freeze player-stat recording\n"
+                   "`rebuild_stats` — recompute the leaderboard from the schedule (fixes double-counted stats)\n"
                    "`admin_record_result` · `admin_restore_schedule` · `end_season`"),
             inline=False,
         )

@@ -2076,6 +2076,78 @@ def _revert_match_stats(tourney, m_data):
     return True, False
 
 
+def rebuild_tournament_stats(tourney):
+    """Recompute tourney['stats'] FROM SCRATCH by summing every completed match's stored
+    contribution exactly once. Self-heals a leaderboard corrupted by a match whose
+    completion event fired twice (double-counted stats): the schedule is the source of
+    truth, so each match contributes exactly once no matter how many times it doubled.
+    Uses the exact per-match `stats_delta` where present (recent matches always have it),
+    else a best-effort recompute from `scorecard_players` (older matches — can't recover
+    bench players' match counts). Walkovers / stats-locked matches contribute nothing.
+    Returns (matches_counted, exact_count, approx_count, players)."""
+    new_stats = {}
+
+    def _add(team, pname, field, amt):
+        if not amt:
+            return
+        ps = new_stats.setdefault(team, {}).setdefault(pname, dict(_TM_STAT_DEFAULT))
+        ps[field] = ps.get(field, 0) + amt
+
+    counted = exact = approx = 0
+    for m in tourney.get("schedule", []):
+        if m.get("status") != "completed":
+            continue
+        r = m.get("result") or {}
+        delta = r.get("stats_delta")
+        if delta:
+            for team, players in delta.items():
+                for pname, fields in players.items():
+                    for f, amt in fields.items():
+                        _add(team, pname, f, amt)
+            counted += 1
+            exact += 1
+            continue
+        sc = r.get("scorecard_players")
+        if not sc:
+            continue   # walkover / stats-locked / manual result → no player stats
+        t1, t2 = m["team1"], m["team2"]
+        first, second = (t1, t2) if sc.get("bf", 1) == 1 else (t2, t1)
+
+        def _addbat(team, arr):
+            for a in (arr or []):
+                _add(team, a[0], "matches", 1)
+                _add(team, a[0], "runs", a[1]); _add(team, a[0], "balls_faced", a[2])
+                dism = a[3] if len(a) > 3 else "not out"
+                if not isinstance(dism, bool) and dism and dism != "not out":
+                    _add(team, a[0], "outs", 1)
+                if len(a) > 4:
+                    _add(team, a[0], "fours", a[4])
+                if len(a) > 5:
+                    _add(team, a[0], "sixes", a[5])
+                if a[1] >= 100:
+                    _add(team, a[0], "hundreds", 1)
+                elif a[1] >= 50:
+                    _add(team, a[0], "fifties", 1)
+
+        def _addbowl(team, arr):
+            for a in (arr or []):
+                ov = str(a[3]); balls = 0
+                if "." in ov:
+                    o, b = ov.split("."); balls = int(o) * 6 + int(b)
+                elif ov.isdigit():
+                    balls = int(ov) * 6
+                _add(team, a[0], "wickets", a[1]); _add(team, a[0], "runs_conceded", a[2])
+                _add(team, a[0], "balls_bowled", balls)
+
+        _addbat(first, sc.get("b1")); _addbat(second, sc.get("b2"))
+        _addbowl(first, sc.get("w1")); _addbowl(second, sc.get("w2"))
+        counted += 1
+        approx += 1
+
+    tourney["stats"] = new_stats
+    return counted, exact, approx, sum(len(v) for v in new_stats.values())
+
+
 def revert_tournament_match(tourney, match_id):
     """Cancel a completed match so it can be replayed. Reverts the result, the player
     stats it fed, and any downstream bracket matches generated from it (the points
@@ -2977,6 +3049,15 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             except (IndexError, TypeError):
                 print(f"⚠️ on_tournament_match_complete: match_id {_mid} not found in schedule.")
                 return
+
+        # DUPLICATE-EVENT GUARD: if this schedule entry is already completed with a
+        # result, a second completion event would double-count every player's stats
+        # (and points/credits). Seen in the wild when an error mid-finalize made the
+        # hook fire twice — ignore the replay outright. (cancel_match clears the
+        # result BEFORE a redo, so legitimate replays pass through unaffected.)
+        if m_data.get("status") == "completed" and m_data.get("result"):
+            print(f"⚠️ Duplicate completion event for match {_mid} ignored (already recorded).")
+            return
 
         t1_name, t2_name = match.team1["name"], match.team2["name"]
         if match.innings1.batting_team["name"] == t1_name:
