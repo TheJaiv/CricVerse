@@ -1306,7 +1306,8 @@ MY_SQUAD = [
     "Sachin Tendulkar", "Virat Kohli", "Jasprit Bumrah", "Chris Gayle", "Vijay Merchant",
     "Everton Weekes", "MS Dhoni", "Garfield Sobers", "Mike Procter", "Bob Appleyard",
     "Tim Southee", "Bill O'Reilly", "Anil Kumble", "Jim Laker", "Richard Hadlee",
-    "Adam Zampa", "Ricky Ponting", "Quinton de Kock"
+    "Adam Zampa", "Ricky Ponting", "Quinton de Kock", "Sydney Barnes", "Michael Hussey",
+    "Michael Vaughan", "Hashim Amla", "Jonny Bairstow", "Eoin Morgan", "Graham Gooch"
 ]
 def _cli():
     ap = argparse.ArgumentParser(description="CricVerse lineup optimizer")

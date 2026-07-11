@@ -111,87 +111,87 @@
    106  Keith Miller                92   86   89   All-Rounder_Pace            Standard
    107  Travis Head                 89   59   89   Batter                      Aggressor
    108  Ross Taylor                 89   30   89   Batter                      Anchor
-   109  Richard Hadlee              80   97   88   All-Rounder_Pace            Finisher
-   110  Imran Khan                  80   97   88   All-Rounder_Pace            Standard
-   111  Ben Stokes                  87   90   88   All-Rounder_Pace            Finisher
-   112  Lance Klusener              91   86   88   All-Rounder_Pace            Anchor
-   113  Shaun Pollock               84   93   88   All-Rounder_Pace            Anchor
-   114  Shikhar Dhawan              88   30   88   Batter                      Aggressor
-   115  Adam Zampa                  30   88   88   Bowler_Spin_Leg             Standard
-   116  Zaheer Khan                 30   88   88   Bowler_Pace                 Standard
-   117  Sid Barnes                  88   25   88   Batter                      Anchor
-   118  Gautam Gambhir              88   20   88   Batter                      Anchor
-   119  Harry Brook                 88   25   88   Batter                      Aggressor
-   120  Saeed Ajmal                 30   88   88   Bowler_Spin_Off             Standard
-   121  Mohd Asif                   30   88   88   Bowler_Pace                 Standard
-   122  Rishabh Pant                88   20   88   Batter_WK                   Aggressor
-   123  Yashasvi Jaiswal            88   30   88   Batter                      Aggressor
-   124  Graeme Swann                35   88   88   Bowler_Spin_Off             Standard
-   125  Heinrich Klaasen            88   20   88   Batter_WK                   Aggressor
-   126  Bishan Singh Bedi           30   88   88   Bowler_Spin_Orthodox        Standard
-   127  Kl Rahul                    88   20   88   Batter_WK                   Anchor
-   128  Mohammed Siraj              40   88   88   Bowler_Pace                 Finisher
-   129  Doug Bollinger              40   88   88   Bowler_Pace                 Aggressor
-   130  Bhuvneshwar Kumar           58   88   88   Bowler_Pace                 Finisher
-   131  Suryakumar Yadav            88   30   88   Batter                      Standard
-   132  Daniel Vettori              82   94   88   All-Rounder_Spin_Off        Finisher
-   133  Martin Guptill              88   15   88   Batter                      Aggressor
-   134  Charlie Macartney           93   83   88   All-Rounder_Spin_Off        Standard
-   135  Alan Knott                  88   30   88   Batter_WK                   Anchor
-   136  Dudley Nourse               88   15   88   Batter                      Anchor
-   137  John Edrich                 88   20   88   Batter                      Anchor
-   138  David Harris                25   88   88   Bowler_Pace                 Standard
-   139  Billy Beldham               88   40   88   Batter                      Aggressor
-   140  Edward Lumpy Stevens        30   88   88   Bowler_Pace                 Standard
-   141  Jacques Kallis              93   82   87   All-Rounder_Pace            Anchor
-   142  Cheteshwar Pujara           87   20   87   Batter                      Anchor
-   143  M Trescothick               87   30   87   Batter                      Aggressor
-   144  Mark Wood                   30   87   87   Bowler_Pace                 Aggressor
-   145  Lockie Ferguson             25   87   87   Bowler_Pace                 Aggressor
-   146  Mohammad Rizwan             87   20   87   Batter_WK                   Anchor
-   147  Michael Bevan               87   55   87   Batter                      Finisher
-   148  Jason Gillespie             30   87   87   Bowler_Pace                 Standard
-   149  Imran Tahir                 30   87   87   Bowler_Spin_Leg             Standard
-   150  Kyle Jamieson               45   87   87   Bowler_Pace                 Standard
-   151  Anrich Nortje               25   87   87   Bowler_Pace                 Aggressor
-   152  Usman Khawaja               87   20   87   Batter                      Anchor
-   153  Jonny Bairstow              87   20   87   Batter_WK                   Aggressor
-   154  Mohammad Amir               30   87   87   Bowler_Pace                 Standard
-   155  Les Ames                    87   20   87   Batter_WK                   Anchor
-   156  Nathan Lyon                 30   87   87   Bowler_Spin_Off             Standard
-   157  Matt Prior                  87   15   87   Batter_WK                   Anchor
-   158  David Miller                87   20   87   Batter                      Finisher
-   159  B J Watling                 87   10   87   Batter_WK                   Anchor
-   160  Nicholas Pooran             87   20   87   Batter_WK                   Aggressor
-   161  Keshav Maharaj              32   87   87   Bowler_Spin_Off             Standard
-   162  Arshdeep Singh              25   87   87   Bowler_Pace                 Finisher
-   163  Yuzvendra Chahal            25   87   87   Bowler_Spin_Leg             Anchor
-   164  Ravindra Jadeja             84   90   87   All-Rounder_Spin_Off        Finisher
-   165  Dimuth Karunaratne          87   10   87   Batter                      Anchor
-   166  Ben Duckett                 87   20   87   Batter_WK                   Aggressor
-   167  Polly Umrigar               87   45   87   Batter                      Aggressor
-   168  Mansoor Ali Khan Pataudi    87   20   87   Batter                      Aggressor
-   169  John Small                  87   30   87   Batter                      Anchor
-   170  Thomas Brett                20   87   87   Bowler_Pace                 Aggressor
-   171  Lord Frederick Beauclerk    87   60   87   Batter                      Aggressor
-   172  Shakib Al Hasan             86   87   86   All-Rounder_Spin_Off        Standard
-   173  Yuvraj Singh                93   80   86   All-Rounder_Spin_Off        Aggressor
-   174  Kapil Dev                   80   93   86   All-Rounder_Pace            Standard
-   175  Sunil Narine                82   91   86   All-Rounder_Spin_Off        Aggressor
-   176  Matt Henry                  35   86   86   Bowler_Pace                 Standard
-   177  Rvd Dussen                  86   25   86   Batter                      Anchor
-   178  Tabraiz Shamsi              22   86   86   Bowler_Spin_Leg             Standard
-   179  Eoin Morgan                 86   25   86   Batter                      Aggressor
-   180  Devon Conway                86   20   86   Batter                      Anchor
-   181  Vernon Philander            45   86   86   Bowler_Pace                 Standard
-   182  Michael Vaughan             86   25   86   Batter                      Anchor
-   183  Adil Rashid                 32   86   86   Bowler_Spin_Leg             Standard
-   184  Mustafizur Rahman           25   86   86   Bowler_Pace                 Standard
-   185  Beth Mooney                 86   20   86   Batter_WK                   Anchor
-   186  Neil Wagner                 25   86   86   Bowler_Pace                 Standard
-   187  Tim David                   86   30   86   Batter                      Finisher
-   188  Jonathan Trott              86   25   86   Batter                      Anchor
-   189  Aaron Finch                 86   20   86   Batter                      Aggressor
+   109  Aaron Finch                 89   20   89   Batter                      Aggressor
+   110  Eoin Morgan                 89   25   89   Batter                      Standard
+   111  Richard Hadlee              80   97   88   All-Rounder_Pace            Finisher
+   112  Imran Khan                  80   97   88   All-Rounder_Pace            Standard
+   113  Ben Stokes                  87   90   88   All-Rounder_Pace            Finisher
+   114  Lance Klusener              91   86   88   All-Rounder_Pace            Anchor
+   115  Shaun Pollock               84   93   88   All-Rounder_Pace            Anchor
+   116  Shikhar Dhawan              88   30   88   Batter                      Aggressor
+   117  Adam Zampa                  30   88   88   Bowler_Spin_Leg             Standard
+   118  Zaheer Khan                 30   88   88   Bowler_Pace                 Standard
+   119  Sid Barnes                  88   25   88   Batter                      Anchor
+   120  Gautam Gambhir              88   20   88   Batter                      Anchor
+   121  Harry Brook                 88   25   88   Batter                      Aggressor
+   122  Saeed Ajmal                 30   88   88   Bowler_Spin_Off             Standard
+   123  Mohd Asif                   30   88   88   Bowler_Pace                 Standard
+   124  Rishabh Pant                88   20   88   Batter_WK                   Aggressor
+   125  Yashasvi Jaiswal            88   30   88   Batter                      Aggressor
+   126  Graeme Swann                35   88   88   Bowler_Spin_Off             Standard
+   127  Heinrich Klaasen            88   20   88   Batter_WK                   Aggressor
+   128  Bishan Singh Bedi           30   88   88   Bowler_Spin_Orthodox        Standard
+   129  Kl Rahul                    88   20   88   Batter_WK                   Anchor
+   130  Mohammed Siraj              40   88   88   Bowler_Pace                 Finisher
+   131  Doug Bollinger              40   88   88   Bowler_Pace                 Aggressor
+   132  Bhuvneshwar Kumar           58   88   88   Bowler_Pace                 Finisher
+   133  Suryakumar Yadav            88   30   88   Batter                      Standard
+   134  Daniel Vettori              82   94   88   All-Rounder_Spin_Off        Finisher
+   135  Martin Guptill              88   15   88   Batter                      Aggressor
+   136  Charlie Macartney           93   83   88   All-Rounder_Spin_Off        Standard
+   137  Alan Knott                  88   30   88   Batter_WK                   Anchor
+   138  Dudley Nourse               88   15   88   Batter                      Anchor
+   139  John Edrich                 88   20   88   Batter                      Anchor
+   140  David Harris                25   88   88   Bowler_Pace                 Standard
+   141  Billy Beldham               88   40   88   Batter                      Aggressor
+   142  Edward Lumpy Stevens        30   88   88   Bowler_Pace                 Standard
+   143  Jacques Kallis              93   82   87   All-Rounder_Pace            Anchor
+   144  Cheteshwar Pujara           87   20   87   Batter                      Anchor
+   145  M Trescothick               87   30   87   Batter                      Aggressor
+   146  Mark Wood                   30   87   87   Bowler_Pace                 Aggressor
+   147  Lockie Ferguson             25   87   87   Bowler_Pace                 Aggressor
+   148  Mohammad Rizwan             87   20   87   Batter_WK                   Anchor
+   149  Michael Bevan               87   55   87   Batter                      Finisher
+   150  Jason Gillespie             30   87   87   Bowler_Pace                 Standard
+   151  Imran Tahir                 30   87   87   Bowler_Spin_Leg             Standard
+   152  Kyle Jamieson               45   87   87   Bowler_Pace                 Standard
+   153  Anrich Nortje               25   87   87   Bowler_Pace                 Aggressor
+   154  Usman Khawaja               87   20   87   Batter                      Anchor
+   155  Jonny Bairstow              87   20   87   Batter_WK                   Aggressor
+   156  Mohammad Amir               30   87   87   Bowler_Pace                 Standard
+   157  Les Ames                    87   20   87   Batter_WK                   Anchor
+   158  Nathan Lyon                 30   87   87   Bowler_Spin_Off             Standard
+   159  Matt Prior                  87   15   87   Batter_WK                   Anchor
+   160  David Miller                87   20   87   Batter                      Finisher
+   161  B J Watling                 87   10   87   Batter_WK                   Anchor
+   162  Nicholas Pooran             87   20   87   Batter_WK                   Aggressor
+   163  Keshav Maharaj              32   87   87   Bowler_Spin_Off             Standard
+   164  Arshdeep Singh              25   87   87   Bowler_Pace                 Finisher
+   165  Yuzvendra Chahal            25   87   87   Bowler_Spin_Leg             Anchor
+   166  Ravindra Jadeja             84   90   87   All-Rounder_Spin_Off        Finisher
+   167  Dimuth Karunaratne          87   10   87   Batter                      Anchor
+   168  Ben Duckett                 87   20   87   Batter_WK                   Aggressor
+   169  Polly Umrigar               87   45   87   Batter                      Aggressor
+   170  Mansoor Ali Khan Pataudi    87   20   87   Batter                      Aggressor
+   171  John Small                  87   30   87   Batter                      Anchor
+   172  Thomas Brett                20   87   87   Bowler_Pace                 Aggressor
+   173  Lord Frederick Beauclerk    87   60   87   Batter                      Aggressor
+   174  Shakib Al Hasan             86   87   86   All-Rounder_Spin_Off        Standard
+   175  Yuvraj Singh                93   80   86   All-Rounder_Spin_Off        Aggressor
+   176  Kapil Dev                   80   93   86   All-Rounder_Pace            Standard
+   177  Sunil Narine                82   91   86   All-Rounder_Spin_Off        Aggressor
+   178  Matt Henry                  35   86   86   Bowler_Pace                 Standard
+   179  Rvd Dussen                  86   25   86   Batter                      Anchor
+   180  Tabraiz Shamsi              22   86   86   Bowler_Spin_Leg             Standard
+   181  Devon Conway                86   20   86   Batter                      Anchor
+   182  Vernon Philander            45   86   86   Bowler_Pace                 Standard
+   183  Michael Vaughan             86   25   86   Batter                      Anchor
+   184  Adil Rashid                 32   86   86   Bowler_Spin_Leg             Standard
+   185  Mustafizur Rahman           25   86   86   Bowler_Pace                 Standard
+   186  Beth Mooney                 86   20   86   Batter_WK                   Anchor
+   187  Neil Wagner                 25   86   86   Bowler_Pace                 Standard
+   188  Tim David                   86   30   86   Batter                      Finisher
+   189  Jonathan Trott              86   25   86   Batter                      Anchor
    190  Haris Rauf                  30   86   86   Bowler_Pace                 Aggressor
    191  Andrew Strauss              86   20   86   Batter                      Anchor
    192  Chamari Athapaththu         86   52   86   Batter                      Aggressor
@@ -1448,5 +1448,5 @@
   1443  Yasir Mohammad              74   18   18   Bowler_Spin_Leg             Standard
   1444  Sabir Ali                   74   18   18   Bowler_Pace                 Standard
 ════════════════════════════════════════════════════════════════════════════════════════
-  Generated: 2026-07-11 04:13 UTC
+  Generated: 2026-07-11 08:06 UTC
 ════════════════════════════════════════════════════════════════════════════════════════

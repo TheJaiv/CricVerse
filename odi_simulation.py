@@ -24,7 +24,7 @@ DSL_ODI_WKT_TRIM = 0.89
 # proportional counterweights (both teams get them when chasing, so strong-vs-weak
 # is untouched, and low-wear roads are barely touched while crumbling decks get real help):
 ODI_WEAR_CARRY     = 0.65   # fraction of innings-1 wear the chase inherits (was 1.0)
-ODI_CHASE_RELIEF_K = 0.075  # innings-2 wicket relief per point of wear susceptibility
+ODI_CHASE_RELIEF_K = 0.058  # innings-2 wicket relief per point of wear susceptibility
 # Tuned low vs the old (dot=50, wkt=3) baseline, which never bowled teams out
 # and produced 370-run innings. Higher wicket base lets innings actually end.
 # ODI is a singles/strike-rotation game: ~46% dot, ~37% single, only ~10-11%
@@ -167,7 +167,7 @@ SPIN_SHOT_MATRIX = {
     "Mystery": ["Block", "Sweep", "Drive"] 
 }
 
-def get_smart_ai_shot_odi(deliv, innings, is_death_overs, archetype, pressure_multiplier=1.0, max_balls=300):
+def get_smart_ai_shot_odi(deliv, innings, is_death_overs, archetype, pressure_multiplier=1.0, max_balls=300, striker_balls=0):
     total_balls = innings.total_balls
     is_powerplay = total_balls < max_balls * 0.2
     is_middle = max_balls * 0.2 <= total_balls < max_balls * 0.8
@@ -177,7 +177,9 @@ def get_smart_ai_shot_odi(deliv, innings, is_death_overs, archetype, pressure_mu
     # Vaibhav is ALWAYS in that mindset — he attacks in every phase.
     force_aggression = pressure_multiplier > 1.2 or is_death_overs or archetype == "Vaibhav"
         
-    if is_collapse and not force_aggression:
+    # A SET recognised batter doesn't turtle through a collapse — he rebuilds at
+    # normal tempo (rotates, punishes the bad ball); only fresh batters dig in.
+    if is_collapse and not force_aggression and striker_balls < 25:
         if "Yorker" in deliv: return random.choices(["Block", "Defensive", "Drive"], weights=[40, 30, 30], k=1)[0]
         elif "Bouncer" in deliv: return random.choices(["Leave", "Block", "Pull"], weights=[40, 40, 20], k=1)[0]
         else: return random.choices(["Block", "Defensive", "Drive", "Flick"], weights=[30, 30, 25, 15], k=1)[0]
@@ -516,7 +518,7 @@ def execute_ball_math_odi(match):
                     lengths = ['Full', 'Good', 'Yorker']
                 deliv = f"{random.choice(['Inswing', 'Outswing', 'Fast', 'Slow'])} {random.choice(lengths)}"
             
-    shot = match.current_shot_selection or get_smart_ai_shot_odi(deliv, innings, is_death_overs, striker["archetype"], pressure_multiplier, max_balls=_mb)
+    shot = match.current_shot_selection or get_smart_ai_shot_odi(deliv, innings, is_death_overs, striker["archetype"], pressure_multiplier, max_balls=_mb, striker_balls=b_stats.balls_faced)
         
     match.current_delivery_selection = None
     match.current_shot_selection = None
@@ -546,6 +548,13 @@ def execute_ball_math_odi(match):
     # decks lost 8-14 par because 85-attacks also shredded tail defense).
     _bowl_class = max(0.0, min(1.0, (float(bowler.get("bowl", 80)) - 84.0) / 8.0))
     _mismatch = max(0.0, min(1.0, (-edge - 0.25) * 3.5)) * _bowl_class
+    # ...and DEFENSE IS TECHNIQUE: a 35-bat tailender can't actually block, on
+    # any deck, against any attack — his shields leak regardless of bowler
+    # class (measured: tail batting averages were pitch-immune, losing 0% from
+    # Hard to Cracked while every frontline batter lost ~30%, and 35-rated
+    # No.10s posted HS 50+). Frontline (bat 72+) unaffected.
+    _technique = max(0.0, min(1.0, (float(striker.get("bat", 50)) - 42.0) / 30.0))
+    _mismatch = max(_mismatch, (1.0 - _technique) * 0.75)
 
     free_hit_active = getattr(match, "free_hit", False)
     is_wide = False
@@ -880,6 +889,13 @@ def execute_ball_math_odi(match):
     if striker["archetype"] == "Vaibhav" and b_stats.runs_scored >= 30:
         boundary_weight *= 1.4; wicket_weight *= 0.5; dot_weight *= 0.85
 
+    # ── BIG-SCORE BRAKE ── past 120 the double-hundred watch begins: fatigue,
+    # fields set for him, every bowler targeting him. Rating-independent (DSL
+    # included) — real ODI 200s are once-in-thousands rare; the engine posted a
+    # 230 inside 600 innings. Negligible run mass above 110 → par untouched.
+    if b_stats.runs_scored > 110:
+        wicket_weight *= 1.0 + 0.05 * (b_stats.runs_scored - 110)
+
     # ── RATING-SCALED CONSISTENCY (tournament only; high-rated → steadier) ──
     # Protect elite batters through the set phase (fewer freak cheap dismissals)
     # and nudge their risk up once past a big score (fewer freak 150s) → their
@@ -959,7 +975,7 @@ def execute_ball_math_odi(match):
         elif striker["archetype"] == "Finisher" and is_death_overs:
             boundary_weight *= 1.25
 
-        if is_collapse: boundary_weight *= 0.7; wicket_weight *= (0.75 + 0.25 * _mismatch); single_weight *= 1.2
+        if is_collapse: boundary_weight *= (0.7 + 0.22 * _technique); wicket_weight *= (0.75 + 0.25 * _mismatch); single_weight *= 1.2
         if is_set_partnership: wicket_weight *= (0.85 + 0.15 * _mismatch)
         if has_wickets_in_hand: boundary_weight *= 1.2; wicket_weight *= 1.15; dot_weight *= 0.75
 
@@ -1066,7 +1082,11 @@ def execute_ball_math_odi(match):
     if match.pitch in ("Flat", "Dead"):
         wicket_weight = min(wicket_weight, ODI_BAT_PITCH_WKT_CAP)  # batting-paradise floor
     elif match.pitch in ODI_BOWL_DECKS:
-        wicket_weight = min(wicket_weight, ODI_BOWL_PITCH_WKT_CAP)  # minefield ceiling
+        # minefield ceiling — but a TAIL doesn't get its full mercy: real
+        # minefields shoot the lower order out (tails were reading Cracked as
+        # kinder than Hard because this cap clipped exactly their hazard range)
+        _bowl_cap = ODI_BOWL_PITCH_WKT_CAP + (2.0 if float(striker.get("bat", 50)) < 65 else 0.0)
+        wicket_weight = min(wicket_weight, _bowl_cap)
     wicket_weight = max(1.0, min(wicket_weight, 25.0)) # Hard cap to prevent 10/10 scenarios
     dot_weight = max(15.0, min(dot_weight, 120.0))
 
