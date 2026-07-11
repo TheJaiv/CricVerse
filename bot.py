@@ -976,7 +976,14 @@ def render_wicket_summary(match: CricketMatch) -> discord.Embed:
 def get_player_of_the_match(match: CricketMatch) -> str:
     best_player = "TBD"
     highest_impact = -999
-    
+
+    # Format-aware anchors. Judged by the T20 pars (SR 120, econ 10) every ODI
+    # spell looked golden — 10 overs at 5.0 econ banked ~150 pts, more than a
+    # century — and normal ODI strike rates were taxed. ODI par: SR ~95, econ ~5.8.
+    _odi = match.format_overs >= _ODI_ENGINE_MIN_OVERS
+    _sr_par = 95.0 if _odi else 120.0
+    _eco_par, _eco_rate = (5.8, 2.0) if _odi else (10.0, 3.0)
+
     winning_team = None
     if match.current_innings_num == 2 and match.innings2:
         if match.innings2.total_runs > match.innings1.total_runs:
@@ -994,13 +1001,13 @@ def get_player_of_the_match(match: CricketMatch) -> str:
         if p_name in match.innings1.batting_stats:
             bat = match.innings1.batting_stats[p_name]
             sr = (bat.runs_scored / bat.balls_faced * 100) if bat.balls_faced > 0 else 0
-            impact += bat.runs_scored + (bat.runs_scored * (sr / 120))
+            impact += bat.runs_scored + (bat.runs_scored * (sr / _sr_par))
             
         if p_name in match.innings1.bowling_stats:
             bowl = match.innings1.bowling_stats[p_name]
             if bowl.balls_bowled > 0:
                 eco = (bowl.runs_conceded / bowl.balls_bowled) * 6
-                eco_pts = max(-30.0, (10 - eco) * (bowl.balls_bowled / 6) * 3)
+                eco_pts = max(-30.0, (_eco_par - eco) * (bowl.balls_bowled / 6) * _eco_rate)
                 impact += (bowl.wickets_taken * 40) + eco_pts
 
         # Analyze innings 2 impact
@@ -1008,13 +1015,13 @@ def get_player_of_the_match(match: CricketMatch) -> str:
             if p_name in match.innings2.batting_stats:
                 bat = match.innings2.batting_stats[p_name]
                 sr = (bat.runs_scored / bat.balls_faced * 100) if bat.balls_faced > 0 else 0
-                impact += bat.runs_scored + (bat.runs_scored * (sr / 120))
+                impact += bat.runs_scored + (bat.runs_scored * (sr / _sr_par))
 
             if p_name in match.innings2.bowling_stats:
                 bowl = match.innings2.bowling_stats[p_name]
                 if bowl.balls_bowled > 0:
                     eco = (bowl.runs_conceded / bowl.balls_bowled) * 6
-                    eco_pts = max(-30.0, (10 - eco) * (bowl.balls_bowled / 6) * 3)
+                    eco_pts = max(-30.0, (_eco_par - eco) * (bowl.balls_bowled / 6) * _eco_rate)
                     impact += (bowl.wickets_taken * 40) + eco_pts
         
         # Determine team for multiplier

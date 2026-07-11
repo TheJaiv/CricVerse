@@ -345,12 +345,12 @@ def _eval_one(order, pitch, opp_ovr, n, format_overs, base_seed, squad=None):
     random.seed(base_seed)
     me_players = [dict(p) for p in order]
     _apply_captain(me_players)
-    me_subs = _my_bench(order, squad)
+    me_subs = _my_bench(order, squad, format_overs)
     wins = ties = 0
     for i in range(n):
         me = {"name": "YOU", "players": [dict(p) for p in me_players],
               "subs": [dict(p) for p in me_subs]}
-        opp = _build_opponent(opp_ovr)         # fresh balanced side, same perks
+        opp = _build_opponent(opp_ovr, format_overs)         # fresh balanced side, same perks
         if i % 2 == 0:
             m = CricketMatch(me, opp, format_overs, pitch, "Clear")
             m.impact_player = IMPACT_ON and format_overs == 20   # T20-only rule
@@ -414,13 +414,13 @@ def collect_player_stats(order, n, format_overs, seed, opp_ovr, squad=None):
                "hs": 0, "bwl_balls": 0, "conceded": 0, "wkts": 0} for nm in names}
     me_players = [dict(p) for p in order]
     _apply_captain(me_players)
-    me_subs = _my_bench(order, squad)
+    me_subs = _my_bench(order, squad, format_overs)
     random.seed(seed)
     for i in range(n):
         pitch = PITCHES[i % len(PITCHES)]
         me = {"name": "YOU", "players": [dict(p) for p in me_players],
               "subs": [dict(p) for p in me_subs]}
-        opp = _build_opponent(opp_ovr)
+        opp = _build_opponent(opp_ovr, format_overs)
         if i % 2 == 0:
             m = CricketMatch(me, opp, format_overs, pitch, "Clear")
             m.impact_player = IMPACT_ON and format_overs == 20   # T20-only rule
@@ -503,12 +503,12 @@ def _win_pct_fixed_innings(order, pitch, opp_ovr, n, format_overs, seed, me_firs
     random.seed(seed)
     me_players = [dict(p) for p in order]
     _apply_captain(me_players)
-    me_subs = _my_bench(order, squad)
+    me_subs = _my_bench(order, squad, format_overs)
     wins = ties = 0
     for _ in range(n):
         me = {"name": "YOU", "players": [dict(p) for p in me_players],
               "subs": [dict(p) for p in me_subs]}
-        opp = _build_opponent(opp_ovr)
+        opp = _build_opponent(opp_ovr, format_overs)
         if me_first:
             m = CricketMatch(me, opp, format_overs, pitch, "Clear")
             m.impact_player = IMPACT_ON and format_overs == 20   # T20-only rule
@@ -567,7 +567,7 @@ def _winpct_vs_kind(order, pitch, opp_ovr, kind, n, format_overs, seed, squad):
     for i in range(n):
         me = {"name": "YOU", "players": [dict(p) for p in me_players],
               "subs": [dict(p) for p in me_subs]}
-        opp = _variant_opponent(opp_ovr, kind)
+        opp = _variant_opponent(opp_ovr, kind, format_overs)
         if i % 2 == 0:
             m = CricketMatch(me, opp, format_overs, pitch, "Clear")
         else:
@@ -645,7 +645,7 @@ def _captain_winpct(order, captain_name, pitch, opp_ovr, squad, n, format_overs,
     for i in range(n):
         me = {"name": "YOU", "players": [dict(p) for p in me_players],
               "subs": [dict(p) for p in me_subs]}
-        opp = _build_opponent(opp_ovr)
+        opp = _build_opponent(opp_ovr, format_overs)
         if i % 2 == 0:
             m = CricketMatch(me, opp, format_overs, pitch, "Clear")
         else:
@@ -707,7 +707,7 @@ def _print_captaincy(res, order, n, pitch):
 # Impact-player usage — when & where the AI brings the 12th man in
 # ─────────────────────────────────────────────────────────────────────────────
 def impact_usage_stats(order, opp_ovr, squad, n, format_overs, seed):
-    me_subs = _my_bench(order, squad)
+    me_subs = _my_bench(order, squad, format_overs)
     if not me_subs:
         return None
     me_players = [dict(p) for p in order]
@@ -722,7 +722,7 @@ def impact_usage_stats(order, opp_ovr, squad, n, format_overs, seed):
         pitch = PITCHES[i % len(PITCHES)]
         me = {"name": "YOU", "players": [dict(p) for p in me_players],
               "subs": [dict(p) for p in me_subs]}
-        opp = _build_opponent(opp_ovr)
+        opp = _build_opponent(opp_ovr, format_overs)
         my_id = 1 if i % 2 == 0 else 2
         if i % 2 == 0:
             m = CricketMatch(me, opp, format_overs, pitch, "Clear")
@@ -938,7 +938,7 @@ def best_per_pitch(squad, xi, opp_specs, format_overs, procs, seed, rng, params)
             params["max_cand"], format_overs, pseed, procs, rng, pitches=[pitch],
             verbose=False, squad=squad)
         captain = _captain_of(order)
-        bench = _my_bench(order, squad)
+        bench = _my_bench(order, squad, format_overs)
         # Per-pitch impact pick = the bench player best suited to THIS deck.
         impact = max(bench, key=lambda p: pitch_value(p, pitch)) if bench else None
         out[pitch] = (order, grid, captain, impact)
@@ -956,8 +956,9 @@ def _print_one_pitch(pitch, order, grid, field, base_xi, captain, impact):
     tiers = "  ".join(f"{t}:{grid[(pitch, t)]:.0f}" for t, _d in TIERS)
     print(f"     vs even side at ±OVR: [{tiers}]")
     cap = captain["name"] if captain else "-"
-    imp = f"{impact['name']} ({category(impact)})" if impact else "-"
-    print(f"     CAPTAIN: {cap}   |   IMPACT PLAYER: {imp}")
+    # Impact player is T20-only, so it's None in ODIs -> omit the field entirely.
+    imp = f"   |   IMPACT PLAYER: {impact['name']} ({category(impact)})" if impact else ""
+    print(f"     CAPTAIN: {cap}{imp}")
     if ins:
         outs = [n for n in base if n not in {p["name"] for p in order}]
         print(f"     vs default XI:  IN {', '.join(ins)}   OUT {', '.join(outs)}")
@@ -1050,9 +1051,10 @@ def optimize(squad, format_overs=20, coarse_n=30, fine_n=150, fine_k=6,
           f"/ toss / stats")
     print("=" * 74)
     _print_captaincy(pp_caps[best_home], home_order, cap_n, best_home)
-    iu = impact_usage_stats(home_order, opp_specs["same"], squad, stats_n,
-                            format_overs, seed + 13)
-    _print_impact_usage(iu)
+    if format_overs == 20:      # impact player is a T20-only rule
+        iu = impact_usage_stats(home_order, opp_specs["same"], squad, stats_n,
+                                format_overs, seed + 13)
+        _print_impact_usage(iu)
     adv = toss_advice(home_order, toss_n, format_overs, seed + 3, opp_specs["same"],
                       squad)
     _print_toss_advice(adv, toss_n)
@@ -1300,16 +1302,18 @@ def _report(best_order, best_overall, best_grid, fine, finalists, fine_n):
 # Your SQUAD — just names; ratings/roles are looked up from cricverse_players_ratings.txt
 # Give 11 OR MORE; if >11 the tool picks the best XI first.
 # ─────────────────────────────────────────────────────────────────────────────
-
 MY_SQUAD = [
     "Sachin Tendulkar", "Virat Kohli", "Jasprit Bumrah", "Chris Gayle", "Vijay Merchant",
     "Everton Weekes", "MS Dhoni", "Garfield Sobers", "Mike Procter", "Bob Appleyard",
-    "Tim Southee", "Dennis Lillee", "Bill O'Reilly", "Anil Kumble", "Jim Laker",
-    "Shane Watson", "Richard Hadlee"
+    "Tim Southee", "Bill O'Reilly", "Anil Kumble", "Jim Laker", "Richard Hadlee",
+    "Adam Zampa", "Ricky Ponting", "Quinton de Kock"
 ]
 def _cli():
     ap = argparse.ArgumentParser(description="CricVerse lineup optimizer")
-    ap.add_argument("--odi", action="store_true", help="50-over format (default T20)")
+    ap.add_argument("--odi", action="store_true",
+                    help="50-over format (skips the interactive T20/ODI prompt)")
+    ap.add_argument("--t20", action="store_true",
+                    help="20-over format (skips the interactive T20/ODI prompt)")
     ap.add_argument("--coarse-n", type=int, default=30)
     ap.add_argument("--fine-n", type=int, default=150)
     ap.add_argument("--fine-k", type=int, default=6)
@@ -1333,7 +1337,18 @@ def _cli():
     ap.add_argument("--procs", type=int, default=None)
     ap.add_argument("--quick", action="store_true", help="fast sanity run")
     a = ap.parse_args()
-    optimize(MY_SQUAD, format_overs=50 if a.odi else 20, coarse_n=a.coarse_n,
+
+    # Format: honour an explicit flag, else ask interactively.
+    if a.odi:
+        format_overs = 50
+    elif a.t20:
+        format_overs = 20
+    else:
+        ans = input("Format?  [1] T20 (20 overs)   [2] ODI (50 overs)  > ").strip().lower()
+        format_overs = 50 if ans in ("2", "odi", "50", "o") else 20
+        print(f"→ {'ODI (50 overs)' if format_overs == 50 else 'T20 (20 overs)'}\n")
+
+    optimize(MY_SQUAD, format_overs=format_overs, coarse_n=a.coarse_n,
              fine_n=a.fine_n, fine_k=a.fine_k, max_cand=a.max_cand,
              procs=a.procs, quick=a.quick, stats_n=a.stats_n, toss_n=a.toss_n,
              select_n=a.select_n, max_combos=a.max_combos,

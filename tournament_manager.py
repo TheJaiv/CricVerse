@@ -1759,19 +1759,31 @@ _TM_STAT_DEFAULT = {k: 0 for k in _TM_STAT_KEYS}
 
 
 # ── Full tournament report (cvt summary) — the keep-before-you-delete record ──
-def _summary_mvp(s):
-    """Same MVP formula as the leaderboard command."""
+def _summary_mvp(s, odi=False):
+    """Same MVP formula as the leaderboard command. Format-aware: the SR tiers
+    and the economy anchor were T20 numbers (SR 110+ earns a bonus, econ 8 is
+    par) — judged by those, every ODI batter reads "slow" and every ODI bowler
+    reads like a miser. ODI uses its own anchors (SR ~90 par, econ ~5.8 par)."""
     sr = (s["runs"] / s["balls_faced"] * 100) if s["balls_faced"] > 0 else 0
     bat = float(s["runs"])
-    if sr >= 150:   bat *= 1.30
-    elif sr >= 130: bat *= 1.20
-    elif sr >= 110: bat *= 1.10
-    elif sr < 80 and s["balls_faced"] >= 20: bat *= 0.85
+    if odi:
+        if sr >= 115:   bat *= 1.30
+        elif sr >= 100: bat *= 1.20
+        elif sr >= 90:  bat *= 1.10
+        elif sr < 65 and s["balls_faced"] >= 30: bat *= 0.85
+    else:
+        if sr >= 150:   bat *= 1.30
+        elif sr >= 130: bat *= 1.20
+        elif sr >= 110: bat *= 1.10
+        elif sr < 80 and s["balls_faced"] >= 20: bat *= 0.85
     bat += s["fifties"] * 15 + s["hundreds"] * 40
     bat += s["sixes"] * 2 + s["fours"] * 0.5
     econ = (s["runs_conceded"] / s["balls_bowled"] * 6) if s["balls_bowled"] > 0 else 9.0
     bowl = float(s["wickets"] * 40)
-    if s["balls_bowled"] >= 12:
+    if odi:
+        if s["balls_bowled"] >= 30:
+            bowl += max(-25.0, min(25.0, (5.8 - econ) * 6))
+    elif s["balls_bowled"] >= 12:
         bowl += max(-25.0, min(25.0, (8.0 - econ) * 5))
     return bat + bowl
 
@@ -1898,9 +1910,10 @@ def build_tournament_summary_embeds(tourney):
             sorted([(t, p, s) for t, p, s in players if s["wickets"] >= 3],
                    key=lambda x: x[2]["runs_conceded"]/x[2]["wickets"])[:5],
             lambda s: f"**{s['runs_conceded']/s['wickets']:.1f}** avg ({s['wickets']} wkts)"), inline=False)
+        _mvp_odi = tourney.get("format_overs", 20) >= 35
         bowl_e.add_field(name="🏆 MVP Standings", value=fmt(
-            top(_summary_mvp),
-            lambda s: f"**{_summary_mvp(s):.0f}** pts — {s['runs']}R · {s['wickets']}W"), inline=False)
+            top(lambda s: _summary_mvp(s, _mvp_odi)),
+            lambda s: f"**{_summary_mvp(s, _mvp_odi):.0f}** pts — {s['runs']}R · {s['wickets']}W"), inline=False)
         embeds.append(bowl_e)
 
     # ── 5. MATCH RECORDS ───────────────────────────────────────────────────────
@@ -3424,20 +3437,10 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             return await interaction.response.send_message("❌ No stats available yet. Complete a match first!", ephemeral=True)
         c_val = category.value
 
+        _lb_odi = tourney.get("format_overs", 20) >= 35
+
         def _mvp_score(s):
-            sr = (s["runs"] / s["balls_faced"] * 100) if s["balls_faced"] > 0 else 0
-            bat = float(s["runs"])
-            if sr >= 150:   bat *= 1.30
-            elif sr >= 130: bat *= 1.20
-            elif sr >= 110: bat *= 1.10
-            elif sr < 80 and s["balls_faced"] >= 20: bat *= 0.85
-            bat += s["fifties"] * 15 + s["hundreds"] * 40
-            bat += s["sixes"] * 2 + s["fours"] * 0.5
-            econ = (s["runs_conceded"] / s["balls_bowled"] * 6) if s["balls_bowled"] > 0 else 9.0
-            bowl = float(s["wickets"] * 40)
-            if s["balls_bowled"] >= 12:
-                bowl += max(-25.0, min(25.0, (8.0 - econ) * 5))
-            return bat + bowl
+            return _summary_mvp(s, _lb_odi)   # single formula, format-aware
 
         if c_val == "runs": sorted_players = sorted(all_players, key=lambda x: x["stats"]["runs"], reverse=True)
         elif c_val == "wickets": sorted_players = sorted(all_players, key=lambda x: x["stats"]["wickets"], reverse=True)

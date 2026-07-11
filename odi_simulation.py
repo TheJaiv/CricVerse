@@ -52,6 +52,14 @@ ODI_WKT_COMPRESS = 0.315
 # Batting-paradise floor (see T20 note): a road/dead deck caps how cheaply a side
 # folds, lifting the low tail without changing the boundary-driven mean.
 ODI_BAT_PITCH_WKT_CAP = 7.0
+# First-innings par run-rate per deck (calibrated odi_audit pars / 50). Used to
+# judge how steep a chase's death-overs ask REALLY is on this surface: needing
+# 6.8 on a Flat road is a par finish, needing 6.8 on Sticky is a crisis.
+ODI_PITCH_PAR_RATE = {
+    "Flat": 6.8, "Dead": 6.9, "Hard": 5.7, "Green": 4.9, "Dry": 5.3,
+    "Dusty": 4.85, "Soft": 4.65, "Cracked": 4.4, "Damp": 5.0, "Worn": 5.2,
+    "Turning": 4.65, "Two-Paced": 4.5, "Slow": 4.55, "Bouncy": 4.85, "Sticky": 3.85,
+}
 # Bowling-deck ceiling (mirror of T20_BOWL_PITCH_WKT_CAP): even a minefield
 # bottoms out. Caps the stacked env x slog x mismatch wicket spikes that the
 # skill-anchored compressor now lets through, holding all-out at the levels
@@ -525,6 +533,20 @@ def execute_ball_math_odi(match):
     edge = dominance - 0.5                          # ~[-0.45, +0.45]
     diff = edge * 100.0  # legacy scale, kept for any downstream heuristics
 
+    # ── MISMATCH POROSITY ── an out-skilled batter can't buy safety with a
+    # dead bat: blocking, collapse-consolidation and cruise-mode caution all
+    # discount wicket risk, but against a far better bowler the good ball
+    # beats the block anyway (measured: a 36-bat tail faced 60+ balls vs a
+    # 97-attack 15% of the time). 0 = fair contest (shields at full value)
+    # → 1 = heavy mismatch (shields nearly gone). Same ~13-pt gap threshold
+    # as the singles trim, so frontline batters are untouched — AND scaled by
+    # the bowler's class (full at 90+, zero below ~82): only an ELITE bowler
+    # beats the black-hole block; vs an ordinary attack the tail hangs around
+    # exactly as the calibrated par/all-out levels expect (unscaled, wicket
+    # decks lost 8-14 par because 85-attacks also shredded tail defense).
+    _bowl_class = max(0.0, min(1.0, (float(bowler.get("bowl", 80)) - 84.0) / 8.0))
+    _mismatch = max(0.0, min(1.0, (-edge - 0.25) * 3.5)) * _bowl_class
+
     free_hit_active = getattr(match, "free_hit", False)
     is_wide = False
     is_no_ball = False
@@ -599,7 +621,9 @@ def execute_ball_math_odi(match):
 
     # Baseline ODI Weights - High discipline, lower boundary frequency
     dot_weight      = max(14.0, ODI_BASE_DOT  - edge * ODI_DOT_SENS)
-    single_weight   = ODI_BASE_SINGLE * max(0.45, 1.0 + min(0.0, edge - ODI_SINGLE_MISMATCH_EDGE) * ODI_SINGLE_SENS_NEG)
+    # (class-gated like _mismatch: only an ELITE bowler chokes the tail's
+    #  strike rotation; vs an ordinary attack the calibrated par stands)
+    single_weight   = ODI_BASE_SINGLE * max(0.45, 1.0 + min(0.0, edge - ODI_SINGLE_MISMATCH_EDGE) * ODI_SINGLE_SENS_NEG * _bowl_class)
     boundary_weight = max(1.0,  ODI_BASE_BND  + edge * ODI_BND_SENS)
     wicket_weight   = max(0.6,  ODI_BASE_WKT  - edge * ODI_WKT_SENS)
     # The compressor below squeezes environmental inflation back toward THIS
@@ -781,8 +805,16 @@ def execute_ball_math_odi(match):
             boundary_weight *= 1.32
             dot_weight *= 0.82
         else:
-            boundary_weight *= 1.10
-            dot_weight *= 0.92
+            # Par-relative: finishing at/below the DECK's par tempo is a normal
+            # death-overs launch (denying it made bat-first win 53%+ on roads —
+            # a par chase on Flat needs ~6.8 rpo and was being treated as
+            # "steep"); only a genuinely steep ask (the old cheat zone, rrr well
+            # above the deck's par) keeps the mild lift + the slog wicket tax.
+            _dpr = ODI_PITCH_PAR_RATE.get(match.pitch, 5.6)
+            _dratio = ((runs_needed / balls_left * 6) / _dpr) if balls_left > 0 else 1.5
+            _t = max(0.0, min(1.0, (_dratio - 1.02) / 0.28))   # 0 at <=1.02x par, 1 at >=1.3x
+            boundary_weight *= 1.32 - 0.22 * _t
+            dot_weight *= 0.82 + 0.10 * _t
 
     # ── ENVIRONMENTAL WICKET COMPRESSOR ──────────────────────────────────
     # Everything above (pitch + weather + ball-age + phase) has scaled the
@@ -884,7 +916,8 @@ def execute_ball_math_odi(match):
             single_weight *= 1.1
 
     if shot in ["Block", "Defensive"]:
-        dot_weight *= 1.6; single_weight *= 0.9; boundary_weight = 0.1; wicket_weight *= 0.5
+        dot_weight *= 1.6; single_weight *= 0.9; boundary_weight = 0.1
+        wicket_weight *= (0.5 + 0.5 * _mismatch)   # defense is a skill (see porosity note)
     elif shot == "Leave":
         dot_weight *= 3.0; single_weight = 0.0; boundary_weight = 0.0; wicket_weight *= 1.2
     else:
@@ -926,8 +959,8 @@ def execute_ball_math_odi(match):
         elif striker["archetype"] == "Finisher" and is_death_overs:
             boundary_weight *= 1.25
 
-        if is_collapse: boundary_weight *= 0.7; wicket_weight *= 0.75; single_weight *= 1.2
-        if is_set_partnership: wicket_weight *= 0.85
+        if is_collapse: boundary_weight *= 0.7; wicket_weight *= (0.75 + 0.25 * _mismatch); single_weight *= 1.2
+        if is_set_partnership: wicket_weight *= (0.85 + 0.15 * _mismatch)
         if has_wickets_in_hand: boundary_weight *= 1.2; wicket_weight *= 1.15; dot_weight *= 0.75
 
         # ── CRUISE CONTROL ── comfortably ahead of the ask → bat calmly (see constants).
@@ -940,7 +973,8 @@ def execute_ball_math_odi(match):
                 boundary_weight *= max(0.42, 1.0 - _damp)
                 single_weight   *= (1.0 + _damp * 0.6)
                 dot_weight      *= (1.0 + _damp * 0.30)
-                wicket_weight   *= max(0.70, 1.0 - _damp * 0.45)
+                _cruise_relief = max(0.70, 1.0 - _damp * 0.45)
+                wicket_weight  *= _cruise_relief + (1.0 - _cruise_relief) * _mismatch
             
         active_multiplier = pressure_multiplier
         if is_death_overs:
