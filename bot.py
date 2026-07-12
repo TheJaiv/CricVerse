@@ -9563,11 +9563,33 @@ class PrefixCog(commands.Cog):
                 return found
             # 'No' -> loop and re-paste
 
+    async def _optimize_in_subprocess(self, fn_name, *args):
+        """Run a tools.lineup_optimizer entry point in its OWN process and return
+        its result. The optimizer seeds the global `random` module for repeatable
+        results, and that state is process-wide: run via asyncio.to_thread, any
+        other bot activity touching random.* mid-run shifts the stream and the
+        same command gives a different XI each time."""
+        import pickle
+        import sys
+        worker = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "tools", "optimizer_worker.py")
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, worker,
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE)
+        out, err = await proc.communicate(pickle.dumps((fn_name, args)))
+        if proc.returncode != 0 or not out:
+            raise RuntimeError("optimizer worker failed: "
+                               + err.decode(errors="replace")[-400:])
+        ok, payload = pickle.loads(out)
+        if not ok:
+            raise RuntimeError(payload)
+        return payload
+
     @commands.command(name="bestpitch", aliases=["bp", "homepitch"], help="[OWNER] Find the pitch your squad is strongest on (vs any opponent style).\nUsage: bestpitch → paste squad")
     async def bestpitch(self, ctx):
         if ctx.author.id != ADMIN_DISCORD_ID:
             return await ctx.send("🔒 Owner only.")
-        from tools.lineup_optimizer import best_home_pitch
 
         squad = await self._roster_collect(
             ctx, "🏟️ **Best Pitch Finder** (owner) — paste your **SQUAD** (11–30 names, "
@@ -9577,7 +9599,7 @@ class PrefixCog(commands.Cog):
 
         working = await ctx.send("🏟️ Finding the pitch your team is strongest on… (~7s)")
         try:
-            hp = await asyncio.to_thread(best_home_pitch, squad)
+            hp = await self._optimize_in_subprocess("best_home_pitch", squad)
         except Exception as ex:
             return await working.edit(content=f"❌ Error: {ex}")
 
@@ -9606,7 +9628,7 @@ class PrefixCog(commands.Cog):
     async def bestxi(self, ctx, fmt: str = None):
         if ctx.author.id != ADMIN_DISCORD_ID:
             return await ctx.send("🔒 Owner only.")
-        from tools.lineup_optimizer import recommend_xi, PITCHES, category
+        from tools.lineup_optimizer import PITCHES, category
 
         is_odi = (fmt or "").strip().lower() in ("odi", "50", "od", "50ov")
         format_overs = 50 if is_odi else 20
@@ -9701,8 +9723,9 @@ class PrefixCog(commands.Cog):
         working = await ctx.send(f"🧠 Simulating the best **{fmt_label}** XI on "
                                  f"**{view.pitch}** ({view.weather}) vs {opp_label}… {eta}")
         try:
-            r = await asyncio.to_thread(recommend_xi, squad, view.pitch, opp_spec,
-                                        view.weather, format_overs)
+            r = await self._optimize_in_subprocess(
+                "recommend_xi", squad, view.pitch, opp_spec,
+                view.weather, format_overs)
         except Exception as ex:
             return await working.edit(content=f"❌ Error: {ex}")
 
