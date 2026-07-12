@@ -35,7 +35,7 @@ from test_image import (
     generate_test_summary_image as _ti_summary,
     generate_test_scorecard_image as _ti_scorecard,
 )
-from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_ccodi_round_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, revert_tournament_match, rebuild_tournament_stats, repair_tournament_schedule, _tm_next_mid, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS, SquadConfirmView, build_squad_confirm_text, build_squad_confirm_embed, match_order_gate, MATCH_ORDER_LABELS, build_tournament_summary_embeds, generate_round_robin_schedule
+from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_ccodi_round_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, revert_tournament_match, rebuild_tournament_stats, repair_tournament_schedule, _tm_next_mid, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS, SquadConfirmView, build_squad_confirm_text, build_squad_confirm_embed, match_order_gate, MATCH_ORDER_LABELS, build_tournament_summary_embeds, generate_round_robin_schedule, generate_ipl_schedule, ipl_try_advance
 import rating_league
 from rating_league import (
     RATING_CONFIG, is_rating_tournament, create_rating_tournament, create_open_match,
@@ -3529,6 +3529,24 @@ async def trigger_super_over(channel, match: CricketMatch):
     # Pick this innings' two openers (interactive) / auto-pick (sim/AI), then bowl.
     await begin_super_over_innings(channel, so_match)
 
+async def _maybe_send_tbes_ads(channel, match):
+    """TBES only: post the server's sponsor ads at an innings end. Silent for every
+    other match type and when no ads are configured. Super-over innings are skipped
+    so a tie-break doesn't spam the break ads again."""
+    try:
+        from tbes_manager import is_tbes_match, build_tbes_ad_embeds
+        if not is_tbes_match(match) or getattr(match, "is_super_over", False):
+            return
+        sid = getattr(match, "tournament_server_id", None)
+        if not sid:
+            return
+        embeds = build_tbes_ad_embeds(sid)
+        if embeds:
+            await channel.send(embeds=embeds[:10])   # Discord caps a message at 10 embeds
+    except Exception as _ad_err:
+        print(f"⚠️ TBES ad send failed: {_ad_err}")
+
+
 async def handle_innings_end(interaction_context, match: CricketMatch):
     if getattr(match, "is_debut", False):   # Career debut: never start innings 2 — score the trial.
         await handle_debut_end(interaction_context, match)
@@ -3578,11 +3596,14 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
             match.target = target
             
         await channel.send(
-            f"🏁 **Innings 1 Complete!** Target set: **{match.innings1.total_runs + 1} runs** to win.{dls_msg}\nHere is the detailed scorecard and broadcast graphic:", 
-            embed=embed_full, 
+            f"🏁 **Innings 1 Complete!** Target set: **{match.innings1.total_runs + 1} runs** to win.{dls_msg}\nHere is the detailed scorecard and broadcast graphic:",
+            embed=embed_full,
             file=file
         )
-        
+
+        # TBES innings-break ads (no-op for every other match type).
+        await _maybe_send_tbes_ads(channel, match)
+
         # Reset per-innings sim controls so the 2nd innings starts FRESH at the hub.
         # Otherwise a "Sim Innings (Verbose)" / whole-match pick from the 1st innings leaks
         # in — e.g. "Sim 1 Over" in the 2nd innings would auto-sim the whole innings verbose.
@@ -3669,6 +3690,9 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
         else:
             header = "🏆 **Match over! Here is the final detailed scorecard and broadcast graphic:**"
         await channel.send(header, embed=embed_full, file=file)
+
+        # TBES second-innings (match end) ads — shown at every innings end per spec.
+        await _maybe_send_tbes_ads(channel, match_to_finalize)
 
         # Send scorecard to match log channel if configured for this server
         if channel.guild:
@@ -11052,6 +11076,7 @@ class PrefixCog(commands.Cog):
             "t20wc": "t20_world_cup", "t20_world_cup": "t20_world_cup", "worldcup": "t20_world_cup", "wc": "t20_world_cup",
             "acl": "acl",
             "ccodi": "ccodi",   # 10 teams · 2 groups of 5 · round-wise double RR · top-2 → KO1/KO2 → Q1/Eliminator → Q2 → Final
+            "ipl": "ipl", "indian_premier_league": "ipl",   # 10 teams · 2 groups of 5 · 14 matches each · combined table · top-4 playoffs
         }
         cond_map = {"manual": "manual", "auto": "auto", "home": "home", "home_pitch": "home", "homepitch": "home"}
         order_map = {"random": "random", "any": "random",
@@ -11081,7 +11106,7 @@ class PrefixCog(commands.Cog):
                 elif key in ('event', 'event_type', 'type'):
                     et = event_map.get(value.strip().lower())
                     if not et:
-                        return await ctx.send(f"❌ Invalid event `{value}`. Use `roundrobin`, `double_rr`, `t20wc`, `ccodi`, or `acl`.")
+                        return await ctx.send(f"❌ Invalid event `{value}`. Use `roundrobin`, `double_rr`, `t20wc`, `ccodi`, `ipl`, or `acl`.")
                     t_type = et
             except ValueError:
                 return await ctx.send(f"❌ Invalid option format: `{opt}`. Must be `key=value`.")
@@ -11114,7 +11139,7 @@ class PrefixCog(commands.Cog):
             "stadiums": default_stadium_pool(t_type),
         }
         save_tournament(t_data)
-        type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League"}.get(t_type, "Round Robin")
+        type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League", "ipl": "Indian Premier League"}.get(t_type, "Round Robin")
         extra = ""
         if t_type == "acl":
             extra = "\n🔴 **ACL needs exactly 14 teams** — each plays every other once (91 matches) → Top 6 Playoffs → Super Cup."
@@ -11127,6 +11152,11 @@ class PrefixCog(commands.Cog):
                      "**5 stadiums** pre-loaded, no venue repeats within a round "
                      "(edit with `cvt stadium_add`/`cvt stadiums`).\n"
                      "🏆 Top 2 per group → KO1 (A1vB1) & KO2 (A2vB2) → Qualifier 1 / Eliminator → Qualifier 2 → Final.")
+        elif t_type == "ipl":
+            extra = ("\n🏆 **IPL needs exactly 10 teams** — no groups (`cvt add_team \"<team>\" @owner`).\n"
+                     "📋 **Add order = seeding** — the draw pairs seeds 1&2, 3&4, … and each pair plays **twice** (the CSK-v-MI slot). Add your strongest sides first.\n"
+                     "🗓️ **70 league matches, 14 per team** (5 opponents twice, 4 once) over **14 rounds of 5** — one game per team per round, 7 home & 7 away.\n"
+                     "🏅 One combined table → Top 4: Qualifier 1 (1v2) · Eliminator (3v4) → Qualifier 2 → Final.")
         elif t_type == "double_round_robin":
             extra = "\n🔁 **Double Round Robin:** every team plays every other team twice, once each way."
         if kwargs['stadium_mode'] == "linked":
@@ -11174,6 +11204,8 @@ class PrefixCog(commands.Cog):
                 return await ctx.send(f"❌ Group must be **{', '.join(valid_groups)}**.")
             if sum(1 for t in tourney["teams"] if t.get("group") == group_val) >= cap:
                 return await ctx.send(f"❌ Group **{group_val}** already has {cap} teams.")
+        elif t_type == "ipl" and len(tourney["teams"]) >= 10:
+            return await ctx.send("❌ **IPL is full** — 10 teams already added.")
 
         team_name = txt.strip().strip('"').strip("'").strip()[:30]
         if not team_name:
@@ -11187,6 +11219,10 @@ class PrefixCog(commands.Cog):
         tourney["teams"].append({"name": team_name, "owner_id": str(owner.id), "squad": [], "group": group_val})
         save_tournament(tourney)
         grp_txt = f" · Group **{group_val}**" if group_val else ""
+        if t_type == "ipl":
+            # Add order = seed order, which is what pairs teams up in the fixture draw.
+            n = len(tourney["teams"])
+            grp_txt = f" · Seed **{n}**" + (f" · {10 - n} to go" if n < 10 else " · **squad complete**")
         await ctx.send(f"✅ Team **{team_name}**{grp_txt} added! Owner: {owner.mention}")
 
     @tournament.command(name="replace_player", help="[MANAGER] Replace a player in a team's squad.\nUsage: tournament replace_player \"<team>\" \"<out_player>\" \"<in_player>\"")
@@ -11518,6 +11554,9 @@ class PrefixCog(commands.Cog):
                 n = len([t for t in tourney["teams"] if t.get("group") == grp])
                 if n != 5:
                     return f"❌ **CCODI:** Group **{grp}** needs exactly 5 teams (currently {n})."
+        elif t_type == "ipl":
+            if len(tourney["teams"]) != 10:
+                return f"❌ **IPL requires exactly 10 teams** (currently {len(tourney['teams'])})."
         elif t_type == "acl":
             if len(tourney["teams"]) != 14:
                 return f"❌ **ACL requires exactly 14 teams** (currently {len(tourney['teams'])})."
@@ -11611,6 +11650,26 @@ class PrefixCog(commands.Cog):
             save_tournament(tourney)
             groups_txt = "\n".join(f"**Group {g}:** {' · '.join(teams_by_group[g])}" for g in "ABCD")
             return await channel.send(f"🏆 **TOURNAMENT STARTED: {tourney['name']}!** — T20 World Cup\n{groups_txt}\nGenerated **{len(schedule)} group stage matches** (interleaved){self._cond_note(tourney)}. Use `cv tournament status` to view fixtures!")
+
+        # IPL — 10 teams, no groups: one flat 70-match league (14 per team) laid out as
+        # 14 rounds of 5, then a Top-4 playoff off the single combined table.
+        if t_type == "ipl":
+            teams = [t["name"] for t in tourney["teams"]]   # add order = seeding
+            tourney["schedule"] = generate_ipl_schedule(teams)
+            tourney["status"] = "active"
+            tourney["current_match_idx"] = 0
+            assign_tournament_conditions(tourney)   # round-aware venues + conditions
+            save_tournament(tourney)
+            return await channel.send(
+                f"🏆 **IPL STARTED: {tourney['name']}!**\n"
+                f"Generated **{len(tourney['schedule'])} league matches** — **14 per team**, across "
+                f"**14 rounds of 5** (every team plays once a round, 7 home & 7 away)"
+                f"{self._cond_note(tourney)}.\n"
+                f"Just like the real thing: each side meets **5 opponents twice** and the other "
+                f"**4 once** — one combined points table, no groups.\n"
+                f"🏅 Top 4 → **Qualifier 1** (1v2) & **Eliminator** (3v4) → **Qualifier 2** → **Final**.\n"
+                f"`cv tournament status` for fixtures · `cv tournament standings` for the table."
+            )
 
         # CCODI — 2 groups of 5, DOUBLE round robin organised into ROUNDS (each team
         # plays at most once per round; venues never repeat within a round) → top 2
@@ -11756,7 +11815,7 @@ class PrefixCog(commands.Cog):
 
         if tourney["status"] == "registration":
             t_type = tourney.get("tournament_type", "round_robin")
-            type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League"}.get(t_type, "Round Robin")
+            type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League", "ipl": "Indian Premier League"}.get(t_type, "Round Robin")
             embed = discord.Embed(title=f"🏆 {tourney['name']}", color=discord.Color.gold())
             cmode = tourney.get("conditions_mode", "manual")
             cmode_txt = {"auto": "🎲 Auto conditions", "home": "🏟️ Home-Pitch conditions"}.get(cmode, "🎛️ Manual conditions")
@@ -11802,7 +11861,8 @@ class PrefixCog(commands.Cog):
             hint = "Use `cvt groups` to view fixtures by group."
         else:
             pages = _build_status_pages(tourney)
-            hint = None
+            hint = ("14 rounds — every team plays once per round, 14 matches each."
+                    if t_type == "ipl" else None)
 
         if not pages:
             return await ctx.send("❌ No schedule generated yet. Run `cv tournament start` first.")
@@ -12035,6 +12095,87 @@ class PrefixCog(commands.Cog):
         else:
             await ctx.send(embed=embed)
 
+    # ── TBES innings-break ads ─────────────────────────────────────────────────
+    # Managed per server; shown at every innings end of a TBES match (see
+    # _maybe_send_tbes_ads). Manager/admin/owner gated. Store is per-server, so these
+    # work whether or not a TBES tournament is currently live in the server.
+    def _is_ad_manager(self, ctx):
+        tourney = get_server_tournament(str(ctx.guild.id))
+        return ((ctx.author.id == ADMIN_DISCORD_ID)
+                or ctx.author.guild_permissions.administrator
+                or (tourney and str(ctx.author.id) in tourney.get("managers", [])))
+
+    @tournament.command(name="tbes_ad", aliases=["ad_add", "tbes_ad_add", "add_ad"],
+                        help="[MANAGER] Add a TBES ad shown at every innings end.\n"
+                             "Ads can be multi-line with links. Three ways to add:\n"
+                             "• Reply to the ad message with `cvt tbes_ad`\n"
+                             "• Bare `cvt tbes_ad` → the bot asks for the ad as your next message\n"
+                             "• `cvt tbes_ad <text>` for a quick one-liner")
+    async def t_tbes_ad(self, ctx, *, message: str = None):
+        if not self._is_ad_manager(ctx):
+            return await ctx.send("❌ Managers only.")
+        from tbes_manager import add_tbes_ad
+        # Reply-capture: `cvt tbes_ad` as a reply saves the replied-to message verbatim —
+        # the reliable path for pre-composed multi-line ads with links/formatting.
+        if message is None and ctx.message.reference and ctx.message.reference.message_id:
+            try:
+                ref = await ctx.channel.fetch_message(ctx.message.reference.message_id)
+                message = ref.content
+            except Exception:
+                return await ctx.send("❌ Couldn't read the replied-to message — try again.")
+        # Next-message capture: bare `cvt tbes_ad` waits for the full ad as its own message.
+        if message is None:
+            await ctx.send("📝 Send the ad as your **next message** — multiple lines and links are fine. (5 min, `cancel` to abort)")
+            def check(m):
+                return m.author.id == ctx.author.id and m.channel.id == ctx.channel.id
+            try:
+                reply = await self.bot.wait_for("message", timeout=300.0, check=check)
+            except asyncio.TimeoutError:
+                return await ctx.send("⌛ Timed out — no ad added.")
+            if reply.content.strip().lower() == "cancel":
+                return await ctx.send("❌ Cancelled — no ad added.")
+            message = reply.content
+        _ok, msg, _ = add_tbes_ad(str(ctx.guild.id), message)
+        await ctx.send(msg)
+
+    @tournament.command(name="tbes_ads", aliases=["ad_list", "tbes_ad_list", "ads"],
+                        help="[MANAGER] List this server's TBES ads.\nUsage: tournament tbes_ads")
+    async def t_tbes_ads(self, ctx):
+        if not self._is_ad_manager(ctx):
+            return await ctx.send("❌ Managers only.")
+        from tbes_manager import get_tbes_ads
+        ads = get_tbes_ads(str(ctx.guild.id))
+        if not ads:
+            return await ctx.send("ℹ️ No TBES ads set. Add one with `cvt tbes_ad <message>`.")
+        buf = f"📢 **TBES Ads ({len(ads)})** — shown at every innings end:\n"
+        for i, a in enumerate(ads, 1):
+            flat = " ⏎ ".join(x.strip() for x in a.splitlines() if x.strip())   # one line per ad in the list
+            ln = f"**#{i}** — {flat if len(flat) <= 150 else flat[:147] + '…'}\n"
+            if len(buf) + len(ln) > 1990:   # Discord's 2000-char message limit
+                await ctx.send(buf)
+                buf = ""
+            buf += ln
+        if buf.strip():
+            await ctx.send(buf)
+
+    @tournament.command(name="tbes_ad_remove", aliases=["ad_remove", "ad_del", "remove_ad"],
+                        help="[MANAGER] Remove a TBES ad by its number.\nUsage: tournament tbes_ad_remove <n>")
+    async def t_tbes_ad_remove(self, ctx, index: int):
+        if not self._is_ad_manager(ctx):
+            return await ctx.send("❌ Managers only.")
+        from tbes_manager import remove_tbes_ad
+        _ok, msg = remove_tbes_ad(str(ctx.guild.id), index)
+        await ctx.send(msg)
+
+    @tournament.command(name="tbes_ad_clear", aliases=["ad_clear", "clear_ads"],
+                        help="[MANAGER] Remove ALL TBES ads for this server.\nUsage: tournament tbes_ad_clear")
+    async def t_tbes_ad_clear(self, ctx):
+        if not self._is_ad_manager(ctx):
+            return await ctx.send("❌ Managers only.")
+        from tbes_manager import clear_tbes_ads
+        _n, msg = clear_tbes_ads(str(ctx.guild.id))
+        await ctx.send(msg)
+
     @tournament.command(name="force_result", help="[MANAGER] Manually set match result.\nUsage: tournament force_result <id> <winner> <t1_r> <t1_w> <t1_b> <t2_r> <t2_w> <t2_b>")
     async def t_force_result(self, ctx, match_id: int, winner_team: str, t1_runs: int, t1_wkts: int, t1_balls: int, t2_runs: int, t2_wkts: int, t2_balls: int):
         server_id = str(ctx.guild.id)
@@ -12068,9 +12209,11 @@ class PrefixCog(commands.Cog):
             "t2_runs": t2_runs, "t2_wickets": t2_wkts, "t2_balls": t2_balls
         }
         tourney["current_match_idx"] += 1
-        # Advance the ACL bracket / Super Cup if applicable
+        # Advance the ACL bracket / Super Cup / IPL playoffs if applicable
         if tourney.get("tournament_type") == "acl":
             _acl_try_advance(tourney)
+        elif tourney.get("tournament_type") == "ipl":
+            ipl_try_advance(tourney)
         save_tournament(tourney)
         extra = "\n🏆 Bracket updated — `cv tournament bracket` to view." if tourney.get("tournament_type") == "acl" else "\nPoints Table and NRR updated."
         await ctx.send(f"✅ **Match {match_id} forcefully completed!**\nWinner: **{winner_team}**{extra}")
@@ -13881,6 +14024,8 @@ class PrefixCog(commands.Cog):
         t_type = tourney.get("tournament_type", "round_robin")
         if t_type == "acl":
             _acl_try_advance(tourney)
+        elif t_type == "ipl":
+            ipl_try_advance(tourney)
         elif t_type == "dsl":
             from dsl_manager import DSL_CONFIG, dsl_generate_playoffs, _dsl_try_advance
             if DSL_CONFIG["auto_playoffs"]:
@@ -14078,6 +14223,8 @@ class PrefixCog(commands.Cog):
         tourney["current_match_idx"] = tourney.get("current_match_idx", 0) + 1
         if tourney.get("tournament_type") == "acl":
             _acl_try_advance(tourney)
+        elif tourney.get("tournament_type") == "ipl":
+            ipl_try_advance(tourney)
         else:
             sf1 = next((m for m in tourney["schedule"] if m["round"] == "Semi-Final 1"), None)
             sf2 = next((m for m in tourney["schedule"] if m["round"] == "Semi-Final 2"), None)

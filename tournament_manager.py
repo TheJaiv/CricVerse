@@ -181,6 +181,115 @@ def generate_round_robin_schedule(team_names, *, double=False, stage=None, shuff
 
     return [dict(m, match_id=i + 1) for i, m in enumerate(all_matches)]
 
+
+def _circle_rounds(items):
+    """Circle-method 1-factorization → list of rounds, each a list of (a, b) pairs.
+    An odd count gets a BYE, whose pair is dropped (that item sits the round out)."""
+    ts = list(items)
+    if len(ts) % 2:
+        ts.append("BYE")
+    n = len(ts)
+    rounds = []
+    for r in range(n - 1):
+        pairs = []
+        for i in range(n // 2):
+            a, b = ts[i], ts[n - 1 - i]
+            if a == "BYE" or b == "BYE":
+                continue
+            pairs.append((a, b) if r % 2 == 0 else (b, a))
+        rounds.append(pairs)
+        ts.insert(1, ts.pop())
+    return rounds
+
+
+def generate_ipl_schedule(team_names):
+    """Real-IPL fixture list: 10 teams, 14 matches each (70 league matches).
+
+    The IPL has NO groups — one combined table, and nobody ever sees an 'A' or 'B'.
+    The split below is purely the device the real IPL uses to *build* the fixture:
+    the 10 teams are seeded 1-10, dealt alternately into two columns of 5, and each
+    seed row (1&2, 3&4, …) is a 'mirror' pair. From that, each team plays:
+
+      · the 4 teams in its own column ............ twice (home & away)  = 8
+      · its mirror — the other team on its row ... twice               = 2
+      · the other 4 teams of the other column .... once (2 home, 2 away) = 4
+                                                                  total = 14
+
+    So the top two seeds (row 1 — the CSK/MI slot) meet twice, as in the real thing.
+    `team_names` is taken in seed order (the order teams were added).
+
+    Laid out as 14 rounds of 5 so every team plays exactly once per round:
+      · rounds 1-9   — a single round robin over all 10 teams: this supplies every
+                       one-off cross-column meeting, plus leg 1 of the twice-met pairs.
+      · rounds 10-14 — the return legs: a K5 circle method inside each column (2+2
+                       matches) plus the mirror match of the row that byes in both
+                       columns that round (1) = 5.
+
+    team1 is the home side. Every team ends on 7 home / 7 away.
+    """
+    seeds = list(team_names)
+    col_a, col_b = seeds[0::2], seeds[1::2]   # seed 1 → A, seed 2 → B, seed 3 → A …
+    all_teams = seeds
+    row_of, grp_of = {}, {}
+    for i, t in enumerate(col_a):
+        row_of[t], grp_of[t] = i, "A"
+    for i, t in enumerate(col_b):
+        row_of[t], grp_of[t] = i, "B"
+
+    def is_single(a, b):
+        """Different column, different row → the pair meets exactly once."""
+        return grp_of[a] != grp_of[b] and row_of[a] != row_of[b]
+
+    def home_of_single(t1, t2):
+        """A[i] hosts iff (j - i) mod 5 ∈ {1, 2}, else B[j] hosts. This is what leaves
+        every team with exactly 2 home + 2 away among its four single meetings."""
+        a, b = (t1, t2) if grp_of[t1] == "A" else (t2, t1)
+        d = (row_of[b] - row_of[a]) % 5
+        return (a, b) if d in (1, 2) else (b, a)
+
+    rounds = []
+    leg1_home = {}   # frozenset(pair) → who hosted leg 1, for the pairs that meet twice
+
+    for pairs in _circle_rounds(all_teams):
+        rnd = []
+        for a, b in pairs:
+            if is_single(a, b):
+                h, aw = home_of_single(a, b)
+            else:
+                h, aw = a, b            # same column or mirror: leg 1, host as drawn
+                leg1_home[frozenset((a, b))] = h
+            rnd.append({"team1": h, "team2": aw})
+        rounds.append(rnd)
+
+    def return_leg(a, b):
+        """Whoever was away in leg 1 hosts the return."""
+        return (b, a) if leg1_home[frozenset((a, b))] == a else (a, b)
+
+    # Return legs. Both columns run the SAME index rotation, so the row that byes in
+    # column A byes in column B too — that row's mirror match fills the round to 5.
+    for pairs in _circle_rounds(list(range(5))):
+        bye = next(i for i in range(5) if i not in {x for p in pairs for x in p})
+        rnd = []
+        for i, j in pairs:
+            rnd.append(dict(zip(("team1", "team2"), return_leg(col_a[i], col_a[j]))))
+            rnd.append(dict(zip(("team1", "team2"), return_leg(col_b[i], col_b[j]))))
+        rnd.append(dict(zip(("team1", "team2"), return_leg(col_a[bye], col_b[bye]))))
+        rounds.append(rnd)
+
+    # One flat league — no `group` on the match, because the IPL has no groups.
+    schedule, mid = [], 1
+    for r, rnd in enumerate(rounds, 1):
+        random.shuffle(rnd)
+        for m in rnd:
+            schedule.append({
+                "match_id": mid, "round": r, "stage": "group",
+                "team1": m["team1"], "team2": m["team2"],
+                "status": "pending", "result": None,
+            })
+            mid += 1
+    return schedule
+
+
 def get_tournament_standings(tourney):
     teams = {t["name"]: {"P":0, "W":0, "L":0, "T":0, "Pts":0, "RF":0, "OF":0.0, "RA":0, "OA":0.0} for t in tourney["teams"]}
     for m in tourney.get("schedule", []):
@@ -1629,6 +1738,69 @@ def acl_bracket_embed(tourney):
     return e
 
 
+# ── IPL playoffs ─────────────────────────────────────────────────────────────
+# Seeded off the SINGLE combined 10-team table (the groups only shape the fixture
+# list — exactly as the real IPL does):
+#   Qualifier 1: 1st v 2nd        Eliminator: 3rd v 4th
+#   Qualifier 2: L(Q1) v W(Eliminator)
+#   Final:       W(Q1) v W(Q2)
+IPL_PLAYOFF_ORDER = ["Qualifier 1", "Eliminator", "Qualifier 2", "Final"]
+
+
+def ipl_try_advance(tourney):
+    """Progressively build the IPL playoff ladder as feeder results come in."""
+    sched = tourney["schedule"]
+
+    def _get(round_name):
+        return next((m for m in sched if m.get("round") == round_name), None)
+
+    def _add(round_name, t1, t2, t1_src=None, t2_src=None):
+        m = {"match_id": _tm_next_mid(tourney), "round": round_name, "stage": "knockout",
+             "team1": t1, "team2": t2, "status": "pending", "result": None}
+        if t1_src: m["team1_src"] = t1_src
+        if t2_src: m["team2_src"] = t2_src
+        sched.append(m)
+
+    def _done(m):
+        return m and m["status"] == "completed" and m.get("result")
+
+    def _wl(m):
+        w = m["result"]["winner"]
+        l = m["result"].get("loser") or (m["team2"] if w == m["team1"] else m["team1"])
+        return w, l
+
+    # Stage 1: league complete → Qualifier 1 (1v2) + Eliminator (3v4)
+    league = [m for m in sched if m.get("stage") == "group"]
+    if not league or any(m["status"] != "completed" for m in league):
+        return
+    if not _get("Qualifier 1"):
+        top = [n for n, _ in get_tournament_standings(tourney)][:4]
+        if len(top) < 4:
+            return
+        _add("Qualifier 1", top[0], top[1], "1st · League", "2nd · League")
+        _add("Eliminator",  top[2], top[3], "3rd · League", "4th · League")
+        return
+
+    # Stage 2: Q1 + Eliminator complete → Qualifier 2 (Q1 loser v Eliminator winner)
+    q1, elim = _get("Qualifier 1"), _get("Eliminator")
+    if _done(q1) and _done(elim) and not _get("Qualifier 2"):
+        _, lq1 = _wl(q1)
+        welim, _ = _wl(elim)
+        _add("Qualifier 2", lq1, welim, "Loser · Qualifier 1", "Winner · Eliminator")
+        return
+
+    # Stage 3: Q2 complete → Final (Q1 winner v Q2 winner)
+    q2 = _get("Qualifier 2")
+    if _done(q1) and _done(q2) and not _get("Final"):
+        wq1, _ = _wl(q1)
+        wq2, _ = _wl(q2)
+        _add("Final", wq1, wq2, "Winner · Qualifier 1", "Winner · Qualifier 2")
+
+    # Final done → season over
+    if _done(_get("Final")) and tourney.get("status") != "completed":
+        tourney["status"] = "completed"
+
+
 # ── Fixtures & owner-launch (shared by slash + prefix) ───────────────────────
 def _tm_round_label(m):
     rnd = m.get("round")
@@ -1808,7 +1980,8 @@ def build_tournament_summary_embeds(tourney):
     t_type = tourney.get("tournament_type", "round_robin")
     type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup",
                   "acl": "Akatsuki Cricket League", "ccodi": "CCODI",
-                  "dsl": "Dominators Super League", "rating": "Conquest League"}.get(t_type, "Round Robin")
+                  "dsl": "Dominators Super League", "rating": "Conquest League",
+                  "ipl": "Indian Premier League"}.get(t_type, "Round Robin")
     gold = discord.Color.gold()
     embeds = []
 
@@ -2014,6 +2187,9 @@ def _match_bracket_rank(tourney, m):
                 "Qualifier 2": 3, "Final": 4,
                 # legacy crossover-semis seasons
                 "Semi-Final 1": 1, "Semi-Final 2": 1}.get(m.get("round"), 1)
+    if t_type == "ipl":
+        return {"Qualifier 1": 1, "Eliminator": 1,
+                "Qualifier 2": 2, "Final": 3}.get(m.get("round"), 1)
     if m.get("stage") == "super8":
         return 1
     return 4 if str(m.get("round")) == "Final" else 3   # knockout: Semi-Finals(3) < Final(4)
@@ -2191,6 +2367,11 @@ def revert_tournament_match(tourney, match_id):
     # Reopen the match itself.
     m["status"] = "pending"
     m["result"] = None
+    # TBES stores each match's scorecard in its own sharded Mongo doc; drop it so the
+    # replay writes a fresh one instead of being skipped as "already persisted".
+    if t_type == "tbes":
+        from subscription_manager import tbes_forget_match
+        tbes_forget_match(tourney.get("server_id"), match_id)
     tourney["current_match_idx"] = max(0, tourney.get("current_match_idx", 0) - 1)
     if tourney.get("status") == "completed":
         tourney["status"] = "active"
@@ -2306,6 +2487,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         app_commands.Choice(name="T20 World Cup (4 Groups → Super 8 → Final)", value="t20_world_cup"),
         app_commands.Choice(name="CCODI (2 Groups of 5 → Double RR → Qualifiers → Final)", value="ccodi"),
         app_commands.Choice(name="ACL (14 Teams → League → Playoffs → Super Cup)", value="acl"),
+        app_commands.Choice(name="IPL (10 Teams → 14 Matches Each → Top 4 Playoffs)", value="ipl"),
     ])
     @app_commands.choices(conditions=[
         app_commands.Choice(name="Manual — pick pitch & weather each match", value="manual"),
@@ -2343,7 +2525,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         if max_squad < min_squad: return await interaction.response.send_message("❌ Max squad size cannot be less than Min squad size.", ephemeral=True)
 
         t_type = event_type.value if event_type else "round_robin"
-        type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League"}.get(t_type, "Round Robin")
+        type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League", "ipl": "Indian Premier League"}.get(t_type, "Round Robin")
 
         stadium_mode = stadiums.value if stadiums else "random"
         cond_mode = conditions.value if conditions else "manual"
@@ -2380,6 +2562,11 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         elif t_type == "acl":
             extra = "\n🔴 **ACL requires exactly 14 teams.** Each plays every other once (91 league matches) → Top 6 Playoffs → Super Cup. No groups needed — just `/tournament add_team` for all 14."
             extra += f"\n🏟️ **Stadiums:** {len(DEFAULT_ACL_STADIUMS)} venues pre-loaded — fixtures get a random one at start. Edit the pool with `cvt stadium_add` / `cvt stadiums` before starting."
+        elif t_type == "ipl":
+            extra = ("\n🏆 **IPL requires exactly 10 teams** — no groups, just `/tournament add_team` for all 10.\n"
+                     "📋 **Add order = seeding.** Add your strongest sides first: the draw pairs seeds 1&2, 3&4, etc., and each pair plays **twice** (the CSK-v-MI slot).\n"
+                     "🗓️ **70 league matches — 14 per team**, 5 opponents twice & 4 once, played over **14 rounds of 5** (every team plays once a round, 7 home & 7 away).\n"
+                     "🏅 One combined table → **Top 4:** Qualifier 1 (1v2) · Eliminator (3v4) → Qualifier 2 → **Final**.")
         if stadium_mode == "linked":
             extra += ("\n🏟️ **Stadiums: Linked** — every team sets a home ground with a FIXED pitch: "
                       "`cvt set_home_stadium \"<team>\" <stadium name> <pitch>`. Home fixtures are played there, "
@@ -2425,6 +2612,9 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             group_count = sum(1 for t in tourney["teams"] if t.get("group") == group_val)
             if group_count >= 4:
                 return await interaction.response.send_message(f"❌ Group **{group_val}** already has 4 teams.", ephemeral=True)
+        elif t_type == "ipl":
+            if len(tourney["teams"]) >= 10:
+                return await interaction.response.send_message("❌ **IPL is full** — 10 teams already added.", ephemeral=True)
 
         for t in tourney["teams"]:
             if t["name"].lower() == team_name.lower():
@@ -2438,6 +2628,10 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         })
         save_tournament(tourney)
         grp_txt = f" · Group **{group_val}**" if group_val else ""
+        if t_type == "ipl":
+            # Add order = seed order, which is what pairs teams up in the fixture draw.
+            n = len(tourney["teams"])
+            grp_txt = f" · Seed **{n}**" + (f" · {10 - n} to go" if n < 10 else " · **squad complete**")
         await interaction.response.send_message(f"✅ Team **{team_name}**{grp_txt} added!\n👤 Owner: {owner.mention}\n*The owner can now use `/tournament submit_squad` to register their players.*")
 
     @app_commands.command(name="remove_team", description="[MANAGER] Remove a team from the tournament.")
@@ -2529,7 +2723,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         # Registration phase — no schedule yet
         if tourney["status"] == "registration":
             t_type = tourney.get("tournament_type", "round_robin")
-            type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League"}.get(t_type, "Round Robin")
+            type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League", "ipl": "Indian Premier League"}.get(t_type, "Round Robin")
             embed = discord.Embed(title=f"🏆 {tourney['name']}", color=discord.Color.gold())
             embed.description = f"📝 **Registration Phase** · {type_label}"
             team_lines = []
@@ -3309,6 +3503,13 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         if t_type == "t20_world_cup":
             # Super 8 complete → auto-generate Semi-Finals
             self._try_generate_semis(tourney)
+
+        if t_type == "ipl":
+            # League done → Q1 (1v2) + Eliminator (3v4) → Q2 → Final
+            ipl_try_advance(tourney)
+            assign_tournament_conditions(tourney)
+            save_tournament(tourney)
+            return
 
         if t_type == "ccodi":
             # Groups done → KO1/KO2 → Q1/Eliminator → Q2 → Final (legacy semis
