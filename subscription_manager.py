@@ -428,6 +428,34 @@ def bulk_grant_tier(user_ids, tier_value: str, days: int = 0):
     return len(ids), expires
 
 
+def list_all_subs():
+    """[(kind, id, tier, expires_or_None)] for EVERY active sub — user subs first, then
+    server subs, each in cache order. kind is "user" or "server". Free-tier user rows are
+    quota-tracking bookkeeping, not subscriptions, so they're skipped. The ordering is the
+    index contract for remove_sub_by_index — both must walk the same list."""
+    reset_daily_quotas()
+    rows = [("user", u["user_id"], u["tier"], u.get("expires"))
+            for u in DB_CACHE["user_subs"] if u.get("tier", "Free") != "Free"]
+    rows += [("server", s["server_id"], s["tier"], s.get("expires"))
+             for s in DB_CACHE["server_subs"]]
+    return rows
+
+
+def remove_sub_by_index(index: int):
+    """Remove the sub at 1-based `index` of list_all_subs(). Returns the removed
+    (kind, id, tier, expires) tuple, or None if the index is out of range."""
+    rows = list_all_subs()
+    if not (1 <= index <= len(rows)):
+        return None
+    kind, ident, tier, expires = rows[index - 1]
+    if kind == "user":
+        DB_CACHE["user_subs"] = [u for u in DB_CACHE["user_subs"] if u["user_id"] != ident]
+    else:
+        DB_CACHE["server_subs"] = [s for s in DB_CACHE["server_subs"] if s["server_id"] != ident]
+    async_save_to_bin()
+    return kind, ident, tier, expires
+
+
 def list_expiring_subs():
     """[(kind, id, tier, expires)] for every timed sub (user + server), soonest first.
     kind is "user" or "server"."""

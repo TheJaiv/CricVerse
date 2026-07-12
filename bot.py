@@ -57,7 +57,7 @@ from subscription_manager import (
     save_data_to_bin, save_tournament_data_to_bin,
     check_potential_quota, consume_quota,
     update_user_tier, update_server_tier, get_auth_admins, toggle_auth_admin,
-    bulk_grant_tier, list_expiring_subs,
+    bulk_grant_tier, list_expiring_subs, list_all_subs, remove_sub_by_index,
     get_all_players, add_player, add_players_bulk, update_player, delete_players, clean_duplicate_players,
     get_tier_status, is_channel_restricted, toggle_restricted_channel,
     is_ratings_channel, toggle_ratings_channel,
@@ -8095,6 +8095,8 @@ def _help_owner_embed():
     e.add_field(name="Subscriptions",
         value=("`/set_user_tier @user <tier>`  ·  `cv sut @user <tier>`\n"
                "`/set_server_tier <server_id> <tier>`  ·  `cv sst <id> <tier>`\n"
+               "`cv subs`  ·  `cv list_subs` — list ALL active subs (user + server) with indexes\n"
+               "`cv remove_sub <index>`  ·  `cv rsub` — remove a sub by its `cv subs` index\n"
                "`cv authadmin @user`  ·  `cv aa` — toggle admin access"),
         inline=False)
     e.add_field(name="Tournament Owner",
@@ -10340,6 +10342,55 @@ class PrefixCog(commands.Cog):
         if len(rows) > 40:
             e.set_footer(text=f"showing 40 of {len(rows)} · expired ones auto-remove on next use")
         await ctx.send(embed=e)
+
+    @commands.command(name="list_subs", aliases=["subs", "all_subs"], help="[OWNER] List EVERY active subscription (users + servers) with index numbers.\nUsage: list_subs\nRemove one with `cv remove_sub <index>`.")
+    async def list_subs(self, ctx):
+        if ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("❌ Owner only.")
+        rows = list_all_subs()
+        if not rows:
+            return await ctx.send("📭 No active subscriptions.")
+        user_lines, server_lines = [], []
+        for i, (kind, ident, tier, exp) in enumerate(rows, 1):
+            tail = f" · expires **{exp}**" if exp else ""
+            if kind == "user":
+                user_lines.append(f"`{i:>2}.` <@{ident}> — **{tier}**{tail}")
+            else:
+                g = self.bot.get_guild(int(ident)) if ident.isdigit() else None
+                who = f"**{g.name}** (`{ident}`)" if g else f"Server `{ident}`"
+                server_lines.append(f"`{i:>2}.` {who} — **{tier}**{tail}")
+        e = discord.Embed(title=f"📋 Active Subscriptions ({len(rows)})",
+                          color=discord.Color.blurple())
+        # Embed fields cap at 1024 chars — chunk each section into as many fields as needed.
+        for label, lines in (("👤 Users", user_lines), ("🏠 Servers", server_lines)):
+            if not lines:
+                continue
+            chunk, first = [], True
+            for ln in lines:
+                if sum(len(c) + 1 for c in chunk) + len(ln) > 1000:
+                    e.add_field(name=label if first else f"{label} (cont.)",
+                                value="\n".join(chunk), inline=False)
+                    chunk, first = [], False
+                chunk.append(ln)
+            e.add_field(name=label if first else f"{label} (cont.)",
+                        value="\n".join(chunk), inline=False)
+        e.set_footer(text="Remove with: cv remove_sub <index>")
+        await ctx.send(embed=e)
+
+    @commands.command(name="remove_sub", aliases=["rsub", "del_sub"], help="[OWNER] Remove a subscription by its index from `list_subs`.\nUsage: remove_sub <index>\nWorks for both user and server subs — run `cv subs` first to see the indexes.")
+    async def remove_sub(self, ctx, index: int):
+        if ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("❌ Owner only.")
+        removed = remove_sub_by_index(index)
+        if not removed:
+            return await ctx.send(f"❌ No subscription at index `{index}` — run `cv subs` to see current indexes.")
+        kind, ident, tier, exp = removed
+        if kind == "user":
+            who = f"<@{ident}>"
+        else:
+            g = self.bot.get_guild(int(ident)) if ident.isdigit() else None
+            who = f"**{g.name}** (`{ident}`)" if g else f"Server `{ident}`"
+        await ctx.send(f"🗑️ Removed **{tier}** subscription from {who}.")
 
     @commands.command(name="set_server_tier", aliases=["sst"], help="[OWNER] Assign subscription tier to a server (optional auto-expiry).\nUsage: set_server_tier <server_id> <tier> [days]\nTiers: Bronze, Silver, Gold, Diamond, None\n`days` optional — e.g. `sst 12345 Gold 30` auto-removes after 30 days.")
     async def set_server_tier(self, ctx, server_id: str, *, tier: str):
