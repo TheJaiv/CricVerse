@@ -6,23 +6,24 @@
 #
 # Flow:
 #   • A tournament carries a manager-editable pool of stadium names: tourney["stadiums"].
-#   • New ACL tournaments are seeded with DEFAULT_ACL_STADIUMS (managers can edit the
-#     pool with the cvt stadium_add / stadium_remove / stadium_clear commands).
+#   • EVERY new tournament is seeded with a default pool for its type (managers can edit
+#     it with the cvt stadium_add / stadium_remove / stadium_clear commands). A tournament
+#     created before stadiums went global is backfilled on its next assign_stadiums().
 #   • When the tournament starts (and whenever conditions are filled), each fixture is
 #     assigned a random stadium from the pool via assign_stadiums().
 #   • Managers can override a single match's venue with cvt set_stadium.
 #
-# PORTABILITY: the feature is gated to the tournament types listed in
-# STADIUM_TOURNEY_TYPES (currently ACL only). To bring stadiums to the main bot for
-# other formats, add the type here (or make stadiums_enabled() return True). Nothing
-# else in this module is ACL-specific, so it lifts cleanly.
+# Stadiums are ON for EVERY tournament type. How a venue gets picked still varies:
+#   • "dsl"          — NOT random: each team has a home ground (see dsl_manager.py).
+#   • "ccodi", "ipl" — ROUND-AWARE: a venue is used at most once per round.
+#   • linked mode    — every fixture at the HOME (team1) team's ground.
+#   • everything else — a random venue from the pool.
 
 import random
 
-# Tournament types for which stadiums are active. Add types here to enable elsewhere.
-# ("dsl" venues are NOT random — each team has a home ground; see dsl_manager.py.
-#  "ccodi" venues are ROUND-AWARE — every venue is used at most once per round.)
-STADIUM_TOURNEY_TYPES = {"acl", "dsl", "ccodi"}
+# Types whose venues are picked round-aware (their league is a series of int rounds
+# in which every team plays at most once, so a venue need never repeat inside one).
+ROUND_AWARE_STADIUM_TYPES = {"ccodi", "ipl"}
 
 # Starter pool seeded onto new ACL tournaments. Cosmetic — rename/replace freely with
 # cvt stadium_add / stadium_remove / stadium_clear before the tournament starts.
@@ -49,6 +50,34 @@ DEFAULT_CCODI_STADIUMS = [
     "Royal Crown Arena",
 ]
 
+# Starter pool for IPL seasons — the ten real IPL home grounds, one per franchise.
+DEFAULT_IPL_STADIUMS = [
+    "Wankhede Stadium",
+    "M. A. Chidambaram Stadium",
+    "Eden Gardens",
+    "M. Chinnaswamy Stadium",
+    "Narendra Modi Stadium",
+    "Arun Jaitley Stadium",
+    "Rajiv Gandhi International Stadium",
+    "Sawai Mansingh Stadium",
+    "Ekana Cricket Stadium",
+    "Maharaja Yadavindra Singh Stadium",
+]
+
+# Starter pool for every other format (round robin, double RR, T20 World Cup …).
+DEFAULT_STADIUMS = [
+    "The Oval",
+    "Lord's",
+    "Newlands",
+    "Eden Park",
+    "The Gabba",
+    "Galle International Stadium",
+    "Kensington Oval",
+    "National Stadium",
+    "Sharjah Cricket Stadium",
+    "Seddon Park",
+]
+
 
 def linked_stadiums(tourney):
     """True when the tournament was created with stadiums=linked: every team sets a
@@ -57,24 +86,38 @@ def linked_stadiums(tourney):
 
 
 def stadiums_enabled(tourney):
-    """True if this tournament's type supports stadiums."""
-    if not tourney:
-        return False
-    return tourney.get("tournament_type") in STADIUM_TOURNEY_TYPES or linked_stadiums(tourney)
+    """Stadiums are available to every tournament type."""
+    return bool(tourney)
 
 
 def default_stadium_pool(tournament_type):
     """The pool to seed onto a freshly-created tournament of this type."""
     if tournament_type == "ccodi":
         return list(DEFAULT_CCODI_STADIUMS)
-    if tournament_type in STADIUM_TOURNEY_TYPES:
+    if tournament_type == "ipl":
+        return list(DEFAULT_IPL_STADIUMS)
+    if tournament_type in ("acl", "dsl"):
         return list(DEFAULT_ACL_STADIUMS)
-    return []
+    return list(DEFAULT_STADIUMS)
+
+
+def ensure_stadium_pool(tourney):
+    """Seed the default pool onto a tournament that hasn't got one — which covers every
+    tournament created back when stadiums were gated to ACL/DSL/CCODI. A manager who
+    deliberately ran `stadium_clear` keeps their empty pool. Returns the pool."""
+    pool = tourney.get("stadiums") or []
+    if pool or tourney.get("stadiums_cleared"):
+        return pool
+    pool = default_stadium_pool(tourney.get("tournament_type"))
+    if pool:
+        tourney["stadiums"] = pool
+    return pool
 
 
 def get_stadium_pool(tourney):
-    """The tournament's stadium pool (never None)."""
-    return tourney.get("stadiums") or []
+    """The tournament's stadium pool (never None), seeding the default one if it has
+    none yet."""
+    return ensure_stadium_pool(tourney)
 
 
 def canonical_stadium(name, pool):
@@ -85,13 +128,13 @@ def canonical_stadium(name, pool):
     return next((s for s in pool if s.lower() == nm), None)
 
 
-def _assign_ccodi_stadiums(tourney):
-    """CCODI: round-aware venues — every stadium is used AT MOST ONCE per round
-    (a round has 4 matches, the pool 5 venues), rotating the pool start by round
-    number so all venues cycle evenly across the season. Knockouts get a random
-    venue. Idempotent: already-assigned / completed matches are respected, and a
-    manager's cvt set_stadium pick is treated as that round's 'used' venue.
-    Legacy CCODI seasons (string rounds, empty pool) are untouched."""
+def _assign_round_aware_stadiums(tourney):
+    """CCODI / IPL: round-aware venues — every stadium is used AT MOST ONCE per round
+    (CCODI rounds hold 4 matches and IPL rounds 5, against pools of 5 and 10), rotating
+    the pool start by round number so all venues cycle evenly across the season.
+    Knockouts get a random venue. Idempotent: already-assigned / completed matches are
+    respected, and a manager's cvt set_stadium pick is treated as that round's 'used'
+    venue. Legacy seasons (string rounds, empty pool) are untouched."""
     pool = get_stadium_pool(tourney)
     if not pool:
         return
@@ -126,8 +169,8 @@ def assign_stadiums(tourney):
         # DSL: league matches at the home (team1) team's ground, playoffs per policy.
         from dsl_manager import assign_dsl_stadiums   # lazy — avoids circular import
         return assign_dsl_stadiums(tourney)
-    if tourney.get("tournament_type") == "ccodi":
-        return _assign_ccodi_stadiums(tourney)
+    if tourney.get("tournament_type") in ROUND_AWARE_STADIUM_TYPES and not linked_stadiums(tourney):
+        return _assign_round_aware_stadiums(tourney)
     if linked_stadiums(tourney):
         # Linked mode: each fixture is played at the HOME (team1) team's stadium.
         # Knockouts (where team1 is a seed, not a host) get a random linked ground.
@@ -162,7 +205,7 @@ def reroll_stadiums(tourney):
     pool = get_stadium_pool(tourney)
     if not pool:
         return 0
-    if tourney.get("tournament_type") == "ccodi":
+    if tourney.get("tournament_type") in ROUND_AWARE_STADIUM_TYPES:
         # Round-aware reroll: clear pending venues, then reassign with a random
         # rotation offset so uniqueness-per-round is preserved.
         n = 0
@@ -171,7 +214,7 @@ def reroll_stadiums(tourney):
                 m["stadium"] = None
                 n += 1
         random.shuffle(tourney["stadiums"])
-        _assign_ccodi_stadiums(tourney)
+        _assign_round_aware_stadiums(tourney)
         return n
     n = 0
     for m in tourney.get("schedule", []):

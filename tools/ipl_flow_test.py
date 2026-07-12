@@ -15,6 +15,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tournament_manager import (
     generate_ipl_schedule, ipl_try_advance, get_tournament_standings,
     _match_bracket_rank, revert_tournament_match, IPL_PLAYOFF_ORDER,
+    build_standings_message,
+)
+from stadium_manager import (
+    stadiums_enabled, default_stadium_pool, assign_stadiums, reroll_stadiums,
+    DEFAULT_IPL_STADIUMS,
 )
 
 PASS = 0
@@ -148,6 +153,111 @@ def test_standings(rng):
     pts = [d["Pts"] for _, d in table]
     ok(pts == sorted(pts, reverse=True), "table is sorted by points")
     return t, table
+
+
+# ── 3b. Standings render — text table inside an embed ───────────────────────
+def test_standings_render(rng):
+    print("\n[3b] Standings render")
+    t = build_tourney()
+    t["schedule"] = generate_ipl_schedule(TEAMS)
+
+    ok(build_standings_message(t) is None, "no table before a ball is bowled")
+
+    # Play the league out WITHOUT advancing, so we can see the pre-bracket table.
+    for m in [x for x in t["schedule"] if x["stage"] == "group"]:
+        fake_result(m, rng)
+
+    embed = build_standings_message(t)
+    ok(embed is not None, "standings come back as an embed")
+    ok(t["name"] in embed.title, f"tournament name is the embed title: {embed.title!r}")
+    ok(embed.image.url is None, "no image — the table is text")
+
+    desc = embed.description
+    ok("```" in desc, "the table is a monospace code block inside the embed")
+    ok("70/70" in desc, "embed says how many league matches are done")
+    leader = get_tournament_standings(t)[0][0]
+    ok(leader in desc, f"embed names the table-topper ({leader})")
+
+    body = desc.split("```")[1].strip().splitlines()
+    ok(len(body) == 12, "table has a header, a rule, and 10 team rows")
+    for name in TEAMS:
+        assert any(name[:15] in ln for ln in body), f"{name} missing from the table"
+    ok(True, "all 10 teams appear in the table")
+    ok(sum(1 for ln in body if ln.startswith("▸")) == 4, "the top 4 are marked with ▸")
+    ok(all(len(ln) <= 50 for ln in body), "rows stay narrow enough not to wrap on mobile")
+    ok(embed.footer.text and "top 4" in embed.footer.text.lower(),
+       "footer flags the top-4 playoff cutoff before the bracket exists")
+    ok(not embed.fields, "no playoffs field until the bracket is generated")
+
+    # Once the bracket exists, the embed carries it.
+    ipl_try_advance(t)
+    embed = build_standings_message(t)
+    ok(embed.fields and "Playoffs" in embed.fields[0].name,
+       "embed gains a Playoffs field once Q1/Eliminator are drawn")
+    ok("Qualifier 1" in embed.fields[0].value and "Eliminator" in embed.fields[0].value,
+       "playoffs field lists Qualifier 1 and the Eliminator")
+
+    print("\n  ── what lands in Discord ──")
+    print(f"  {embed.title}")
+    for ln in embed.description.splitlines():
+        print(f"  {ln}")
+    for f in embed.fields:
+        print(f"  {f.name}")
+        for ln in f.value.splitlines():
+            print(f"  {ln}")
+
+
+# ── 3c. Stadiums ─────────────────────────────────────────────────────────────
+def test_stadiums(rng):
+    print("\n[3c] Stadiums")
+    t = build_tourney()
+    ok(stadiums_enabled(t), "stadiums are enabled for IPL")
+
+    pool = default_stadium_pool("ipl")
+    ok(pool == DEFAULT_IPL_STADIUMS and len(pool) == 10,
+       "IPL seeds the 10 real IPL grounds")
+
+    t["stadiums"] = pool
+    t["schedule"] = generate_ipl_schedule(TEAMS)
+    assign_stadiums(t)
+    ok(all(m.get("stadium") for m in t["schedule"]), "every fixture gets a venue")
+
+    by_round = defaultdict(list)
+    for m in t["schedule"]:
+        by_round[m["round"]].append(m["stadium"])
+    ok(all(len(v) == len(set(v)) for v in by_round.values()),
+       "no venue is used twice in the same round")
+    ok(len({m["stadium"] for m in t["schedule"]}) == 10, "all 10 grounds get used")
+
+    # Idempotent: a second pass must not reshuffle what's already set.
+    before = [m["stadium"] for m in t["schedule"]]
+    assign_stadiums(t)
+    ok([m["stadium"] for m in t["schedule"]] == before, "assigning again changes nothing")
+
+    n = reroll_stadiums(t)
+    ok(n == 70, "reroll reassigns every pending fixture")
+    by_round = defaultdict(list)
+    for m in t["schedule"]:
+        by_round[m["round"]].append(m["stadium"])
+    ok(all(len(v) == len(set(v)) for v in by_round.values()),
+       "reroll preserves one-venue-per-round")
+
+    # A tournament from before stadiums were enabled everywhere gets backfilled…
+    old = build_tourney()
+    old["schedule"] = generate_ipl_schedule(TEAMS)
+    old["stadiums"] = []
+    assign_stadiums(old)
+    ok(old["stadiums"] and all(m.get("stadium") for m in old["schedule"]),
+       "a tournament saved with an empty pool is backfilled with the defaults")
+
+    # …but a pool the manager cleared on purpose stays cleared.
+    cleared = build_tourney()
+    cleared["schedule"] = generate_ipl_schedule(TEAMS)
+    cleared["stadiums"] = []
+    cleared["stadiums_cleared"] = True
+    assign_stadiums(cleared)
+    ok(not cleared["stadiums"] and not any(m.get("stadium") for m in cleared["schedule"]),
+       "a deliberately cleared pool is respected (no venues, no reseed)")
 
 
 # ── 4. Playoffs ──────────────────────────────────────────────────────────────
@@ -302,6 +412,8 @@ if __name__ == "__main__":
     test_fixture_shape(rng)
     test_rounds(rng)
     test_standings(rng)
+    test_standings_render(rng)
+    test_stadiums(rng)
     test_playoffs(rng)
     test_revert(rng)
     test_fuzz()

@@ -35,7 +35,7 @@ from test_image import (
     generate_test_summary_image as _ti_summary,
     generate_test_scorecard_image as _ti_scorecard,
 )
-from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_ccodi_round_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, revert_tournament_match, rebuild_tournament_stats, repair_tournament_schedule, _tm_next_mid, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS, SquadConfirmView, build_squad_confirm_text, build_squad_confirm_embed, match_order_gate, MATCH_ORDER_LABELS, build_tournament_summary_embeds, generate_round_robin_schedule, generate_ipl_schedule, ipl_try_advance
+from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_ccodi_round_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, revert_tournament_match, rebuild_tournament_stats, repair_tournament_schedule, _tm_next_mid, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS, SquadConfirmView, build_squad_confirm_text, build_squad_confirm_embed, match_order_gate, MATCH_ORDER_LABELS, build_tournament_summary_embeds, generate_round_robin_schedule, generate_ipl_schedule, ipl_try_advance, build_standings_message
 import rating_league
 from rating_league import (
     RATING_CONFIG, is_rating_tournament, create_rating_tournament, create_open_match,
@@ -13028,8 +13028,6 @@ class PrefixCog(commands.Cog):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney: return await ctx.send("❌ No tournament exists.")
-        if not stadiums_enabled(tourney):
-            return await ctx.send("🏟️ Stadiums are an **ACL/DSL-only** feature for now.")
         if name:
             # `cvt stadium <name>` → full all-time venue stats (DSL); cosmetic label elsewhere.
             if is_dsl_tournament(tourney):
@@ -13079,15 +13077,13 @@ class PrefixCog(commands.Cog):
         e.set_footer(text=foot)
         await ctx.send(embed=e)
 
-    @tournament.command(name="stadium_add", aliases=["addstadium", "add_stadium"], help="[MANAGER] Add a stadium to the ACL pool.\nUsage: tournament stadium_add \"<name>\"")
+    @tournament.command(name="stadium_add", aliases=["addstadium", "add_stadium"], help="[MANAGER] Add a stadium to the tournament's venue pool.\nUsage: tournament stadium_add \"<name>\"")
     async def t_stadium_add(self, ctx, *, name: str):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney: return await ctx.send("❌ No tournament exists.")
         is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
         if not is_mgr: return await ctx.send("❌ Managers only.")
-        if not stadiums_enabled(tourney):
-            return await ctx.send("🏟️ Stadiums are an **ACL/DSL-only** feature for now.")
         if is_dsl_tournament(tourney):
             return await ctx.send(f"🔒 **{DSL_CONFIG['short_name']}** venues are fixed by the league config — the pool can't be edited.")
         nm = name.strip().strip('"').strip()
@@ -13096,41 +13092,41 @@ class PrefixCog(commands.Cog):
         if canonical_stadium(nm, pool):
             return await ctx.send(f"⚠️ **{nm}** is already in the pool.")
         pool.append(nm)
+        tourney.pop("stadiums_cleared", None)   # the pool is deliberate again
         save_tournament(tourney)
         await ctx.send(f"🏟️ Added 📍 **{nm}** to the stadium pool ({len(pool)} total).")
 
-    @tournament.command(name="stadium_remove", aliases=["removestadium", "remove_stadium", "delstadium"], help="[MANAGER] Remove a stadium from the ACL pool.\nUsage: tournament stadium_remove \"<name>\"")
+    @tournament.command(name="stadium_remove", aliases=["removestadium", "remove_stadium", "delstadium"], help="[MANAGER] Remove a stadium from the tournament's venue pool.\nUsage: tournament stadium_remove \"<name>\"")
     async def t_stadium_remove(self, ctx, *, name: str):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney: return await ctx.send("❌ No tournament exists.")
         is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
         if not is_mgr: return await ctx.send("❌ Managers only.")
-        if not stadiums_enabled(tourney):
-            return await ctx.send("🏟️ Stadiums are an **ACL/DSL-only** feature for now.")
         if is_dsl_tournament(tourney):
             return await ctx.send(f"🔒 **{DSL_CONFIG['short_name']}** venues are fixed by the league config — the pool can't be edited.")
         pool = tourney.get("stadiums", [])
         cs = canonical_stadium(name, pool)
         if not cs: return await ctx.send(f"❌ **{name.strip()}** isn't in the pool. `cvt stadiums` to view.")
         pool.remove(cs)
+        if not pool:
+            tourney["stadiums_cleared"] = True   # empty on purpose — don't reseed defaults
         save_tournament(tourney)
         await ctx.send(f"🗑️ Removed **{cs}** from the pool ({len(pool)} left). *Matches already on it keep the label — re-roll or `cvt set_stadium` to change.*")
 
-    @tournament.command(name="stadium_clear", aliases=["clearstadiums", "clear_stadiums"], help="[MANAGER] Clear the entire ACL stadium pool.\nUsage: tournament stadium_clear")
+    @tournament.command(name="stadium_clear", aliases=["clearstadiums", "clear_stadiums"], help="[MANAGER] Clear the entire stadium pool (fixtures then show no venue).\nUsage: tournament stadium_clear")
     async def t_stadium_clear(self, ctx):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney: return await ctx.send("❌ No tournament exists.")
         is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
         if not is_mgr: return await ctx.send("❌ Managers only.")
-        if not stadiums_enabled(tourney):
-            return await ctx.send("🏟️ Stadiums are an **ACL/DSL-only** feature for now.")
         if is_dsl_tournament(tourney):
             return await ctx.send(f"🔒 **{DSL_CONFIG['short_name']}** venues are fixed by the league config — the pool can't be edited.")
         tourney["stadiums"] = []
+        tourney["stadiums_cleared"] = True   # don't reseed the defaults behind their back
         save_tournament(tourney)
-        await ctx.send("🧹 Stadium pool cleared. Add new ones with `cvt stadium_add \"<name>\"`.")
+        await ctx.send("🧹 Stadium pool cleared — fixtures will show no venue. Add new ones with `cvt stadium_add \"<name>\"`.")
 
     @tournament.command(name="reroll_stadiums", aliases=["stadium_reroll", "reroll_venues"], help="[MANAGER] Randomly reassign stadiums to all upcoming matches from the pool.\nUsage: tournament reroll_stadiums")
     async def t_reroll_stadiums(self, ctx):
@@ -13139,8 +13135,6 @@ class PrefixCog(commands.Cog):
         if not tourney: return await ctx.send("❌ No tournament exists.")
         is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
         if not is_mgr: return await ctx.send("❌ Managers only.")
-        if not stadiums_enabled(tourney):
-            return await ctx.send("🏟️ Stadiums are an **ACL/DSL/linked-only** feature for now.")
         from stadium_manager import linked_stadiums
         if is_dsl_tournament(tourney) or linked_stadiums(tourney):
             return await ctx.send("🔒 Matches are played at the **home team's ground** — venues can't be rerolled.")
@@ -13157,8 +13151,6 @@ class PrefixCog(commands.Cog):
         if not tourney: return await ctx.send("❌ No tournament exists.")
         is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
         if not is_mgr: return await ctx.send("❌ Managers only.")
-        if not stadiums_enabled(tourney):
-            return await ctx.send("🏟️ Stadiums are an **ACL/DSL-only** feature for now.")
         m = next((x for x in tourney.get("schedule", []) if x["match_id"] == match_id), None)
         if not m: return await ctx.send(f"❌ No match **#{match_id}** in this tournament.")
         if m.get("status") == "completed": return await ctx.send(f"❌ Match #{match_id} is already completed.")
@@ -14499,7 +14491,7 @@ class PrefixCog(commands.Cog):
         ref.add_field(
             name="🏟️ Stadiums & conditions",
             value=("`stadiums [venue]` — the pool / one venue's stats\n"
-                   "`stadium_add \"<name>\"` · `stadium_remove \"<name>\"` · `stadium_clear` — [MGR] edit ACL pool\n"
+                   "`stadium_add \"<name>\"` · `stadium_remove \"<name>\"` · `stadium_clear` — [MGR] edit the venue pool\n"
                    "`reroll_stadiums` — [MGR] reassign venues to upcoming matches\n"
                    "`set_stadium <id> <name|none>` — [MGR] set one match's venue\n"
                    "`set_home_pitch \"<team>\" <pitch>` · `set_home_stadium \"<team>\" <venue>` — [MGR] home ground\n"
@@ -14674,45 +14666,12 @@ class PrefixCog(commands.Cog):
             except Exception as e:
                 print(f"⚠️ ACL points table failed, using default: {e}")
 
-        standings = get_tournament_standings(tourney)
-        theme = tourney.get("theme", "Default")
-
-        if theme == "Crimson Cricket":
-            try:
-                img = Image.open("assets/points_table_crimson.png").convert("RGB")
-                d = ImageDraw.Draw(img)
-                font_row = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 26)
-                def get_tw(text, font): return font.getbbox(text)[2] if hasattr(font, 'getbbox') else len(text) * 12
-                
-                start_y, row_height, c_text = 275, 38, "#FFFFFF"
-                cols = {"TEAM": 140, "P": 445, "W": 555, "L": 665, "NR": 775, "PTS": 885, "NRR": 995}
-                y = start_y
-                for i, (t_name, data) in enumerate(standings, 1):
-                    if i > 10: break
-                    d.text((cols["TEAM"], y + 8), t_name[:20].upper(), fill=c_text, font=font_row)
-                    d.text((cols["P"] - (get_tw(str(data['P']), font_row)/2), y + 8), str(data['P']), fill=c_text, font=font_row)
-                    d.text((cols["W"] - (get_tw(str(data['W']), font_row)/2), y + 8), str(data['W']), fill=c_text, font=font_row)
-                    d.text((cols["L"] - (get_tw(str(data['L']), font_row)/2), y + 8), str(data['L']), fill=c_text, font=font_row)
-                    d.text((cols["NR"] - (get_tw(str(data['T']), font_row)/2), y + 8), str(data['T']), fill=c_text, font=font_row)
-                    d.text((cols["PTS"] - (get_tw(str(data['Pts']), font_row)/2), y + 8), str(data['Pts']), fill=c_text, font=font_row)
-                    nrr_str = f"{data['NRR']:+.2f}"
-                    d.text((cols["NRR"] - (get_tw(nrr_str, font_row)/2), y + 8), nrr_str, fill=c_text, font=font_row)
-                    y += row_height
-                    
-                buf = io.BytesIO()
-                img.save(buf, format="PNG")
-                buf.seek(0)
-                return await ctx.send(file=discord.File(fp=buf, filename="crimson_standings.png"))
-            except (FileNotFoundError, OSError):
-                await ctx.send("⚠️ Crimson theme file not found, falling back to default.")
-        
-        if not standings: return await ctx.send("No matches have been completed yet.")
-        header = f"`{'#':<3}{'Team':<20}{'P':>3}{'W':>3}{'L':>3}{'T':>3}{'Pts':>4}{'NRR':>7}`\n"
-        rows = [header]
-        for i, (t_name, data) in enumerate(standings, 1):
-            nrr = f"{data['NRR']:+.2f}"
-            rows.append(f"`{i:<3}{t_name:<20}{data['P']:>3}{data['W']:>3}{data['L']:>3}{data['T']:>3}{data['Pts']:>4}{nrr:>7}`")
-        await ctx.send("🏆 **Tournament Standings**\n" + "\n".join(rows))
+        # Everything else (Round Robin / Double RR / IPL): the shared points-table
+        # image, delivered inside an embed titled with the tournament name.
+        embed = build_standings_message(tourney)
+        if not embed:
+            return await ctx.send("No matches have been completed yet.")
+        await ctx.send(embed=embed)
 
 # ==========================================
 # 🚀 STARTUP SEQUENCE

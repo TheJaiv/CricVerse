@@ -521,6 +521,83 @@ def generate_ccodi_points_table(tourney) -> io.BytesIO:
     return buf
 
 
+# ── Default points table (every format without a bespoke one — incl. IPL) ────
+# How many top rows are flagged as qualifying for the knockouts.
+_STANDINGS_CUTOFF = {"ipl": 4, "dsl": 4, "acl": 6}
+
+
+def _standings_table(standings, cutoff=None):
+    """The points table as monospace rows. `cutoff` marks the qualifying places with ▸.
+    The NR column only appears if someone actually has a tie/no-result."""
+    show_nr = any(d["T"] for _, d in standings)
+
+    head = f"{'#':>3} {'TEAM':<15} {'P':>2} {'W':>2} {'L':>2}"
+    if show_nr:
+        head += f" {'NR':>2}"
+    head += f" {'PTS':>3} {'NRR':>6}"
+
+    rows = [head, "─" * len(head)]
+    for i, (name, d) in enumerate(standings, 1):
+        mark = "▸" if cutoff and i <= cutoff else " "
+        row = f"{mark}{i:>2} {name[:15]:<15} {d['P']:>2} {d['W']:>2} {d['L']:>2}"
+        if show_nr:
+            row += f" {d['T']:>2}"
+        row += f" {d['Pts']:>3} {d['NRR']:>+6.2f}"
+        rows.append(row)
+    return rows
+
+
+def build_standings_message(tourney):
+    """The default standings: the points table as text, inside an embed titled with the
+    tournament name. Returns the embed, or None if nothing has been played yet.
+
+    Formats with a bespoke table image (ACL, CCODI, T20 World Cup) never reach this —
+    they render their own and return before the default path.
+    """
+    standings = get_tournament_standings(tourney)
+    if not standings or not any(d["P"] for _, d in standings):
+        return None
+
+    t_type = tourney.get("tournament_type", "round_robin")
+    cutoff = _STANDINGS_CUTOFF.get(t_type)
+
+    embed = discord.Embed(title=f"🏆 {tourney['name']} — Points Table", color=discord.Color.gold())
+
+    played = sum(d["P"] for _, d in standings) // 2
+    total = len([m for m in tourney.get("schedule", []) if isinstance(m.get("round"), int)])
+    parts = [f"**{played}/{total}** league matches played · 🥇 **{standings[0][0]}** on top"]
+
+    # The table lives in the description (4096 chars — room for far more teams than any
+    # format here); it only spills into extra fields if a huge roster ever overflows it.
+    rows = _standings_table(standings, cutoff)
+    block = "```\n" + "\n".join(rows) + "\n```"
+    overflow = []
+    if len(block) + len(parts[0]) + 2 > 4000:
+        keep = rows[:2] + rows[2:12]
+        block = "```\n" + "\n".join(keep) + "\n```"
+        rest = rows[12:]
+        while rest:
+            chunk, rest = rest[:15], rest[15:]
+            overflow.append("```\n" + "\n".join(chunk) + "\n```")
+    parts.append(block)
+    embed.description = "\n".join(parts)
+    for i, chunk in enumerate(overflow):
+        embed.add_field(name="\u200b", value=chunk, inline=False)
+
+    # Playoff picture, once the bracket exists.
+    ko = [m for m in tourney.get("schedule", []) if m.get("stage") == "knockout"]
+    if ko:
+        lines = []
+        for m in sorted(ko, key=lambda x: x.get("match_id", 0)):
+            res = m.get("result")
+            tail = f" → 🏆 **{res['winner']}**" if res else " *(pending)*"
+            lines.append(f"**{m.get('round')}**: {m['team1']} vs {m['team2']}{tail}")
+        embed.add_field(name="🔥 Playoffs", value="\n".join(lines), inline=False)
+    elif cutoff:
+        embed.set_footer(text=f"▸ the top {cutoff} qualify for the playoffs")
+    return embed
+
+
 def _acl_pt_font(size):
     for p in ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
               "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
@@ -3616,91 +3693,12 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                 print(f"⚠️ ACL points table failed, using default: {e}")
             # fall through to the generic renderer below on failure
 
-        # Round Robin: existing image-based standings
-        standings = get_tournament_standings(tourney)
-        theme = tourney.get("theme", "Default")
-
-        try:
-            font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 46)
-            font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 18)
-            font_hdr = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 22)
-            font_row = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 26)
-            font_bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 22)
-        except:
-            font_title = font_small = font_hdr = font_row = font_bold = ImageFont.load_default()
-
-        def get_tw(text, font):
-            if hasattr(font, 'getbbox'): return font.getbbox(text)[2]
-            return len(text) * 12
-
-        if theme == "Crimson Cricket":
-            try:
-                img = Image.open("assets/points_table_crimson.png").convert("RGB")
-                d = ImageDraw.Draw(img)
-                start_y = 275
-                row_height = 40
-                c_text = "#FFFFFF"
-                cols = {"TEAM": 140, "P": 445, "W": 555, "L": 665, "NR": 775, "PTS": 885, "NRR": 995}
-                y = start_y
-                for i, (t_name, data) in enumerate(standings, 1):
-                    if i > 10: break
-                    d.text((cols["TEAM"], y + 8), t_name[:20].upper(), fill=c_text, font=font_row)
-                    d.text((cols["P"] - (get_tw(str(data['P']), font_row)/2), y + 8), str(data['P']), fill=c_text, font=font_row)
-                    d.text((cols["W"] - (get_tw(str(data['W']), font_row)/2), y + 8), str(data['W']), fill=c_text, font=font_row)
-                    d.text((cols["L"] - (get_tw(str(data['L']), font_row)/2), y + 8), str(data['L']), fill=c_text, font=font_row)
-                    d.text((cols["NR"] - (get_tw(str(data['T']), font_row)/2), y + 8), str(data['T']), fill=c_text, font=font_row)
-                    d.text((cols["PTS"] - (get_tw(str(data['Pts']), font_row)/2), y + 8), str(data['Pts']), fill=c_text, font=font_row)
-                    nrr_str = f"{data['NRR']:+.2f}"
-                    d.text((cols["NRR"] - (get_tw(nrr_str, font_row)/2), y + 8), nrr_str, fill=c_text, font=font_row)
-                    y += row_height
-                buf = io.BytesIO()
-                img.save(buf, format="PNG")
-                buf.seek(0)
-                return await interaction.followup.send(file=discord.File(fp=buf, filename="crimson_standings.png"))
-            except FileNotFoundError:
-                print("⚠️ Warning: points_table_crimson.png not found. Falling back to default layout.")
-                pass
-
-        c_bg = "#101820"; c_panel = "#F8F9FA"; c_header = "#0B2B5C"
-        c_cyan = "#1DA1F2"; c_text_navy = "#0F172A"; c_text_grey = "#64748B"
-        c_white = "#FFFFFF"; c_line = "#E2E8F0"; c_green = "#39B54A"; c_red = "#E84135"
-        row_height = 60; header_height = 120; footer_height = 80
-        img_height = 80 + header_height + 50 + (len(standings) * row_height) + footer_height + 80
-        img = Image.new("RGB", (1200, img_height), color=c_bg)
-        d = ImageDraw.Draw(img)
-        d.rounded_rectangle([(100, 80), (1100, img_height - 80)], radius=20, fill=c_panel)
-        d.rounded_rectangle([(100, 80), (1100, 80 + header_height)], radius=20, fill=c_header)
-        d.rectangle([(100, 80 + header_height - 20), (1100, 80 + header_height)], fill=c_header)
-        d.text((140, 105), tourney['name'][:30].upper(), fill=c_white, font=font_title)
-        d.text((140, 155), "POINTS TABLE - GROUP STAGE", fill="#A5F3FC", font=font_small)
-        d.text((1060 - get_tw("SERVER LOGO", font_bold), 120), "SERVER LOGO", fill=c_white, font=font_bold)
-        cols = [("POS", 40), ("TEAM", 150), ("P", 550), ("W", 650), ("L", 750), ("T", 850), ("PTS", 950), ("NRR", 1050)]
-        for name, x in cols:
-            w = get_tw(name, font_hdr)
-            align_x = x - w/2 if name != "TEAM" else x
-            d.text((align_x, 80 + header_height + 15), name, fill=c_text_grey, font=font_hdr)
-        y = 80 + header_height + 50
-        for i, (t_name, data) in enumerate(standings, 1):
-            d.line([(100, y), (1100, y)], fill=c_line, width=2)
-            if i <= 4: d.rectangle([(100, y), (108, y + row_height)], fill=c_cyan)
-            d.text((140 - (get_tw(str(i), font_row)/2), y + 15), str(i), fill=c_text_navy, font=font_row)
-            d.text((220, y + 15), t_name[:20].upper(), fill=c_text_navy, font=font_row)
-            d.text((550 - (get_tw(str(data['P']), font_row)/2), y + 15), str(data['P']), fill=c_text_grey, font=font_row)
-            d.text((650 - (get_tw(str(data['W']), font_row)/2), y + 15), str(data['W']), fill=c_green, font=font_row)
-            d.text((750 - (get_tw(str(data['L']), font_row)/2), y + 15), str(data['L']), fill=c_red, font=font_row)
-            d.text((850 - (get_tw(str(data['T']), font_row)/2), y + 15), str(data['T']), fill=c_text_grey, font=font_row)
-            d.text((950 - (get_tw(str(data['Pts']), font_row)/2), y + 15), str(data['Pts']), fill=c_text_navy, font=font_row)
-            nrr_str = f"{data['NRR']:+.3f}"
-            d.text((1050 - (get_tw(nrr_str, font_row)/2), y + 15), nrr_str, fill=c_text_navy, font=font_row)
-            y += row_height
-        footer_y = img_height - 80 - footer_height
-        d.rounded_rectangle([(100, footer_y), (1100, img_height - 80)], radius=20, fill=c_header)
-        d.rectangle([(100, footer_y), (1100, footer_y + 20)], fill=c_header)
-        d.text((600 - get_tw("SIMULATION ENGINE PRO", font_bold)//2, footer_y + 25), "SIMULATION ENGINE PRO", fill=c_white, font=font_bold)
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        buf.seek(0)
-        await interaction.followup.send(file=discord.File(fp=buf, filename="standings.png"))
+        # Everything else (Round Robin / Double RR / IPL): the shared points-table
+        # image, delivered inside an embed titled with the tournament name.
+        embed = build_standings_message(tourney)
+        if not embed:
+            return await interaction.followup.send("No matches have been completed yet.")
+        await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="leaderboard", description="View the top performing players in the tournament.")
     @app_commands.choices(category=[
