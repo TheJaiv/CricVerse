@@ -57,7 +57,7 @@ from subscription_manager import (
     save_data_to_bin, save_tournament_data_to_bin,
     check_potential_quota, consume_quota,
     update_user_tier, update_server_tier, get_auth_admins, toggle_auth_admin,
-    bulk_grant_tier, list_expiring_subs, list_all_subs, remove_sub_by_index,
+    bulk_grant_tier, list_expiring_subs, list_all_subs, remove_subs_by_indexes,
     get_all_players, add_player, add_players_bulk, update_player, delete_players, clean_duplicate_players,
     get_tier_status, is_channel_restricted, toggle_restricted_channel,
     is_ratings_channel, toggle_ratings_channel,
@@ -10377,20 +10377,25 @@ class PrefixCog(commands.Cog):
         e.set_footer(text="Remove with: cv remove_sub <index>")
         await ctx.send(embed=e)
 
-    @commands.command(name="remove_sub", aliases=["rsub", "del_sub"], help="[OWNER] Remove a subscription by its index from `list_subs`.\nUsage: remove_sub <index>\nWorks for both user and server subs — run `cv subs` first to see the indexes.")
-    async def remove_sub(self, ctx, index: int):
+    @commands.command(name="remove_sub", aliases=["rsub", "del_sub"], help="[OWNER] Remove subscription(s) by index from `list_subs`.\nUsage: remove_sub <index> [index …]\nAll indexes are read from the SAME `cv subs` list — e.g. `cv rsub 1 3 5` removes rows 1, 3 and 5 as shown.")
+    async def remove_sub(self, ctx, *indexes: int):
         if ctx.author.id != ADMIN_DISCORD_ID:
             return await ctx.send("❌ Owner only.")
-        removed = remove_sub_by_index(index)
-        if not removed:
-            return await ctx.send(f"❌ No subscription at index `{index}` — run `cv subs` to see current indexes.")
-        kind, ident, tier, exp = removed
-        if kind == "user":
-            who = f"<@{ident}>"
-        else:
-            g = self.bot.get_guild(int(ident)) if ident.isdigit() else None
-            who = f"**{g.name}** (`{ident}`)" if g else f"Server `{ident}`"
-        await ctx.send(f"🗑️ Removed **{tier}** subscription from {who}.")
+        if not indexes:
+            return await ctx.send("❌ Give at least one index — e.g. `cv rsub 2` or `cv rsub 1 3 5`. Run `cv subs` to see them.")
+        removed, invalid = remove_subs_by_indexes(indexes)
+        lines = []
+        for kind, ident, tier, exp in removed:
+            if kind == "user":
+                who = f"<@{ident}>"
+            else:
+                g = self.bot.get_guild(int(ident)) if ident.isdigit() else None
+                who = f"**{g.name}** (`{ident}`)" if g else f"Server `{ident}`"
+            lines.append(f"🗑️ Removed **{tier}** subscription from {who}.")
+        msg = "\n".join(lines) if lines else "❌ Nothing removed."
+        if invalid:
+            msg += f"\n⚠️ No subscription at index(es): {', '.join(map(str, invalid))} — run `cv subs` to check."
+        await ctx.send(msg)
 
     @commands.command(name="set_server_tier", aliases=["sst"], help="[OWNER] Assign subscription tier to a server (optional auto-expiry).\nUsage: set_server_tier <server_id> <tier> [days]\nTiers: Bronze, Silver, Gold, Diamond, None\n`days` optional — e.g. `sst 12345 Gold 30` auto-removes after 30 days.")
     async def set_server_tier(self, ctx, server_id: str, *, tier: str):

@@ -441,19 +441,31 @@ def list_all_subs():
     return rows
 
 
-def remove_sub_by_index(index: int):
-    """Remove the sub at 1-based `index` of list_all_subs(). Returns the removed
-    (kind, id, tier, expires) tuple, or None if the index is out of range."""
+def remove_subs_by_indexes(indexes):
+    """Remove one or more subs by 1-based index. ALL indexes resolve against a single
+    list_all_subs() snapshot taken up front, so `1 3 5` means those rows as shown by
+    the list command — earlier removals never shift later indexes. Duplicates are
+    ignored. Returns (removed_rows, invalid_indexes) where removed_rows are
+    (kind, id, tier, expires) tuples in the order given."""
     rows = list_all_subs()
-    if not (1 <= index <= len(rows)):
-        return None
-    kind, ident, tier, expires = rows[index - 1]
-    if kind == "user":
-        DB_CACHE["user_subs"] = [u for u in DB_CACHE["user_subs"] if u["user_id"] != ident]
-    else:
-        DB_CACHE["server_subs"] = [s for s in DB_CACHE["server_subs"] if s["server_id"] != ident]
-    async_save_to_bin()
-    return kind, ident, tier, expires
+    removed, invalid, seen = [], [], set()
+    for idx in indexes:
+        if idx in seen:
+            continue
+        seen.add(idx)
+        if 1 <= idx <= len(rows):
+            removed.append(rows[idx - 1])
+        else:
+            invalid.append(idx)
+    if removed:
+        u_ids = {r[1] for r in removed if r[0] == "user"}
+        s_ids = {r[1] for r in removed if r[0] == "server"}
+        if u_ids:
+            DB_CACHE["user_subs"] = [u for u in DB_CACHE["user_subs"] if u["user_id"] not in u_ids]
+        if s_ids:
+            DB_CACHE["server_subs"] = [s for s in DB_CACHE["server_subs"] if s["server_id"] not in s_ids]
+        async_save_to_bin()
+    return removed, invalid
 
 
 def list_expiring_subs():
