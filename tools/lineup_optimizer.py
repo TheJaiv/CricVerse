@@ -111,7 +111,7 @@ def _norm(p):
     """Accept capitalised CSV keys OR lowercase engine keys; return engine shape."""
     g = lambda *ks, d=None: next((p[k] for k in ks if k in p), d)
     ovr = g("ovr", "OVR")
-    return {
+    out = {
         "name": g("name", "Name", d="Player"),
         "bat": int(g("bat", "Bat", d=50)),
         "bowl": int(g("bowl", "Bowl", d=20)),
@@ -119,6 +119,9 @@ def _norm(p):
         "role": g("role", "Role", d="Batter"),
         "archetype": g("archetype", "Archetype", d="Standard"),
     }
+    if g("avoid_bowl"):        # typed 'L' (less bowling) tag — must survive _norm
+        out["avoid_bowl"] = True
+    return out
 
 
 def category(p):
@@ -1146,11 +1149,23 @@ def _opponent_factory(opp_spec, ref_ovr, format_overs=20):
     return make
 
 
+def _rxi_eval(args):
+    """Score ONE candidate order for recommend_xi (Pool worker). The opponent
+    factory is rebuilt from its spec here because closures don't pickle."""
+    i, order, pitch, opp_spec, ref_ovr, n, format_overs, seed, squad, weather = args
+    opp_factory = _opponent_factory(opp_spec, ref_ovr, format_overs)
+    return i, _winpct_vs_team(order, pitch, opp_factory, n, format_overs, seed,
+                              squad, weather)
+
+
 def recommend_xi(squad, pitch, opp_spec, weather="Clear", format_overs=20, n_coarse=24,
-                 n_fine=120, k=6, max_combos=80, max_cand=60, seed=42, toss_n=150):
+                 n_fine=120, k=6, max_combos=80, max_cand=60, seed=42, toss_n=150,
+                 procs=None, progress=None):
     """Best XI + order for ONE pitch vs ONE opponent (a style string or an explicit
-    11). Returns a dict: order, captain, impact, winpct, benched, ref_ovr.
-    Single-process and quick (~a few thousand matches) so a bot can await it."""
+    11). Returns a dict: order, captain, impact, winpct, benched, l_tags, ref_ovr,
+    toss. Sim batches fan out over `procs` processes (default all-but-one core);
+    every candidate's seed is fixed up front, so the result is identical whatever
+    `procs` is. `progress` (a callable taking 0..1) fires as evaluations finish."""
     squad = [_norm(p) for p in squad]
     ref_ovr = team_ovr(sorted(squad, key=lambda p: -player_ovr(p))[:11])
     opp_factory = _opponent_factory(opp_spec, ref_ovr, format_overs)
@@ -1166,28 +1181,104 @@ def recommend_xi(squad, pitch, opp_spec, weather="Clear", format_overs=20, n_coa
     combos = combos[:max_combos]
     rng = random.Random(seed)
 
+    if procs is None:
+        procs = max(1, (os.cpu_count() or 2) - 1)
+    mpool = Pool(procs) if procs > 1 else None
+
+    # Progress: weight each stage by its sim count. Candidate generation may
+    # return fewer orders than budgeted, so this is an upper bound and the bar
+    # can only finish early (it's pinned to 1.0 on return).
+    n_bowl = sum(1 for p in sorted(squad, key=lambda p: -player_ovr(p))[:11]
+                 if category(p) in ("AR", "BWL"))
+    total_units = (len(combos) * n_coarse + k * n_fine              # XI pick
+                   + max_cand * n_coarse + k * n_fine               # batting order
+                   + n_fine + 2 * (n_bowl * n_coarse + 2 * n_fine)  # L stage
+                   + 2 * toss_n)                                    # toss
+    done = [0]
+
+    def _tick(units):
+        done[0] += units
+        if progress:
+            progress(min(1.0, done[0] / total_units))
+
+    def _eval_batch(orders, n, seeds):
+        """[(idx, win%)] best-first; fans out over the pool when there is one."""
+        tasks = [(i, o, pitch, opp_spec, ref_ovr, n, format_overs, seeds[i],
+                  squad, weather) for i, o in enumerate(orders)]
+        res = {}
+        for i, w in (mpool.imap_unordered(_rxi_eval, tasks) if mpool
+                     else map(_rxi_eval, tasks)):
+            res[i] = w
+            _tick(n)
+        # Tie-break on candidate index: imap_unordered yields in COMPLETION order,
+        # and ties are common at coarse n — without this the ranking (and thus the
+        # final XI) would vary run to run.
+        return sorted(res.items(), key=lambda kv: (-kv[1], kv[0]))
+
     def best_of(orders, base_seed, coarse=True):
         n = n_coarse if coarse else n_fine
-        scored = [(o, _winpct_vs_team(o, pitch, opp_factory, n, format_overs,
-                                      base_seed + i, squad, weather))
-                  for i, o in enumerate(orders)]
-        scored.sort(key=lambda x: -x[1])
-        return scored
+        ranked = _eval_batch(orders, n, [base_seed + i for i in range(len(orders))])
+        return [(orders[i], w) for i, w in ranked]
 
-    # Pick the XI (coarse -> fine), then optimise its batting order (coarse -> fine).
-    sel = best_of([_default_order(c) for c in combos], seed, coarse=True)
-    sel_fine = best_of([o for o, _w in sel[:k]], seed + 500, coarse=False)
-    best_xi = sel_fine[0][0]
+    try:
+        # Pick the XI (coarse -> fine), then optimise its batting order (coarse -> fine).
+        sel = best_of([_default_order(c) for c in combos], seed, coarse=True)
+        sel_fine = best_of([o for o, _w in sel[:k]], seed + 500, coarse=False)
+        best_xi = sel_fine[0][0]
 
-    ords = best_of(generate_candidates(best_xi, max_cand, rng), seed + 1000, coarse=True)
-    ord_fine = best_of([o for o, _w in ords[:k]], seed + 1500, coarse=False)
-    best_order, winpct = ord_fine[0]
+        ords = best_of(generate_candidates(best_xi, max_cand, rng), seed + 1000,
+                       coarse=True)
+        ord_fine = best_of([o for o, _w in ords[:k]], seed + 1500, coarse=False)
+        best_order, winpct = ord_fine[0]
 
-    # Toss: win% batting first vs fielding first (chasing) on this pitch/opponent.
-    bf = _winpct_innings_vs_team(best_order, pitch, opp_factory, toss_n, format_overs,
-                                 seed + 2000, squad, me_first=True, weather=weather)
-    ff = _winpct_innings_vs_team(best_order, pitch, opp_factory, toss_n, format_overs,
-                                 seed + 2500, squad, me_first=False, weather=weather)
+        # 'L' (less bowling) for OUR XI: greedily tag a bowler/AR out of the AI's
+        # main attack when that raises win%. Every candidate is judged at the SAME
+        # seed as the untagged baseline (common random numbers) and must clear
+        # L_EPS, so noise can't add a tag. Opponent L tags are never invented here —
+        # only honoured if typed in a pasted XI (they ride in on the player dicts
+        # via _norm). Tags on BATs are pointless (the AI's main attack is
+        # bowlers/ARs only), so skip them.
+        def _with_l(order, names):
+            return [{**p, "avoid_bowl": True} if p["name"] in names else p
+                    for p in order]
+
+        L_EPS = 1.0
+        l_names, l_seed = set(), seed + 3000
+        base = _eval_batch([best_order], n_fine, [l_seed])[0][1]
+        winpct = base
+        l_cands = [p["name"] for p in best_order
+                   if category(p) in ("AR", "BWL") and not p.get("avoid_bowl")]
+        for _ in range(2):                                     # at most 2 L tags
+            if not l_cands:
+                break
+            variants = [_with_l(best_order, l_names | {nm}) for nm in l_cands]
+            top = [i for i, _w in _eval_batch(variants, n_coarse,
+                                              [l_seed] * len(variants))[:2]]
+            bi, w = _eval_batch([variants[i] for i in top], n_fine,
+                                [l_seed] * len(top))[0]
+            if w < base + L_EPS:
+                break
+            base = winpct = w
+            nm = l_cands[top[bi]]
+            l_names.add(nm)
+            l_cands.remove(nm)
+        best_order = _with_l(best_order, l_names)
+
+        # Toss: win% batting first vs fielding first (chasing) on this pitch/opponent.
+        bf = _winpct_innings_vs_team(best_order, pitch, opp_factory, toss_n,
+                                     format_overs, seed + 2000, squad,
+                                     me_first=True, weather=weather)
+        _tick(toss_n)
+        ff = _winpct_innings_vs_team(best_order, pitch, opp_factory, toss_n,
+                                     format_overs, seed + 2500, squad,
+                                     me_first=False, weather=weather)
+        _tick(toss_n)
+    finally:
+        if mpool:
+            mpool.close()
+            mpool.join()
+    if progress:
+        progress(1.0)
 
     # Impact player is a T20-only rule — no impact 12th man in ODIs.
     bench = _my_bench(best_order, squad) if format_overs == 20 else []
@@ -1198,6 +1289,7 @@ def recommend_xi(squad, pitch, opp_spec, weather="Clear", format_overs=20, n_coa
         "impact": max(bench, key=lambda p: pitch_value(p, pitch)) if bench else None,
         "winpct": winpct,
         "benched": [p for p in squad if p["name"] not in chosen],
+        "l_tags": sorted(l_names),
         "ref_ovr": ref_ovr,
         "toss": {"bat_first": bf, "field_first": ff,
                  "decision": "BAT FIRST" if bf >= ff else "FIELD FIRST"},

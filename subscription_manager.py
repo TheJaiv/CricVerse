@@ -72,35 +72,35 @@ DB_CACHE = {
     # monotonic in Mongo even if the on-disk archive files are lost between deploys:
     # { "dsl": { server_id: {"enabled": True, "last_season": 2} } }
     "league_access": {},
-    # TBES innings-break ads: { server_id: ["ad text 1", "ad text 2", ...] }. Shown at
-    # every innings end of a TBES match (see bot._maybe_send_tbes_ads). Lives in the main
-    # doc (small) — only the heavy TBES match scorecards are sharded out (see below).
-    "tbes_ads": {},
+    # TBECS innings-break ads: { server_id: ["ad text 1", "ad text 2", ...] }. Shown at
+    # every innings end of a TBECS match (see bot._maybe_send_tbecs_ads). Lives in the main
+    # doc (small) — only the heavy TBECS match scorecards are sharded out (see below).
+    "tbecs_ads": {},
 }
 
-# ── TBES per-match sharding ───────────────────────────────────────────────────
-# A TBES event runs 50 teams, so a full schedule is 1000+ matches, each carrying a
+# ── TBECS per-match sharding ───────────────────────────────────────────────────
+# A TBECS event runs 50 teams, so a full schedule is 1000+ matches, each carrying a
 # full 40-player scorecard + stats_delta. Kept inline that would blow Mongo's 16MB
-# per-document cap AND force a multi-MB rewrite every innings. So for TBES only, the
+# per-document cap AND force a multi-MB rewrite every innings. So for TBECS only, the
 # two heavy per-match fields are sharded into their own documents
-# (_id "tbesmatch_<server>_<match_id>") in the tournaments collection, and the skeleton
+# (_id "tbecsmatch_<server>_<match_id>") in the tournaments collection, and the skeleton
 # (teams/schedule/standings) is stored light. The in-memory tournament stays COMPLETE —
 # the split is a Mongo-boundary detail, so nothing downstream (scorecards, cancel_match,
 # leaderboards) changes. See load_tournament_data_from_bin / save_tournament_data_to_bin.
-_TBES_HEAVY_FIELDS = ("scorecard_players", "stats_delta")
-_tbes_persisted = set()   # (server_id, match_id) whose heavy match-doc is already in Mongo
+_TBECS_HEAVY_FIELDS = ("scorecard_players", "stats_delta")
+_tbecs_persisted = set()   # (server_id, match_id) whose heavy match-doc is already in Mongo
 
-def tbes_forget_match(server_id, match_id):
+def tbecs_forget_match(server_id, match_id):
     """Drop a match's sharded scorecard doc so a cancelled/replayed match re-persists
     fresh next save. Called from revert_tournament_match. Safe if no doc exists."""
     key = (str(server_id), match_id)
-    _tbes_persisted.discard(key)
+    _tbecs_persisted.discard(key)
     if not MONGO_URI:
         return
     try:
-        _get_db()["tournaments"].delete_one({"_id": f"tbesmatch_{server_id}_{match_id}"})
+        _get_db()["tournaments"].delete_one({"_id": f"tbecsmatch_{server_id}_{match_id}"})
     except Exception as e:
-        print(f"⚠️ TBES match-doc delete failed ({server_id}/{match_id}): {e}")
+        print(f"⚠️ TBECS match-doc delete failed ({server_id}/{match_id}): {e}")
 
 def load_data_from_bin():
     if not MONGO_URI:
@@ -120,7 +120,7 @@ def load_data_from_bin():
             DB_CACHE["draft_stats"]         = doc.get("draft_stats", {})
             DB_CACHE["custom_teams"]        = doc.get("custom_teams", {})
             DB_CACHE["league_access"]       = doc.get("league_access", {})
-            DB_CACHE["tbes_ads"]            = doc.get("tbes_ads", {})
+            DB_CACHE["tbecs_ads"]            = doc.get("tbecs_ads", {})
             _migrate_custom_teams()  # flatten any legacy per-server teams into one global pool
             raw_mc = doc.get("match_counts", {})
             DB_CACHE["match_counts"] = {
@@ -153,19 +153,19 @@ def load_tournament_data_from_bin():
         dsl_tours = list(dsl_doc.get("tournaments", [])) if dsl_doc else []
         rating_doc = _get_db()["tournaments"].find_one({"_id": "rating_tournament_data"})
         rating_tours = list(rating_doc.get("tournaments", [])) if rating_doc else []
-        # TBES lives in its own skeleton doc; its heavy per-match scorecards are sharded
-        # into separate tbesmatch_* docs — reattach them so the in-memory tournament is
+        # TBECS lives in its own skeleton doc; its heavy per-match scorecards are sharded
+        # into separate tbecsmatch_* docs — reattach them so the in-memory tournament is
         # complete and indistinguishable from any other tournament downstream.
-        tbes_doc = _get_db()["tournaments"].find_one({"_id": "tbes_tournament_data"})
-        tbes_tours = list(tbes_doc.get("tournaments", [])) if tbes_doc else []
-        _tbes_persisted.clear()
-        for t in tbes_tours:
+        tbecs_doc = _get_db()["tournaments"].find_one({"_id": "tbecs_tournament_data"})
+        tbecs_tours = list(tbecs_doc.get("tournaments", [])) if tbecs_doc else []
+        _tbecs_persisted.clear()
+        for t in tbecs_tours:
             sid = str(t.get("server_id"))
             heavy_by_mid = {}
             for md in _get_db()["tournaments"].find({"server_id": sid}):
                 mid = md.get("match_id")
                 heavy_by_mid[mid] = md.get("heavy", {})
-                _tbes_persisted.add((sid, mid))
+                _tbecs_persisted.add((sid, mid))
             for m in t.get("schedule", []):
                 res = m.get("result")
                 if not res:
@@ -175,12 +175,12 @@ def load_tournament_data_from_bin():
                     res.update(h)
         # De-dupe on the boundary: a split-type tournament saved into the main doc by an
         # older bot version must not load twice once it also exists in its own doc.
-        split_ids = {(str(t.get("server_id")), t.get("name")) for t in dsl_tours + rating_tours + tbes_tours}
+        split_ids = {(str(t.get("server_id")), t.get("name")) for t in dsl_tours + rating_tours + tbecs_tours}
         if split_ids:
             tours = [t for t in tours if (str(t.get("server_id")), t.get("name")) not in split_ids]
-        DB_CACHE["tournaments"] = tours + dsl_tours + rating_tours + tbes_tours
-        if doc or dsl_doc or rating_doc or tbes_doc:
-            print(f"✅ Loaded {len(tours)} tournament(s) + {len(dsl_tours)} DSL + {len(rating_tours)} Conquest + {len(tbes_tours)} TBES from MongoDB!")
+        DB_CACHE["tournaments"] = tours + dsl_tours + rating_tours + tbecs_tours
+        if doc or dsl_doc or rating_doc or tbecs_doc:
+            print(f"✅ Loaded {len(tours)} tournament(s) + {len(dsl_tours)} DSL + {len(rating_tours)} Conquest + {len(tbecs_tours)} TBECS from MongoDB!")
         else:
             print("⚠️ No tournament document found in MongoDB. Starting with empty cache.")
     except Exception as e:
@@ -212,29 +212,29 @@ def save_tournament_data_to_bin(snapshot=None):
         # Split by league: DSL seasons and the Conquest (rating) league each get their
         # own document (own 16MB budget) — see load_tournament_data_from_bin. Matched
         # on tournament_type, so this module stays a leaf (no manager imports).
-        regular = [t for t in data if t.get("tournament_type") not in ("dsl", "rating", "tbes")]
+        regular = [t for t in data if t.get("tournament_type") not in ("dsl", "rating", "tbecs")]
         dsl     = [t for t in data if t.get("tournament_type") == "dsl"]
         rating  = [t for t in data if t.get("tournament_type") == "rating"]
-        tbes    = [t for t in data if t.get("tournament_type") == "tbes"]
+        tbecs    = [t for t in data if t.get("tournament_type") == "tbecs"]
         db = _get_db()
 
-        # TBES: shard each completed match's heavy fields (full scorecard + stats_delta)
+        # TBECS: shard each completed match's heavy fields (full scorecard + stats_delta)
         # into its own doc, then strip them from the skeleton. `data` is a deep copy, so
         # mutating it here never touches the live in-memory tournament. Only matches not
         # yet persisted are written, so a normal save touches just the one new match.
         new_match_docs = []
-        for t in tbes:
+        for t in tbecs:
             sid = str(t.get("server_id"))
             for m in t.get("schedule", []):
                 res = m.get("result")
                 if not res:
                     continue
                 mid = m.get("match_id")
-                heavy = {k: res.get(k) for k in _TBES_HEAVY_FIELDS if res.get(k) is not None}
-                if heavy and (sid, mid) not in _tbes_persisted:
-                    new_match_docs.append({"_id": f"tbesmatch_{sid}_{mid}",
+                heavy = {k: res.get(k) for k in _TBECS_HEAVY_FIELDS if res.get(k) is not None}
+                if heavy and (sid, mid) not in _tbecs_persisted:
+                    new_match_docs.append({"_id": f"tbecsmatch_{sid}_{mid}",
                                            "server_id": sid, "match_id": mid, "heavy": heavy})
-                for k in _TBES_HEAVY_FIELDS:
+                for k in _TBECS_HEAVY_FIELDS:
                     res.pop(k, None)   # reattached from the match doc on load
         # Persist the heavy match docs BEFORE the skeleton, so the light skeleton is never
         # written ahead of the data it references (a mid-save crash can't orphan a match).
@@ -243,7 +243,7 @@ def save_tournament_data_to_bin(snapshot=None):
             db["tournaments"].bulk_write(
                 [UpdateOne({"_id": d["_id"]}, {"$set": d}, upsert=True) for d in new_match_docs])
             for d in new_match_docs:
-                _tbes_persisted.add((d["server_id"], d["match_id"]))
+                _tbecs_persisted.add((d["server_id"], d["match_id"]))
 
         db["tournaments"].replace_one(
             {"_id": "tournament_data"},
@@ -255,10 +255,10 @@ def save_tournament_data_to_bin(snapshot=None):
             {"_id": "rating_tournament_data"},
             {"_id": "rating_tournament_data", "tournaments": rating}, upsert=True)
         db["tournaments"].replace_one(
-            {"_id": "tbes_tournament_data"},
-            {"_id": "tbes_tournament_data", "tournaments": tbes}, upsert=True)
+            {"_id": "tbecs_tournament_data"},
+            {"_id": "tbecs_tournament_data", "tournaments": tbecs}, upsert=True)
         print(f"✅ MongoDB Save OK (tournaments: {len(regular)} regular / {len(dsl)} DSL / "
-              f"{len(rating)} Conquest / {len(tbes)} TBES +{len(new_match_docs)} match docs)")
+              f"{len(rating)} Conquest / {len(tbecs)} TBECS +{len(new_match_docs)} match docs)")
         return True
     except Exception as e:
         print(f"❌ MongoDB Tournament Save Error: {e}")
@@ -628,16 +628,21 @@ def _migrate_custom_teams():
     if legacy:
         async_save_to_bin()
 
-def save_custom_team(name, player_names, impact_names=None):
+def save_custom_team(name, player_names, impact_names=None, nobowl_names=None):
     """Save a named XI globally as a list of player NAMES (re-resolved live on load).
-    `impact_names` are optional impact-player substitutes (used only in impact-mode matches)."""
+    `impact_names` are optional impact-player substitutes (used only in impact-mode matches).
+    `nobowl_names` are the players marked with the no-bowl 'L' tag — stored so the flag
+    survives the save/load round-trip and is re-applied when the team is used."""
     DB_CACHE.setdefault("custom_teams", {})[name.strip().lower()] = {
         "name": name.strip(), "players": list(player_names), "impact": list(impact_names or []),
+        "nobowl": list(nobowl_names or []),
     }
     async_save_to_bin()
 
 def get_custom_team(name):
-    """Return {'name', 'players':[names]} for a saved team (case-insensitive), or None."""
+    """Return {'name', 'players':[names], 'impact':[names], 'nobowl':[names]} for a
+    saved team (case-insensitive), or None. Teams saved before the 'L' fix have no
+    'nobowl' key — treat it as empty."""
     if not name:
         return None
     return DB_CACHE.get("custom_teams", {}).get(name.strip().lower())

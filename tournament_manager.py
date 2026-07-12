@@ -2444,11 +2444,11 @@ def revert_tournament_match(tourney, match_id):
     # Reopen the match itself.
     m["status"] = "pending"
     m["result"] = None
-    # TBES stores each match's scorecard in its own sharded Mongo doc; drop it so the
+    # TBECS stores each match's scorecard in its own sharded Mongo doc; drop it so the
     # replay writes a fresh one instead of being skipped as "already persisted".
-    if t_type == "tbes":
-        from subscription_manager import tbes_forget_match
-        tbes_forget_match(tourney.get("server_id"), match_id)
+    if t_type == "tbecs":
+        from subscription_manager import tbecs_forget_match
+        tbecs_forget_match(tourney.get("server_id"), match_id)
     tourney["current_match_idx"] = max(0, tourney.get("current_match_idx", 0) - 1)
     if tourney.get("status") == "completed":
         tourney["status"] = "active"

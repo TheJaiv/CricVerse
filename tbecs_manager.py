@@ -1,16 +1,16 @@
-# ── TBES (The Big Event Series) ───────────────────────────────────────────────
+# ── TBECS (The Big Event Series) ───────────────────────────────────────────────
 # A large 50-team event. Because a full 50-team schedule is 1000+ matches — each
 # carrying a full 40-player scorecard — its match data would blow Mongo's 16MB
-# per-document cap. So TBES gets special storage: the tournament skeleton lives in
-# its OWN document ("tbes_tournament_data") and every match's heavy scorecard is
+# per-document cap. So TBECS gets special storage: the tournament skeleton lives in
+# its OWN document ("tbecs_tournament_data") and every match's heavy scorecard is
 # sharded into a per-match document. All of that lives in subscription_manager
-# (the Mongo leaf); this module just marks TBES tournaments and owns the ad feature.
+# (the Mongo leaf); this module just marks TBECS tournaments and owns the ad feature.
 #
 # The schedule/format is set up elsewhere (added later). Everything here works the
-# moment a tournament carries tournament_type == "tbes".
+# moment a tournament carries tournament_type == "tbecs".
 #
 # Import direction: this module may import from subscription_manager only. Other
-# managers must import tbes_manager LAZILY (inside functions) to avoid import cycles.
+# managers must import tbecs_manager LAZILY (inside functions) to avoid import cycles.
 
 import discord
 
@@ -19,10 +19,10 @@ from subscription_manager import DB_CACHE, async_save_to_bin
 # ══════════════════════════════════════════════════════════════════════════════
 # CONFIG
 # ══════════════════════════════════════════════════════════════════════════════
-TBES_CONFIG = {
-    "type_key": "tbes",                 # tournament_type value (drives Mongo sharding)
-    "display_name": "The Big Event Series",
-    "short_name": "TBES",
+TBECS_CONFIG = {
+    "type_key": "tbecs",                 # tournament_type value (drives Mongo sharding)
+    "display_name": "The Big Event Championship Series",   # guess for the acronym — edit freely
+    "short_name": "TBECS",
     "team_count": 50,
     "squad_size": 20,                   # 20 players per team (per-match stats stored for all)
 }
@@ -32,31 +32,31 @@ _EMBED_DESC_LIMIT = 4096
 _MAX_EMBEDS = 10
 
 
-def is_tbes_tournament(tourney):
-    return bool(tourney) and tourney.get("tournament_type") == TBES_CONFIG["type_key"]
+def is_tbecs_tournament(tourney):
+    return bool(tourney) and tourney.get("tournament_type") == TBECS_CONFIG["type_key"]
 
 
-def is_tbes_match(match):
-    """True for a live match object belonging to a TBES tournament."""
-    return getattr(match, "tournament_type", None) == TBES_CONFIG["type_key"]
+def is_tbecs_match(match):
+    """True for a live match object belonging to a TBECS tournament."""
+    return getattr(match, "tournament_type", None) == TBECS_CONFIG["type_key"]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ADS — innings-break sponsor messages, managed per server, shown at every innings
-# end of a TBES match. Stored in DB_CACHE["tbes_ads"] (main doc), keyed by server_id.
+# end of a TBECS match. Stored in DB_CACHE["tbecs_ads"] (main doc), keyed by server_id.
 # ══════════════════════════════════════════════════════════════════════════════
 def _ads_store():
-    if "tbes_ads" not in DB_CACHE or not isinstance(DB_CACHE["tbes_ads"], dict):
-        DB_CACHE["tbes_ads"] = {}
-    return DB_CACHE["tbes_ads"]
+    if "tbecs_ads" not in DB_CACHE or not isinstance(DB_CACHE["tbecs_ads"], dict):
+        DB_CACHE["tbecs_ads"] = {}
+    return DB_CACHE["tbecs_ads"]
 
 
-def get_tbes_ads(server_id):
+def get_tbecs_ads(server_id):
     """Return the list of ad strings for a server (a copy; never the live list)."""
     return list(_ads_store().get(str(server_id), []))
 
 
-def add_tbes_ad(server_id, text):
+def add_tbecs_ad(server_id, text):
     """Append an ad. Returns (ok, message, new_total). Persists to Mongo."""
     text = (text or "").strip()
     if not text:
@@ -69,10 +69,10 @@ def add_tbes_ad(server_id, text):
     ads = store.setdefault(str(server_id), [])
     ads.append(text)
     async_save_to_bin()
-    return True, f"✅ Ad #{len(ads)} added. It'll show at every innings end in TBES matches.", len(ads)
+    return True, f"✅ Ad #{len(ads)} added. It'll show at every innings end in TBECS matches.", len(ads)
 
 
-def remove_tbes_ad(server_id, index):
+def remove_tbecs_ad(server_id, index):
     """Remove the 1-based ad at `index`. Returns (ok, message). Persists to Mongo."""
     ads = _ads_store().get(str(server_id), [])
     if not ads:
@@ -86,7 +86,7 @@ def remove_tbes_ad(server_id, index):
     return True, f"🗑️ Removed ad #{index}: “{preview}”. {len(ads)} ad(s) left."
 
 
-def clear_tbes_ads(server_id):
+def clear_tbecs_ads(server_id):
     """Remove all ads for a server. Returns (count_cleared, message). Persists to Mongo."""
     ads = _ads_store().get(str(server_id), [])
     n = len(ads)
@@ -97,11 +97,11 @@ def clear_tbes_ads(server_id):
     return n, f"🧹 Cleared all {n} ad(s) for this server."
 
 
-def build_tbes_ad_embeds(server_id):
+def build_tbecs_ad_embeds(server_id):
     """Render every ad for a server as a list of discord.Embeds (usually one).
     Returns [] when the server has no ads. Splits across embeds if the combined
     text exceeds Discord's per-embed description limit, so ANY number of ads fits."""
-    ads = get_tbes_ads(server_id)
+    ads = get_tbecs_ads(server_id)
     if not ads:
         return []
 

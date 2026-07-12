@@ -3529,22 +3529,22 @@ async def trigger_super_over(channel, match: CricketMatch):
     # Pick this innings' two openers (interactive) / auto-pick (sim/AI), then bowl.
     await begin_super_over_innings(channel, so_match)
 
-async def _maybe_send_tbes_ads(channel, match):
-    """TBES only: post the server's sponsor ads at an innings end. Silent for every
+async def _maybe_send_tbecs_ads(channel, match):
+    """TBECS only: post the server's sponsor ads at an innings end. Silent for every
     other match type and when no ads are configured. Super-over innings are skipped
     so a tie-break doesn't spam the break ads again."""
     try:
-        from tbes_manager import is_tbes_match, build_tbes_ad_embeds
-        if not is_tbes_match(match) or getattr(match, "is_super_over", False):
+        from tbecs_manager import is_tbecs_match, build_tbecs_ad_embeds
+        if not is_tbecs_match(match) or getattr(match, "is_super_over", False):
             return
         sid = getattr(match, "tournament_server_id", None)
         if not sid:
             return
-        embeds = build_tbes_ad_embeds(sid)
+        embeds = build_tbecs_ad_embeds(sid)
         if embeds:
             await channel.send(embeds=embeds[:10])   # Discord caps a message at 10 embeds
     except Exception as _ad_err:
-        print(f"⚠️ TBES ad send failed: {_ad_err}")
+        print(f"⚠️ TBECS ad send failed: {_ad_err}")
 
 
 async def handle_innings_end(interaction_context, match: CricketMatch):
@@ -3601,8 +3601,8 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
             file=file
         )
 
-        # TBES innings-break ads (no-op for every other match type).
-        await _maybe_send_tbes_ads(channel, match)
+        # TBECS innings-break ads (no-op for every other match type).
+        await _maybe_send_tbecs_ads(channel, match)
 
         # Reset per-innings sim controls so the 2nd innings starts FRESH at the hub.
         # Otherwise a "Sim Innings (Verbose)" / whole-match pick from the 1st innings leaks
@@ -3691,8 +3691,8 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
             header = "🏆 **Match over! Here is the final detailed scorecard and broadcast graphic:**"
         await channel.send(header, embed=embed_full, file=file)
 
-        # TBES second-innings (match end) ads — shown at every innings end per spec.
-        await _maybe_send_tbes_ads(channel, match_to_finalize)
+        # TBECS second-innings (match end) ads — shown at every innings end per spec.
+        await _maybe_send_tbecs_ads(channel, match_to_finalize)
 
         # Send scorecard to match log channel if configured for this server
         if channel.guild:
@@ -5508,6 +5508,28 @@ def format_xi_display(players):
     return "\n".join(lines)
 
 
+def _saved_team_lineup(ct):
+    """Resolve a saved team's stored names back to live DB dicts, re-applying the
+    persisted no-bowl 'L' flags (flagged players are COPIED so the shared DB dicts
+    are never mutated). Returns (players, impact, missing_xi, missing_impact)."""
+    dbmap = {p["name"].lower(): p for p in get_all_players()}
+    nobowl = {n.lower() for n in ct.get("nobowl", [])}
+
+    def _take(names, cap):
+        out = []
+        for nm in names:
+            p = dbmap.get(nm.lower())
+            if p:
+                out.append({**p, "avoid_bowl": True} if nm.lower() in nobowl else p)
+        return out[:cap]
+
+    players = _take(ct.get("players", []), 11)
+    impact = _take(ct.get("impact", []), 5)
+    missing_xi = [nm for nm in ct.get("players", []) if nm.lower() not in dbmap]
+    missing_impact = [nm for nm in ct.get("impact", []) if nm.lower() not in dbmap]
+    return players, impact, missing_xi, missing_impact
+
+
 # --- Step 1: Format & Impact Player ---
 # --- Step 1: Format & Impact Player ---
 
@@ -6258,14 +6280,9 @@ async def on_message(message: discord.Message):
                 state.t1_subs = []
             missing = []
         elif _ct:
-            _dbmap = {p["name"].lower(): p for p in get_all_players()}
-            players = [_dbmap[nm.lower()] for nm in _ct["players"] if nm.lower() in _dbmap][:11]
-            missing = [nm for nm in _ct["players"] if nm.lower() not in _dbmap]
+            players, _impact, missing, _ = _saved_team_lineup(_ct)
             # Impact subs only matter in impact-mode matches; ignored otherwise.
-            if state.impact_player:
-                state.t1_subs = [_dbmap[nm.lower()] for nm in _ct.get("impact", []) if nm.lower() in _dbmap][:5]
-            else:
-                state.t1_subs = []
+            state.t1_subs = _impact if state.impact_player else []
         else:
             db = get_all_players()
             parsed_players, missing, cap_name, cap_err, cap_low = parse_pasted_roster(message.content, db)
@@ -6331,14 +6348,9 @@ async def on_message(message: discord.Message):
                 state.t2_subs = []
             missing = []
         elif _ct:
-            _dbmap = {p["name"].lower(): p for p in get_all_players()}
-            players = [_dbmap[nm.lower()] for nm in _ct["players"] if nm.lower() in _dbmap][:11]
-            missing = [nm for nm in _ct["players"] if nm.lower() not in _dbmap]
+            players, _impact, missing, _ = _saved_team_lineup(_ct)
             # Impact subs only matter in impact-mode matches; ignored otherwise.
-            if state.impact_player:
-                state.t2_subs = [_dbmap[nm.lower()] for nm in _ct.get("impact", []) if nm.lower() in _dbmap][:5]
-            else:
-                state.t2_subs = []
+            state.t2_subs = _impact if state.impact_player else []
         else:
             db = get_all_players()
             parsed_players, missing, cap_name, cap_err, cap_low = parse_pasted_roster(message.content, db)
@@ -8026,6 +8038,7 @@ def _help_players_embed(is_admin: bool):
     e = discord.Embed(title="🔍 Players & Database", color=discord.Color.blue())
     e.add_field(name="/searchplayer <name>  ·  `cv sp`", value="Search for a player — shows their role (ratings & archetype hidden unless you're an admin in a ratings channel).", inline=False)
     e.add_field(name="/playerlist  ·  `cv playerlist`  ·  `cv pl`", value="Download the full player database as a .txt file — names only, grouped by tier, shuffled within each tier.", inline=False)
+    e.add_field(name="`cv playerlistcompact`  ·  `cv pla`", value="Same tier-grouped list, but names are comma-separated within each tier (compact).", inline=False)
     e.add_field(name="📋 How to enter Playing XI",        value="When prompted during a match, paste 11 player names (one per line). Names must match the database exactly.", inline=False)
     e.add_field(name="🏟️ Pitch & Weather Conditions",    value="15 pitch types · 10 weather conditions — each affects pace, spin and batting differently across T20 and ODI.", inline=False)
     if is_admin:
@@ -8441,6 +8454,47 @@ def _build_playerlist_txt(players: list) -> str:
         lines.append(f"── {label} ({len(grp)}) " + "─" * max(1, 44 - len(label) - len(str(len(grp)))))
         for p in grp:
             lines.append(f"  {p['name']}")
+        lines.append("")
+
+    lines.append("═" * 52)
+    from datetime import datetime, timezone
+    lines.append(f"  Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+    lines.append("═" * 52)
+    return "\n".join(lines)
+
+
+def _build_playerlist_csv_txt(players: list) -> str:
+    """Same tier grouping as _build_playerlist_txt, but names are comma-separated per tier."""
+    tiers = {"LEGENDS": [], "ELITE": [], "GOLD": [], "SILVER": [], "BRONZE": []}
+    for p in players:
+        ov = _player_overall(p)
+        if   ov > 95: tiers["LEGENDS"].append(p)
+        elif ov > 90: tiers["ELITE"].append(p)
+        elif ov >= 85: tiers["GOLD"].append(p)
+        elif ov >= 80: tiers["SILVER"].append(p)
+        else:          tiers["BRONZE"].append(p)
+    for lst in tiers.values():
+        random.shuffle(lst)
+
+    lines = [
+        "═" * 52,
+        f"  CricVerse Player Database  —  {len(players)} players",
+        "═" * 52,
+        "",
+    ]
+    tier_labels = {
+        "LEGENDS": "👑  LEGENDS",
+        "ELITE":   "⭐⭐⭐  ELITE",
+        "GOLD":    "⭐⭐    GOLD",
+        "SILVER":  "⭐      SILVER",
+        "BRONZE":  "         BRONZE",
+    }
+    for tier, label in tier_labels.items():
+        grp = tiers[tier]
+        if not grp:
+            continue
+        lines.append(f"── {label} ({len(grp)}) " + "─" * max(1, 44 - len(label) - len(str(len(grp)))))
+        lines.append(", ".join(p["name"] for p in grp))
         lines.append("")
 
     lines.append("═" * 52)
@@ -9342,6 +9396,19 @@ class PrefixCog(commands.Cog):
             file=discord.File(fp=buf, filename="cricverse_players.txt")
         )
 
+    @commands.command(name="playerlistcompact", aliases=["pla"], help="Download full player database grouped by tier, names comma-separated (no ratings).\nUsage: pla")
+    async def playerlistcompact(self, ctx):
+        players = get_all_players()
+        if not players:
+            return await ctx.send("❌ Player database is empty.")
+        txt = _build_playerlist_csv_txt(players)
+        buf = io.BytesIO(txt.encode("utf-8"))
+        buf.seek(0)
+        await ctx.send(
+            f"📋 **Player Database (compact)** — {len(players)} players across 4 tiers.\nRatings are hidden. Players within each tier are shuffled, comma-separated.",
+            file=discord.File(fp=buf, filename="cricverse_players_compact.txt")
+        )
+
     # ── Custom saved teams (server-shared XI presets) ────────────────────────
     async def _log_team_action(self, ctx, action, team_name, players, impact):
         """Log saveteam/editteam to the global player-database update channel (teams are global)."""
@@ -9399,7 +9466,8 @@ class PrefixCog(commands.Cog):
             if missing:
                 err += f"Not in DB: {', '.join(missing)}\n"
             return await msg.reply(err + "Fix the names and run `cv saveteam` again.")
-        save_custom_team(name, [p["name"] for p in players], [p["name"] for p in impact])
+        save_custom_team(name, [p["name"] for p in players], [p["name"] for p in impact],
+                         [p["name"] for p in players + impact if p.get("avoid_bowl")])
         out = f"✅ Saved team **{name}**! Load it in any match by typing **{name}** at the XI step.\n\n{format_xi_display(players)}"
         if impact:
             out += "\n\n**Impact players:**\n" + format_xi_display(impact)
@@ -9439,10 +9507,8 @@ class PrefixCog(commands.Cog):
         ct = get_custom_team(name or "")
         if not ct:
             return await ctx.send(f"❌ No saved team named **{name}**. See `cv teams`.")
-        dbmap = {p["name"].lower(): p for p in get_all_players()}
-        players = [dbmap[nm.lower()] for nm in ct["players"] if nm.lower() in dbmap]
-        impact = [dbmap[nm.lower()] for nm in ct.get("impact", []) if nm.lower() in dbmap]
-        gone = [nm for nm in ct["players"] + ct.get("impact", []) if nm.lower() not in dbmap]
+        players, impact, missing_xi, missing_impact = _saved_team_lineup(ct)
+        gone = missing_xi + missing_impact
         note = f"\n⚠️ No longer in DB: {', '.join(gone)}" if gone else ""
         out = f"📋 **{ct['name']}**\n{format_xi_display(players)}"
         if impact:
@@ -9469,8 +9535,7 @@ class PrefixCog(commands.Cog):
         ct = get_custom_team(name or "")
         if not ct:
             return await ctx.send(f"❌ No saved team named **{name}**. See `cv teams`, or create one with `cv saveteam`.")
-        dbmap = {p["name"].lower(): p for p in get_all_players()}
-        cur = [dbmap[nm.lower()] for nm in ct["players"] if nm.lower() in dbmap]
+        cur, *_ = _saved_team_lineup(ct)
         await ctx.send(
             f"✏️ Editing **{ct['name']}** — current XI:\n{format_xi_display(cur)}\n\n"
             f"Reply with the **new 11 player names** (one per line). You have 3 minutes. Type `cancel` to abort.\n"
@@ -9492,7 +9557,8 @@ class PrefixCog(commands.Cog):
             if missing:
                 err += f"Not in DB: {', '.join(missing)}\n"
             return await msg.reply(err + "Fix the names and run `cv editteam` again.")
-        save_custom_team(ct["name"], [p["name"] for p in players], [p["name"] for p in impact])
+        save_custom_team(ct["name"], [p["name"] for p in players], [p["name"] for p in impact],
+                         [p["name"] for p in players + impact if p.get("avoid_bowl")])
         out = f"✅ Updated **{ct['name']}**!\n\n{format_xi_display(players)}"
         if impact:
             out += "\n\n**Impact players:**\n" + format_xi_display(impact)
@@ -9510,8 +9576,10 @@ class PrefixCog(commands.Cog):
                     and m.content.strip())
 
         async def confirm(players):
-            listing = "\n".join(f"`{i:>2}.` {p['name']} · {p['bat']}/{p['bowl']}"
-                                for i, p in enumerate(players, 1))
+            listing = "\n".join(
+                f"`{i:>2}.` {p['name']} · {p['bat']}/{p['bowl']}"
+                + (" · 🚫L" if p.get("avoid_bowl") else "")
+                for i, p in enumerate(players, 1))
 
             class _Confirm(discord.ui.View):
                 def __init__(self):
@@ -9563,12 +9631,17 @@ class PrefixCog(commands.Cog):
                 return found
             # 'No' -> loop and re-paste
 
-    async def _optimize_in_subprocess(self, fn_name, *args):
+    async def _optimize_in_subprocess(self, fn_name, *args, on_progress=None,
+                                      proc_box=None):
         """Run a tools.lineup_optimizer entry point in its OWN process and return
         its result. The optimizer seeds the global `random` module for repeatable
         results, and that state is process-wide: run via asyncio.to_thread, any
         other bot activity touching random.* mid-run shifts the stream and the
-        same command gives a different XI each time."""
+        same command gives a different XI each time.
+        `on_progress` (async, int 0..100) receives the worker's progress lines;
+        `proc_box` (a dict) exposes the process under "proc" so a cancel button
+        can kill it. The worker gets its own session so a cancel can take its
+        multiprocessing children down with it (killpg)."""
         import pickle
         import sys
         worker = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -9576,11 +9649,36 @@ class PrefixCog(commands.Cog):
         proc = await asyncio.create_subprocess_exec(
             sys.executable, worker,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE)
-        out, err = await proc.communicate(pickle.dumps((fn_name, args)))
+            stderr=asyncio.subprocess.PIPE, start_new_session=True)
+        if proc_box is not None:
+            proc_box["proc"] = proc
+        err_tail = []
+
+        async def _pump_stderr():
+            while True:
+                line = await proc.stderr.readline()
+                if not line:
+                    return
+                s = line.decode(errors="replace").strip()
+                if s.startswith("P ") and on_progress:
+                    try:
+                        await on_progress(int(s[2:]))
+                    except Exception:
+                        pass
+                elif s:
+                    err_tail.append(s)
+
+        pump = asyncio.create_task(_pump_stderr())
+        proc.stdin.write(pickle.dumps((fn_name, args)))
+        await proc.stdin.drain()
+        proc.stdin.close()
+        out = await proc.stdout.read()
+        await proc.wait()
+        await pump
         if proc.returncode != 0 or not out:
             raise RuntimeError("optimizer worker failed: "
-                               + err.decode(errors="replace")[-400:])
+                               + (" · ".join(err_tail)[-400:] or
+                                  f"exit code {proc.returncode}"))
         ok, payload = pickle.loads(out)
         if not ok:
             raise RuntimeError(payload)
@@ -9712,22 +9810,73 @@ class PrefixCog(commands.Cog):
         opp_spec = view.opp
         if view.opp == "custom":
             opp_players = await self._roster_collect(
-                ctx, "📝 Paste the **opponent's 11** (one per line). 3 minutes.",
+                ctx, "📝 Paste the **opponent's 11** (one per line; end a line with "
+                "` L` if they use less-bowling on that player). 3 minutes.",
                 11, 11, "Opponent XI")
             if opp_players is None:
                 return await ctx.send("⏳ Timed out — run `cv bestxi` again.")
             opp_spec = opp_players[:11]
 
         opp_label = "their XI" if view.opp == "custom" else f"a {view.opp}-strong side"
-        eta = "~20s" if is_odi else "~10s"
-        working = await ctx.send(f"🧠 Simulating the best **{fmt_label}** XI on "
-                                 f"**{view.pitch}** ({view.weather}) vs {opp_label}… {eta}")
+        job = {}
+
+        class _CancelView(discord.ui.View):
+            def __init__(self):
+                super().__init__(timeout=3600)
+                self.cancelled = False
+
+            async def interaction_check(self, it):
+                if it.user.id != ctx.author.id:
+                    await it.response.send_message("Not your panel.", ephemeral=True)
+                    return False
+                return True
+
+            @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger, emoji="🛑")
+            async def cancel_btn(self, it, btn):
+                self.cancelled = True
+                p = job.get("proc")
+                if p and p.returncode is None:
+                    import signal
+                    try:
+                        # Kill the whole session: the worker fans out over a
+                        # multiprocessing pool, and killing just the parent
+                        # would orphan the pool children mid-simulation.
+                        os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+                    except (OSError, ProcessLookupError):
+                        p.kill()
+                await it.response.defer()
+                self.stop()
+
+        cview = _CancelView()
+        base_msg = (f"🧠 Simulating the best **{fmt_label}** XI on **{view.pitch}** "
+                    f"({view.weather}) vs {opp_label}…")
+        working = await ctx.send(base_msg + " **0%**", view=cview)
+
+        import time
+        last_edit = [0.0]
+
+        async def on_prog(pct):
+            # Throttle Discord edits (rate limits); the final state is written
+            # by the result/cancel path, so dropped ticks don't matter.
+            now = time.monotonic()
+            if now - last_edit[0] < 4 or cview.cancelled or pct >= 100:
+                return
+            last_edit[0] = now
+            try:
+                await working.edit(content=f"{base_msg} **{pct}%**")
+            except discord.HTTPException:
+                pass
+
         try:
             r = await self._optimize_in_subprocess(
                 "recommend_xi", squad, view.pitch, opp_spec,
-                view.weather, format_overs)
+                view.weather, format_overs, on_progress=on_prog, proc_box=job)
         except Exception as ex:
-            return await working.edit(content=f"❌ Error: {ex}")
+            cview.stop()
+            if cview.cancelled:
+                return await working.edit(content="🛑 Simulation cancelled.", view=None)
+            return await working.edit(content=f"❌ Error: {ex}", view=None)
+        cview.stop()
 
         # 4) format result
         cap = r["captain"]["name"] if r["captain"] else "-"
@@ -9736,7 +9885,8 @@ class PrefixCog(commands.Cog):
         for i, p in enumerate(r["order"], 1):
             wk = " (WK)" if "WK" in p["role"] else ""
             c = " 🧢" if p["name"] == cap else ""
-            rows.append(f"`{i:>2}.` {p['name']}{wk} · {p['bat']}/{p['bowl']}{c}")
+            lb = " 🚫L" if p.get("avoid_bowl") else ""
+            rows.append(f"`{i:>2}.` {p['name']}{wk} · {p['bat']}/{p['bowl']}{c}{lb}")
         e = discord.Embed(title=f"🧠 Best XI ({fmt_label}) · {view.pitch} / {view.weather} "
                                 f"vs {opp_label}",
                           description="\n".join(rows), color=0x2ecc71)
@@ -9745,6 +9895,10 @@ class PrefixCog(commands.Cog):
             e.add_field(name="⚡ Impact Player",
                         value=f"{imp['name']} ({category(imp)})", inline=True)
         e.add_field(name="Win %", value=f"{r['winpct']:.0f}%", inline=True)
+        if r.get("l_tags"):
+            e.add_field(name="🚫 Less bowling (L)",
+                        value=", ".join(r["l_tags"]) + " — keeping them out of the "
+                        "main attack raises your win%", inline=False)
         toss = r.get("toss")
         if toss:
             e.add_field(
@@ -9756,7 +9910,7 @@ class PrefixCog(commands.Cog):
                         value=", ".join(p["name"] for p in r["benched"][:14]), inline=False)
         e.set_footer(text=f"{fmt_label} · squad {len(squad)} · team OVR {r['ref_ovr']} · "
                           f"owner-only · batting order optimised for this deck")
-        await working.edit(content=None, embed=e)
+        await working.edit(content=None, embed=e, view=None)
 
     @commands.command(name="playerlistratings", aliases=["plr", "plratings"], help="[OWNER] Download the full player database WITH ratings.\nUsage: plr")
     async def playerlistratings(self, ctx):
@@ -12174,27 +12328,27 @@ class PrefixCog(commands.Cog):
         else:
             await ctx.send(embed=embed)
 
-    # ── TBES innings-break ads ─────────────────────────────────────────────────
-    # Managed per server; shown at every innings end of a TBES match (see
-    # _maybe_send_tbes_ads). Manager/admin/owner gated. Store is per-server, so these
-    # work whether or not a TBES tournament is currently live in the server.
+    # ── TBECS innings-break ads ─────────────────────────────────────────────────
+    # Managed per server; shown at every innings end of a TBECS match (see
+    # _maybe_send_tbecs_ads). Manager/admin/owner gated. Store is per-server, so these
+    # work whether or not a TBECS tournament is currently live in the server.
     def _is_ad_manager(self, ctx):
         tourney = get_server_tournament(str(ctx.guild.id))
         return ((ctx.author.id == ADMIN_DISCORD_ID)
                 or ctx.author.guild_permissions.administrator
                 or (tourney and str(ctx.author.id) in tourney.get("managers", [])))
 
-    @tournament.command(name="tbes_ad", aliases=["ad_add", "tbes_ad_add", "add_ad"],
-                        help="[MANAGER] Add a TBES ad shown at every innings end.\n"
+    @tournament.command(name="tbecs_ad", aliases=["ad_add", "tbecs_ad_add", "add_ad"],
+                        help="[MANAGER] Add a TBECS ad shown at every innings end.\n"
                              "Ads can be multi-line with links. Three ways to add:\n"
-                             "• Reply to the ad message with `cvt tbes_ad`\n"
-                             "• Bare `cvt tbes_ad` → the bot asks for the ad as your next message\n"
-                             "• `cvt tbes_ad <text>` for a quick one-liner")
-    async def t_tbes_ad(self, ctx, *, message: str = None):
+                             "• Reply to the ad message with `cvt tbecs_ad`\n"
+                             "• Bare `cvt tbecs_ad` → the bot asks for the ad as your next message\n"
+                             "• `cvt tbecs_ad <text>` for a quick one-liner")
+    async def t_tbecs_ad(self, ctx, *, message: str = None):
         if not self._is_ad_manager(ctx):
             return await ctx.send("❌ Managers only.")
-        from tbes_manager import add_tbes_ad
-        # Reply-capture: `cvt tbes_ad` as a reply saves the replied-to message verbatim —
+        from tbecs_manager import add_tbecs_ad
+        # Reply-capture: `cvt tbecs_ad` as a reply saves the replied-to message verbatim —
         # the reliable path for pre-composed multi-line ads with links/formatting.
         if message is None and ctx.message.reference and ctx.message.reference.message_id:
             try:
@@ -12202,7 +12356,7 @@ class PrefixCog(commands.Cog):
                 message = ref.content
             except Exception:
                 return await ctx.send("❌ Couldn't read the replied-to message — try again.")
-        # Next-message capture: bare `cvt tbes_ad` waits for the full ad as its own message.
+        # Next-message capture: bare `cvt tbecs_ad` waits for the full ad as its own message.
         if message is None:
             await ctx.send("📝 Send the ad as your **next message** — multiple lines and links are fine. (5 min, `cancel` to abort)")
             def check(m):
@@ -12214,19 +12368,19 @@ class PrefixCog(commands.Cog):
             if reply.content.strip().lower() == "cancel":
                 return await ctx.send("❌ Cancelled — no ad added.")
             message = reply.content
-        _ok, msg, _ = add_tbes_ad(str(ctx.guild.id), message)
+        _ok, msg, _ = add_tbecs_ad(str(ctx.guild.id), message)
         await ctx.send(msg)
 
-    @tournament.command(name="tbes_ads", aliases=["ad_list", "tbes_ad_list", "ads"],
-                        help="[MANAGER] List this server's TBES ads.\nUsage: tournament tbes_ads")
-    async def t_tbes_ads(self, ctx):
+    @tournament.command(name="tbecs_ads", aliases=["ad_list", "tbecs_ad_list", "ads"],
+                        help="[MANAGER] List this server's TBECS ads.\nUsage: tournament tbecs_ads")
+    async def t_tbecs_ads(self, ctx):
         if not self._is_ad_manager(ctx):
             return await ctx.send("❌ Managers only.")
-        from tbes_manager import get_tbes_ads
-        ads = get_tbes_ads(str(ctx.guild.id))
+        from tbecs_manager import get_tbecs_ads
+        ads = get_tbecs_ads(str(ctx.guild.id))
         if not ads:
-            return await ctx.send("ℹ️ No TBES ads set. Add one with `cvt tbes_ad <message>`.")
-        buf = f"📢 **TBES Ads ({len(ads)})** — shown at every innings end:\n"
+            return await ctx.send("ℹ️ No TBECS ads set. Add one with `cvt tbecs_ad <message>`.")
+        buf = f"📢 **TBECS Ads ({len(ads)})** — shown at every innings end:\n"
         for i, a in enumerate(ads, 1):
             flat = " ⏎ ".join(x.strip() for x in a.splitlines() if x.strip())   # one line per ad in the list
             ln = f"**#{i}** — {flat if len(flat) <= 150 else flat[:147] + '…'}\n"
@@ -12237,23 +12391,34 @@ class PrefixCog(commands.Cog):
         if buf.strip():
             await ctx.send(buf)
 
-    @tournament.command(name="tbes_ad_remove", aliases=["ad_remove", "ad_del", "remove_ad"],
-                        help="[MANAGER] Remove a TBES ad by its number.\nUsage: tournament tbes_ad_remove <n>")
-    async def t_tbes_ad_remove(self, ctx, index: int):
+    @tournament.command(name="tbecs_ad_remove", aliases=["ad_remove", "ad_del", "remove_ad"],
+                        help="[MANAGER] Remove a TBECS ad by its number.\nUsage: tournament tbecs_ad_remove <n>")
+    async def t_tbecs_ad_remove(self, ctx, index: int):
         if not self._is_ad_manager(ctx):
             return await ctx.send("❌ Managers only.")
-        from tbes_manager import remove_tbes_ad
-        _ok, msg = remove_tbes_ad(str(ctx.guild.id), index)
+        from tbecs_manager import remove_tbecs_ad
+        _ok, msg = remove_tbecs_ad(str(ctx.guild.id), index)
         await ctx.send(msg)
 
-    @tournament.command(name="tbes_ad_clear", aliases=["ad_clear", "clear_ads"],
-                        help="[MANAGER] Remove ALL TBES ads for this server.\nUsage: tournament tbes_ad_clear")
-    async def t_tbes_ad_clear(self, ctx):
+    @tournament.command(name="tbecs_ad_clear", aliases=["ad_clear", "clear_ads"],
+                        help="[MANAGER] Remove ALL TBECS ads for this server.\nUsage: tournament tbecs_ad_clear")
+    async def t_tbecs_ad_clear(self, ctx):
         if not self._is_ad_manager(ctx):
             return await ctx.send("❌ Managers only.")
-        from tbes_manager import clear_tbes_ads
-        _n, msg = clear_tbes_ads(str(ctx.guild.id))
+        from tbecs_manager import clear_tbecs_ads
+        _n, msg = clear_tbecs_ads(str(ctx.guild.id))
         await ctx.send(msg)
+
+    @tournament.command(name="tbecs_ad_preview", aliases=["ad_preview", "preview_ads"],
+                        help="[MANAGER] Preview the ads exactly as they'll appear at an innings end.\nUsage: tournament tbecs_ad_preview")
+    async def t_tbecs_ad_preview(self, ctx):
+        if not self._is_ad_manager(ctx):
+            return await ctx.send("❌ Managers only.")
+        from tbecs_manager import build_tbecs_ad_embeds
+        embeds = build_tbecs_ad_embeds(str(ctx.guild.id))
+        if not embeds:
+            return await ctx.send("ℹ️ No TBECS ads set. Add one with `cvt tbecs_ad`.")
+        await ctx.send("👀 **Preview** — this is what shows at every innings end:", embeds=embeds[:10])
 
     @tournament.command(name="force_result", help="[MANAGER] Manually set match result.\nUsage: tournament force_result <id> <winner> <t1_r> <t1_w> <t1_b> <t2_r> <t2_w> <t2_b>")
     async def t_force_result(self, ctx, match_id: int, winner_team: str, t1_runs: int, t1_wkts: int, t1_balls: int, t2_runs: int, t2_wkts: int, t2_balls: int):
