@@ -1,7 +1,7 @@
 <h1 align="center">CricVerse</h1>
 
 <p align="center">
-  <b>A full-featured cricket simulation bot for Discord</b><br>
+  <b>A cricket simulation bot for Discord</b><br>
   Ball-by-ball match engine · multi-format tournaments · draft mode · player careers
 </p>
 
@@ -128,6 +128,21 @@ python3 tools/dsl_flow_test.py       # 34 checks
 python3 tools/rating_league_test.py  # 21 checks
 ```
 
+## Contributing
+
+Want to run your own instance? [SETUP.md](SETUP.md) has everything - fork or
+clone away. If you'd like a change in this repo, open a pull request rather
+than expecting direct access: `main` auto-deploys the live bot, so changes
+are only merged after they've been tested.
+
+## Disclaimer
+
+This is a non-commercial fan project. It is not affiliated with, endorsed by,
+or connected to the ICC, IPL, or any cricket board. Player names are used in a
+fictional simulation context and all ratings are fan-made. Scorecard template
+imagery belongs to its respective owners; if you're a rights holder and want
+something removed, open an issue.
+
 ## License
 
-[MIT](LICENSE) © Jaiv Patel
+[MIT](LICENSE) © Jaiv Patel (code only - see disclaimer above for assets)
