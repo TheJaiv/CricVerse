@@ -14,7 +14,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tools.sim_harness import build_team, CricketMatch, run_full_match
-from t20_simulation import (T20_PITCH_DIFFICULTY, T20_PAR_RATE_FLAT, T20_PAR_RATE_SLOPE)
+from engine.t20_simulation import (T20_PITCH_DIFFICULTY, T20_PAR_RATE_FLAT, T20_PAR_RATE_SLOPE)
 
 ALL = ["Flat", "Green", "Dry", "Dusty", "Hard", "Soft", "Cracked", "Damp",
        "Dead", "Worn", "Turning", "Two-Paced", "Slow", "Bouncy", "Sticky"]

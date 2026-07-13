@@ -1,11 +1,11 @@
-# ── OS / editor junk ───────────────────────────────────────────────
+# OS / editor
 .DS_Store
 Thumbs.db
 *.swp
 .idea/
 .vscode/
 
-# ── Python ─────────────────────────────────────────────────────────
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -18,18 +18,18 @@ venv/
 env/
 ENV/
 
-# ── Secrets / config (NEVER commit real tokens or DB URIs) ─────────
+# secrets - never commit real tokens or DB URIs
 .env
 *.env
 !.env.example
 
-# ── Runtime data & local backups (the source of truth is MongoDB) ──
+# runtime data & local backups (source of truth is MongoDB)
 ccpl_backup.json
+data/ccpl_backup.json
 match_counts.json
 *.bin
 
-# ── Throwaway preview renders (the bot builds images in-memory; ─────
-#    these only appear if a local test/preview script writes them) ──
+# throwaway preview renders from local test/preview scripts
 summary.png
 scorecard.png
 final_scoreboard.png
@@ -42,8 +42,8 @@ knockouts.png
 match_banner.png
 test_full.png
 test_summary.png
+testoutput.png
 preview_*.png
-_*.py
 *_test_output.png
 *_test.png
 test_previews/

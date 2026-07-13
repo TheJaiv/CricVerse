@@ -8,19 +8,19 @@ import random
 import requests
 from PIL import Image, ImageDraw, ImageFont
 import asyncio
-from subscription_manager import DB_CACHE, async_save_tournament_to_bin, get_all_players, get_tier_status
-from stadium_manager import (
+from core.subscription_manager import DB_CACHE, async_save_tournament_to_bin, get_all_players, get_tier_status
+from league.stadium_manager import (
     stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium,
     assign_stadiums, reroll_stadiums, stadium_label, DEFAULT_ACL_STADIUMS,
 )
 
-# ── Tournament pitch & weather conditions ────────────────────────────────────
+# Tournament pitch & weather conditions
 # Canonical engine lists (mirror the PitchWeatherView dropdowns in bot.py).
 ALL_PITCHES = ["Flat", "Green", "Dry", "Dusty", "Hard", "Soft", "Cracked", "Damp",
                "Dead", "Worn", "Turning", "Two-Paced", "Slow", "Bouncy", "Sticky"]
 ALL_WEATHER = ["Clear", "Cloudy", "Overcast", "Humid", "Dry Heat", "Windy",
                "Light Rain", "Drizzle", "Heavy Rain", "Thunderstorm"]
-# "Nice"/standard pools — group stages draw from these 90% of the time, knockouts 100%.
+# "Nice"/standard pools - group stages draw from these 90% of the time, knockouts 100%.
 GROUP_PITCHES = ["Flat", "Dead", "Hard", "Green", "Dusty"]
 GROUP_WEATHER = ["Clear", "Cloudy"]
 _OTHER_PITCHES = [p for p in ALL_PITCHES if p not in GROUP_PITCHES]
@@ -50,13 +50,13 @@ def pick_conditions(is_knockout: bool):
 
 def assign_tournament_conditions(tourney):
     """Idempotently fill pitch/weather on every scheduled match per the tournament's
-    conditions_mode. Safe to call repeatedly — only fills matches missing conditions.
-      manual  → leave unset (each match asks interactively)
-      auto    → weighted pools (group 90% / knockout 100%)
-      home    → pitch = home team's (team1) home_pitch; weather = pooled
-      stadium → (DSL) pitch drawn from the match venue's weighted profile
+    conditions_mode. Safe to call repeatedly - only fills matches missing conditions.
+      manual  -> leave unset (each match asks interactively)
+      auto    -> weighted pools (group 90% / knockout 100%)
+      home    -> pitch = home team's (team1) home_pitch; weather = pooled
+      stadium -> (DSL) pitch drawn from the match venue's weighted profile
     """
-    assign_stadiums(tourney)   # venue labels (ACL random / DSL home-ground; no-op otherwise) — before pitch draw
+    assign_stadiums(tourney)   # venue labels (ACL random / DSL home-ground; no-op otherwise) - before pitch draw
     mode = tourney.get("conditions_mode", "manual")
     if mode == "manual":
         return
@@ -66,7 +66,7 @@ def assign_tournament_conditions(tourney):
             continue
         ko = _match_is_knockout(m)
         if mode == "stadium":
-            from dsl_manager import pick_dsl_conditions   # lazy — avoids circular import
+            from league.dsl_manager import pick_dsl_conditions   # lazy - avoids circular import
             m["pitch"], m["weather"] = pick_dsl_conditions(m.get("stadium"), ko)
         elif mode == "home":
             hp = canonical_pitch(homes.get(m.get("team1"))) or random.choice(GROUP_PITCHES)
@@ -183,7 +183,7 @@ def generate_round_robin_schedule(team_names, *, double=False, stage=None, shuff
 
 
 def _circle_rounds(items):
-    """Circle-method 1-factorization → list of rounds, each a list of (a, b) pairs.
+    """Circle-method 1-factorization -> list of rounds, each a list of (a, b) pairs.
     An odd count gets a BYE, whose pair is dropped (that item sits the round out)."""
     ts = list(items)
     if len(ts) % 2:
@@ -205,30 +205,30 @@ def _circle_rounds(items):
 def generate_ipl_schedule(team_names):
     """Real-IPL fixture list: 10 teams, 14 matches each (70 league matches).
 
-    The IPL has NO groups — one combined table, and nobody ever sees an 'A' or 'B'.
+    The IPL has NO groups - one combined table, and nobody ever sees an 'A' or 'B'.
     The split below is purely the device the real IPL uses to *build* the fixture:
     the 10 teams are seeded 1-10, dealt alternately into two columns of 5, and each
-    seed row (1&2, 3&4, …) is a 'mirror' pair. From that, each team plays:
+    seed row (1&2, 3&4, ...) is a 'mirror' pair. From that, each team plays:
 
       · the 4 teams in its own column ............ twice (home & away)  = 8
-      · its mirror — the other team on its row ... twice               = 2
+      · its mirror - the other team on its row ... twice               = 2
       · the other 4 teams of the other column .... once (2 home, 2 away) = 4
                                                                   total = 14
 
-    So the top two seeds (row 1 — the CSK/MI slot) meet twice, as in the real thing.
+    So the top two seeds (row 1 - the CSK/MI slot) meet twice, as in the real thing.
     `team_names` is taken in seed order (the order teams were added).
 
     Laid out as 14 rounds of 5 so every team plays exactly once per round:
-      · rounds 1-9   — a single round robin over all 10 teams: this supplies every
+      · rounds 1-9   - a single round robin over all 10 teams: this supplies every
                        one-off cross-column meeting, plus leg 1 of the twice-met pairs.
-      · rounds 10-14 — the return legs: a K5 circle method inside each column (2+2
+      · rounds 10-14 - the return legs: a K5 circle method inside each column (2+2
                        matches) plus the mirror match of the row that byes in both
                        columns that round (1) = 5.
 
     team1 is the home side. Every team ends on 7 home / 7 away.
     """
     seeds = list(team_names)
-    col_a, col_b = seeds[0::2], seeds[1::2]   # seed 1 → A, seed 2 → B, seed 3 → A …
+    col_a, col_b = seeds[0::2], seeds[1::2]   # seed 1 -> A, seed 2 -> B, seed 3 -> A ...
     all_teams = seeds
     row_of, grp_of = {}, {}
     for i, t in enumerate(col_a):
@@ -237,7 +237,7 @@ def generate_ipl_schedule(team_names):
         row_of[t], grp_of[t] = i, "B"
 
     def is_single(a, b):
-        """Different column, different row → the pair meets exactly once."""
+        """Different column, different row -> the pair meets exactly once."""
         return grp_of[a] != grp_of[b] and row_of[a] != row_of[b]
 
     def home_of_single(t1, t2):
@@ -248,7 +248,7 @@ def generate_ipl_schedule(team_names):
         return (a, b) if d in (1, 2) else (b, a)
 
     rounds = []
-    leg1_home = {}   # frozenset(pair) → who hosted leg 1, for the pairs that meet twice
+    leg1_home = {}   # frozenset(pair) -> who hosted leg 1, for the pairs that meet twice
 
     for pairs in _circle_rounds(all_teams):
         rnd = []
@@ -266,7 +266,7 @@ def generate_ipl_schedule(team_names):
         return (b, a) if leg1_home[frozenset((a, b))] == a else (a, b)
 
     # Return legs. Both columns run the SAME index rotation, so the row that byes in
-    # column A byes in column B too — that row's mirror match fills the round to 5.
+    # column A byes in column B too - that row's mirror match fills the round to 5.
     for pairs in _circle_rounds(list(range(5))):
         bye = next(i for i in range(5) if i not in {x for p in pairs for x in p})
         rnd = []
@@ -276,7 +276,7 @@ def generate_ipl_schedule(team_names):
         rnd.append(dict(zip(("team1", "team2"), return_leg(col_a[bye], col_b[bye]))))
         rounds.append(rnd)
 
-    # One flat league — no `group` on the match, because the IPL has no groups.
+    # One flat league - no `group` on the match, because the IPL has no groups.
     schedule, mid = [], 1
     for r, rnd in enumerate(rounds, 1):
         random.shuffle(rnd)
@@ -390,7 +390,7 @@ def generate_t20wc_points_table(tourney) -> io.BytesIO:
         bb = f.getbbox("Ag") if hasattr(f, "getbbox") else None
         return (bb[3] - bb[1]) if bb else 14
 
-    # Column X centres — aligned to template header labels; right group adds R_OFF
+    # Column X centres - aligned to template header labels; right group adds R_OFF
     L_POS_X  =  93
     L_TEAM_X = 130
     L_P_X    = 402
@@ -437,7 +437,7 @@ def generate_t20wc_points_table(tourney) -> io.BytesIO:
             for text, cx, centered in stats:
                 x = (cx - tw(text) // 2) if centered else cx
                 d.text((x, ty), text, fill=DARK, font=font)
-            # team name — larger font
+            # team name - larger font
             d.text((team_x, ty_name), nm[:14].upper(), fill=DARK, font=font_name)
 
     for grp, right, row_ys in [("A", False, TOP_ROWS), ("B", True, TOP_ROWS),
@@ -459,7 +459,7 @@ def generate_t20wc_points_table(tourney) -> io.BytesIO:
 
 def generate_ccodi_points_table(tourney) -> io.BytesIO:
     """Fill assets/ccodi_table.png (dark navy, Group A left / Group B right, 5 rows each,
-    POS digits baked in) with live group standings — team logos included. Top-2 (the
+    POS digits baked in) with live group standings - team logos included. Top-2 (the
     semi-final qualifiers) get gold names + points."""
     img = Image.open("assets/ccodi_table.png").convert("RGBA")
     d = ImageDraw.Draw(img)
@@ -521,7 +521,7 @@ def generate_ccodi_points_table(tourney) -> io.BytesIO:
     return buf
 
 
-# ── Default points table (every format without a bespoke one — incl. IPL) ────
+# Default points table (every format without a bespoke one - incl. IPL)
 # How many top rows are flagged as qualifying for the knockouts.
 _STANDINGS_CUTOFF = {"ipl": 4, "dsl": 4, "acl": 6}
 
@@ -551,7 +551,7 @@ def build_standings_message(tourney):
     """The default standings: the points table as text, inside an embed titled with the
     tournament name. Returns the embed, or None if nothing has been played yet.
 
-    Formats with a bespoke table image (ACL, CCODI, T20 World Cup) never reach this —
+    Formats with a bespoke table image (ACL, CCODI, T20 World Cup) never reach this -
     they render their own and return before the default path.
     """
     standings = get_tournament_standings(tourney)
@@ -567,7 +567,7 @@ def build_standings_message(tourney):
     total = len([m for m in tourney.get("schedule", []) if isinstance(m.get("round"), int)])
     parts = [f"**{played}/{total}** league matches played · 🥇 **{standings[0][0]}** on top"]
 
-    # The table lives in the description (4096 chars — room for far more teams than any
+    # The table lives in the description (4096 chars - room for far more teams than any
     # format here); it only spills into extra fields if a huge roster ever overflows it.
     rows = _standings_table(standings, cutoff)
     block = "```\n" + "\n".join(rows) + "\n```"
@@ -684,9 +684,9 @@ def generate_acl_fixtures_image(tourney, team_name) -> io.BytesIO:
     """Fill assets/acl_fixtures.png with one team's fixtures (up to 13 league rows).
     Coordinates pixel-scanned from the template (1024×1536):
       • header team-logo placeholder box: x299–433, y62–182 (center 366,122)
-      • 8 columns — MATCH NO | TEAM | VS | TEAM | PITCH | WEATHER | STADIUM | STATUS
+      • 8 columns - MATCH NO | TEAM | VS | TEAM | PITCH | WEATHER | STADIUM | STATUS
       • 13 data rows, ~79px pitch
-    The VS badges, match-no pills, status pills and labels are already on the template —
+    The VS badges, match-no pills, status pills and labels are already on the template -
     we only render text/logos into the cells.
     """
     DARK  = (16, 28, 70)
@@ -746,7 +746,7 @@ def generate_acl_fixtures_image(tourney, team_name) -> io.BytesIO:
         for i, ln in enumerate(lines):
             d.text((cx - tw(ln, f) / 2, y0 + i * lh - off), ln, font=f, fill=fill)
 
-    CELL_SZ = 20   # ONE constant font size for every data cell — uniform look
+    CELL_SZ = 20   # ONE constant font size for every data cell - uniform look
 
     def cell(cx, cy, s, max_w, fill=DARK, max_lines=3):
         """Render a centred cell value at the constant CELL_SZ. If it doesn't fit on
@@ -762,7 +762,7 @@ def generate_acl_fixtures_image(tourney, team_name) -> io.BytesIO:
             lines = _wrap(words, f, max_w)
             if lines and len(lines) <= max_lines:
                 return _draw_lines(lines, f, cx, cy, fill)
-        # rare: a single word (or too many wrapped lines) wider than the column →
+        # rare: a single word (or too many wrapped lines) wider than the column ->
         # shrink just this value a little until it fits the line budget.
         for sz in range(CELL_SZ - 1, 12, -1):
             f = _acl_pt_font(sz)
@@ -777,7 +777,7 @@ def generate_acl_fixtures_image(tourney, team_name) -> io.BytesIO:
             s = s[:-1]
         _draw_lines([s + "…"], f, cx, cy, fill)
 
-    # ── Header: viewing team's logo into the placeholder box ──
+    # Header: viewing team's logo into the placeholder box
     team = next((t for t in tourney.get("teams", []) if t["name"] == team_name), {})
     logo_str = team.get("logo_match") or team.get("logo_standings")
     logo = _fetch_emoji_img(logo_str, PH_SZ) if logo_str else None
@@ -785,14 +785,14 @@ def generate_acl_fixtures_image(tourney, team_name) -> io.BytesIO:
         img.paste(logo, (int(PH_CX - PH_SZ / 2), int(PH_CY - PH_SZ / 2)), logo)
         d = ImageDraw.Draw(img)
 
-    # ── Header: team name on the gradient pill below FIXTURES (its own larger size) ──
+    # Header: team name on the gradient pill below FIXTURES (its own larger size)
     f_name = _acl_pt_font(30)
     _nm = team_name.upper()
     while tw(_nm, f_name) > NAME_W and f_name.size > 16:
         f_name = _acl_pt_font(f_name.size - 1)
     _draw_lines([_nm], f_name, NAME_CX, NAME_CY, WHITE)
 
-    # ── Rows: this team's matches in schedule order, capped to the 13 template rows ──
+    # Rows: this team's matches in schedule order, capped to the 13 template rows
     mine = [m for m in tourney.get("schedule", [])
             if m.get("team1") == team_name or m.get("team2") == team_name]
     mine.sort(key=lambda m: m.get("match_id", 0))
@@ -845,7 +845,7 @@ class FixturesView(discord.ui.View):
             try:
                 buf = generate_acl_fixtures_image(self.tourney, self.team_name)
             except Exception as e:
-                print(f"⚠️ Fixtures image render failed: {e}")
+                print(f"Fixtures image render failed: {e}")
                 return await interaction.followup.send(f"⚠️ Couldn't render the fixtures image: {e}", ephemeral=True)
             self.showing_image = True
             button.label, button.emoji = "View as List", "📋"
@@ -899,7 +899,7 @@ def generate_t20wc_super8_table(tourney) -> io.BytesIO:
         bb = f.getbbox("Ag") if hasattr(f, "getbbox") else None
         return (bb[3] - bb[1]) if bb else 14
 
-    # Column X centres — pixel-scanned from super8_table.png (1484px wide, two groups)
+    # Column X centres - pixel-scanned from super8_table.png (1484px wide, two groups)
     # POS numbers are pre-printed in the template; L_TEAM_X is where logo/name rendering begins
     L_TEAM_X = 105
     L_P_X    = 365
@@ -910,7 +910,7 @@ def generate_t20wc_super8_table(tourney) -> io.BytesIO:
     L_NRR_X  = 682
     R_OFF    = 710
 
-    # 4 team rows per group — sub-header at y=425..492, data rows below it
+    # 4 team rows per group - sub-header at y=425..492, data rows below it
     ROW_YS = [532, 613, 697, 778]
 
     EMOJI_SZ = int(H * 0.038)
@@ -932,7 +932,7 @@ def generate_t20wc_super8_table(tourney) -> io.BytesIO:
                 ey = cy - EMOJI_SZ // 2
                 img.paste(logo, (team_x, ey), logo)
                 team_x += EMOJI_SZ + 6
-            # stat columns — POS numbers are pre-printed in template, skip them
+            # stat columns - POS numbers are pre-printed in template, skip them
             stats = [
                 (str(st["P"]),        L_P_X  + off,  True ),
                 (str(st["W"]),        L_W_X  + off,  True ),
@@ -944,7 +944,7 @@ def generate_t20wc_super8_table(tourney) -> io.BytesIO:
             for text, cx, centered in stats:
                 x = (cx - tw(text) // 2) if centered else cx
                 d.text((x, ty), text, fill=DARK, font=font)
-            # team name — larger font
+            # team name - larger font
             d.text((team_x, ty_name), nm[:14].upper(), fill=DARK, font=font_name)
 
     for sg, right in [("A", False), ("B", True)]:
@@ -1029,7 +1029,7 @@ def generate_t20wc_knockouts_image(tourney: dict):
     # Final box x=566-968: T1 cx=655, T2 cx=879, VS at x≈767
     # SF2 box x=1053-1466: T1 cx=1145, T2 cx=1375, VS at x≈1261
     # All boxes: white interior starts y≈468, VS center y≈583
-    # → name above logo: name_cy=490, logo_cy=583 (aligned with VS row)
+    # > name above logo: name_cy=490, logo_cy=583 (aligned with VS row)
     draw_match(sf1,
                t1_logo_cx=155,  t2_logo_cx=387,  logo_cy=583,
                t1_name_cx=155,  t2_name_cx=387,  name_cy=490, emoji_sz=100)
@@ -1152,7 +1152,7 @@ def _build_status_pages(tourney):
         if ko:
             pages.append(("Knockouts", "knockout", None, ko))
     elif t_type == "ccodi":
-        # Per-group pages (with standings) + knockouts — used by cvt groups.
+        # Per-group pages (with standings) + knockouts - used by cvt groups.
         for grp in ["A", "B"]:
             matches = [m for m in schedule if m.get("stage") == "group" and m.get("group") == grp]
             if matches:
@@ -1189,7 +1189,7 @@ def _build_status_pages(tourney):
 
 
 def _build_ccodi_round_pages(tourney):
-    """One page per round (4 matches, distinct venues) + a Knockouts page —
+    """One page per round (4 matches, distinct venues) + a Knockouts page -
     the round-wise cvt status view for new CCODI seasons."""
     schedule = tourney.get("schedule", [])
     pages = []
@@ -1205,7 +1205,7 @@ def _build_ccodi_round_pages(tourney):
 _FLAT_PAGE_SIZE = 10
 
 def _build_flat_pages(tourney):
-    """Flat pages sorted by match_id — used by cvt status for T20 WC."""
+    """Flat pages sorted by match_id - used by cvt status for T20 WC."""
     schedule = sorted(tourney.get("schedule", []), key=lambda m: m["match_id"])
     pages = []
     for i in range(0, len(schedule), _FLAT_PAGE_SIZE):
@@ -1269,7 +1269,7 @@ def _build_status_embed(tourney, page_info):
             else:
                 lines.append(f"`#{m['match_id']}` {tag}{t1b} {r['t1_runs']}/{r['t1_wickets']} vs {t2b} {r['t2_runs']}/{r['t2_wickets']} ✅")
         else:
-            # ACL playoff slots may be unresolved (None) — show their TBD source label
+            # ACL playoff slots may be unresolved (None) - show their TBD source label
             a = f"**{m['team1']}**" if m.get("team1") else f"*{m.get('team1_src', 'TBD')}*"
             b = f"**{m['team2']}**" if m.get("team2") else f"*{m.get('team2_src', 'TBD')}*"
             icon = "🔒" if m["status"] == "locked" else "⏳"
@@ -1369,7 +1369,7 @@ class TournamentStatusView(discord.ui.View):
 
 
 class T20StandingsView(discord.ui.View):
-    """◀ / ▶ navigation through Group Stage → Super 8 → Knockouts standings images."""
+    """ /  navigation through Group Stage -> Super 8 -> Knockouts standings images."""
 
     def __init__(self, pages: list, *, start_idx: int = 0):
         super().__init__(timeout=120)
@@ -1411,7 +1411,7 @@ class T20StandingsView(discord.ui.View):
 
 
 class TournamentLeaderboardView(discord.ui.View):
-    """◀ / ▶ paginated leaderboard — shows up to `len(lines)` entries, 10 per page.
+    """ /  paginated leaderboard - shows up to `len(lines)` entries, 10 per page.
     Used by the runs / wickets / MVP leaderboards (first 50, 5 pages).
     (Named distinctly from bot.py's career `LeaderboardView` to avoid a shadow clash.)"""
 
@@ -1461,7 +1461,7 @@ class TournamentLeaderboardView(discord.ui.View):
 
 def build_player_stats_embed(stats, pname, tname, overall=None, season_label=None):
     """Shared tournament player-stats embed (slash + prefix, after the team is resolved).
-    `overall` (DSL): merged all-season totals dict (same keys + 'seasons'/'teams') —
+    `overall` (DSL): merged all-season totals dict (same keys + 'seasons'/'teams') -
     rendered as an extra field. `season_label` retitles the current block (e.g. 'Season 3')."""
     sr = (stats["runs"] / stats["balls_faced"] * 100) if stats["balls_faced"] > 0 else 0.0
     bat_avg = (stats["runs"] / stats["outs"]) if stats["outs"] > 0 else float(stats["runs"])
@@ -1599,13 +1599,11 @@ def build_squad_confirm_embed(team_name: str, found_players: list, fuzzy_correct
     return embed
 
 
-# ══════════════════════════════════════════════════════════════════════════
-#  ACL — Akatsuki Cricket League: playoff + Super Cup engine
-#  League (91) → Top-6 Playoffs (6 matches) → Akatsuki Super Cup.
+# ACL - Akatsuki Cricket League: playoff + Super Cup engine
+# League (91) -> Top-6 Playoffs (6 matches) -> Akatsuki Super Cup.
 #  Structure note: the moment the league ends, the #1 (League Shield) is
-#  already locked into the Super Cup — so the Super Cup is created up front
+# already locked into the Super Cup - so the Super Cup is created up front
 #  with one finalist known and the other (ACL Trophy Winner) as TBD.
-# ══════════════════════════════════════════════════════════════════════════
 ACL_PLAYOFF_STAGE  = "acl_playoff"
 ACL_SUPERCUP_STAGE = "acl_supercup"
 ACL_KO_STAGES      = (ACL_PLAYOFF_STAGE, ACL_SUPERCUP_STAGE)
@@ -1664,7 +1662,7 @@ def acl_generate_playoffs(tourney):
     if len(seeds) < 6:
         return False, "❌ Need at least 6 teams to run the Playoffs."
     s1, s2, s3, s4, s5, s6 = seeds[:6]
-    tourney["league_shield"] = s1            # #1 → direct Super Cup spot
+    tourney["league_shield"] = s1            # #1 -> direct Super Cup spot
     tourney["playoff_seeds"] = seeds[:6]
 
     mid = _acl_next_mid(tourney)
@@ -1677,15 +1675,15 @@ def acl_generate_playoffs(tourney):
         })
         mid += 1
 
-    # Round 1 — teams known, ready to play (any order / in parallel)
+    # Round 1 - teams known, ready to play (any order / in parallel)
     mk("Qualifier",        ACL_PLAYOFF_STAGE,  s1, s2,   "1st · League", "2nd · League", "pending")
     mk("Eliminator 1",     ACL_PLAYOFF_STAGE,  s3, s6,   "3rd · League", "6th · League", "pending")
     mk("Eliminator 2",     ACL_PLAYOFF_STAGE,  s4, s5,   "4th · League", "5th · League", "pending")
-    # Knockouts — locked until feeders resolve
+    # Knockouts - locked until feeders resolve
     mk("The Knockout", ACL_PLAYOFF_STAGE,  None, None, "Winner · Eliminator 1", "Winner · Eliminator 2", "locked")
     mk("Qualifier 2",      ACL_PLAYOFF_STAGE,  None, None, "Loser · Qualifier",     "Winner · The Knockout", "locked")
     mk("Grand Final",      ACL_PLAYOFF_STAGE,  None, None, "Winner · Qualifier",    "Winner · Qualifier 2", "locked")
-    # Super Cup apex — Shield finalist locked in already; opponent = ACL Trophy Winner (TBD)
+    # Super Cup apex - Shield finalist locked in already; opponent = ACL Trophy Winner (TBD)
     mk("Super Cup",        ACL_SUPERCUP_STAGE, s1, None,  "League Shield",          "ACL Trophy Winner", "locked")
 
     assign_tournament_conditions(tourney)   # knockouts get 100%-pool conditions up front
@@ -1708,24 +1706,24 @@ def _acl_try_advance(tourney):
     gf = _acl_get(tourney, "Grand Final")
     sc = _acl_get(tourney, "Super Cup")
 
-    # Qualifier → winner to Grand Final, loser to Qualifier 2
+    # Qualifier -> winner to Grand Final, loser to Qualifier 2
     qw, ql = _acl_winner_loser(q)
     if qw:
         _acl_fill(gf, "team1", qw)
         _acl_fill(sf, "team1", ql)
-    # Eliminators → The Knockout
+    # Eliminators -> The Knockout
     e1w, _ = _acl_winner_loser(e1)
     e2w, _ = _acl_winner_loser(e2)
     if e1w: _acl_fill(ef, "team1", e1w)
     if e2w: _acl_fill(ef, "team2", e2w)
-    # The Knockout → Qualifier 2 (slot 2)
+    # The Knockout -> Qualifier 2 (slot 2)
     efw, _ = _acl_winner_loser(ef)
     if efw: _acl_fill(sf, "team2", efw)
-    # Qualifier 2 → Grand Final (slot 2)
+    # Qualifier 2 -> Grand Final (slot 2)
     sfw, _ = _acl_winner_loser(sf)
     if sfw: _acl_fill(gf, "team2", sfw)
 
-    # Grand Final → ACL Trophy Winner, then Super Cup branch
+    # Grand Final -> ACL Trophy Winner, then Super Cup branch
     trophy, runner_up = _acl_winner_loser(gf)
     if trophy:
         tourney["acl_trophy_winner"] = trophy
@@ -1733,7 +1731,7 @@ def _acl_try_advance(tourney):
         shield = tourney.get("league_shield")
         slq = _acl_get(tourney, "Super League Qualifier")
         if trophy == shield:
-            # DOMESTIC DOUBLE → Super League Qualifier decides the Super Cup challenger
+            # DOMESTIC DOUBLE -> Super League Qualifier decides the Super Cup challenger
             if not slq:
                 seeds = tourney.get("playoff_seeds", [])
                 second = seeds[1] if len(seeds) > 1 else None
@@ -1750,12 +1748,12 @@ def _acl_try_advance(tourney):
         else:
             _acl_fill(sc, "team2", trophy)
 
-    # Super League Qualifier → Super Cup challenger
+    # Super League Qualifier -> Super Cup challenger
     slqw, _ = _acl_winner_loser(_acl_get(tourney, "Super League Qualifier"))
     if slqw:
         _acl_fill(sc, "team2", slqw)
 
-    # Super Cup complete → crown the champion
+    # Super Cup complete -> crown the champion
     champ, _ = _acl_winner_loser(sc)
     if champ:
         tourney["acl_champion"] = champ
@@ -1815,12 +1813,12 @@ def acl_bracket_embed(tourney):
     return e
 
 
-# ── IPL playoffs ─────────────────────────────────────────────────────────────
+# IPL playoffs
 # Seeded off the SINGLE combined 10-team table (the groups only shape the fixture
-# list — exactly as the real IPL does):
-#   Qualifier 1: 1st v 2nd        Eliminator: 3rd v 4th
+# list - exactly as the real IPL does):
+# Qualifier 1: 1st v 2nd Eliminator: 3rd v 4th
 #   Qualifier 2: L(Q1) v W(Eliminator)
-#   Final:       W(Q1) v W(Q2)
+# Final: W(Q1) v W(Q2)
 IPL_PLAYOFF_ORDER = ["Qualifier 1", "Eliminator", "Qualifier 2", "Final"]
 
 
@@ -1846,7 +1844,7 @@ def ipl_try_advance(tourney):
         l = m["result"].get("loser") or (m["team2"] if w == m["team1"] else m["team1"])
         return w, l
 
-    # Stage 1: league complete → Qualifier 1 (1v2) + Eliminator (3v4)
+    # Stage 1: league complete -> Qualifier 1 (1v2) + Eliminator (3v4)
     league = [m for m in sched if m.get("stage") == "group"]
     if not league or any(m["status"] != "completed" for m in league):
         return
@@ -1858,7 +1856,7 @@ def ipl_try_advance(tourney):
         _add("Eliminator",  top[2], top[3], "3rd · League", "4th · League")
         return
 
-    # Stage 2: Q1 + Eliminator complete → Qualifier 2 (Q1 loser v Eliminator winner)
+    # Stage 2: Q1 + Eliminator complete -> Qualifier 2 (Q1 loser v Eliminator winner)
     q1, elim = _get("Qualifier 1"), _get("Eliminator")
     if _done(q1) and _done(elim) and not _get("Qualifier 2"):
         _, lq1 = _wl(q1)
@@ -1866,19 +1864,19 @@ def ipl_try_advance(tourney):
         _add("Qualifier 2", lq1, welim, "Loser · Qualifier 1", "Winner · Eliminator")
         return
 
-    # Stage 3: Q2 complete → Final (Q1 winner v Q2 winner)
+    # Stage 3: Q2 complete -> Final (Q1 winner v Q2 winner)
     q2 = _get("Qualifier 2")
     if _done(q1) and _done(q2) and not _get("Final"):
         wq1, _ = _wl(q1)
         wq2, _ = _wl(q2)
         _add("Final", wq1, wq2, "Winner · Qualifier 1", "Winner · Qualifier 2")
 
-    # Final done → season over
+    # Final done -> season over
     if _done(_get("Final")) and tourney.get("status") != "completed":
         tourney["status"] = "completed"
 
 
-# ── Fixtures & owner-launch (shared by slash + prefix) ───────────────────────
+# Fixtures & owner-launch (shared by slash + prefix)
 def _tm_round_label(m):
     rnd = m.get("round")
     if isinstance(rnd, int):
@@ -1904,7 +1902,7 @@ def owner_can_launch(tourney, match, user_id, is_manager=False):
 
 
 # Match-order policies (chosen at creation; stored as tourney["match_order"]).
-# Older tournaments have no field → "random", the pre-existing behaviour.
+# Older tournaments have no field -> "random", the pre-existing behaviour.
 MATCH_ORDER_LABELS = {
     "random":     "🎲 Random — anyone can start any ready match",
     "sequential": "🔢 Strict Schedule — matches must be played in exact order",
@@ -1916,9 +1914,9 @@ def match_order_gate(tourney, match):
     """(ok, message): may this pending match be launched under the tournament's
     match-order policy? Locked matches are rejected elsewhere; knockout ordering
     is already enforced by the locked-slot system, so:
-      random     → always ok
-      sequential → every earlier-numbered pending match must be done first
-      round      → no earlier ROUND may still have pending matches (integer rounds)
+      random     -> always ok
+      sequential -> every earlier-numbered pending match must be done first
+      round      -> no earlier ROUND may still have pending matches (integer rounds)
     """
     mode = tourney.get("match_order", "random")
     if mode == "random":
@@ -1978,7 +1976,7 @@ def build_team_fixtures_embed(tourney, team_name):
                 results.append(f"`#{m['match_id']}` {rlabel} · vs **{opp}**  {my_r}/{my_w} : {op_r}/{op_w}  {outcome}")
         elif m["status"] == "locked":
             upcoming.append(f"`#{m['match_id']}` {rlabel} · vs *{opp_src or 'TBD'}*  🔒 awaiting earlier results\n     └ {_conditions_label(m)}")
-        else:  # pending → launchable
+        else:  # pending -> launchable
             upcoming.append(f"`#{m['match_id']}` {rlabel} · vs **{opp}**  🟢 ready — `cvt play {m['match_id']}`\n     └ {_conditions_label(m)}")
 
     def _add(title, lines):
@@ -2007,10 +2005,10 @@ _TM_STAT_KEYS = ("matches", "runs", "balls_faced", "outs", "fours", "sixes",
 _TM_STAT_DEFAULT = {k: 0 for k in _TM_STAT_KEYS}
 
 
-# ── Full tournament report (cvt summary) — the keep-before-you-delete record ──
+# Full tournament report (cvt summary) - the keep-before-you-delete record
 def _summary_mvp(s, odi=False):
     """Same MVP formula as the leaderboard command. Format-aware: the SR tiers and
-    economy anchor were T20 numbers (SR 110+ earns a bonus, econ 8 is par) — judged by
+    economy anchor were T20 numbers (SR 110+ earns a bonus, econ 8 is par) - judged by
     those, every ODI batter reads "slow" and every ODI bowler "miserly", so ODI uses its
     own anchors (SR ~90 par, econ ~5.8 par).
     ODI scoring is BOOST-ONLY (Jaiv): a high SR / good economy is a bonus on top of runs /
@@ -2019,7 +2017,7 @@ def _summary_mvp(s, odi=False):
     sr = (s["runs"] / s["balls_faced"] * 100) if s["balls_faced"] > 0 else 0
     bat = float(s["runs"])
     if odi:
-        if sr >= 115:   bat *= 1.30      # ODI: SR is a bonus only — no low-SR penalty
+        if sr >= 115:   bat *= 1.30      # ODI: SR is a bonus only - no low-SR penalty
         elif sr >= 100: bat *= 1.20
         elif sr >= 90:  bat *= 1.10
     else:
@@ -2062,7 +2060,7 @@ def build_tournament_summary_embeds(tourney):
     gold = discord.Color.gold()
     embeds = []
 
-    # ── 1. OVERVIEW ────────────────────────────────────────────────────────────
+    # 1. OVERVIEW
     champion = (tourney.get("acl_champion") or tourney.get("dsl_champion")
                 or next((m["result"]["winner"] for m in done
                          if str(m.get("round")) in ("Final", "Grand Final")), None))
@@ -2086,7 +2084,7 @@ def build_tournament_summary_embeds(tourney):
     ov.add_field(name="Ties / Walkovers", value=f"{ties} / {walkovers}", inline=True)
     embeds.append(ov)
 
-    # ── 2. STANDINGS ───────────────────────────────────────────────────────────
+    # 2. STANDINGS
     st_e = discord.Embed(title="🏁 Final Standings", color=gold)
     if t_type == "t20_world_cup":
         for grp in ["A", "B", "C", "D"]:
@@ -2104,7 +2102,7 @@ def build_tournament_summary_embeds(tourney):
     if st_e.description or st_e.fields:
         embeds.append(st_e)
 
-    # ── 3. KNOCKOUT / PLAYOFF RESULTS ──────────────────────────────────────────
+    # 3. KNOCKOUT / PLAYOFF RESULTS
     ko = [m for m in done if not isinstance(m.get("round"), int) and m.get("stage") != "group"]
     if ko:
         lines = []
@@ -2118,7 +2116,7 @@ def build_tournament_summary_embeds(tourney):
         ko_e = discord.Embed(title="🔥 Knockout Stage", description="\n".join(lines[:20]), color=gold)
         embeds.append(ko_e)
 
-    # ── 4. LEADERBOARDS (all of them, in detail) ───────────────────────────────
+    # 4. LEADERBOARDS (all of them, in detail)
     players = [(t, p, s) for t, m in tourney.get("stats", {}).items() for p, s in m.items()]
     if players:
         def top(key_fn, n=10, cond=lambda s: True):
@@ -2168,7 +2166,7 @@ def build_tournament_summary_embeds(tourney):
             lambda s: f"**{_summary_mvp(s, _mvp_odi):.0f}** pts — {s['runs']}R · {s['wickets']}W"), inline=False)
         embeds.append(bowl_e)
 
-    # ── 5. MATCH RECORDS ───────────────────────────────────────────────────────
+    # 5. MATCH RECORDS
     real = [m for m in done if not m["result"].get("walkover")]
     if real:
         rec_e = discord.Embed(title="📜 Match Records", color=discord.Color.teal())
@@ -2217,7 +2215,7 @@ def build_tournament_summary_embeds(tourney):
 
 
 def _tm_next_mid(tourney):
-    """Next free match_id = max existing id + 1. MUST be used instead of len()+1 —
+    """Next free match_id = max existing id + 1. MUST be used instead of len()+1 -
     once any match is removed (e.g. by cancel_match), len()+1 collides with an
     existing id and creates a duplicate the lookups can't tell apart."""
     return max((m.get("match_id", 0) for m in tourney.get("schedule", [])), default=0) + 1
@@ -2246,7 +2244,7 @@ def repair_tournament_schedule(tourney):
 
 
 def _match_bracket_rank(tourney, m):
-    """How far into the tournament a match sits — higher = later. Used to find
+    """How far into the tournament a match sits - higher = later. Used to find
     the matches that were built on (i.e. depend on) another match's result."""
     if m.get("stage") in ("group", "league", "ladder") or isinstance(m.get("round"), int):
         return 0
@@ -2337,7 +2335,7 @@ def rebuild_tournament_stats(tourney):
     completion event fired twice (double-counted stats): the schedule is the source of
     truth, so each match contributes exactly once no matter how many times it doubled.
     Uses the exact per-match `stats_delta` where present (recent matches always have it),
-    else a best-effort recompute from `scorecard_players` (older matches — can't recover
+    else a best-effort recompute from `scorecard_players` (older matches - can't recover
     bench players' match counts). Walkovers / stats-locked matches contribute nothing.
     Returns (matches_counted, exact_count, approx_count, players)."""
     new_stats = {}
@@ -2364,7 +2362,7 @@ def rebuild_tournament_stats(tourney):
             continue
         sc = r.get("scorecard_players")
         if not sc:
-            continue   # walkover / stats-locked / manual result → no player stats
+            continue   # walkover / stats-locked / manual result -> no player stats
         t1, t2 = m["team1"], m["team2"]
         first, second = (t1, t2) if sc.get("bf", 1) == 1 else (t2, t1)
 
@@ -2435,9 +2433,9 @@ def revert_tournament_match(tourney, match_id):
         stat_note = ""
 
     # Conquest League: reverse this match's Elo + credits (team-level, not covered by
-    # _revert_match_stats) while the result is still intact — it's cleared just below.
+    # _revert_match_stats) while the result is still intact - it's cleared just below.
     if t_type == "rating":
-        from rating_league import revert_match_rating, revert_match_credits
+        from league.rating_league import revert_match_rating, revert_match_credits
         revert_match_rating(tourney, m)
         revert_match_credits(tourney, m)
 
@@ -2447,7 +2445,7 @@ def revert_tournament_match(tourney, match_id):
     # TBECS stores each match's scorecard in its own sharded Mongo doc; drop it so the
     # replay writes a fresh one instead of being skipped as "already persisted".
     if t_type == "tbecs":
-        from subscription_manager import tbecs_forget_match
+        from core.subscription_manager import tbecs_forget_match
         tbecs_forget_match(tourney.get("server_id"), match_id)
     tourney["current_match_idx"] = max(0, tourney.get("current_match_idx", 0) - 1)
     if tourney.get("status") == "completed":
@@ -2458,7 +2456,7 @@ def revert_tournament_match(tourney, match_id):
     removed = []
     if t_type == "acl":
         if m.get("stage") == "league":
-            # A changed league result reshuffles the seeding → the whole generated bracket is stale.
+            # A changed league result reshuffles the seeding -> the whole generated bracket is stale.
             ko = [x for x in sched if x.get("stage") in ACL_KO_STAGES]
             for x in ko:
                 sched.remove(x)
@@ -2483,9 +2481,9 @@ def revert_tournament_match(tourney, match_id):
                 tourney.pop(k, None)
             _acl_try_advance(tourney)
     elif t_type == "dsl":
-        from dsl_manager import DSL_KO_STAGES, _dsl_try_advance
+        from league.dsl_manager import DSL_KO_STAGES, _dsl_try_advance
         if m.get("stage") == "league":
-            # A changed league result reshuffles the seeding → the generated bracket is stale.
+            # A changed league result reshuffles the seeding -> the generated bracket is stale.
             ko = [x for x in sched if x.get("stage") in DSL_KO_STAGES]
             for x in ko:
                 sched.remove(x)
@@ -2504,9 +2502,9 @@ def revert_tournament_match(tourney, match_id):
                 tourney.pop(k, None)
             _dsl_try_advance(tourney)
     elif t_type == "rating":
-        from rating_league import RATING_KO_STAGES, _rating_try_advance
+        from league.rating_league import RATING_KO_STAGES, _rating_try_advance
         if m.get("stage") == "ladder":
-            # A changed ladder result restales playoff seeding → drop any generated bracket.
+            # A changed ladder result restales playoff seeding -> drop any generated bracket.
             ko = [x for x in sched if x.get("stage") in RATING_KO_STAGES]
             for x in ko:
                 sched.remove(x)
@@ -2523,7 +2521,7 @@ def revert_tournament_match(tourney, match_id):
                 tourney.pop(k, None)
             _rating_try_advance(tourney)
     else:
-        # Round Robin / T20 World Cup: drop later-stage matches — they regenerate
+        # Round Robin / T20 World Cup: drop later-stage matches - they regenerate
         # automatically once the earlier stage is completed again.
         later = [x for x in sched
                  if _match_bracket_rank(tourney, x) > rank and x.get("status") in ("pending", "locked")]
@@ -2797,7 +2795,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         if not tourney:
             return await interaction.response.send_message("❌ No tournament exists in this server.", ephemeral=True)
 
-        # Registration phase — no schedule yet
+        # Registration phase - no schedule yet
         if tourney["status"] == "registration":
             t_type = tourney.get("tournament_type", "round_robin")
             type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League", "ipl": "Indian Premier League"}.get(t_type, "Round Robin")
@@ -2919,7 +2917,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                 return await interaction.response.send_message(f"❌ Group {grp} doesn't have enough qualifying teams.", ephemeral=True)
             qualifiers[grp] = real[:2]  # [1st, 2nd]
 
-        # Super 8 Group A: A1, B2, C1, D2  |  Group B: A2, B1, C2, D1
+        # Super 8 Group A: A1, B2, C1, D2 | Group B: A2, B1, C2, D1
         s8a = [qualifiers["A"][0], qualifiers["B"][1], qualifiers["C"][0], qualifiers["D"][1]]
         s8b = [qualifiers["A"][1], qualifiers["B"][0], qualifiers["C"][1], qualifiers["D"][0]]
 
@@ -2964,7 +2962,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         if tourney["status"] != "active": return await interaction.response.send_message("❌ Tournament is not active.", ephemeral=True)
 
         if tourney.get("tournament_type") == "dsl":
-            from dsl_manager import dsl_generate_playoffs, dsl_bracket_embed, DSL_CONFIG
+            from league.dsl_manager import dsl_generate_playoffs, dsl_bracket_embed, DSL_CONFIG
             ok, msg = dsl_generate_playoffs(tourney)
             if not ok:
                 return await interaction.response.send_message(msg, ephemeral=True)
@@ -2991,7 +2989,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         tourney = get_server_tournament(server_id)
         if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
         if tourney.get("tournament_type") == "dsl":
-            from dsl_manager import _dsl_get, dsl_bracket_embed
+            from league.dsl_manager import _dsl_get, dsl_bracket_embed
             if not _dsl_get(tourney, "Semi-Final 1"):
                 return await interaction.response.send_message("ℹ️ The Playoffs haven't been generated yet — they appear automatically once every league match is done.", ephemeral=True)
             return await interaction.response.send_message(embed=dsl_bracket_embed(tourney))
@@ -3001,7 +2999,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             return await interaction.response.send_message("ℹ️ The Playoffs haven't been generated yet. A Manager runs `/tournament generate_playoffs` once all 91 league games are done.", ephemeral=True)
         await interaction.response.send_message(embed=acl_bracket_embed(tourney))
 
-    # NOTE: force_delete & set_theme are prefix-only (cvt force_delete / cvt set_theme) — 25-subcommand limit.
+    # NOTE: force_delete & set_theme are prefix-only (cvt force_delete / cvt set_theme) - 25-subcommand limit.
 
     @app_commands.command(name="set_team_color", description="[MANAGER] Set a team's color for the scorecard. Works anytime, even mid-tournament.")
     async def set_team_color(self, interaction: discord.Interaction, team_name: str, color: str):
@@ -3077,7 +3075,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             return await interaction.response.send_message(f"✅ {label} logo for **{team['name']}** set to {raw} — used in {where}.")
         await interaction.response.send_message("❌ Provide an emoji, a URL, or upload an image.", ephemeral=True)
 
-    # NOTE: set_injury_channel & remove_injury are prefix-only (cvt set_injury_channel / cvt remove_injury) — 25-subcommand limit.
+    # NOTE: set_injury_channel & remove_injury are prefix-only (cvt set_injury_channel / cvt remove_injury) - 25-subcommand limit.
 
     @app_commands.command(name="match_scorecard", description="View the scorecard image for a completed tournament match.")
     async def match_scorecard(self, interaction: discord.Interaction, match_id: int):
@@ -3111,14 +3109,14 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                 await interaction.followup.send(embed=embed, file=file)
                 sent = True
             except Exception as _e:
-                print(f"⚠️ Scorecard image render failed for match {match_id}: {_e}")
+                print(f"Scorecard image render failed for match {match_id}: {_e}")
             try:
                 card_embeds = build_stored_scorecard_embeds(full_data)
                 if card_embeds:
                     await interaction.followup.send(embeds=card_embeds)
                     sent = True
             except Exception as _e:
-                print(f"⚠️ Text scorecard render failed for match {match_id}: {_e}")
+                print(f"Text scorecard render failed for match {match_id}: {_e}")
             if sent:
                 return
         if interaction.response.is_done():
@@ -3276,10 +3274,10 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
           Qualifier 2: L(Q1) vs W(Eliminator)
           Final:       W(Q1) vs W(Q2)
         LEGACY GUARD: seasons that already generated the old crossover semis keep
-        finishing on that bracket (the generic SF→Final block handles them)."""
+        finishing on that bracket (the generic SF->Final block handles them)."""
         sched = tourney["schedule"]
         if any(m.get("round") == "Semi-Final 1" for m in sched):
-            return   # legacy crossover-semis season — don't touch it
+            return   # legacy crossover-semis season - don't touch it
 
         def _get(round_name):
             return next((m for m in sched if m.get("round") == round_name), None)
@@ -3297,7 +3295,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             l = m["result"].get("loser") or (m["team2"] if w == m["team1"] else m["team1"])
             return w, l
 
-        # Stage 1: both groups complete → Knockout 1 (A1 v B1) + Knockout 2 (A2 v B2)
+        # Stage 1: both groups complete -> Knockout 1 (A1 v B1) + Knockout 2 (A2 v B2)
         grp = [m for m in sched if m.get("stage") == "group"]
         if not grp or any(m["status"] == "pending" for m in grp):
             return
@@ -3310,7 +3308,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             _add("Knockout 2", a_top2[1], b_top2[1])   # A2 v B2
             return
 
-        # Stage 2: KO1 + KO2 complete → Qualifier 1 (winners) + Eliminator (losers)
+        # Stage 2: KO1 + KO2 complete -> Qualifier 1 (winners) + Eliminator (losers)
         ko1, ko2 = _get("Knockout 1"), _get("Knockout 2")
         if _done(ko1) and _done(ko2) and not _get("Qualifier 1"):
             w1, l1 = _wl(ko1); w2, l2 = _wl(ko2)
@@ -3318,14 +3316,14 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             _add("Eliminator", l1, l2)
             return
 
-        # Stage 3: Q1 + Eliminator complete → Qualifier 2 (Q1 loser v Eliminator winner)
+        # Stage 3: Q1 + Eliminator complete -> Qualifier 2 (Q1 loser v Eliminator winner)
         q1, elim = _get("Qualifier 1"), _get("Eliminator")
         if _done(q1) and _done(elim) and not _get("Qualifier 2"):
             _, lq1 = _wl(q1); welim, _ = _wl(elim)
             _add("Qualifier 2", lq1, welim)
             return
 
-        # Stage 4: Q2 complete → Final (Q1 winner v Q2 winner)
+        # Stage 4: Q2 complete -> Final (Q1 winner v Q2 winner)
         q2 = _get("Qualifier 2")
         if _done(q1) and _done(q2) and not _get("Final"):
             wq1, _ = _wl(q1); wq2, _ = _wl(q2)
@@ -3337,7 +3335,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         tourney = get_server_tournament(server_id)
         if not tourney: return
 
-        # Look up the schedule entry by its match_id, NOT by (id-1) as a list index —
+        # Look up the schedule entry by its match_id, NOT by (id-1) as a list index
         # index-based lookup silently writes to the wrong match if ids ever stop being
         # a contiguous 1..N run (removed/regenerated knockouts, repaired duplicates).
         _mid = match.tournament_match_id
@@ -3346,16 +3344,16 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             try:
                 m_data = tourney["schedule"][_mid - 1]   # legacy fallback
             except (IndexError, TypeError):
-                print(f"⚠️ on_tournament_match_complete: match_id {_mid} not found in schedule.")
+                print(f"on_tournament_match_complete: match_id {_mid} not found in schedule.")
                 return
 
         # DUPLICATE-EVENT GUARD: if this schedule entry is already completed with a
         # result, a second completion event would double-count every player's stats
         # (and points/credits). Seen in the wild when an error mid-finalize made the
-        # hook fire twice — ignore the replay outright. (cancel_match clears the
+        # hook fire twice - ignore the replay outright. (cancel_match clears the
         # result BEFORE a redo, so legitimate replays pass through unaffected.)
         if m_data.get("status") == "completed" and m_data.get("result"):
-            print(f"⚠️ Duplicate completion event for match {_mid} ignored (already recorded).")
+            print(f"Duplicate completion event for match {_mid} ignored (already recorded).")
             return
 
         t1_name, t2_name = match.team1["name"], match.team2["name"]
@@ -3373,7 +3371,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         elif match.innings2.total_runs >= target: winner = match.innings2.batting_team["name"]
         else: winner = match.innings1.batting_team["name"]
 
-        # Knockouts can't end in a draw — break a tie toward team1 (the higher seed / home slot)
+        # Knockouts can't end in a draw - break a tie toward team1 (the higher seed / home slot)
         if winner == "TIE" and not isinstance(m_data.get("round"), int) and m_data.get("stage") in ("knockout", None, "acl_playoff", "acl_supercup", "dsl_playoff"):
             winner = m_data["team1"]
 
@@ -3389,7 +3387,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             "t2_runs": t2_inn.total_runs, "t2_wickets": t2_inn.wickets, "t2_balls": t2_inn.total_balls,
             "scorecard_players": getattr(match, "_scorecard_players", None),
             # Context snapshot (all formats): who batted first + where/on what it was
-            # played — feeds the DSL all-time venue stats and survives schedule edits.
+            # played - feeds the DSL all-time venue stats and survives schedule edits.
             "batted_first": match.innings1.batting_team["name"],
             "stadium": m_data.get("stadium"),
             "pitch": m_data.get("pitch") or match.pitch,
@@ -3397,7 +3395,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         }
         tourney["current_match_idx"] += 1
 
-        # --- STATS AGGREGATION ---
+        # STATS AGGREGATION
         if "stats" not in tourney: tourney["stats"] = {}
         if t1_name not in tourney["stats"]: tourney["stats"][t1_name] = {}
         if t2_name not in tourney["stats"]: tourney["stats"][t2_name] = {}
@@ -3444,20 +3442,20 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             process_team_stats(t2_name, t2_inn, t1_inn)
             m_data["result"]["stats_delta"] = stats_delta
 
-        # --- CONQUEST (rating) LEAGUE: Elo update, and CREDIT economy for any league ---
+        # CONQUEST (rating) LEAGUE: Elo update, and CREDIT economy for any league
         # Elo uses the result's winner/margin; credits (weak-favouring) use stats_delta
-        # for milestones — so both run AFTER the result + stats_delta are set above.
+        # for milestones - so both run AFTER the result + stats_delta are set above.
         if tourney.get("tournament_type") == "rating":
-            from rating_league import apply_match_rating
+            from league.rating_league import apply_match_rating
             apply_match_rating(tourney, m_data)
         try:
-            from rating_league import award_match_credits
+            from league.rating_league import award_match_credits
             award_match_credits(tourney, m_data)   # generic; idempotent-guarded
         except Exception as _cr_err:
-            print(f"⚠️ credit award failed for match {m_data.get('match_id')}: {_cr_err}")
+            print(f"credit award failed for match {m_data.get('match_id')}: {_cr_err}")
 
-        # --- SCORECARD GALLERY CHANNEL (cvt scorecard_channel) ---
-        # Auto-post this match's scoreboard image to the configured channel — real
+        # SCORECARD GALLERY CHANNEL (cvt scorecard_channel)
+        # Auto-post this match's scoreboard image to the configured channel - real
         # matches AND sims alike, so the channel becomes a complete match gallery.
         sc_ch_id = tourney.get("scorecard_channel_id")
         if sc_ch_id:
@@ -3472,21 +3470,21 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                             try:
                                 _buf = generate_ccodi_scorecard_from_data(_full)
                             except Exception as _ce:
-                                print(f"⚠️ CCODI gallery card failed, using generic: {_ce}")
+                                print(f"CCODI gallery card failed, using generic: {_ce}")
                         if _buf is None:
                             _buf = generate_scorecard_from_data(_full)
                         _rl = _tm_round_label(m_data)
                         await sc_ch.send(f"**Match #{m_data['match_id']}** · {_rl}",
                                          file=discord.File(fp=_buf, filename=f"scorecard_m{m_data['match_id']}.png"))
             except Exception as _sc_err:
-                print(f"⚠️ Scorecard-channel post failed for match {m_data.get('match_id')}: {_sc_err}")
+                print(f"Scorecard-channel post failed for match {m_data.get('match_id')}: {_sc_err}")
 
-        # --- INJURY COUNTDOWN (real matches only; count COMPLETED matches, not started ones) ---
+        # INJURY COUNTDOWN (real matches only; count COMPLETED matches, not started ones)
         # Players already injured coming into this match sat it out; now that it has actually
         # FINISHED, burn one match off their spell. Doing this at completion (not at start)
         # means starting a match that's then abandoned/incomplete won't consume the injury.
         # Runs BEFORE the roll so freshly-injured players aren't decremented the same match.
-        # channel is None only on the sim path, which keeps its own expiry — leave it alone.
+        # channel is None only on the sim path, which keeps its own expiry - leave it alone.
         if channel is not None:
             for _tn in (t1_name, t2_name):
                 _tobj = next((t for t in tourney["teams"] if t["name"] == _tn), None)
@@ -3500,11 +3498,11 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                     else:
                         _p["injury_matches_left"] = _left
 
-        # --- INJURY ROLL (group/super8/league only, needs injuries_enabled) ---
+        # INJURY ROLL (group/super8/league only, needs injuries_enabled)
         if tourney.get("injuries_enabled", False) and m_data.get("stage") in ("group", "super8", "league"):
             import random as _rng
-            # ACL injuries are more frequent and RATING-SCALED — a star (high bat/bowl)
-            # gets hurt less than a journeyman — and allow one injury per TEAM per match
+            # ACL injuries are more frequent and RATING-SCALED - a star (high bat/bowl)
+            # gets hurt less than a journeyman - and allow one injury per TEAM per match
             # (vs one per whole match for other formats), so the squad depth matters more.
             _is_acl = tourney.get("tournament_type") == "acl"
             _match_injured = False
@@ -3528,7 +3526,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                     if _is_acl:
                         base = 0.065 if heavy else 0.028          # ~2x the other-format rate
                         _rt = max(player.get("bat", 50), player.get("bowl", 50))
-                        # factor: 1.0 at "normal" (75) → ~0.6 for a 95-rated star, ~1.3 for a 60-rated
+                        # factor: 1.0 at "normal" (75) -> ~0.6 for a 95-rated star, ~1.3 for a 60-rated
                         _factor = max(0.55, min(1.35, 1.0 - (_rt - 75) * 0.02))
                         chance = base * _factor
                     else:
@@ -3555,7 +3553,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                     else: _match_injured = True
 
             # Real match: report injuries to the injury/log channel immediately,
-            # right after this match — no waiting for the next match to start.
+            # right after this match - no waiting for the next match to start.
             if channel is not None and _new_injuries:
                 team_owners = {t["name"]: t.get("owner_id") for t in tourney.get("teams", [])}
                 _lines, _pings = ["🚑 **Injury Report:**"], []
@@ -3571,9 +3569,9 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                 try:
                     await announce_ch.send("\n".join(_lines))
                 except Exception as _e:
-                    print(f"⚠️ Injury report send failed: {_e}")
+                    print(f"Injury report send failed: {_e}")
 
-        # --- KNOCKOUTS AUTO-PROGRESSION ---
+        # KNOCKOUTS AUTO-PROGRESSION
         t_type = tourney.get("tournament_type", "round_robin")
 
         if t_type == "acl":
@@ -3584,9 +3582,9 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             return
 
         if t_type == "rating":
-            # Conquest League: open ladder — no auto-schedule; just resolve any playoff
+            # Conquest League: open ladder - no auto-schedule; just resolve any playoff
             # bracket the manager generated (ladder games simply save the rating update).
-            from rating_league import _rating_try_advance
+            from league.rating_league import _rating_try_advance
             _rating_try_advance(tourney)
             assign_tournament_conditions(tourney)
             save_tournament(tourney)
@@ -3595,7 +3593,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         if t_type == "dsl":
             # DSL: auto-generate the Top-4 playoffs the moment the league finishes,
             # then resolve bracket slots as feeder results come in.
-            from dsl_manager import DSL_CONFIG, dsl_generate_playoffs, _dsl_try_advance
+            from league.dsl_manager import DSL_CONFIG, dsl_generate_playoffs, _dsl_try_advance
             if DSL_CONFIG["auto_playoffs"]:
                 dsl_generate_playoffs(tourney)   # refuses (no-op) unless the league just completed
             _dsl_try_advance(tourney)
@@ -3604,22 +3602,22 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             return
 
         if t_type == "t20_world_cup":
-            # Super 8 complete → auto-generate Semi-Finals
+            # Super 8 complete -> auto-generate Semi-Finals
             self._try_generate_semis(tourney)
 
         if t_type == "ipl":
-            # League done → Q1 (1v2) + Eliminator (3v4) → Q2 → Final
+            # League done -> Q1 (1v2) + Eliminator (3v4) -> Q2 -> Final
             ipl_try_advance(tourney)
             assign_tournament_conditions(tourney)
             save_tournament(tourney)
             return
 
         if t_type == "ccodi":
-            # Groups done → KO1/KO2 → Q1/Eliminator → Q2 → Final (legacy semis
-            # seasons are left to the generic SF→Final block below).
+            # Groups done -> KO1/KO2 -> Q1/Eliminator -> Q2 -> Final (legacy semis
+            # seasons are left to the generic SF->Final block below).
             self._ccodi_try_advance(tourney)
 
-        # SF complete → auto-generate Final (works for all group formats)
+        # SF complete -> auto-generate Final (works for all group formats)
         sf1 = next((m for m in tourney["schedule"] if m.get("round") == "Semi-Final 1"), None)
         sf2 = next((m for m in tourney["schedule"] if m.get("round") == "Semi-Final 2"), None)
         if sf1 and sf2 and sf1["status"] == "completed" and sf2["status"] == "completed":
@@ -3653,12 +3651,12 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             ko_matches     = [m for m in schedule if m.get("stage") == "knockout"]
 
             if not super8_matches and not ko_matches:
-                # Group stage only — single image, no navigation needed
+                # Group stage only - single image, no navigation needed
                 try:
                     buf = generate_t20wc_points_table(tourney)
                     return await interaction.followup.send(file=discord.File(fp=buf, filename="points_table.png"))
                 except Exception as e:
-                    print(f"⚠️ Points table image failed: {e}")
+                    print(f"Points table image failed: {e}")
 
             # Build available pages
             pages = []
@@ -3666,20 +3664,20 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                 s16_buf = generate_t20wc_points_table(tourney)
                 pages.append(("Group Stage", "points_table.png", s16_buf))
             except Exception as e:
-                print(f"⚠️ Super16 table failed: {e}")
+                print(f"Super16 table failed: {e}")
             if super8_matches:
                 try:
                     s8_buf = generate_t20wc_super8_table(tourney)
                     pages.append(("Super 8", "super8_table.png", s8_buf))
                 except Exception as e:
-                    print(f"⚠️ Super8 table failed: {e}")
+                    print(f"Super8 table failed: {e}")
             if ko_matches:
                 try:
                     ko_buf = generate_t20wc_knockouts_image(tourney)
                     if ko_buf:
                         pages.append(("Knockouts", "knockouts.png", ko_buf))
                 except Exception as e:
-                    print(f"⚠️ Knockouts image failed: {e}")
+                    print(f"Knockouts image failed: {e}")
 
             if len(pages) >= 2:
                 start_idx = len(pages) - 1
@@ -3692,7 +3690,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                 buf.seek(0)
                 return await interaction.followup.send(file=discord.File(fp=buf, filename=fname))
 
-            # Both images failed — text embed fallback
+            # Both images failed - text embed fallback
             embed = discord.Embed(title=f"🌍 {tourney['name']} — Standings", color=discord.Color.gold())
             has_data = False
             for sg in ["A", "B"]:
@@ -3716,7 +3714,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                 buf = generate_acl_points_table(tourney)
                 return await interaction.followup.send(file=discord.File(fp=buf, filename="acl_points_table.png"))
             except Exception as e:
-                print(f"⚠️ ACL points table failed, using default: {e}")
+                print(f"ACL points table failed, using default: {e}")
             # fall through to the generic renderer below on failure
 
         # Everything else (Round Robin / Double RR / IPL): the shared points-table
@@ -3776,7 +3774,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         elif c_val == "mvp":
             sorted_players = sorted(all_players, key=lambda x: _mvp_score(x["stats"]), reverse=True)
 
-        # runs / wickets / MVP get the first 50, paginated 10-per-page with ◀ ▶ buttons;
+        # runs / wickets / MVP get the first 50, paginated 10-per-page with buttons;
         # the qualifier-filtered categories stay a single top-10 embed.
         PAGINATED = {"runs", "wickets", "mvp"}
         limit = 50 if c_val in PAGINATED else 10
@@ -3816,7 +3814,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         stats_map = tourney.get("stats", {})
         if not stats_map: return await interaction.response.send_message("❌ No stats available yet. Complete a match first!", ephemeral=True)
 
-        # Team given → resolve within that team (old behaviour).
+        # Team given -> resolve within that team (old behaviour).
         if team_name:
             t_match = next((t for t in stats_map if t.lower() == team_name.lower()), None)
             if not t_match:
@@ -3828,7 +3826,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                 else: return await interaction.response.send_message(f"❌ Player '{player_name}' not found in team '{t_match}'.", ephemeral=True)
             return await interaction.response.send_message(embed=build_player_stats_embed(stats_map[t_match][p_match], p_match, t_match))
 
-        # No team → search every team; ask which one if the name is shared.
+        # No team -> search every team; ask which one if the name is shared.
         matches = find_player_in_tournament(tourney, player_name)
         if not matches:
             return await interaction.response.send_message(f"❌ Player '{player_name}' not found in any team.", ephemeral=True)

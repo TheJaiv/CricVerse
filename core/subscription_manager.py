@@ -64,27 +64,27 @@ DB_CACHE = {
     # Draft-mode lifetime record per user (PvP wins are the leaderboard; vs-AI kept separate):
     # { user_id: {"name":.., "wins":int, "losses":int, "ai_wins":int, "ai_losses":int} }
     "draft_stats": {},
-    # Saved custom XI presets per server (player NAMES — re-resolved against the live DB on load):
+    # Saved custom XI presets per server (player NAMES - re-resolved against the live DB on load):
     # { server_id: { "<name lower>": {"name": "RCB", "players": ["Virat Kohli", ...]} } }
     "custom_teams": {},
-    # Per-league, per-server access grants (bot-owner only — independent of server tiers,
+    # Per-league, per-server access grants (bot-owner only - independent of server tiers,
     # which update_server_tier() wholesale-replaces). last_season keeps season numbering
     # monotonic in Mongo even if the on-disk archive files are lost between deploys:
     # { "dsl": { server_id: {"enabled": True, "last_season": 2} } }
     "league_access": {},
     # TBECS innings-break ads: { server_id: ["ad text 1", "ad text 2", ...] }. Shown at
     # every innings end of a TBECS match (see bot._maybe_send_tbecs_ads). Lives in the main
-    # doc (small) — only the heavy TBECS match scorecards are sharded out (see below).
+    # doc (small) - only the heavy TBECS match scorecards are sharded out (see below).
     "tbecs_ads": {},
 }
 
-# ── TBECS per-match sharding ───────────────────────────────────────────────────
+# TBECS per-match sharding
 # A TBECS event runs 50 teams, so a full schedule is 1000+ matches, each carrying a
 # full 40-player scorecard + stats_delta. Kept inline that would blow Mongo's 16MB
 # per-document cap AND force a multi-MB rewrite every innings. So for TBECS only, the
 # two heavy per-match fields are sharded into their own documents
 # (_id "tbecsmatch_<server>_<match_id>") in the tournaments collection, and the skeleton
-# (teams/schedule/standings) is stored light. The in-memory tournament stays COMPLETE —
+# (teams/schedule/standings) is stored light. The in-memory tournament stays COMPLETE
 # the split is a Mongo-boundary detail, so nothing downstream (scorecards, cancel_match,
 # leaderboards) changes. See load_tournament_data_from_bin / save_tournament_data_to_bin.
 _TBECS_HEAVY_FIELDS = ("scorecard_players", "stats_delta")
@@ -100,11 +100,11 @@ def tbecs_forget_match(server_id, match_id):
     try:
         _get_db()["tournaments"].delete_one({"_id": f"tbecsmatch_{server_id}_{match_id}"})
     except Exception as e:
-        print(f"⚠️ TBECS match-doc delete failed ({server_id}/{match_id}): {e}")
+        print(f"TBECS match-doc delete failed ({server_id}/{match_id}): {e}")
 
 def load_data_from_bin():
     if not MONGO_URI:
-        print("⚠️ MONGO_URI missing! Cache will be empty.")
+        print("MONGO_URI missing! Cache will be empty.")
         return
     try:
         doc = _get_db()["main"].find_one({"_id": "cricket_bot_data"})
@@ -128,25 +128,25 @@ def load_data_from_bin():
                 "odi":  int(raw_mc.get("odi",  0)),
                 "test": int(raw_mc.get("test", 0)),
             }
-            print(f"✅ Loaded {len(DB_CACHE['players'])} players & subscriptions from MongoDB!")
+            print(f"Loaded {len(DB_CACHE['players'])} players & subscriptions from MongoDB!")
         else:
-            print("⚠️ No main data document found in MongoDB. Starting with empty cache.")
+            print("No main data document found in MongoDB. Starting with empty cache.")
     except Exception as e:
-        print(f"❌ MongoDB Load Error: {e}")
+        print(f"MongoDB Load Error: {e}")
 
 def load_tournament_data_from_bin():
     if not MONGO_URI:
-        print("⚠️ MONGO_URI missing! Tournament data will be empty.")
+        print("MONGO_URI missing! Tournament data will be empty.")
         return
     try:
         # Regular tournaments and DSL league seasons live in SEPARATE documents so the
         # recurring league never competes with normal tournaments for Mongo's 16MB
-        # per-document cap. The in-memory cache stays one unified list — nothing
+        # per-document cap. The in-memory cache stays one unified list - nothing
         # downstream needs to know about the split.
         # DSL leagues and the Conquest (rating) league each live in their OWN document
         # so the recurring/open leagues never compete with normal tournaments for
         # Mongo's 16MB per-doc cap (the open ladder can accumulate many matches). The
-        # in-memory cache stays one unified list — nothing downstream knows about the split.
+        # in-memory cache stays one unified list - nothing downstream knows about the split.
         doc = _get_db()["tournaments"].find_one({"_id": "tournament_data"})
         tours = list(doc.get("tournaments", [])) if doc else []
         dsl_doc = _get_db()["tournaments"].find_one({"_id": "dsl_tournament_data"})
@@ -154,7 +154,7 @@ def load_tournament_data_from_bin():
         rating_doc = _get_db()["tournaments"].find_one({"_id": "rating_tournament_data"})
         rating_tours = list(rating_doc.get("tournaments", [])) if rating_doc else []
         # TBECS lives in its own skeleton doc; its heavy per-match scorecards are sharded
-        # into separate tbecsmatch_* docs — reattach them so the in-memory tournament is
+        # into separate tbecsmatch_* docs - reattach them so the in-memory tournament is
         # complete and indistinguishable from any other tournament downstream.
         tbecs_doc = _get_db()["tournaments"].find_one({"_id": "tbecs_tournament_data"})
         tbecs_tours = list(tbecs_doc.get("tournaments", [])) if tbecs_doc else []
@@ -180,11 +180,11 @@ def load_tournament_data_from_bin():
             tours = [t for t in tours if (str(t.get("server_id")), t.get("name")) not in split_ids]
         DB_CACHE["tournaments"] = tours + dsl_tours + rating_tours + tbecs_tours
         if doc or dsl_doc or rating_doc or tbecs_doc:
-            print(f"✅ Loaded {len(tours)} tournament(s) + {len(dsl_tours)} DSL + {len(rating_tours)} Conquest + {len(tbecs_tours)} TBECS from MongoDB!")
+            print(f"Loaded {len(tours)} tournament(s) + {len(dsl_tours)} DSL + {len(rating_tours)} Conquest + {len(tbecs_tours)} TBECS from MongoDB!")
         else:
-            print("⚠️ No tournament document found in MongoDB. Starting with empty cache.")
+            print("No tournament document found in MongoDB. Starting with empty cache.")
     except Exception as e:
-        print(f"❌ MongoDB Tournament Load Error: {e}")
+        print(f"MongoDB Tournament Load Error: {e}")
 
 def save_data_to_bin():
     if not MONGO_URI:
@@ -196,10 +196,10 @@ def save_data_to_bin():
             {"_id": "cricket_bot_data", **payload},
             upsert=True
         )
-        print("✅ MongoDB Save OK (main)")
+        print("MongoDB Save OK (main)")
         return True
     except Exception as e:
-        print(f"❌ MongoDB Save Error: {e}")
+        print(f"MongoDB Save Error: {e}")
         return False
 
 def save_tournament_data_to_bin(snapshot=None):
@@ -210,7 +210,7 @@ def save_tournament_data_to_bin(snapshot=None):
         # background writer never encodes a dict the event loop is mutating mid-save.
         data = snapshot if snapshot is not None else copy.deepcopy(DB_CACHE["tournaments"])
         # Split by league: DSL seasons and the Conquest (rating) league each get their
-        # own document (own 16MB budget) — see load_tournament_data_from_bin. Matched
+        # own document (own 16MB budget) - see load_tournament_data_from_bin. Matched
         # on tournament_type, so this module stays a leaf (no manager imports).
         regular = [t for t in data if t.get("tournament_type") not in ("dsl", "rating", "tbecs")]
         dsl     = [t for t in data if t.get("tournament_type") == "dsl"]
@@ -257,11 +257,11 @@ def save_tournament_data_to_bin(snapshot=None):
         db["tournaments"].replace_one(
             {"_id": "tbecs_tournament_data"},
             {"_id": "tbecs_tournament_data", "tournaments": tbecs}, upsert=True)
-        print(f"✅ MongoDB Save OK (tournaments: {len(regular)} regular / {len(dsl)} DSL / "
+        print(f"MongoDB Save OK (tournaments: {len(regular)} regular / {len(dsl)} DSL / "
               f"{len(rating)} Conquest / {len(tbecs)} TBECS +{len(new_match_docs)} match docs)")
         return True
     except Exception as e:
-        print(f"❌ MongoDB Tournament Save Error: {e}")
+        print(f"MongoDB Tournament Save Error: {e}")
         return False
 
 def async_save_to_bin():
@@ -281,7 +281,7 @@ def reset_daily_quotas():
     today = get_today_str()
     updated = False
     # Auto-expire timed subscriptions (giveaways etc.): any user sub whose `expires`
-    # date has passed is dropped here — so a month-long grant removes itself with no
+    # date has passed is dropped here - so a month-long grant removes itself with no
     # manual cleanup. Runs on every get_tier_status/quota check (i.e. whenever the
     # bot is used), so expired rows vanish lazily but reliably.
     before = len(DB_CACHE["user_subs"])
@@ -381,8 +381,8 @@ def consume_quota(user_id: str, server_id: str, format_val: str, admin_discord_i
     return False, "❌ **Access Denied:** You have exhausted your daily limit, or your tier restricts this format. Please contact **frenzy_guy** to upgrade."
 
 def update_user_tier(user_id: str, tier_value: str, tier_name: str, mention: str, days: int = 0):
-    """Assign/remove a user's tier. days>0 → auto-expires after that many days
-    (removed by reset_daily_quotas — no manual cleanup); days<=0 → permanent."""
+    """Assign/remove a user's tier. days>0 -> auto-expires after that many days
+    (removed by reset_daily_quotas - no manual cleanup); days<=0 -> permanent."""
     global DB_CACHE
     DB_CACHE["user_subs"] = [u for u in DB_CACHE["user_subs"] if u["user_id"] != user_id]
     if tier_value == "None":
@@ -406,8 +406,8 @@ def update_user_tier(user_id: str, tier_value: str, tier_name: str, mention: str
 
 def bulk_grant_tier(user_ids, tier_value: str, days: int = 0):
     """Grant one tier to many users at once, optionally with an auto-expiry.
-    days>0 → expires that many days from today (auto-removed by reset_daily_quotas);
-    days<=0 → permanent. Existing subs for those users are replaced. Returns
+    days>0 -> expires that many days from today (auto-removed by reset_daily_quotas);
+    days<=0 -> permanent. Existing subs for those users are replaced. Returns
     (granted_count, expires_str_or_None)."""
     global DB_CACHE
     ids = {str(u) for u in user_ids}
@@ -429,10 +429,10 @@ def bulk_grant_tier(user_ids, tier_value: str, days: int = 0):
 
 
 def list_all_subs():
-    """[(kind, id, tier, expires_or_None)] for EVERY active sub — user subs first, then
+    """[(kind, id, tier, expires_or_None)] for EVERY active sub - user subs first, then
     server subs, each in cache order. kind is "user" or "server". Free-tier user rows are
     quota-tracking bookkeeping, not subscriptions, so they're skipped. The ordering is the
-    index contract for remove_sub_by_index — both must walk the same list."""
+    index contract for remove_sub_by_index - both must walk the same list."""
     reset_daily_quotas()
     rows = [("user", u["user_id"], u["tier"], u.get("expires"))
             for u in DB_CACHE["user_subs"] if u.get("tier", "Free") != "Free"]
@@ -444,7 +444,7 @@ def list_all_subs():
 def remove_subs_by_indexes(indexes):
     """Remove one or more subs by 1-based index. ALL indexes resolve against a single
     list_all_subs() snapshot taken up front, so `1 3 5` means those rows as shown by
-    the list command — earlier removals never shift later indexes. Duplicates are
+    the list command - earlier removals never shift later indexes. Duplicates are
     ignored. Returns (removed_rows, invalid_indexes) where removed_rows are
     (kind, id, tier, expires) tuples in the order given."""
     rows = list_all_subs()
@@ -479,8 +479,8 @@ def list_expiring_subs():
 
 
 def update_server_tier(server_id: str, tier_value: str, tier_name: str, days: int = 0):
-    """Assign/remove a server's tier. days>0 → auto-expires after that many days
-    (removed by reset_daily_quotas); days<=0 → permanent."""
+    """Assign/remove a server's tier. days>0 -> auto-expires after that many days
+    (removed by reset_daily_quotas); days<=0 -> permanent."""
     global DB_CACHE
     DB_CACHE["server_subs"] = [s for s in DB_CACHE["server_subs"] if s["server_id"] != server_id]
     if tier_value == "None":
@@ -504,7 +504,7 @@ def update_server_tier(server_id: str, tier_value: str, tier_name: str, days: in
 def get_auth_admins():
     return [a["admin_id"] for a in DB_CACHE["auth_admins"]]
 
-# ── Match counters (stored in DB_CACHE["match_counts"], persisted to MongoDB) ──
+# Match counters (stored in DB_CACHE["match_counts"], persisted to MongoDB)
 
 def get_match_counts() -> dict:
     return dict(DB_CACHE["match_counts"])
@@ -538,7 +538,7 @@ def toggle_auth_admin(admin_id: str):
 def get_all_players():
     return DB_CACHE["players"]
 
-# ── Per-server player rating overrides (owner-only; global `players` DB untouched) ──────
+# Per-server player rating overrides (owner-only; global `players` DB untouched)
 _OVERRIDE_FIELDS = ("bat", "bowl", "role", "archetype")
 
 def get_server_overrides(server_id):
@@ -569,7 +569,7 @@ def reset_server_override(server_id, name):
 
 def apply_server_overrides(players, server_id):
     """Return players with this server's rating overrides merged in (by name).
-    Never mutates the input/global dicts — overridden players are fresh copies.
+    Never mutates the input/global dicts - overridden players are fresh copies.
     Returns the original list unchanged when the server has no overrides (cheap no-op)."""
     if not server_id:
         return players
@@ -586,7 +586,7 @@ def apply_server_overrides(players, server_id):
     return out
 
 
-# ── Draft-mode lifetime stats (PvP leaderboard; vs-AI kept separate) ────────
+# Draft-mode lifetime stats (PvP leaderboard; vs-AI kept separate)
 def _draft_row(user_id, name=None):
     s = DB_CACHE.setdefault("draft_stats", {})
     r = s.setdefault(str(user_id), {"name": name or str(user_id), "wins": 0, "losses": 0, "ai_wins": 0, "ai_losses": 0})
@@ -601,7 +601,7 @@ def record_draft_pvp(winner_id, winner_name, loser_id, loser_name):
     async_save_to_bin()
 
 def record_draft_ai(user_id, user_name, won):
-    """Record a vs-AI draft result — kept SEPARATE from the PvP leaderboard."""
+    """Record a vs-AI draft result - kept SEPARATE from the PvP leaderboard."""
     r = _draft_row(user_id, user_name)
     r["ai_wins" if won else "ai_losses"] += 1
     async_save_to_bin()
@@ -610,7 +610,7 @@ def get_draft_stats():
     return DB_CACHE.get("draft_stats", {})
 
 
-# ── Saved custom XI presets (global — usable in every server) ────────────────
+# Saved custom XI presets (global - usable in every server)
 def _migrate_custom_teams():
     """Flatten any legacy per-server custom_teams ({server_id: {name: team}}) into a
     single global namespace ({name: team}). Safe to call repeatedly / on already-flat data."""
@@ -631,7 +631,7 @@ def _migrate_custom_teams():
 def save_custom_team(name, player_names, impact_names=None, nobowl_names=None):
     """Save a named XI globally as a list of player NAMES (re-resolved live on load).
     `impact_names` are optional impact-player substitutes (used only in impact-mode matches).
-    `nobowl_names` are the players marked with the no-bowl 'L' tag — stored so the flag
+    `nobowl_names` are the players marked with the no-bowl 'L' tag - stored so the flag
     survives the save/load round-trip and is re-applied when the team is used."""
     DB_CACHE.setdefault("custom_teams", {})[name.strip().lower()] = {
         "name": name.strip(), "players": list(player_names), "impact": list(impact_names or []),
@@ -642,7 +642,7 @@ def save_custom_team(name, player_names, impact_names=None, nobowl_names=None):
 def get_custom_team(name):
     """Return {'name', 'players':[names], 'impact':[names], 'nobowl':[names]} for a
     saved team (case-insensitive), or None. Teams saved before the 'L' fix have no
-    'nobowl' key — treat it as empty."""
+    'nobowl' key - treat it as empty."""
     if not name:
         return None
     return DB_CACHE.get("custom_teams", {}).get(name.strip().lower())

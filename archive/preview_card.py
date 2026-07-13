@@ -9,7 +9,7 @@ disc.ui=ui; disc.SelectOption=lambda *a,**k: None
 class _BS: success=primary=secondary=danger=1
 disc.ButtonStyle=_BS; disc.File=lambda *a,**k: None
 sys.modules['discord']=disc; sys.modules['discord.ui']=ui
-import career_manager as CM, career_ui
+from career import career_manager as CM, career_ui
 c=CM.new_career(123,"Jai Patel","legspin","aggressor")
 c["attributes"]={"power":74,"control":80,"bowling":71,"stamina":76}; CM.refresh_ovr(c)
 c["coins"]=4820; c["debut_done"]=True; c["cosmetic_title"]="[Patron]"

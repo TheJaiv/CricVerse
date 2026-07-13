@@ -9,9 +9,7 @@ import random
 import discord
 from PIL import Image, ImageDraw, ImageFont
 
-import career_manager as CM
-
-
+from career import career_manager as CM
 def _font(size, bold=True):
     paths = (
         # Linux (server)
@@ -90,10 +88,10 @@ def render_career_card(career: dict) -> io.BytesIO:
     img = Image.new("RGB", (W, H), (14, 16, 22))
     d = ImageDraw.Draw(img)
 
-    # Right stats panel — dark vertical gradient
+    # Right stats panel - dark vertical gradient
     for y in range(H):
         d.line([(PW, y), (W, y)], fill=_mix((28, 32, 44), (13, 14, 19), y / H))
-    # Left identity panel — vibrant tier-colour gradient
+    # Left identity panel - vibrant tier-colour gradient
     a_top = _mix(accent, (255, 255, 255), 0.10)
     a_bot = _mix(accent, (0, 0, 0), 0.42)
     for y in range(H):
@@ -108,7 +106,7 @@ def render_career_card(career: dict) -> io.BytesIO:
     f_attr = _font(19); f_num = _font(30); f_coin = _font(17); f_small = _font(14, bold=False)
 
     cx = PW // 2
-    # ── Left panel: OVR · tier · role ──
+    # Left panel: OVR · tier · role
     _ctext(d, cx, 22, str(career.get("ovr", CM.BASE_OVR)), f_ovr, ink)
     _ctext(d, cx, 138, "OVERALL", f_ovrl, ink_soft)
     _ctext(d, cx, 168, tier.upper(), f_tier, ink)
@@ -120,7 +118,7 @@ def render_career_card(career: dict) -> io.BytesIO:
         _rrect(d, [40, cy, PW - 40, cy + 30], 15, fill=_mix(accent, (0, 0, 0), 0.30))
         _ctext(d, cx, cy + 6, txt, f_chip, ink)
 
-    # ── Right panel: name + attributes + coins ──
+    # Right panel: name + attributes + coins
     nx = PW + 30
     d.text((nx, 28), str(career.get("username", "Rookie"))[:16], font=f_name, fill=(245, 247, 252))
     if career.get("cosmetic_title"):
@@ -151,9 +149,9 @@ def render_career_card(career: dict) -> io.BytesIO:
     return buf
 
 
-# ── Debut: 2-over Academy Trial (every player is an all-rounder; bat trial) ──
+# Debut: 2-over Academy Trial (every player is an all-rounder; bat trial)
 _SKILL_SCALE = 15.0
-_AI_RATING = 72  # academy bowler — a stern test for a fresh OVR-60 rookie
+_AI_RATING = 72  # academy bowler - a stern test for a fresh OVR-60 rookie
 
 
 def _eff(r):
@@ -189,7 +187,7 @@ def run_debut_trial(career: dict):
     return passed, lines, ("✅ TRIAL PASSED" if passed else "❌ TRIAL FAILED")
 
 
-# ── Creation picker: bowling type + batting mindset ─────────────────────────
+# Creation picker: bowling type + batting mindset
 class _BowlingSelect(discord.ui.Select):
     def __init__(self, picker):
         opts = [discord.SelectOption(label=f"{v['emoji']} {v['label']}", value=k,
@@ -269,7 +267,7 @@ class CareerCreateView(discord.ui.View):
     def __init__(self, user_id, username):
         super().__init__(timeout=180)
         self.uid = user_id
-        self.username = username       # Discord name — only the default in the name prompt
+        self.username = username       # Discord name - only the default in the name prompt
         self.message = None
         self.bowling = None
         self.mindset = None

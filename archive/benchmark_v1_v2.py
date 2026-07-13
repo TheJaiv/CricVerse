@@ -8,7 +8,7 @@ import random, statistics
 from collections import Counter
 import sim_harness as H
 import t20_simulation_v1 as T1, odi_simulation_v1 as O1
-import t20_simulation as T2, odi_simulation as O2
+from engine import t20_simulation as T2, odi_simulation as O2
 
 
 def use(t20, odi):

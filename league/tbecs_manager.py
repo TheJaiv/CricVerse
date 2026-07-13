@@ -1,6 +1,6 @@
-# ── TBECS (The Big Event Series) ───────────────────────────────────────────────
-# A large 50-team event. Because a full 50-team schedule is 1000+ matches — each
-# carrying a full 40-player scorecard — its match data would blow Mongo's 16MB
+# TBECS (The Big Event Series)
+# A large 50-team event. Because a full 50-team schedule is 1000+ matches - each
+# carrying a full 40-player scorecard - its match data would blow Mongo's 16MB
 # per-document cap. So TBECS gets special storage: the tournament skeleton lives in
 # its OWN document ("tbecs_tournament_data") and every match's heavy scorecard is
 # sharded into a per-match document. All of that lives in subscription_manager
@@ -14,14 +14,12 @@
 
 import discord
 
-from subscription_manager import DB_CACHE, async_save_to_bin
+from core.subscription_manager import DB_CACHE, async_save_to_bin
 
-# ══════════════════════════════════════════════════════════════════════════════
-# CONFIG
-# ══════════════════════════════════════════════════════════════════════════════
+# ---- Config ----
 TBECS_CONFIG = {
     "type_key": "tbecs",                 # tournament_type value (drives Mongo sharding)
-    "display_name": "The Big Event Championship Series",   # guess for the acronym — edit freely
+    "display_name": "The Big Event Championship Series",   # guess for the acronym - edit freely
     "short_name": "TBECS",
     "team_count": 50,
     "squad_size": 20,                   # 20 players per team (per-match stats stored for all)
@@ -41,10 +39,8 @@ def is_tbecs_match(match):
     return getattr(match, "tournament_type", None) == TBECS_CONFIG["type_key"]
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# ADS — innings-break sponsor messages, managed per server, shown at every innings
+# ADS - innings-break sponsor messages, managed per server, shown at every innings
 # end of a TBECS match. Stored in DB_CACHE["tbecs_ads"] (main doc), keyed by server_id.
-# ══════════════════════════════════════════════════════════════════════════════
 def _ads_store():
     if "tbecs_ads" not in DB_CACHE or not isinstance(DB_CACHE["tbecs_ads"], dict):
         DB_CACHE["tbecs_ads"] = {}

@@ -1,5 +1,5 @@
 """
-Test-match result graphics (PIL only — no discord import) so they can be rendered
+Test-match result graphics (PIL only - no discord import) so they can be rendered
 and previewed locally without running the bot:
 
     python3 test_image.py          # simulates a Test and writes summary.png + scorecard.png
@@ -38,9 +38,7 @@ def _hex(h):
         return (29, 78, 216)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# COMPACT SUMMARY — one horizontal band per innings (score + top 2 bat/bowl)
-# ─────────────────────────────────────────────────────────────────────────────
+# ---- COMPACT SUMMARY - one horizontal band per innings (score + top 2 bat/bowl) ----
 def generate_test_summary_image(match, match_no_label="", potm="") -> io.BytesIO:
     played = match.innings_list or []
     n = max(1, len(played))
@@ -58,7 +56,7 @@ def generate_test_summary_image(match, match_no_label="", potm="") -> io.BytesIO
         except Exception: return len(t) * 11
 
     c_navy = "#0A0F24"; c_grey = "#7A7F8A"; c_div = "#E4E6EA"
-    c_accent = "#BCC4CD"            # Test whites — greyish silver
+    c_accent = "#BCC4CD"            # Test whites - greyish silver
     c_band_a = "#FFFFFF"; c_band_b = "#F3F4F7"
     c_star = "#C9A227"
 
@@ -76,7 +74,7 @@ def generate_test_summary_image(match, match_no_label="", potm="") -> io.BytesIO
                 if i.bowling_stats[p["name"]].balls_bowled > 0]
         return sorted(rows, key=lambda x: (x[1].wickets_taken, -x[1].runs_conceded), reverse=True)[:k]
 
-    # ── Header ──
+    # Header
     t1n = match.team1["name"][:18].upper(); t2n = match.team2["name"][:18].upper()
     d.text((300 - tw(t1n, f_team)//2, 32), t1n, fill=c_navy, font=f_team)
     d.text((900 - tw(t2n, f_team)//2, 32), t2n, fill=c_navy, font=f_team)
@@ -96,7 +94,7 @@ def generate_test_summary_image(match, match_no_label="", potm="") -> io.BytesIO
     bar = "SIMULATION MATCH    •    DAY-NIGHT TEST    •    PINK BALL" if _pink else "SIMULATION MATCH    •    TEST MATCH"
     d.text((W // 2 - tw(bar, f_med) // 2, HEAD_H - 27), bar, fill=("#C2185B" if _pink else c_navy), font=f_med)
 
-    # ── Innings bands ──
+    # Innings bands
     BAT_X, BOWL_X = 392, 800
     for idx, inn in enumerate(played):
         y0 = HEAD_H + idx * BAND_H
@@ -134,7 +132,7 @@ def generate_test_summary_image(match, match_no_label="", potm="") -> io.BytesIO
             fig = f"{st.wickets_taken}-{st.runs_conceded} ({st.overs_str})"
             d.text((W - 30 - tw(fig, f_med), yy), fig, fill=c_navy, font=f_med)
 
-    # ── Footer ──
+    # Footer
     fy = HEAD_H + n * BAND_H
     d.rectangle([(0, fy), (W, fy + FOOT_H)], fill=c_accent)
     res = (getattr(match, "result", None) or "MATCH DRAWN").upper()
@@ -147,9 +145,7 @@ def generate_test_summary_image(match, match_no_label="", potm="") -> io.BytesIO
     return buf
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# FULL SCORECARD — every batter (dismissal/R/B/4s/6s/SR), extras+total, FoW, bowling
-# ─────────────────────────────────────────────────────────────────────────────
+# ---- FULL SCORECARD - every batter (dismissal/R/B/4s/6s/SR), extras+total, FoW, bowling ----
 def generate_test_scorecard_image(match, match_no_label="", potm="") -> io.BytesIO:
     W = 1080; M = 36; ROW = 30; HDR_H, RES_H = 104, 46
     C_BG = (17, 21, 32); C_GRAD_L = (11, 17, 44); C_GRAD_R = (21, 92, 140)
@@ -264,7 +260,7 @@ def generate_test_scorecard_image(match, match_no_label="", potm="") -> io.Bytes
 
 if __name__ == "__main__":
     import random
-    import test_simulation as T
+    from engine import test_simulation as T
     random.seed()
     m = T.TestMatch(T.TEAM_ALPHA, T.TEAM_BETA,
                     random.choice(["Flat", "Green", "Dusty", "Hard"]),

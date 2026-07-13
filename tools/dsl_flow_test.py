@@ -1,5 +1,5 @@
 # DSL end-to-end flow test (headless, no Discord / no MongoDB writes needed).
-# Run from the repo root:  python tools/dsl_flow_test.py
+# Run from the repo root: python tools/dsl_flow_test.py
 #
 # Covers: schedule shape (double RR, home/away balance, venues), venue-profile
 # pitch draws, playoff generation + slot advancement + champion, season archive
@@ -14,22 +14,22 @@ from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import dsl_manager
-from dsl_manager import (
+from league import dsl_manager
+from league.dsl_manager import (
     DSL_CONFIG, DSL_KO_STAGES, create_dsl_tournament, set_home_stadium,
     assign_dsl_stadiums, pick_dsl_conditions, dsl_generate_league_schedule,
     dsl_generate_playoffs, _dsl_try_advance, _dsl_get,
     write_season_archive, load_all_seasons, invalidate_archive_cache,
     aggregate_player_stats, aggregate_venue_stats, season_history,
 )
-from tournament_manager import get_tournament_standings, assign_tournament_conditions
+from league.tournament_manager import get_tournament_standings, assign_tournament_conditions
 
 PASS = 0
 def ok(cond, label):
     global PASS
     assert cond, f"FAIL: {label}"
     PASS += 1
-    print(f"  ✓ {label}")
+    print(f"{label}")
 
 
 def build_tourney():
@@ -176,7 +176,7 @@ def main():
            "season history shows S1 champion + S2 in progress")
 
         # season review: awards stored in the archive JSON and loadable
-        from dsl_manager import get_season_summary, season_detail_embed
+        from league.dsl_manager import get_season_summary, season_detail_embed
         ok(data.get("awards", {}).get("most_runs", {}).get("name") == "Rohit",
            "archive JSON carries awards (Orange Cap = Rohit, 700 runs)")
         summ = get_season_summary("999", t["season"], t2)
@@ -191,7 +191,7 @@ def main():
            "current in-progress season summary computes live awards")
         invalidate_archive_cache()
 
-    print(f"\nALL {PASS} CHECKS PASSED ✅")
+    print(f"\nALL {PASS} CHECKS PASSED ")
 
 
 if __name__ == "__main__":

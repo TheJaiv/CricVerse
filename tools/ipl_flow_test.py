@@ -1,9 +1,9 @@
 # IPL end-to-end flow test (headless, no Discord / no MongoDB writes needed).
-# Run from the repo root:  python tools/ipl_flow_test.py
+# Run from the repo root: python tools/ipl_flow_test.py
 #
-# Covers: the real-IPL fixture rule (10 teams, 14 matches each — 5 opponents twice
+# Covers: the real-IPL fixture rule (10 teams, 14 matches each - 5 opponents twice
 # and 4 once), the 14-round layout, home/away balance, the single combined table
-# (no groups), and the Top-4 playoff ladder (Q1/Eliminator → Q2 → Final → champion).
+# (no groups), and the Top-4 playoff ladder (Q1/Eliminator -> Q2 -> Final -> champion).
 
 import os
 import sys
@@ -12,12 +12,12 @@ from collections import Counter, defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tournament_manager import (
+from league.tournament_manager import (
     generate_ipl_schedule, ipl_try_advance, get_tournament_standings,
     _match_bracket_rank, revert_tournament_match, IPL_PLAYOFF_ORDER,
     build_standings_message,
 )
-from stadium_manager import (
+from league.stadium_manager import (
     stadiums_enabled, default_stadium_pool, assign_stadiums, reroll_stadiums,
     DEFAULT_IPL_STADIUMS,
 )
@@ -27,7 +27,7 @@ def ok(cond, label):
     global PASS
     assert cond, f"FAIL: {label}"
     PASS += 1
-    print(f"  ✓ {label}")
+    print(f"{label}")
 
 
 TEAMS = ["CSK", "MI", "KKR", "SRH", "RR", "GT", "RCB", "DC", "PBKS", "LSG"]
@@ -64,7 +64,7 @@ def play_all(tourney, matches, rng):
         ipl_try_advance(tourney)
 
 
-# ── 1. Fixture shape ─────────────────────────────────────────────────────────
+# 1. Fixture shape
 def test_fixture_shape(rng):
     print("\n[1] Fixture shape — the real IPL rule")
     sched = generate_ipl_schedule(TEAMS)
@@ -101,7 +101,7 @@ def test_fixture_shape(rng):
         assert len(once) == 4, f"{t} plays {len(once)} teams once (want 4)"
     ok(True, "every team meets 5 opponents twice and 4 opponents once")
 
-    # The two top seeds (add order 1 & 2 — the CSK/MI slot) are a mirror pair → meet twice.
+    # The two top seeds (add order 1 & 2 - the CSK/MI slot) are a mirror pair -> meet twice.
     ok(meetings[frozenset((TEAMS[0], TEAMS[1]))] == 2,
        f"top two seeds ({TEAMS[0]} & {TEAMS[1]}) meet twice")
 
@@ -115,7 +115,7 @@ def test_fixture_shape(rng):
     ok(True, "pairs that meet twice play one leg each at home")
 
 
-# ── 2. Round layout ──────────────────────────────────────────────────────────
+# 2. Round layout
 def test_rounds(rng):
     print("\n[2] Round layout")
     sched = generate_ipl_schedule(TEAMS)
@@ -137,7 +137,7 @@ def test_rounds(rng):
        "league matches rank 0 in the bracket order")
 
 
-# ── 3. Single combined table ─────────────────────────────────────────────────
+# 3. Single combined table
 def test_standings(rng):
     print("\n[3] Points table")
     t = build_tourney()
@@ -155,7 +155,7 @@ def test_standings(rng):
     return t, table
 
 
-# ── 3b. Standings render — text table inside an embed ───────────────────────
+# 3b. Standings render - text table inside an embed
 def test_standings_render(rng):
     print("\n[3b] Standings render")
     t = build_tourney()
@@ -207,7 +207,7 @@ def test_standings_render(rng):
             print(f"  {ln}")
 
 
-# ── 3c. Stadiums ─────────────────────────────────────────────────────────────
+# 3c. Stadiums
 def test_stadiums(rng):
     print("\n[3c] Stadiums")
     t = build_tourney()
@@ -242,7 +242,7 @@ def test_stadiums(rng):
     ok(all(len(v) == len(set(v)) for v in by_round.values()),
        "reroll preserves one-venue-per-round")
 
-    # A tournament from before stadiums were enabled everywhere gets backfilled…
+    # A tournament from before stadiums were enabled everywhere gets backfilled...
     old = build_tourney()
     old["schedule"] = generate_ipl_schedule(TEAMS)
     old["stadiums"] = []
@@ -250,7 +250,7 @@ def test_stadiums(rng):
     ok(old["stadiums"] and all(m.get("stadium") for m in old["schedule"]),
        "a tournament saved with an empty pool is backfilled with the defaults")
 
-    # …but a pool the manager cleared on purpose stays cleared.
+    # ...but a pool the manager cleared on purpose stays cleared.
     cleared = build_tourney()
     cleared["schedule"] = generate_ipl_schedule(TEAMS)
     cleared["stadiums"] = []
@@ -260,7 +260,7 @@ def test_stadiums(rng):
        "a deliberately cleared pool is respected (no venues, no reseed)")
 
 
-# ── 4. Playoffs ──────────────────────────────────────────────────────────────
+# 4. Playoffs
 def test_playoffs(rng):
     print("\n[4] Top-4 playoffs")
     t = build_tourney()
@@ -286,7 +286,7 @@ def test_playoffs(rng):
     ok(not any(m["round"] in ("Qualifier 2", "Final") for m in t["schedule"]),
        "Qualifier 2 / Final not generated until their feeders finish")
 
-    # Q1 + Eliminator → Qualifier 2
+    # Q1 + Eliminator -> Qualifier 2
     wq1 = fake_result(q1, rng)
     lq1 = q1["result"]["loser"]
     ipl_try_advance(t)
@@ -300,7 +300,7 @@ def test_playoffs(rng):
        "Qualifier 2 is the Qualifier 1 loser v the Eliminator winner")
     ok(t["status"] != "completed", "season still active before the Final")
 
-    # Q2 → Final
+    # Q2 -> Final
     wq2 = fake_result(q2, rng)
     ipl_try_advance(t)
     final = next(m for m in t["schedule"] if m["round"] == "Final")
@@ -326,12 +326,12 @@ def test_playoffs(rng):
     return t
 
 
-# ── 5. Revert ────────────────────────────────────────────────────────────────
+# 5. Revert
 def test_revert(rng):
     print("\n[5] Revert")
     t = test_playoffs(rng)
 
-    # The Final is the last word — reverting it reopens the season.
+    # The Final is the last word - reverting it reopens the season.
     final = next(m for m in t["schedule"] if m["round"] == "Final")
     good, _ = revert_tournament_match(t, final["match_id"])
     ok(good and t["status"] == "active", "reverting the Final reopens the season")
@@ -362,7 +362,7 @@ def test_revert(rng):
        "the regenerated Qualifier 1 uses the re-seeded top 2")
 
 
-# ── 6. Fuzz ──────────────────────────────────────────────────────────────────
+# 6. Fuzz
 def test_fuzz():
     print("\n[6] Fuzz — 300 random seasons")
     for seed in range(300):

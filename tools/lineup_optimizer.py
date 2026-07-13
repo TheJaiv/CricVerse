@@ -1,33 +1,28 @@
-"""
-CricVerse Lineup Optimizer
-==========================
-Given a SQUAD (11+), pick the best XI and best batting order by Monte-Carlo
-simulating thousands of matches across all 15 pitch conditions, then do the same
-PER PITCH. The opponent is a FIXED balanced side (pace+spin) at +3/+2/same/-2/-3
-OVR -- NOT a clone of your XI (a mirror copies your players, so strong picks and
-pitch specialists cancel out and can't be selected for).
+"""Pick the best XI and batting order from a squad by Monte-Carlo sim.
 
-Why this is tractable (11! = 40M orders is impossible):
-  1. ROLE CONSTRAINT -> the batting order is always
-        [ specialist batters ] + [ all-rounders ] + [ bowlers ]
-     so openers are always batters and bowlers are always tail (your rule).
-     We only permute WITHIN the batter group and WITHIN the all-rounder group
-     (tail order barely moves results), collapsing the space to a few hundred
-     genuinely different line-ups.
-  2. COARSE -> FINE FUNNEL -> rank every candidate cheaply (small N), then only
-     re-simulate the top few at full N (>=100 per case).
-  3. COMMON RANDOM NUMBERS -> every candidate faces the SAME sequence of
-     opponent XIs / form draws, so the coarse ranking is paired (low variance),
-     not RNG noise.
+Simulates thousands of matches across all 15 pitch conditions, then again per
+pitch. The opponent is a fixed balanced side (pace+spin) at +3/+2/same/-2/-3
+OVR rather than a clone of your XI - a mirror copies your players, so strong
+picks and pitch specialists would cancel out and never get selected for.
 
-Give 11 players OR a bigger SQUAD: if you pass >11, the tool first picks the
-best legal XI (keeper + bowling depth) and then optimises that XI's order.
+Brute-forcing 11! = 40M batting orders is impossible, so instead:
+  1. The order is constrained to [batters] + [all-rounders] + [bowlers]
+     (openers are always batters, bowlers are always tail). Only the batter
+     and all-rounder groups get permuted - tail order barely moves results -
+     which collapses the space to a few hundred genuinely different line-ups.
+  2. Every candidate is ranked cheaply at small N first; only the top few get
+     re-simulated at full N (>=100 per case).
+  3. Common random numbers: every candidate faces the same sequence of
+     opponent XIs and form draws, so the coarse ranking is paired rather
+     than RNG noise.
 
-Usage:
-  - Edit MY_SQUAD below (11+ players), or call optimize(squad).
-  - Run:  PYTHONDONTWRITEBYTECODE=1 python3 tools/lineup_optimizer.py
-  - Flags: --odi --coarse-n N --fine-n N --fine-k K --max-cand M --procs P
-           --stats-n N --toss-n N --select-n N --max-combos M --quick
+If you pass more than 11 players, the tool first picks the best legal XI
+(keeper + bowling depth) and then optimises that XI's order.
+
+Usage: edit MY_SQUAD below (11+ players) or call optimize(squad), then
+  PYTHONDONTWRITEBYTECODE=1 python3 tools/lineup_optimizer.py
+Flags: --odi --coarse-n N --fine-n N --fine-k K --max-cand M --procs P
+       --stats-n N --toss-n N --select-n N --max-combos M --quick
 """
 import argparse
 import difflib
@@ -45,7 +40,7 @@ sys.path.insert(0, _REPO_ROOT)
 from tools.sim_harness import CricketMatch, run_full_match, build_team  # noqa: E402
 
 # Master ratings list shipped in the repo (NAME BAT BOWL OVR ROLE ARCHETYPE).
-RATINGS_FILE = os.path.join(_REPO_ROOT, "cricverse_players_ratings.txt")
+RATINGS_FILE = os.path.join(_REPO_ROOT, "data", "cricverse_players_ratings.txt")
 _RATINGS_LINE = re.compile(r"^\s*\d+\s+(.+?)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\S+)\s*$")
 
 
@@ -104,9 +99,7 @@ PITCH_IX = {p: i for i, p in enumerate(PITCHES)}
 TIERS = [("+3", +3), ("+2", +2), ("same", 0), ("-2", -2), ("-3", -3)]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Player / team helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# ---- Player / team helpers ----
 def _norm(p):
     """Accept capitalised CSV keys OR lowercase engine keys; return engine shape."""
     g = lambda *ks, d=None: next((p[k] for k in ks if k in p), d)
@@ -119,7 +112,7 @@ def _norm(p):
         "role": g("role", "Role", d="Batter"),
         "archetype": g("archetype", "Archetype", d="Standard"),
     }
-    if g("avoid_bowl"):        # typed 'L' (less bowling) tag — must survive _norm
+    if g("avoid_bowl"):        # typed 'L' (less bowling) tag - must survive _norm
         out["avoid_bowl"] = True
     return out
 
@@ -201,7 +194,7 @@ def _apply_captain(players, captain_name=None):
 
 
 def _impact_on(format_overs):
-    """Impact player is a T20-only rule — never in ODIs (or other formats)."""
+    """Impact player is a T20-only rule - never in ODIs (or other formats)."""
     return IMPACT_ON and format_overs == 20
 
 
@@ -270,9 +263,7 @@ def _default_order(xi):
     return bats + ars + bwls
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Candidate batting-order generation (role-constrained)
-# ─────────────────────────────────────────────────────────────────────────────
+# ---- Candidate batting-order generation (role-constrained) ----
 def _archetype_seed(bats):
     """A cricket-sensible opener pairing: Aggressor + Anchor up top, Finishers low."""
     prio = {"Aggressor": 0, "Anchor": 1, "Standard": 2, "Finisher": 3}
@@ -335,9 +326,7 @@ def generate_candidates(xi, max_cand, rng):
     return orders
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Evaluation (one candidate -> win% on every pitch x tier)
-# ─────────────────────────────────────────────────────────────────────────────
+# ---- Evaluation (one candidate -> win% on every pitch x tier) ----
 def _eval_one(order, pitch, opp_ovr, n, format_overs, base_seed, squad=None):
     """Win% for `order` on one pitch vs a FIXED balanced opponent rated `opp_ovr`.
     A fixed (not self-mirror) opponent is essential: a clone copies your players,
@@ -406,9 +395,7 @@ def _run_stage(orders, opp_specs, n, format_overs, seed0, procs, label,
     return results
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Per-player career stats for the winning order
-# ─────────────────────────────────────────────────────────────────────────────
+# ---- Per-player career stats for the winning order ----
 def collect_player_stats(order, n, format_overs, seed, opp_ovr, squad=None):
     """Run `n` matches with the winning order (vs a fixed even opponent, pitches
     cycled) and accumulate batting & bowling stats per player, like a career log."""
@@ -496,9 +483,7 @@ def _print_player_stats(order, st, n):
                   f"{s['wkts']:>6}{econ:>7.2f}{avg:>7}{sr:>7}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Toss decision (bat first vs field first) per pitch
-# ─────────────────────────────────────────────────────────────────────────────
+# ---- Toss decision (bat first vs field first) per pitch ----
 def _win_pct_fixed_innings(order, pitch, opp_ovr, n, format_overs, seed, me_first,
                            squad=None):
     """Win% for the best XI on one pitch when it ALWAYS bats first (me_first=True)
@@ -558,9 +543,7 @@ def _print_toss_advice(adv, n):
     print(f"  >> FIELD first on: {', '.join(field_pitches) or '(none)'}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Best HOME pitch — which deck gives the biggest edge vs a VARIED field
-# ─────────────────────────────────────────────────────────────────────────────
+# ---- Best HOME pitch - which deck gives the biggest edge vs a VARIED field ----
 def _winpct_vs_kind(order, pitch, opp_ovr, kind, n, format_overs, seed, squad):
     random.seed(seed)
     me_players = [dict(p) for p in order]
@@ -635,9 +618,7 @@ def _print_home_pitch(adv, n):
               f"beats you there")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Captaincy test — every candidate captain (+1) tested on every pitch
-# ─────────────────────────────────────────────────────────────────────────────
+# ---- Captaincy test - every candidate captain (+1) tested on every pitch ----
 def _captain_winpct(order, captain_name, pitch, opp_ovr, squad, n, format_overs, seed):
     """Win% with `captain_name` boosted +1, on ONE pitch (common random numbers)."""
     random.seed(seed)
@@ -706,9 +687,7 @@ def _print_captaincy(res, order, n, pitch):
     return rec
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Impact-player usage — when & where the AI brings the 12th man in
-# ─────────────────────────────────────────────────────────────────────────────
+# ---- Impact-player usage - when & where the AI brings the 12th man in ----
 def impact_usage_stats(order, opp_ovr, squad, n, format_overs, seed):
     me_subs = _my_bench(order, squad, format_overs)
     if not me_subs:
@@ -773,9 +752,7 @@ def _print_impact_usage(s):
     print("     most subbed in: " + ", ".join(f"{nm} ({c})" for nm, c in top))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Squad -> best XI selection
-# ─────────────────────────────────────────────────────────────────────────────
+# ---- Squad -> best XI selection ----
 def _is_valid_xi(players, require_wk=False, min_bowl=5, min_bat=4):
     """A pickable XI: enough bowling to get through an innings, a real top order,
     and (if `require_wk`) at least one wicketkeeper."""
@@ -889,9 +866,7 @@ def select_best_xi(squad, format_overs, select_n, max_combos, seed, procs, opp_s
     return best_xi
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Batting-order optimization (reusable for the overall run AND each pitch)
-# ─────────────────────────────────────────────────────────────────────────────
+# ---- Batting-order optimization (reusable for the overall run AND each pitch) ----
 def optimize_order(xi, opp_specs, coarse_n, fine_n, fine_k, max_cand, format_overs,
                    seed, procs, rng, pitches=PITCHES, verbose=True, squad=None):
     """Coarse->fine search for the best batting order of a fixed XI over `pitches`.
@@ -967,9 +942,7 @@ def _print_one_pitch(pitch, order, grid, field, base_xi, captain, impact):
         print(f"     vs default XI:  IN {', '.join(ins)}   OUT {', '.join(outs)}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Public entry point
-# ─────────────────────────────────────────────────────────────────────────────
+# ---- Public entry point ----
 def optimize(squad, format_overs=20, coarse_n=30, fine_n=150, fine_k=6,
              max_cand=150, procs=None, seed=42, quick=False, stats_n=300,
              toss_n=200, select_n=20, max_combos=150, select_fine_n=200,
@@ -1005,7 +978,7 @@ def optimize(squad, format_overs=20, coarse_n=30, fine_n=150, fine_k=6,
     default_xi = (sorted(squad, key=lambda p: -player_ovr(p))[:11]
                   if len(squad) > 11 else squad)
 
-    # ── CORE: best XI + best order for EACH of the 15 pitches ──
+    # CORE: best XI + best order for EACH of the 15 pitches
     pp_params = {
         "select_n": select_n, "max_combos": min(max_combos, 100),
         "select_fine_n": select_fine_n, "select_k": select_k,
@@ -1036,7 +1009,7 @@ def optimize(squad, format_overs=20, coarse_n=30, fine_n=150, fine_k=6,
     pp_caps = per_pitch_captaincy(per_pitch, opp_specs["same"], squad, cap_n,
                                   format_overs, seed + 11, procs)
 
-    # ── PER-PITCH best XI + order, sorted best home pitch first ──
+    # PER-PITCH best XI + order, sorted best home pitch first
     print("\n" + "=" * 74)
     print("  PER-PITCH BEST XI + ORDER  (win% = vs a VARIED field; best deck first)")
     print("=" * 74)
@@ -1048,7 +1021,7 @@ def optimize(squad, format_overs=20, coarse_n=30, fine_n=150, fine_k=6,
     print("\n" + "=" * 74)
     _print_home_pitch(hp, home_n)
 
-    # ── Detailed analysis for the recommended HOME pitch's XI ──
+    # Detailed analysis for the recommended HOME pitch's XI
     print("\n" + "=" * 74)
     print(f"  HOME-PITCH SETUP  ·  {best_home.upper()}  ·  best XI captaincy / impact "
           f"/ toss / stats")
@@ -1068,10 +1041,8 @@ def optimize(squad, format_overs=20, coarse_n=30, fine_n=150, fine_k=6,
     return per_pitch, hp, best_home
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Single-scenario recommender (one pitch, one opponent) — used by the Discord bot.
+# Single-scenario recommender (one pitch, one opponent) - used by the Discord bot.
 # Self-contained, NO multiprocessing, so it's safe to call from an async thread.
-# ─────────────────────────────────────────────────────────────────────────────
 def _winpct_vs_team(order, pitch, opp_factory, n, format_overs, seed, squad,
                     weather="Clear"):
     random.seed(seed)
@@ -1211,7 +1182,7 @@ def recommend_xi(squad, pitch, opp_spec, weather="Clear", format_overs=20, n_coa
             res[i] = w
             _tick(n)
         # Tie-break on candidate index: imap_unordered yields in COMPLETION order,
-        # and ties are common at coarse n — without this the ranking (and thus the
+        # and ties are common at coarse n - without this the ranking (and thus the
         # final XI) would vary run to run.
         return sorted(res.items(), key=lambda kv: (-kv[1], kv[0]))
 
@@ -1234,7 +1205,7 @@ def recommend_xi(squad, pitch, opp_spec, weather="Clear", format_overs=20, n_coa
         # 'L' (less bowling) for OUR XI: greedily tag a bowler/AR out of the AI's
         # main attack when that raises win%. Every candidate is judged at the SAME
         # seed as the untagged baseline (common random numbers) and must clear
-        # L_EPS, so noise can't add a tag. Opponent L tags are never invented here —
+        # L_EPS, so noise can't add a tag. Opponent L tags are never invented here
         # only honoured if typed in a pasted XI (they ride in on the player dicts
         # via _norm). Tags on BATs are pointless (the AI's main attack is
         # bowlers/ARs only), so skip them.
@@ -1280,7 +1251,7 @@ def recommend_xi(squad, pitch, opp_spec, weather="Clear", format_overs=20, n_coa
     if progress:
         progress(1.0)
 
-    # Impact player is a T20-only rule — no impact 12th man in ODIs.
+    # Impact player is a T20-only rule - no impact 12th man in ODIs.
     bench = _my_bench(best_order, squad) if format_overs == 20 else []
     chosen = {p["name"] for p in best_order}
     return {
@@ -1323,7 +1294,7 @@ def _quick_xi(squad, pitch):
 
 
 def best_home_pitch(squad, n=60, format_overs=20, seed=42):
-    """The pitch where THIS squad is strongest — i.e. the deck whose WORST-CASE win%
+    """The pitch where THIS squad is strongest - i.e. the deck whose WORST-CASE win%
     against a varied field (balanced/spin/pace/bat) is highest, so however good a
     visitor is, your home advantage holds. Returns ranked pitches + the field grid."""
     squad = [_norm(p) for p in squad]
@@ -1336,7 +1307,7 @@ def best_home_pitch(squad, n=60, format_overs=20, seed=42):
                         for ki, kind in enumerate(FIELD_KINDS)}
     # Score = average advantage + worst-case floor. Rewards a BIG edge (so you
     # dominate, not just survive) while still penalising any exploitable weak column
-    # -- so the pick is the deck you're strongest on with no soft underbelly.
+    # so the pick is the deck you're strongest on with no soft underbelly.
     def score(p):
         v = field[p]
         return sum(v.values()) / len(v) + min(v.values())
@@ -1390,10 +1361,8 @@ def _report(best_order, best_overall, best_grid, fine, finalists, fine_n):
     print("=" * 74)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Your SQUAD — just names; ratings/roles are looked up from cricverse_players_ratings.txt
+# Your SQUAD - just names; ratings/roles are looked up from cricverse_players_ratings.txt
 # Give 11 OR MORE; if >11 the tool picks the best XI first.
-# ─────────────────────────────────────────────────────────────────────────────
 MY_SQUAD = [
     "Sachin Tendulkar", "Virat Kohli", "Jasprit Bumrah", "Chris Gayle", "Vijay Merchant",
     "Everton Weekes", "MS Dhoni", "Garfield Sobers", "Mike Procter", "Bob Appleyard",

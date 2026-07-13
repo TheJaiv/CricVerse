@@ -1,7 +1,7 @@
-# Batting stats BY LINEUP SLOT — catches the "bowlers are the best batters"
+# Batting stats BY LINEUP SLOT - catches the "bowlers are the best batters"
 # inversion: tailenders walking into collapse-mode armor and out-averaging the
 # top order. Real ODI shape: openers/middle avg 30-45 · #8 ~15 · #9-11 ≤ ~12.
-# Run from repo root:  python tools/position_check.py [n] [pitch]
+# Run from repo root: python tools/position_check.py [n] [pitch]
 import os
 import random
 import statistics
@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from sim_harness import CricketMatch, InningsState, build_team
-from odi_simulation import execute_ball_math_odi, get_smart_ai_bowler_odi
+from engine.odi_simulation import execute_ball_math_odi, get_smart_ai_bowler_odi
 
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 600
 PITCH = sys.argv[2] if len(sys.argv) > 2 else "Hard"

@@ -7,13 +7,13 @@ and measure win-rates / score distributions for calibration.
 import random
 import statistics
 import sys, os
-# Allow running from the repo root (e.g. `python tools/sim_harness.py`) — add root to the import path.
+# Allow running from the repo root (e.g. `python tools/sim_harness.py`) - add root to the import path.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from t20_simulation import execute_ball_math_t20, get_smart_ai_bowler_t20
-from odi_simulation import execute_ball_math_odi, get_smart_ai_bowler_odi
+from engine.t20_simulation import execute_ball_math_t20, get_smart_ai_bowler_t20
+from engine.odi_simulation import execute_ball_math_odi, get_smart_ai_bowler_odi
 
 
-# ---- minimal mirrors of bot.py classes ----
+# minimal mirrors of bot.py classes
 class BatterStats:
     def __init__(self, profile):
         self.profile = profile
@@ -100,7 +100,7 @@ def execute_ball_math(match):
     return execute_ball_math_t20(match)
 
 
-# ── Impact-player rule (ported from bot.py; AI subs a 12th man at over breaks) ──
+# Impact-player rule (ported from bot.py; AI subs a 12th man at over breaks)
 def swap_impact_player(match, team_id, out_name, in_player):
     if team_id == 1:
         match.t1_impact_used = True; match.t1_impact_sub_name = in_player["name"]; team = match.team1
@@ -250,7 +250,7 @@ def run_full_match(match):
     return match
 
 
-# ---- team builder with controlled ratings ----
+# team builder with controlled ratings
 def build_team(name, bat_rating, bowl_rating, noise=3):
     """A realistic XI: 6 specialist batters (1 WK), 1 pace AR, 4 bowlers (2 pace, 2 spin)."""
     def j(r):  # jitter
@@ -275,7 +275,7 @@ def build_team(name, bat_rating, bowl_rating, noise=3):
 
 def series(team_a_spec, team_b_spec, n=2000, format_overs=20, pitch="Flat", weather="Clear", swap_innings=True):
     """team_x_spec = (bat, bowl). Returns dict of stats. A bats first half, B bats first other half.
-    'par' = first-innings totals only (no chase truncation) — the true realism metric."""
+    'par' = first-innings totals only (no chase truncation) - the true realism metric."""
     a_wins = b_wins = ties = 0
     a_scores, b_scores = [], []
     par_scores = []   # first-innings totals only

@@ -2,10 +2,10 @@
 Career Mode hardcore verification harness (no Discord connection, no Mongo).
 
 Covers, against the REAL code paths:
-  Part 1 — career_manager unit tests (fake in-memory Mongo)
-  Part 2 — career_match lobby logic
-  Part 3 — career_ui card rendering + legacy trial
-  Part 4 — bot.py headless end-to-end flows: interactive debut, batting &
+  Part 1 - career_manager unit tests (fake in-memory Mongo)
+  Part 2 - career_match lobby logic
+  Part 3 - career_ui card rendering + legacy trial
+  Part 4 - bot.py headless end-to-end flows: interactive debut, batting &
            bowling scenarios (every difficulty), full 2v2 club match with bots,
            club payout winner logic (tie / super-over), bot-captain toss.
 
@@ -21,7 +21,7 @@ import traceback
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["CAREER_MODE"] = "1"
 
-# ── Fake Mongo layer (installed BEFORE career_manager import) ────────────────
+# Fake Mongo layer (installed BEFORE career_manager import)
 class FakeCollection:
     def __init__(self):
         self.docs = {}
@@ -55,13 +55,12 @@ class InlineThread:
         if self._t:
             self._t(*self._a, **self._k)
 
-import career_manager as CM
+from career import career_manager as CM
 CM._get_db = lambda: FAKE_DB
 CM.Thread = InlineThread
-import career_match as CMATCH
-import career_ui
-
-# ── Tiny test framework ──────────────────────────────────────────────────────
+from career import career_match as CMATCH
+from career import career_ui
+# Tiny test framework
 PASS, FAIL = 0, []
 
 def check(name, cond, detail=""):
@@ -70,7 +69,7 @@ def check(name, cond, detail=""):
         PASS += 1
     else:
         FAIL.append(f"{name}  {detail}")
-        print(f"  ❌ {name}  {detail}")
+        print(f"{name}  {detail}")
 
 def section(title):
     print(f"\n── {title} " + "─" * max(0, 60 - len(title)))
@@ -85,7 +84,7 @@ def fresh(uid, name="Tester", bt="pace", ms="standard", debut=True, coins=0):
     return c
 
 
-# ═════════════════════════════ PART 1: career_manager ═══════════════════════
+# PART 1: career_manager
 def part1():
     section("PART 1 · career_manager")
 
@@ -206,7 +205,7 @@ def part1():
           and 1 <= eng["bat"] <= 99 and 1 <= eng["bowl"] <= 99)
 
 
-# ═════════════════════════════ PART 2: career_match ═════════════════════════
+# PART 2: career_match
 def part2():
     section("PART 2 · career_match lobby")
     for i in range(1, 9):
@@ -256,7 +255,7 @@ def part2():
     check("each_side_has_human", lob.each_side_has_human())
 
 
-# ═════════════════════════════ PART 3: career_ui ════════════════════════════
+# PART 3: career_ui
 def part3():
     section("PART 3 · career_ui")
     c = fresh("u20", name="Card Tester")
@@ -273,7 +272,7 @@ def part3():
     check("legacy trial returns sane", isinstance(passed, bool) and len(lines) == 3 and headline)
 
 
-# ═════════════════════════════ PART 4: bot.py headless flows ════════════════
+# PART 4: bot.py headless flows
 import bot as B
 
 B.increment_match_count = lambda fmt: 1
@@ -363,7 +362,7 @@ async def _act_on_view(msg, actors, rng):
                 return inter
         return None
 
-    # Club team naming — both captains submit via record()
+    # Club team naming - both captains submit via record()
     if isinstance(view, B.ClubNameView):
         for uid in (view.cap_a_id, view.cap_b_id):
             if uid in view.names:
@@ -477,7 +476,7 @@ async def drive_match(channel, actors, max_steps=6000, seed=1):
 async def part4():
     section("PART 4 · headless flows (real bot.py code)")
 
-    # ── Debut: strong rookie (should usually pass) and weak floor rookie ─────
+    # Debut: strong rookie (should usually pass) and weak floor rookie
     for tag, boost, uid, cid in [("strong", 95, 201, 9001), ("base", None, 202, 9002)]:
         career = fresh(uid, name=f"Debutant{tag[:1].upper()}", debut=False)
         if boost:
@@ -498,7 +497,7 @@ async def part4():
         if passed:
             check(f"debut[{tag}] stats recorded", career["stats"]["bat"]["matches"] == 1)
 
-    # ── Scenarios: bat + bowl across all difficulties ────────────────────────
+    # Scenarios: bat + bowl across all difficulties
     scount = 0
     for mode in ("bat", "bowl"):
         for diff in ("easy", "medium", "hard"):
@@ -536,7 +535,7 @@ async def part4():
     check("scenario busy channel keeps coins", CM.get_career(uid)["coins"] == 100,
           f"got {CM.get_career(uid)['coins']}")
 
-    # ── Club match: 2 humans + 2 bots, full interactive match ────────────────
+    # Club match: 2 humans + 2 bots, full interactive match
     u1 = fresh(401, name="CapAlpha", coins=0)
     u2 = fresh(402, name="CapBeta", coins=0)
     u1["attributes"]["power"] = 90; CM.refresh_ovr(u1); CM.async_save_career(u1)
@@ -566,7 +565,7 @@ async def part4():
     check("club winner recorded (or tie)", tied or wins == 1, f"wins={wins}")
     check("club quest matches fed", a1["quests"]["progress"].get("matches") == 1)
 
-    # ── Club payout winner logic: super-over-decided + genuine tie ───────────
+    # Club payout winner logic: super-over-decided + genuine tie
     def craft_payout_match(so_winner=None, tie=False):
         t1 = {"name": "Alphas", "players": [{"name": "CapAlpha", "owner_id": 401, "bat": 70, "bowl": 60,
                                              "role": "All-Rounder_Pace", "archetype": "Standard"},
@@ -603,7 +602,7 @@ async def part4():
     check("true tie recorded as tie", "Match tied" in ch3.text()
           and CM.get_career(401).get("club", {}).get("won", 0) == 0)
 
-    # ── Bot captain toss must auto-resolve (no deadlock) ─────────────────────
+    # Bot captain toss must auto-resolve (no deadlock)
     t1 = {"name": "Humans", "players": [{"name": "CapAlpha", "owner_id": 401, "bat": 70, "bowl": 60,
                                          "role": "All-Rounder_Pace", "archetype": "Standard"},
                                         {"name": "H2", "owner_id": 402, "bat": 60, "bowl": 60,
@@ -623,7 +622,7 @@ async def part4():
     ch4 = FChannel(9203)
     B.active_games[9203] = m
     await B._club_begin_toss(ch4, m)
-    # A bot can never click "call the coin" — the fix must never send TossCallView here.
+    # A bot can never click "call the coin" - the fix must never send TossCallView here.
     stuck = [x for x in ch4.log if isinstance(x.view, B.TossCallView)]
     check("bot-captain toss auto-resolved", not stuck,
           "TossCallView sent to a bot captain (deadlock)")
@@ -634,7 +633,7 @@ async def part4():
         await drive_match(ch4, [FUser(401, "CapAlpha"), FUser(402, "H2")], seed=5)
         check("bot-captain match completes", 9203 not in B.active_games)
 
-    # ── Tied club match: super over must stay a club match ───────────────────
+    # Tied club match: super over must stay a club match
     m2 = craft_payout_match(tie=True)
     m2.current_innings_num = 2
     m2.current_innings = m2.innings2
@@ -651,7 +650,7 @@ async def part4():
 
 
 async def part5_stress(n=8):
-    """Many random seeds across every interactive flow — catches flaky paths
+    """Many random seeds across every interactive flow - catches flaky paths
     (DRS, last-man rule, quota exhaustion, ties, free hits, bot turns)."""
     section(f"PART 5 · stress ({n} debuts · {n} scenarios · {n} club matches)")
 
@@ -718,7 +717,7 @@ def main():
         asyncio.run(part5_stress(int(os.environ.get("STRESS_N", "8"))))
 
     print("\n" + "=" * 64)
-    print(f"✅ {PASS} checks passed   ·   ❌ {len(FAIL)} failed")
+    print(f"{PASS} checks passed   ·    {len(FAIL)} failed")
     for f in FAIL:
         print(f"   FAIL: {f}")
     sys.exit(1 if FAIL else 0)

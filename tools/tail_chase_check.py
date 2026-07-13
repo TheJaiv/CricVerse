@@ -7,7 +7,7 @@ import os
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT); sys.path.insert(0, ROOT + "/tools")
 from sim_harness import CricketMatch, InningsState, build_team, run_full_match
-from odi_simulation import execute_ball_math_odi, get_smart_ai_bowler_odi
+from engine.odi_simulation import execute_ball_math_odi, get_smart_ai_bowler_odi
 
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 400
 PITCH = "Hard"

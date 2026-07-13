@@ -1,12 +1,10 @@
 import random
 import math
 
-# ──────────────────────────────────────────────────────────────────────────
-# CALIBRATION CONSTANTS (tuned via Monte Carlo — see sim_harness.py)
+# CALIBRATION CONSTANTS (tuned via Monte Carlo - see sim_harness.py)
 # Neutral 85v85 target: par ~165, ~6-7 wkts, ~50/50. Big rating gaps separate
 # teams decisively (≤1% upset at 14pt gap, ~0.1% at 24pt gap).
-# ──────────────────────────────────────────────────────────────────────────
-# Exponential skill scale: a 90→95 jump is worth far more than 75→80, so
+# Exponential skill scale: a 90->95 jump is worth far more than 75->80, so
 # legends dominate and rating gaps translate into a real per-ball edge.
 T20_SKILL_SCALE = 15.0
 # Base outcome weights at a neutral (edge=0) contest, and how strongly the
@@ -24,29 +22,29 @@ T20_BASE_WKT   = 5.2;  T20_WKT_SENS = 11.0
 # Lower = more consistent / skill-dominant. 1.0 = off.
 T20_WKT_COMPRESS = 0.45
 # Batting-paradise floor: on a true road / dead deck there's a ceiling on how
-# cheaply a side can be bowled out — even swing only does so much on a featherbed.
+# cheaply a side can be bowled out - even swing only does so much on a featherbed.
 # Capping wicket_weight here lifts the low tail (no 49 all-out on a road) without
 # touching the mean, which is driven by boundaries.
 T20_BAT_PITCH_WKT_CAP = 8.5
-# Bowling-deck floor: even the nastiest minefield bottoms out — real T20 on a
+# Bowling-deck floor: even the nastiest minefield bottoms out - real T20 on a
 # raging turner / cracked deck is ~120-140 all out ~35%, NOT 88 all out 58%.
 # Caps how lethal a green/dusty/cracked surface can get so scores stay cricketing.
 T20_BOWL_PITCH_WKT_CAP = 12.0
 T20_BOWL_DECKS = ("Cracked", "Sticky", "Turning", "Worn", "Dusty", "Dry", "Green", "Damp", "Bouncy")
 
-# ── RATING-SCALED CONSISTENCY (all matches) ──────────────────────────────────
+# RATING-SCALED CONSISTENCY (all matches)
 # HIGH-rated players sim more consistently game-to-game (a star reliably delivers
 # across a season), while LOW-rated players keep their full variance (still erratic
-# → upsets/feel survive). Applies everywhere — casual and every tournament type.
-# cons(r): 0 at/below CONS_LOW (no change) → 1 at/above CONS_HIGH (max steadiness).
+# > upsets/feel survive). Applies everywhere - casual and every tournament type.
+# cons(r): 0 at/below CONS_LOW (no change) -> 1 at/above CONS_HIGH (max steadiness).
 T20_CONS_LOW  = 68.0
 T20_CONS_HIGH = 88.0
 T20_CONS_SET_BALLS    = 16     # protected "getting set" window (balls)
-T20_CONS_EARLY_PROTECT = 0.62  # set-phase wicket-risk cut at cons=1 (×0.38) — kills cheap 0/15s
+T20_CONS_EARLY_PROTECT = 0.62  # set-phase wicket-risk cut at cons=1 (×0.38) - kills cheap 0/15s
 T20_CONS_EARLY_BND_DAMP = 0.34  # protected stars bat watchfully early (fewer boundaries)
 T20_CONS_BIG_SCORE    = 35      # past this, wicket risk ESCALATES with the score so a
 T20_CONS_LATE_SLOPE   = 0.030   #   protected star reliably gets out near his expected total
-                                #   (×(1+slope·(runs-BIG))) — removes the runs floor-protection
+                                # (×(1+slope·(runs-BIG))) - removes the runs floor-protection
                                 #   added, so the MEAN/par stays flat and only the SPREAD shrinks.
 T20_CONS_FORM_DAMP    = 0.60    # shrink the ±4% form wobble for top players
 
@@ -55,14 +53,14 @@ T20_CONS_FORM_DAMP    = 0.60    # shrink the ±4% form wobble for top players
 _T20_ACCEL = True
 
 def t20_cons(rating: float) -> float:
-    """0 → no change (rating ≤ LOW, current variance); 1 → max consistency (rating ≥ HIGH)."""
+    """0 -> no change (rating ≤ LOW, current variance); 1 -> max consistency (rating ≥ HIGH)."""
     if rating <= T20_CONS_LOW:
         return 0.0
     if rating >= T20_CONS_HIGH:
         return 1.0
     return (rating - T20_CONS_LOW) / (T20_CONS_HIGH - T20_CONS_LOW)
 
-# ── 2.0: PITCH DETERIORATION ──
+# 2.0: PITCH DETERIORATION
 # How fast each surface wears over the match. Dust bowls / worn / cracked decks
 # roughen fast (spin becomes lethal late); roads & dead decks barely change, so a
 # flat track stays a flat track and keeps its 200 ceiling.
@@ -138,11 +136,11 @@ def get_smart_ai_bowler_t20(innings, pitch, weather="Clear", format_overs=20):
 
     def _rem(p): return bowler_quota - innings.bowling_stats[p["name"]].balls_bowled // 6
 
-    # ── Smart quota management (prevents the back-to-back corner) ─────────────────────
+    # Smart quota management (prevents the back-to-back corner)
     # A main bowler is eligible only if, AFTER they bowl THIS over, the remaining overs can
     # still be covered by the main attack with NO two-in-a-row. A schedule of n overs with
     # no consecutive repeats exists iff Σ min(remᵢ, ⌈n/2⌉) ≥ n, so we never burn a bowler
-    # to the point where one man is forced to bowl back-to-back death overs — the bad
+    # to the point where one man is forced to bowl back-to-back death overs - the bad
     # state simply never forms.
     def _feasible_if(cand):
         n = overs_remaining - 1
@@ -162,7 +160,7 @@ def get_smart_ai_bowler_t20(innings, pitch, weather="Clear", format_overs=20):
     # then progressively relax (only if already cornered) down to part-timers / last resort.
     pool = [p for p in safe if _nc(p)]
     # When the attack is TIGHT (little spare quota), depletion must stay balanced or the
-    # weakest bowler gets stranded — so drain the fullest-quota bowler first. This is what
+    # weakest bowler gets stranded - so drain the fullest-quota bowler first. This is what
     # actually drives the back-to-back rate to ~0 on a 5-man, zero-slack attack.
     if pool:
         slack = sum(_rem(p) for p in mains if _quota(p)) - overs_remaining
@@ -190,7 +188,7 @@ def get_smart_ai_bowler_t20(innings, pitch, weather="Clear", format_overs=20):
         base_score = (float(p["bowl"]) / 10.0) ** 2.0
         base_score *= (3.0 if is_frontline else 0.1)
 
-        # ── Urgency boost: bowler has more overs left than available slots ──
+        # Urgency boost: bowler has more overs left than available slots
         # Prevents wasted quota when match ends early
         if overs_remaining > 0 and overs_left > 0:
             urgency = overs_left / max(1, overs_remaining)
@@ -257,7 +255,7 @@ def get_smart_ai_bowler_t20(innings, pitch, weather="Clear", format_overs=20):
 
 
 def _solo_batting(innings):
-    """True if the non-striker is already out — i.e. the last man is batting ALONE.
+    """True if the non-striker is already out - i.e. the last man is batting ALONE.
     Only reachable in career club matches (max_wickets == squad size); there the lone
     batsman keeps strike and the over-end / single rotation is suppressed."""
     try:
@@ -287,8 +285,8 @@ def execute_ball_math_t20(match):
     bat_rating = striker["bat"] * _bat_form
     bowl_rating = bowler["bowl"] * _bowl_form
 
-    # ── 2.0 PITCH DETERIORATION ──
-    # Surface roughens across the match: 0 at the first ball → ~1 by the last,
+    # 2.0 PITCH DETERIORATION
+    # Surface roughens across the match: 0 at the first ball -> ~1 by the last,
     # with innings 2 inheriting innings 1's wear. Scaled by the pitch's wear
     # susceptibility so roads stay roads. Worn surfaces give spin extra turn
     # (fed into the rating contest) and make timing slightly harder for everyone.
@@ -339,7 +337,7 @@ def execute_ball_math_t20(match):
         bowl_rating += 4
         bat_rating -= 2
         
-    # Weather Mechanics — new-ball conditions (Overcast, Cloudy, Humid, Windy) scale with
+    # Weather Mechanics - new-ball conditions (Overcast, Cloudy, Humid, Windy) scale with
     # innings.total_balls so the advantage applies to the START of BOTH innings equally.
     _new_ball = innings.total_balls < 36  # powerplay of whichever innings is being played
     if match.weather == "Clear":
@@ -412,11 +410,11 @@ def execute_ball_math_t20(match):
     is_set_partnership = innings.partnership_runs >= 30
     has_wickets_in_hand = total_balls >= (match.max_balls - 42) and innings.wickets <= 3
 
-    # ── First-innings situational mentality (the chase already uses RRR pressure) ──
+    # First-innings situational mentality (the chase already uses RRR pressure)
     # A T20 side MUST use its wickets. On tough pitches the survival logic (high dot%)
     # can otherwise leave them 120-4 with wickets unspent. So: when wickets are in hand
-    # AND scoring is below par → lift the tempo (accept more risk, attack); when wickets
-    # have tumbled for the overs gone → consolidate and rebuild a partnership instead.
+    # AND scoring is below par -> lift the tempo (accept more risk, attack); when wickets
+    # have tumbled for the overs gone -> consolidate and rebuild a partnership instead.
     if (_T20_ACCEL and match.current_innings_num == 1 and total_balls >= 24 and balls_left > 0
             and not getattr(match, "is_super_over", False)):
         _frac = total_balls / match.max_balls
@@ -425,17 +423,17 @@ def execute_ball_math_t20(match):
         _crr = innings.total_runs / total_balls * 6.0
         _PAR_RR = 8.5
         # wickets an "even pace" still needs for the overs left (0.5/over in a 20-over game);
-        # surplus>0 = wickets to spare → attack, surplus very negative = thin → consolidate.
+        # surplus>0 = wickets to spare -> attack, surplus very negative = thin -> consolidate.
         _even = _overs_left * (10.0 / (match.max_balls / 6.0))
         _surplus = _wkts_left - _even
         if _crr < _PAR_RR and _surplus > -0.5 and _wkts_left >= 2:
-            # Scoring below par with wickets to spend → throw the bat. This lifts the
-            # batting INTENT so the AI plays aggressive shots — which organically raise
+            # Scoring below par with wickets to spend -> throw the bat. This lifts the
+            # batting INTENT so the AI plays aggressive shots - which organically raise
             # BOTH boundaries and wickets (no artificial wicket bump). Harder the slower/later.
             _accel = 1.0 + min(0.75, max(0.0, _surplus) * 0.06 + _frac * 0.22 + (_PAR_RR - _crr) * 0.05)
             pressure_multiplier = max(pressure_multiplier, _accel)
         elif _surplus < -1.0:
-            is_collapse = True   # wickets thin for the overs left → consolidate, rebuild a stand
+            is_collapse = True   # wickets thin for the overs left -> consolidate, rebuild a stand
 
     # Dynamic Delivery Generation based on Bowler Role (for Fast Sim)
     if match.current_delivery_selection:
@@ -463,10 +461,10 @@ def execute_ball_math_t20(match):
     match.current_shot_selection = None
     match.temp_variation = None
 
-    # ── Non-linear skill contest (replaces the old linear bat-bowl diff) ──
+    # Non-linear skill contest (replaces the old linear bat-bowl diff)
     # Each rating is mapped onto an exponential curve, then the batter's
     # "share of control" is bat_eff / (bat_eff + bowl_eff). This is a logistic
-    # response: equal ratings → 0.5, and the gap between elite ratings matters
+    # response: equal ratings -> 0.5, and the gap between elite ratings matters
     # disproportionately more than the gap between poor ones.
     bat_eff  = math.exp((bat_rating  - 80.0) / T20_SKILL_SCALE)
     bowl_eff = math.exp((bowl_rating - 80.0) / T20_SKILL_SCALE)
@@ -487,7 +485,7 @@ def execute_ball_math_t20(match):
             is_no_ball = True
             prefix += "🚨 **NO BALL!** (Third bouncer of the over)\n➡️ **NEXT BALL IS A FREE HIT!**\n"
 
-    # Cutter tracking — Off Cutter / Leg Cutter / Knuckle
+    # Cutter tracking - Off Cutter / Leg Cutter / Knuckle
     # 1st cutter per over: safe. 2nd+ in same over: 50% chance of wide (grip loss)
     _CUTTERS = ("Off Cutter", "Leg Cutter", "Knuckle")
     is_cutter = deliv in _CUTTERS
@@ -610,7 +608,7 @@ def execute_ball_math_t20(match):
         boundary_weight *= 0.75
         dot_weight *= 1.20
         
-    # Weather Advanced Modifiers — new-ball conditions scale with innings.total_balls
+    # Weather Advanced Modifiers - new-ball conditions scale with innings.total_balls
     # so both innings get the powerplay swing advantage (not just innings 1).
     _new_ball = total_balls < 36
     if match.weather == "Overcast":
@@ -635,7 +633,7 @@ def execute_ball_math_t20(match):
         wicket_weight *= 0.80
         boundary_weight *= 1.15
 
-    # ── BALL AGE / HARDNESS ──────────────────────────────────────────────
+    # BALL AGE / HARDNESS
     # The ball is a third actor alongside bat & bowl. A hard new ball seams,
     # swings and flies off the edge (pace threat + flush boundaries); it goes
     # soft through the middle (harder to time, spin grips); and in the back
@@ -656,30 +654,30 @@ def execute_ball_math_t20(match):
         dot_weight *= 1.05
         if _is_spin_b:
             wicket_weight *= 1.06      # grip & turn
-    else:                            # back third — mild reverse for pace
+    else:                            # back third - mild reverse for pace
         if _is_pace_b:
             wicket_weight *= 1.08
         boundary_weight *= 1.03
 
-    # ── 2.0 PITCH DETERIORATION (weight effects) ──
+    # 2.0 PITCH DETERIORATION (weight effects)
     # A worn surface helps spin take wickets and makes timing fractionally harder.
     if _is_spin_b:
         wicket_weight *= (1.0 + wear * 0.35)
     boundary_weight *= (1.0 - wear * 0.07)
     dot_weight *= (1.0 + wear * 0.06)
 
-    # ── 2.0 BATTING MOMENTUM ──
+    # 2.0 BATTING MOMENTUM
     # A new batsman is vulnerable until set; a well-set batsman is dangerous.
     # This layers on top of the balls-faced rating curve to sharpen the "playing
     # yourself in vs seeing it like a beachball" texture of an innings.
     _bf = b_stats.balls_faced
     if _bf < 6:
-        wicket_weight *= (1.32 - _bf * 0.045)   # ~1.32 first ball → ~1.05 at 6
+        wicket_weight *= (1.32 - _bf * 0.045)   # ~1.32 first ball -> ~1.05 at 6
         boundary_weight *= (0.78 + _bf * 0.035)
     elif _bf >= 15:
-        boundary_weight *= 1.10                  # set — cashing in
+        boundary_weight *= 1.10                  # set - cashing in
 
-    # 🚨 TACTICAL USER BALANCING & SPIN LOGIC
+    # TACTICAL USER BALANCING & SPIN LOGIC
     if "Yorker" in deliv:
         if shot in ["Pull", "Cut"]: bad_shot_selection = True
         elif shot in ["Defensive", "Drive"]: perfect_shot_selection = True
@@ -720,14 +718,14 @@ def execute_ball_math_t20(match):
             # boundaries) AND very hard to dislodge; once set he opens up; set + a rising
             # ask, he explodes with control. The run gap mirrors the wicket gap at each stage.
             if _set and _lift:
-                boundary_weight *= 1.30; wicket_weight *= 0.96   # cuts loose — finds gaps, stays secure
+                boundary_weight *= 1.30; wicket_weight *= 0.96   # cuts loose - finds gaps, stays secure
             elif _set:
                 boundary_weight *= 1.12; wicket_weight *= 0.86    # keeps the score ticking, not blocking
             else:
                 dot_weight *= 1.16; boundary_weight *= 0.82; wicket_weight *= 0.76   # still playing himself in
         elif striker["archetype"] == "Standard":
             # The middle-ground: scores a touch quicker than the Anchor but is a touch
-            # less secure at EVERY stage — the difference shows up in runs AND in risk.
+            # less secure at EVERY stage - the difference shows up in runs AND in risk.
             if _set and _lift:
                 boundary_weight *= 1.20; wicket_weight *= 1.06
             elif _set:
@@ -788,14 +786,14 @@ def execute_ball_math_t20(match):
     elif "Inswing" in deliv and shot in ["Drive", "Flick", "Sweep"]: wicket_weight *= 1.4
     elif is_cutter and shot in ["Drive", "Cut"]: wicket_weight *= 1.25; four_weight *= 0.85
 
-    # ── RATING-SCALED CONSISTENCY (tournament only; high-rated → steadier) ──
+    # RATING-SCALED CONSISTENCY (tournament only; high-rated -> steadier)
     # Cuts a star's match-to-match swing (no more 100,15,0,20,30) so their
-    # tournament aggregate is reliable — WITHOUT touching low-rated players
+    # tournament aggregate is reliable - WITHOUT touching low-rated players
     # (cons=0), so weak sides stay erratic and upsets/feel survive.
     if _cons_bat > 0.0:
-        # Set-phase protection: elite batters far less likely to fall cheaply →
+        # Set-phase protection: elite batters far less likely to fall cheaply ->
         # they reliably get a start (the main driver of freak low scores). Paired
-        # with an early-boundary damp so surviving longer doesn't inflate par —
+        # with an early-boundary damp so surviving longer doesn't inflate par
         # the star just plays himself in, then cashes in once set.
         if b_stats.balls_faced < T20_CONS_SET_BALLS:
             wicket_weight *= (1.0 - _cons_bat * T20_CONS_EARLY_PROTECT)
@@ -803,21 +801,21 @@ def execute_ball_math_t20(match):
             six_weight    *= (1.0 - _cons_bat * T20_CONS_EARLY_BND_DAMP)
         # Top-end taming: wicket risk escalates with the score past the milestone, so
         # a protected star gets out near his expected total instead of running to 130.
-        # This removes the runs the floor-protection added → par flat, spread tighter.
+        # This removes the runs the floor-protection added -> par flat, spread tighter.
         if b_stats.runs_scored > T20_CONS_BIG_SCORE:
             wicket_weight *= (1.0 + _cons_bat * T20_CONS_LATE_SLOPE * (b_stats.runs_scored - T20_CONS_BIG_SCORE))
 
-    # ── VARIANCE COMPRESSORS ──────────────────────────────────────────────
+    # VARIANCE COMPRESSORS
     # Skill should decide matches, not luck. Per-ball weight spikes (from stacked
-    # delivery×shot×situation multipliers) cause wickets/boundaries to CLUSTER →
+    # delivery×shot×situation multipliers) cause wickets/boundaries to CLUSTER ->
     # cascades to 30-all-out or freak 250s between equal teams. Pull the upward
     # spikes back toward the rating-driven baseline so good sides score
     # consistently. (Mirrors the ODI engine's ODI_WKT_COMPRESS.)
     if wicket_weight > T20_BASE_WKT:
         wicket_weight = T20_BASE_WKT + (wicket_weight - T20_BASE_WKT) * T20_WKT_COMPRESS
 
-    # 🚨 ANTI-OVERCOOK SAFETIES (Prevents stacked conditions from breaking the game)
-    four_weight = max(0.5, min(four_weight, 23.0)) # Hard cap — clips road-deck freak 250s
+    # ANTI-OVERCOOK SAFETIES (Prevents stacked conditions from breaking the game)
+    four_weight = max(0.5, min(four_weight, 23.0)) # Hard cap - clips road-deck freak 250s
     six_weight = max(0.1, min(six_weight, 12.5))
     if match.pitch in ("Flat", "Dead"):
         wicket_weight = min(wicket_weight, T20_BAT_PITCH_WKT_CAP)  # batting-paradise floor
@@ -847,7 +845,7 @@ def execute_ball_math_t20(match):
         innings.wkt_balls.append(innings.total_balls)  # for the rolling collapse window
         d_types = ["Bowled", "Caught", "LBW"]
 
-        # ── 2.0 DISMISSAL VARIETY ──
+        # 2.0 DISMISSAL VARIETY
         # Run-out first: a fielding mix-up, NOT credited to the bowler. Then
         # stumping (charging a spinner and missing) and hit-wicket (treading on
         # the stumps to a short ball) join the bowler-credited dismissals.

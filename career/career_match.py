@@ -1,19 +1,18 @@
 """
-Career Mode — Phase 4: Club Matches (PvP that pays coins).
+Career Mode - Phase 4: Club Matches (PvP that pays coins).
 
-4.1  Lobby   : create / join / leave / view / swap / start — numbered roster, two
+4.1  Lobby   : create / join / leave / view / swap / start - numbered roster, two
                balanced teams, slot 1 of each team = captain (host can re-order via swap).
 4.2  Match   : interactive, per-player control (each player bats/bowls their own turn;
                the captain picks openers, the next batter, and the bowler).
-4.3  Payouts : coins + lifetime stats per player (PvP only — AI never pays).
+4.3  Payouts : coins + lifetime stats per player (PvP only - AI never pays).
 
 Lobbies are ephemeral (in-memory, per channel) like the bot's active_games.
 """
 import time
 import random
 
-import career_manager as CM
-
+from career import career_manager as CM
 LOBBIES = {}          # channel_id -> ClubLobby
 
 MAX_PER_SIDE = 11     # short-sided is fine; both sides must be EQUAL
@@ -31,14 +30,14 @@ class ClubLobby:
         self.created_at = int(time.time())
         self.started = False
         self.players = []          # flat join list: {"id", "name"}
-        self.team_a = []           # ordered: {"id","name","ovr"}  (index 0 = captain)
+        self.team_a = []           # ordered: {"id","name","ovr"} (index 0 = captain)
         self.team_b = []
         self.add(host_id, host_name)
 
     def expired(self):
         return (not self.started) and int(time.time()) - self.created_at > LOBBY_TTL
 
-    # ── membership ──
+    # membership
     def has(self, uid):
         return any(p["id"] == uid for p in self.players)
 
@@ -81,7 +80,7 @@ class ClubLobby:
         self._rebuild_teams()
         return True, f"Bot {n}"
 
-    # ── teams ──
+    # teams
     def _entry(self, p):
         if p.get("is_bot"):
             return {"id": p["id"], "name": p["name"], "ovr": p["career"]["ovr"],
@@ -123,7 +122,7 @@ class ClubLobby:
     def team_strength(self, team):
         return sum(p["ovr"] for p in team)
 
-    # ── swap (host re-orders by global number; slot 1 of a team = captain) ──
+    # swap (host re-orders by global number; slot 1 of a team = captain)
     def _locate(self, num):
         if 1 <= num <= len(self.team_a):
             return ("a", num - 1)

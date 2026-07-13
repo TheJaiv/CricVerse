@@ -11,10 +11,10 @@ import os
 import json
 from PIL import Image, ImageDraw, ImageFont, ImageStat
 import math
-from keep_alive import keep_alive
-from odi_simulation import execute_ball_math_odi, get_smart_ai_bowler_odi
-from t20_simulation import execute_ball_math_t20, get_smart_ai_bowler_t20
-from test_simulation import (
+from core.keep_alive import keep_alive
+from engine.odi_simulation import execute_ball_math_odi, get_smart_ai_bowler_odi
+from engine.t20_simulation import execute_ball_math_t20, get_smart_ai_bowler_t20
+from engine.test_simulation import (
     TestMatch as TestMatchObj,
     simulate_session as _test_sim_session,
     simulate_innings as _test_sim_innings,
@@ -31,20 +31,20 @@ from test_simulation import (
     _format_scorecard as _test_format_scorecard,
     _player_of_match as _test_player_of_match,
 )
-from test_image import (
+from engine.test_image import (
     generate_test_summary_image as _ti_summary,
     generate_test_scorecard_image as _ti_scorecard,
 )
-from tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_ccodi_round_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, revert_tournament_match, rebuild_tournament_stats, repair_tournament_schedule, _tm_next_mid, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS, SquadConfirmView, build_squad_confirm_text, build_squad_confirm_embed, match_order_gate, MATCH_ORDER_LABELS, build_tournament_summary_embeds, generate_round_robin_schedule, generate_ipl_schedule, ipl_try_advance, build_standings_message
-import rating_league
-from rating_league import (
+from league.tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_ccodi_round_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, revert_tournament_match, rebuild_tournament_stats, repair_tournament_schedule, _tm_next_mid, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS, SquadConfirmView, build_squad_confirm_text, build_squad_confirm_embed, match_order_gate, MATCH_ORDER_LABELS, build_tournament_summary_embeds, generate_round_robin_schedule, generate_ipl_schedule, ipl_try_advance, build_standings_message
+from league import rating_league
+from league.rating_league import (
     RATING_CONFIG, is_rating_tournament, create_rating_tournament, create_open_match,
     rating_standings, rating_board_embed, rating_bracket_embed,
     generate_rating_playoffs, apply_tournament_boosts, apply_boost,
     BOOST_COST, BOOST_MAX_PER_PLAYER, BOOST_MAX_PER_TEAM,
 )
-import dsl_manager
-from dsl_manager import (
+from league import dsl_manager
+from league.dsl_manager import (
     DSL_CONFIG, is_dsl_enabled, set_dsl_enabled, dsl_enabled_servers,
     create_dsl_tournament, is_dsl_tournament, canonical_venue, set_home_stadium,
     dsl_generate_league_schedule, dsl_generate_playoffs, dsl_bracket_embed,
@@ -52,7 +52,7 @@ from dsl_manager import (
     aggregate_player_stats, aggregate_venue_stats, season_history,
     get_season_summary, season_detail_embed, reset_dsl_server, player_season_history,
 )
-from subscription_manager import (
+from core.subscription_manager import (
     load_data_from_bin, load_tournament_data_from_bin,
     save_data_to_bin, save_tournament_data_to_bin,
     check_potential_quota, consume_quota,
@@ -67,33 +67,31 @@ from subscription_manager import (
     record_draft_pvp, record_draft_ai, get_draft_stats,
     save_custom_team, get_custom_team, delete_custom_team, list_custom_teams,
 )
-import draft_mode as dm
-# ── Career Mode (LIVE) ────────────────────────────────────────────────────────
+from league import draft_mode as dm
+# Career Mode (LIVE)
 # Launched for everyone after the 2026-07-06 hardcore verification pass (see
 # tools/career_flow_test.py). Career code still loads defensively: any failure
 # here can NEVER crash bot startup. Set env var CAREER_MODE=0 to kill-switch it.
 CAREER_MODE_ENABLED = os.environ.get("CAREER_MODE", "1") == "1"
 try:
-    import career_manager as CM
-    import career_ui
-    import career_match
-    from career_manager import load_careers
+    from career import career_manager as CM
+    from career import career_ui
+    from career import career_match
+    from career.career_manager import load_careers
     _CAREER_OK = True
 except Exception as _career_err:
-    print(f"⚠️ Career module not loaded ({_career_err}); Career Mode disabled.")
+    print(f"Career module not loaded ({_career_err}); Career Mode disabled.")
     CAREER_MODE_ENABLED = False
     _CAREER_OK = False
     def load_careers():  # no-op fallback
         pass
 
-# ==========================================
-# ⚙️ 1. SETUP & CONFIGURATION
-# ==========================================
-ADMIN_DISCORD_ID = 1087369198801526836 # Your ID
+# ---- Setup & configuration ----
+ADMIN_DISCORD_ID = int(os.environ.get("ADMIN_DISCORD_ID", "1087369198801526836"))
 _log_env = os.environ.get("LOG_CHANNEL_ID")
 LOG_CHANNEL_ID = int(_log_env) if _log_env and _log_env.isdigit() else 0
 
-# ── Career Mode gating helpers ────────────────────────────────────────────────
+# Career Mode gating helpers
 _CAREER_SOON = "🚧 **Career Mode is coming soon!** It's still in development."
 
 def _can_use_career(ctx):
@@ -136,7 +134,7 @@ def _is_premium(ctx):
         pass
     return False
 
-# ── Career Mode: tier Discord roles ───────────────────────────────────────────
+# Career Mode: tier Discord roles
 _TIER_ROLE_PREFIX = "CricVerse"
 _TIER_ROLE_COLORS = {
     "Bronze": 0xCD7F32, "Silver": 0xB0BAC7, "Gold": 0xE0B838,
@@ -181,7 +179,7 @@ async def _sync_tier_role(guild, member, career):
         print(f"tier role sync error: {e}")
         return None, None
 
-# ── Career Mode: club-match lobby (Phase 4.1) ─────────────────────────────────
+# Career Mode: club-match lobby (Phase 4.1)
 def _get_live_lobby(channel_id):
     """Return the channel's lobby, silently dropping it if it expired (30 min, un-started)."""
     if not _CAREER_OK:
@@ -226,7 +224,7 @@ def _lobby_embed(lobby, title):
     return e
 
 
-# ── Career leaderboard ────────────────────────────────────────────────────────
+# Career leaderboard
 _LB_CATS = {
     "ovr":   ("🏆 OVR",        lambda c: (c.get("ovr", 60), c.get("coins", 0))),
     "coins": ("🪙 Coins",      lambda c: c.get("coins", 0)),
@@ -299,7 +297,7 @@ class LeaderboardView(discord.ui.View):
         await self._refresh(interaction)
 
 
-# ── Match counters (backed by MongoDB via subscription_manager) ───────────────
+# Match counters (backed by MongoDB via subscription_manager)
 
 def _increment_match_count(fmt: str) -> int:
     """Increment and return the new match number for the given format."""
@@ -321,27 +319,25 @@ class CricketBot(commands.Bot):
         super().__init__(command_prefix=commands.when_mentioned_or("cv ", "Cv ", "CV ", "cv", "Cv", "CV"), case_insensitive=True, intents=intents, help_command=None)
     
     async def setup_hook(self):
-        from tournament_manager import TournamentCog
+        from league.tournament_manager import TournamentCog
         await self.add_cog(TournamentCog(self))
         
         await self.add_cog(PrefixCog(self))
         await self.tree.sync()
-        print("✅ Slash commands synchronized globally.")
-        print("✅ Prefix commands loaded.")
+        print("Slash commands synchronized globally.")
+        print("Prefix commands loaded.")
 
 bot = CricketBot()
 active_games = {}
 active_setups = {}
-active_test_matches = {}   # channel_id → TestMatchObj
+active_test_matches = {}   # channel_id -> TestMatchObj
 active_drafts = set()       # channel_ids with a draft pick-phase in progress
-setup_states = {}           # channel_id → MatchSetupState, kept ALIVE through the whole
-                            #  pre-match setup (format→impact→names→XI→verify→pitch) so
+setup_states = {}           # channel_id -> MatchSetupState, kept ALIVE through the whole
+                            # pre-match setup (format->impact->names->XI->verify->pitch) so
                             #  endmatch can mark state.cancelled and the setup views bail.
-draft_tasks = {}            # channel_id → asyncio.Task for the running draft (cancellable)
+draft_tasks = {}            # channel_id -> asyncio.Task for the running draft (cancellable)
 
-# ==========================================
-# 🗄️ 1.5 CLOUD DATABASE & SECURITY
-# ==========================================
+# ---- Cloud database & security ----
 @tasks.loop(hours=1)
 async def auto_sync_db():
     """Refresh in-memory cache from MongoDB every hour (picks up manual edits)"""
@@ -353,7 +349,7 @@ async def auto_sync_db():
 
 @bot.event
 async def on_ready():
-    print(f"🏏 Logged in successfully as {bot.user.name}")
+    print(f"Logged in successfully as {bot.user.name}")
     load_data_from_bin()
     load_tournament_data_from_bin()
     if CAREER_MODE_ENABLED:
@@ -361,18 +357,16 @@ async def on_ready():
         except Exception as e: print(f"⚠️ load_careers failed (ignored): {e}")
     if not auto_sync_db.is_running():
         auto_sync_db.start()
-    print("✅ Memory Cache Loaded and Ready.")
-# ==========================================
-# 📊 2. CORE DATA STRUCTURES & FALLBACKS
-# ==========================================
+    print("Memory Cache Loaded and Ready.")
+# ---- Core data structures & fallbacks ----
 
 # Hardcoded fallback database to prevent crashes if the CSV is empty
-# ── Default teams: two COMPLETELY EQUAL sides (stat-for-stat mirror images). ──
+# Default teams: two COMPLETELY EQUAL sides (stat-for-stat mirror images).
 # Identical bat/bowl/role/archetype at every position, only the names differ, so
 # a default-vs-default match is a true 50/50 contest. Balanced XI: 5 batters
 # (incl. WK), 2 all-rounders, 4 bowlers, with a pace + spin mix for all pitches.
 # Primary skill ratings span 80-92 (solid pros up to a marquee 92 star). Bowlers
-# keep a realistic lower-order bat, batters a token bowl — the 80-92 range is the
+# keep a realistic lower-order bat, batters a token bowl - the 80-92 range is the
 # headline (primary) skill of each player. Both XIs share these exact stats.
 _EQUAL_TEMPLATE = [
     # (bat, bowl, archetype, role)
@@ -409,10 +403,10 @@ TEAMS_DATA = {
 }
 
 
-# ── Player-test helpers (cv testplayer) — build two balanced XIs whose OVR is scaled
+# Player-test helpers (cv testplayer) - build two balanced XIs whose OVR is scaled
 #    relative to the tested players, so a single player can be watched in a fair (or
 #    deliberately easy/hard) context. The balanced template above is recentred to a
-#    target OVR; role structure + internal spread are preserved. ──
+# target OVR; role structure + internal spread are preserved.
 _TEST_WK_SLOT = (85, 10, "Finisher", "Batter_WK")
 
 def _clamp_rt(x):
@@ -451,7 +445,7 @@ def build_test_home_xi(tested, target_ovr, prefix="Home Net"):
         elif len(xi) < 11:
             xi.append(wk)
         else:
-            # full tested XI, no keeper — hand the gloves to the best pure batter
+            # full tested XI, no keeper - hand the gloves to the best pure batter
             cand = max((p for p in xi if (p.get("role") or "").startswith("Batter")),
                        key=lambda p: p.get("bat", 0), default=None)
             if cand:
@@ -462,14 +456,14 @@ def build_test_away_xi(target_ovr):
     """A full balanced opposition XI recentred to target_ovr."""
     return _scaled_xi_from_template(list(_EQUAL_TEMPLATE), "Net", 0, target_ovr)
 
-# difficulty → OVR offset applied to every non-tested player, relative to the tested avg
+# difficulty -> OVR offset applied to every non-tested player, relative to the tested avg
 _TEST_DIFFICULTY = {"weak": -8, "balanced": 0, "tough": +8}
 
 
 def _apply_order_pins(xi, pins):
-    """Re-seat pinned players ("Virat Kohli 3" → position 3) inside an engine-ordered
+    """Re-seat pinned players ("Virat Kohli 3" -> position 3) inside an engine-ordered
     XI. Unpinned players keep their engine order around the pins. `pins` maps player
-    name → 1-based position; names not in this XI are ignored (split mode)."""
+    name -> 1-based position; names not in this XI are ignored (split mode)."""
     mine = {n: pos for n, pos in pins.items() if any(p["name"] == n for p in xi)}
     if not mine:
         return xi
@@ -682,13 +676,11 @@ def _bowler_is_bot(match):
         return False
 
 def _is_career_match(match):
-    """Career-mode match (club / debut / scenario) — fully interactive, no Auto-Ball / Sim."""
+    """Career-mode match (club / debut / scenario) - fully interactive, no Auto-Ball / Sim."""
     return bool(getattr(match, "is_club", False) or getattr(match, "is_debut", False)
                 or getattr(match, "is_scenario", False))
 
-# ==========================================
-# 🧠 3. SIMULATION ROUTING ENGINE
-# ==========================================
+# ---- Simulation routing engine ----
 
 def swap_impact_player(match: CricketMatch, team_id: int, out_name: str, in_player: dict):
     if team_id == 1:
@@ -757,7 +749,7 @@ def _ai_batting_impact(match: CricketMatch, innings: InningsState, team_num: int
     if not upcoming:
         return
 
-    # Batting first: never sacrifice a pure bowler — you'll need them in inn2
+    # Batting first: never sacrifice a pure bowler - you'll need them in inn2
     if is_inn1:
         swappable = [p for p in upcoming if "Bowler" not in p["role"]]
         if not swappable:
@@ -768,7 +760,7 @@ def _ai_batting_impact(match: CricketMatch, innings: InningsState, team_num: int
     next_up  = swappable[0]
     worst_up = min(swappable, key=lambda x: x["bat"])
 
-    # Guarantee (batting second only): next batter is tail — sub them out before they walk in
+    # Guarantee (batting second only): next batter is tail - sub them out before they walk in
     if not is_inn1 and next_up["bat"] < 60 and best_sub["bat"] > next_up["bat"] + 10:
         return _do_impact_swap(match, team_num, next_up["name"], best_sub)
 
@@ -792,7 +784,7 @@ def _ai_batting_impact(match: CricketMatch, innings: InningsState, team_num: int
                 _do_impact_swap(match, team_num, worst_up["name"], best_sub)
                 return
 
-    # Late guarantee: last 4 overs and sub still unused — don't waste the slot
+    # Late guarantee: last 4 overs and sub still unused - don't waste the slot
     if innings.total_balls >= max_b - 24 and best_sub["bat"] > worst_up["bat"] + 8:
         return _do_impact_swap(match, team_num, worst_up["name"], best_sub)
 
@@ -817,7 +809,7 @@ def _ai_bowling_impact(match: CricketMatch, innings: InningsState, team_num: int
     if balls >= max_b - 30:
         return _do_impact_swap(match, team_num, worst["name"], best_sub)
 
-    # 2nd innings, opponent cruising (low RRR) — use from last 6 overs
+    # 2nd innings, opponent cruising (low RRR) - use from last 6 overs
     if match.current_innings_num == 2 and balls >= max_b - 36:
         balls_left = max_b - balls
         if balls_left > 0:
@@ -854,7 +846,7 @@ def try_ai_impact_player(match: CricketMatch, innings: InningsState):
     return announcements
 
 # Engine choice is by MATCH LENGTH, not an exact 50-over check: a DLS-reduced ODI
-# (e.g. 48 or 40 overs) must KEEP ODI pacing — only a genuinely short match plays
+# (e.g. 48 or 40 overs) must KEEP ODI pacing - only a genuinely short match plays
 # T20-style. The ODI engine scales its phases (powerplay/death) to max_balls.
 _ODI_ENGINE_MIN_OVERS = 35
 
@@ -873,7 +865,7 @@ def _run_full_match_sync(match: CricketMatch):
     # Headless sims must run in "whole_match" mode so the ball engine auto-promotes
     # the next batter on a wicket. In the default "interactive" mode a fallen wicket
     # only sets pending_next_batter (awaiting a UI pick), so nobody past the opening
-    # pair ever bats — leaving only the top 2 batters with runs in stats/scorecard.
+    # pair ever bats - leaving only the top 2 batters with runs in stats/scorecard.
     match.simulation_mode = "whole_match"
 
     def _sim_innings(innings):
@@ -905,7 +897,7 @@ def _run_full_match_sync(match: CricketMatch):
     match.current_innings_num = 2
     _sim_innings(match.innings2)
 
-    # ACL has no ties — a tied ACL sim is decided by a Super Over. Other formats keep their
+    # ACL has no ties - a tied ACL sim is decided by a Super Over. Other formats keep their
     # existing behavior (round-robin league ties share a point; knockouts fall back to team1),
     # so round-robin is completely unaffected.
     if (getattr(match, "tournament_type", None) == "acl"
@@ -914,13 +906,13 @@ def _run_full_match_sync(match: CricketMatch):
         try:
             _sim_super_over(match)
         except Exception as _so_err:
-            print(f"⚠️ Sim super over failed, leaving tie for fallback: {_so_err}")
+            print(f"Sim super over failed, leaving tie for fallback: {_so_err}")
 
 
 def _sim_super_over(match: CricketMatch):
     """Headless: break a tie via simulated super over(s); sets match.tiebreak_winner_name.
     Team that batted 2nd bats first; max 2 wickets / 6 balls; replays (swapping order) if tied again."""
-    bat_team = match.innings2.batting_team   # batted 2nd in the main match → bats first in the SO
+    bat_team = match.innings2.batting_team   # batted 2nd in the main match -> bats first in the SO
     bowl_team = match.innings1.batting_team
     for _ in range(25):  # safety cap against pathological repeated ties
         so = CricketMatch(match.p1, match.p2, match.p1_id, match.p2_id,
@@ -956,11 +948,9 @@ def _sim_super_over(match: CricketMatch):
         if r1 != r2:
             match.tiebreak_winner_name = bat_team["name"] if r1 > r2 else bowl_team["name"]
             return
-        bat_team, bowl_team = bowl_team, bat_team  # still tied — swap who bats first and replay
+        bat_team, bowl_team = bowl_team, bat_team  # still tied - swap who bats first and replay
 
-# ==========================================
-# 🖼️ 4. EMBED SCOREBOARDS & PIL GRAPHICS
-# ==========================================
+# ---- Embed scoreboards & pil graphics ----
 
 def render_wicket_summary(match: CricketMatch) -> discord.Embed:
     p = match.out_batter_profile
@@ -978,8 +968,8 @@ def get_player_of_the_match(match: CricketMatch) -> str:
     highest_impact = -999
 
     # Format-aware anchors. Judged by the T20 pars (SR 120, econ 10) every ODI
-    # spell looked golden — 10 overs at 5.0 econ banked ~150 pts, more than a
-    # century — and normal ODI strike rates were taxed. ODI par: SR ~95, econ ~5.8.
+    # spell looked golden - 10 overs at 5.0 econ banked ~150 pts, more than a
+    # century - and normal ODI strike rates were taxed. ODI par: SR ~95, econ ~5.8.
     # ODI economy is BOOST-ONLY (Jaiv): a tight spell adds points, an expensive one
     # never subtracts from the wickets taken. T20 keeps its −30 economy floor.
     _odi = match.format_overs >= _ODI_ENGINE_MIN_OVERS
@@ -1220,7 +1210,7 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
     c_ball = c_accent    # Adaptive color based on format
     c_text_grey = "#777777"
 
-    # Impact Player markers — names of players who came on as an impact sub
+    # Impact Player markers - names of players who came on as an impact sub
     impact_subs = {
         n for n in (getattr(match, "t1_impact_sub_name", None),
                     getattr(match, "t2_impact_sub_name", None)) if n
@@ -1236,9 +1226,7 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
         d.text((bx + 4, by + 3), "IP", fill=c_white, font=font_small)
         return bw_px + 6
 
-    # ==========================================
-    # 1. CORE LAYOUT & BARS
-    # ==========================================
+    # ---- Core layout & bars ----
     
     # Green Match Type Bar
     d.rectangle([(0, 110), (1200, 140)], fill=c_accent)
@@ -1254,9 +1242,7 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
     # Footer
     d.rectangle([(0, 800), (1200, 850)], fill=c_accent)
     
-    # ==========================================
-    # 2. GRID SYSTEM
-    # ==========================================
+    # ---- Grid system ----
     
     # Grid Backgrounds
     d.rectangle([(0, 220), (1200, 470)], fill=c_score_bg)
@@ -1277,9 +1263,7 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
     # Horizontal Row Lines (Lower Grid - Bowling)
     for y in range(600, 801, 50): d.line([(0, y), (1200, y)], fill=c_grid, width=1)
         
-    # ==========================================
-    # 3. FLOATING UI ICONS
-    # ==========================================
+    # ---- Floating UI icons ----
     
     # Upper Icons (Bats)
     # Left box: perfectly flush with left edge, rounded on the right
@@ -1317,9 +1301,7 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
     d.line([(1163, 498), (1178, 510)], fill=c_white, width=1)
     d.line([(1163, 510), (1178, 522)], fill=c_white, width=1)
 
-    # ==========================================
-    # 4. DATA POPULATION
-    # ==========================================
+    # ---- Data population ----
     
     # Top White Header (Teams & Logo)
     t1_name = match.innings1.batting_team['name'][:18].upper()
@@ -1331,13 +1313,13 @@ def generate_final_score_image(match: CricketMatch) -> io.BytesIO:
         t2_name = match.innings1.bowling_team['name'][:18].upper()
     d.text((900 - get_tw(t2_name, font_large)//2, 30), t2_name, fill=c_navy, font=font_large)
 
-    # Match number — top-right corner, small/unobtrusive
+    # Match number - top-right corner, small/unobtrusive
     _base_fmt = "odi" if _base_overs == 50 else "t20"
     _ctr_text = _format_match_no_label(_base_fmt)
     _ctr_w = get_tw(_ctr_text, font_micro)
     d.text((1195 - _ctr_w, 8), _ctr_text, fill=c_text_grey, font=font_micro)
 
-    # Pitch & weather — top-left corner, mirrors the match number
+    # Pitch & weather - top-left corner, mirrors the match number
     _cond_text = f"PITCH: {str(getattr(match, 'pitch', 'Flat')).upper()}  •  {str(getattr(match, 'weather', 'Clear')).upper()}"
     d.text((5, 8), _cond_text, fill=c_text_grey, font=font_micro)
 
@@ -1595,9 +1577,9 @@ def extract_scorecard_players(match: CricketMatch) -> dict:
     Uses short keys + arrays to keep the stored JSON as small as possible.
     Stores EVERY active batter (with dismissal text) and EVERY bowler so the
     `cv tournament match_scorecard` command can rebuild the exact end-of-innings
-    text scorecard — not just the top-4 image summary. Lists stay sorted by
+    text scorecard - not just the top-4 image summary. Lists stay sorted by
     runs / wickets so the image renderers (which take the first slots) are
-    unchanged. Per-match size: ~1–1.5 KB → 45 matches ≈ 50–70 KB in the bin.
+    unchanged. Per-match size: ~1–1.5 KB -> 45 matches ≈ 50–70 KB in the bin.
     """
     potm = get_player_of_the_match(match)
     inn1 = match.innings1
@@ -1653,7 +1635,7 @@ def extract_scorecard_players(match: CricketMatch) -> dict:
         "w1": _bowl(inn2),  # batting-first team's bowlers (bowled in inn2)
         "b2": _bat(inn2),   # batting-second team's batters
         "w2": _bowl(inn1),  # batting-second team's bowlers (bowled in inn1)
-        "x1": _extras(inn1),  # [extras, byes, legbyes, noballs, wides] per innings —
+        "x1": _extras(inn1),  # [extras, byes, legbyes, noballs, wides] per innings
         "x2": _extras(inn2),  #   feeds the CCODI card's EXTRAS breakdown from storage
     }
 
@@ -1700,11 +1682,11 @@ def reconstruct_scorecard_data(tourney: dict, m: dict) -> dict:
         return [{"name": a[0], "wickets": a[1], "runs": a[2], "overs": a[3],
                  "maidens": a[4] if len(a) > 4 else 0} for a in (arrays or [])]
 
-    # bf=1 → team1 batted first; bf=2 → team2 batted first
+    # bf=1 -> team1 batted first; bf=2 -> team2 batted first
     # result stores t1_*/t2_* keyed to m["team1"]/m["team2"], not batting order
     bf = p.get("bf", 1)
     if bf == 2:
-        # team2 batted first → swap for display
+        # team2 batted first -> swap for display
         top_name, top_team, top_r, top_w, top_b = t2_name, t2_team, r.get("t2_runs", 0), r.get("t2_wickets", 0), r.get("t2_balls", 0)
         bot_name, bot_team, bot_r, bot_w, bot_b = t1_name, t1_team, r.get("t1_runs", 0), r.get("t1_wickets", 0), r.get("t1_balls", 0)
     else:
@@ -1755,12 +1737,12 @@ def reconstruct_scorecard_data(tourney: dict, m: dict) -> dict:
 
 
 def build_stored_scorecard_embeds(data: dict) -> list:
-    """Build the detailed text scorecard for a completed match — one embed per
-    innings — from reconstructed match data. Mirrors the end-of-innings
+    """Build the detailed text scorecard for a completed match - one embed per
+    innings - from reconstructed match data. Mirrors the end-of-innings
     `render_full_scorecard_embed` so a stored match reads the same as it did live.
     Note: batters are listed by runs scored (the order they're stored in), not
     strict batting order. Old matches (stored before full data) lack dismissal
-    text — those lines render blank.
+    text - those lines render blank.
     """
     embeds = []
     potm = data.get("potm")
@@ -1825,12 +1807,12 @@ def _fetch_emoji_img(emoji_str: str, size: int = 72):
     import re as _re, requests as _req, io as _io2
     emoji_str = emoji_str.strip()
     try:
-        # Base64 data URI (stored from attachment upload — never expires)
+        # Base64 data URI (stored from attachment upload - never expires)
         if emoji_str.startswith("data:image/"):
             import base64 as _b64
             _data = emoji_str.split(",", 1)[1]
             return Image.open(_io2.BytesIO(_b64.b64decode(_data))).convert("RGBA").resize((size, size), Image.LANCZOS)
-        # Custom Discord emoji  <:name:id>  or  <a:name:id>
+        # Custom Discord emoji <:name:id> or <a:name:id>
         m = _re.match(r'<(a?):(\w+):(\d+)>', emoji_str)
         if m:
             ext = "gif" if m.group(1) == "a" else "png"
@@ -1850,10 +1832,10 @@ def _fetch_emoji_img(emoji_str: str, size: int = 72):
                 return Image.open(_io2.BytesIO(resp.content)).convert("RGBA").resize((size, size), Image.LANCZOS)
             return None
 
-        # Plain text / :shortcode: with no ID — can't resolve without guild context
+        # Plain text / :shortcode: with no ID - can't resolve without guild context
         if all(ord(c) < 128 for c in emoji_str):
             return None
-        # Unicode emoji → Twemoji CDN (skip variation selectors and ZWJ)
+        # Unicode emoji -> Twemoji CDN (skip variation selectors and ZWJ)
         codepoints = "-".join(
             f"{ord(c):x}" for c in emoji_str
             if ord(c) not in (0xFE0F, 0xFE0E, 0x200D) and ord(c) > 0x7F
@@ -1870,7 +1852,7 @@ def _fetch_emoji_img(emoji_str: str, size: int = 72):
             except Exception:
                 continue
     except Exception as _e:
-        print(f"⚠️ Emoji fetch failed ({emoji_str}): {_e}")
+        print(f"Emoji fetch failed ({emoji_str}): {_e}")
     return None
 
 
@@ -1884,7 +1866,7 @@ def generate_t20wc_scorecard(data: dict) -> io.BytesIO:
     round_label = data.get("round_label", "")
     fmt_overs   = data.get("format_overs", 20)
 
-    # ── Background ──────────────────────────────────────────────
+    # Background
     try:
         bg = Image.open("assets/t20_scoreboard.png").convert("RGBA")
     except FileNotFoundError:
@@ -1893,7 +1875,7 @@ def generate_t20wc_scorecard(data: dict) -> io.BytesIO:
     img = bg.copy()
     d   = ImageDraw.Draw(img)
 
-    # ── Fonts ────────────────────────────────────────────────────
+    # Fonts
     _fbd = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
     _frg = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
     try:
@@ -1926,7 +1908,7 @@ def generate_t20wc_scorecard(data: dict) -> io.BytesIO:
     T2B_Y2 = T2B_Y1 + band_h
     T2S_Y2 = int(H * 0.841)               # 878
     RES_Y1 = T2S_Y2
-    RES_Y2 = int(H * 0.901)               # 940 — covers template transition pixels at y=939-940
+    RES_Y2 = int(H * 0.901)               # 940 - covers template transition pixels at y=939-940
 
     COL_MID   = W // 2
 
@@ -1943,7 +1925,7 @@ def generate_t20wc_scorecard(data: dict) -> io.BytesIO:
     DKBLK = (28,  28,  28,  255)
     GOLD  = (255, 210,   0, 255)
 
-    # ── Helpers ───────────────────────────────────────────────────
+    # Helpers
     def _overs(balls):
         if not balls: return str(fmt_overs)
         return str(balls // 6) if balls % 6 == 0 else f"{balls // 6}.{balls % 6}"
@@ -1960,14 +1942,14 @@ def generate_t20wc_scorecard(data: dict) -> io.BytesIO:
             return bx + size + 12
         return bx
 
-    # ── Match number — above template's green "MATCH SUMMARY" (y=64-98) ──
+    # Match number - above template's green "MATCH SUMMARY" (y=64-98)
     ctx_line = f"MATCH {match_id}"
     if round_label:
         ctx_line += f"  •  {round_label.upper()}"
     d.text(((W - _tw(ctx_line, fMatch)) // 2, int(H * 0.022)),
            ctx_line, fill=(200, 200, 200, 255), font=fMatch)
 
-    # ── Team band ──────────────────────────────────────────────────
+    # Team band
     def _hex_rgba(h, alpha=255):
         h = (h or "#6B7280").lstrip("#")
         try:
@@ -1999,7 +1981,7 @@ def generate_t20wc_scorecard(data: dict) -> io.BytesIO:
         sc_y = y1 + (band_h - _th(fScore)) // 2
         d.text((sc_x, sc_y), sc, fill=WHITE, font=fScore)
 
-    # ── Stats table (no header row — matches ICC reference style) ──
+    # Stats table (no header row - matches ICC reference style)
     def draw_stats(td, y1, y2):
         d.rectangle([(0, y1), (W, y2)], fill=(255, 255, 255, 255))
         row_h = (y2 - y1) // 4
@@ -2037,7 +2019,7 @@ def generate_t20wc_scorecard(data: dict) -> io.BytesIO:
                 d.text((BWL_WR_X  - _tw(wr,           fRuns )//2, ry2), wr,           fill=DKBLK, font=fRuns)
                 d.text((BWL_OVR_X - _tw(bw["overs"],  fBalls)//2, by2), bw["overs"],  fill=DGRAY, font=fBalls)
 
-    # ── Render both teams ─────────────────────────────────────────
+    # Render both teams
     draw_band(t1,  T1B_Y1, T1B_Y2)
     draw_stats(t1, T1B_Y2, T1S_Y2)
     draw_band(t2,  T2B_Y1, T2B_Y2)
@@ -2070,7 +2052,7 @@ def generate_t20wc_scorecard(data: dict) -> io.BytesIO:
         d.text(((W - _tw(result_str, fResult)) // 2, res_cy - _th(fResult) // 2),
                result_str, fill=WHITE, font=fResult)
 
-    # ── Flatten RGBA → RGB ────────────────────────────────────────
+    # Flatten RGBA -> RGB
     final = Image.new("RGB", img.size, (255, 255, 255))
     final.paste(img, mask=img.split()[3])
     buf = io.BytesIO()
@@ -2098,7 +2080,7 @@ def generate_acl_match_summary(data: dict) -> io.BytesIO:
     DARK, WHITE = (12, 28, 68), (255, 255, 255)
     img = Image.open("assets/acl_scoreboard.png").convert("RGBA")
     # Flatten the baked green "best bowler" strip AND its diagonal notch in both bowler
-    # panels → clean uniform white box. Restricted to the safe interior so the panel's
+    # panels -> clean uniform white box. Restricted to the safe interior so the panel's
     # outer rounded border is preserved.
     _ip = img.load()
     for (x0, x1, y0, y1) in ((948, 1543, 362, 503), (948, 1543, 605, 747)):
@@ -2111,9 +2093,9 @@ def generate_acl_match_summary(data: dict) -> io.BytesIO:
                     _ip[xx, yy] = (252, 252, 252, 255)
 
     # Recolor each team-row's coloured frame (header bar + logo cap + score cap +
-    # run/over block) to that team's colour — swap only Hue/Saturation in HSV. The
+    # run/over block) to that team's colour - swap only Hue/Saturation in HSV. The
     # template bakes the top row's frame lighter than the bottom, so each frame's
-    # brightness is shifted to a common (lighter) mean V → both rows read the same,
+    # brightness is shifted to a common (lighter) mean V -> both rows read the same,
     # with the within-frame gradient kept intact. White panels / grey grid (low
     # saturation) are untouched by the mask.
     from colorsys import rgb_to_hsv as _r2h
@@ -2138,7 +2120,7 @@ def generate_acl_match_summary(data: dict) -> io.BytesIO:
         _recolor((88, 278, 1556, 515), _rc_hex((data.get("t1") or {}).get("color")))
         _recolor((88, 525, 1556, 760), _rc_hex((data.get("t2") or {}).get("color")))
     except Exception as _rc_err:
-        print(f"⚠️ ACL team-colour recolor skipped: {_rc_err}")
+        print(f"ACL team-colour recolor skipped: {_rc_err}")
 
     d = ImageDraw.Draw(img)
     # Redraw a 3-row grid in the bowling box identical to the batting section.
@@ -2275,12 +2257,12 @@ def generate_scorecard_from_data(data: dict) -> io.BytesIO:
         try:
             return generate_acl_match_summary(data)
         except Exception as e:
-            print(f"⚠️ ACL match-summary render failed, using default scorecard: {e}")
+            print(f"ACL match-summary render failed, using default scorecard: {e}")
     if data.get("tournament_type") == "t20_world_cup" or data.get("theme") == "T20 World Cup":
         try:
             return generate_t20wc_scorecard(data)
         except Exception as _e:
-            print(f"⚠️ T20 WC scorecard error: {_e}. Falling back to default.")
+            print(f"T20 WC scorecard error: {_e}. Falling back to default.")
 
     theme      = data.get("theme", "Default")
     t1_data    = data["t1"]
@@ -2293,7 +2275,7 @@ def generate_scorecard_from_data(data: dict) -> io.BytesIO:
 
     if theme == "Crimson Cricket":
         try:
-            # ── Layout ───────────────────────────────────────────
+            # Layout
             _W, _H       = 1200, 720
             _H_HDR       = 130
             _H_BAR       = 65
@@ -2301,7 +2283,7 @@ def generate_scorecard_from_data(data: dict) -> io.BytesIO:
             _H_BOT       = 60
             _SCORE_PANEL = 260
 
-            # ── Colors ───────────────────────────────────────────
+            # Colors
             _GRAD_L = (13, 0, 0)
             _GRAD_M = (107, 13, 18)
             _GRAD_R = (196, 75, 26)
@@ -2317,11 +2299,11 @@ def generate_scorecard_from_data(data: dict) -> io.BytesIO:
             _C_WHITE     = "#FFFFFF"
             _C_GOLD      = (255, 215, 0)
 
-            # ── Canvas ───────────────────────────────────────────
+            # Canvas
             img = Image.new("RGB", (_W, _H), "#FFFFFF")
             d   = ImageDraw.Draw(img)
 
-            # ── Fonts ────────────────────────────────────────────
+            # Fonts
             _fbd = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
             _frg = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
             try:
@@ -2340,7 +2322,7 @@ def generate_scorecard_from_data(data: dict) -> io.BytesIO:
                 _fHUGE = _fTRN = _fMTCH = _fTEAM = _fSCORE = _fOVR = _fCOL = \
                 _fNAME = _fRUNS = _fBALLS = _fBOT = ImageFont.load_default()
 
-            # ── Helpers ──────────────────────────────────────────
+            # Helpers
             def _tw(text, font):
                 if hasattr(font, 'getbbox'): return font.getbbox(text)[2]
                 return len(text) * 10
@@ -2367,7 +2349,7 @@ def generate_scorecard_from_data(data: dict) -> io.BytesIO:
                     pts.append((cx + r * math.cos(angle), cy + r * math.sin(angle)))
                 d.polygon(pts, fill=_C_GOLD)
 
-            # ── 1. Gradient header ───────────────────────────────
+            # 1. Gradient header
             for x in range(_W):
                 t = x / (_W - 1)
                 col = _lerp(_GRAD_L, _GRAD_M, t * 2) if t < 0.5 else _lerp(_GRAD_M, _GRAD_R, (t - 0.5) * 2)
@@ -2385,7 +2367,7 @@ def generate_scorecard_from_data(data: dict) -> io.BytesIO:
             d.rounded_rectangle([(bx1, by1), (bx2, by2)], radius=10, outline=(196, 75, 26), width=2)
             d.text((bx1 + pad, by1 + pad), tourn_name, fill=_C_GOLD, font=_fTRN)
 
-            # ── 2. Team section ──────────────────────────────────
+            # 2. Team section
             _HALF       = _W // 2
             _BN_X       = 30
             _BR_X       = 455
@@ -2494,7 +2476,7 @@ def generate_scorecard_from_data(data: dict) -> io.BytesIO:
             _draw_team(_H_HDR,                  t1_data)
             _draw_team(_H_HDR + _H_BAR + _H_STATS, t2_data)
 
-            # ── 3. Bottom bar ────────────────────────────────────
+            # 3. Bottom bar
             bot_y = _H - _H_BOT
             d.rectangle([(0, bot_y), (_W, _H)], fill=_C_PANEL)
 
@@ -2521,10 +2503,10 @@ def generate_scorecard_from_data(data: dict) -> io.BytesIO:
             buf.seek(0)
             return buf
         except Exception as e:
-            print(f"⚠️ Crimson Cricket scoreboard error: {e}. Falling back to default.")
+            print(f"Crimson Cricket scoreboard error: {e}. Falling back to default.")
             pass
 
-    # ── Default "broadcast" scoreboard ───────────────────────────────
+    # Default "broadcast" scoreboard
     # Side-by-side two-team layout: white header (team names + crests +
     # centre logo), format bar, split score band, batter grids, bowler
     # grids, then a navy result/POTM footer. Left column = batting-first
@@ -2533,7 +2515,7 @@ def generate_scorecard_from_data(data: dict) -> io.BytesIO:
     img = Image.new("RGB", (W, H), "#FFFFFF")
     d   = ImageDraw.Draw(img)
 
-    # Fonts — prefer bundled DejaVu (Linux host), fall back to macOS/Windows,
+    # Fonts - prefer bundled DejaVu (Linux host), fall back to macOS/Windows,
     # then PIL's default so a missing font never crashes the render.
     def _font(size, bold=True):
         cands = ([
@@ -2588,7 +2570,7 @@ def generate_scorecard_from_data(data: dict) -> io.BytesIO:
     c_navy_rgb = _hex(c_navy)
     c_gold_rgb = _hex(c_gold)
 
-    # ── Colour + gradient helpers ─────────────────────────────────────
+    # Colour + gradient helpers
     def _lerp(a, b, t):
         return tuple(int(a[k] + (b[k] - a[k]) * t) for k in range(3))
 
@@ -2634,7 +2616,7 @@ def generate_scorecard_from_data(data: dict) -> io.BytesIO:
 
     HALF = W // 2
 
-    # ── 1. Header: soft vertical-gradient bg + crests, names, centre logo ──
+    # 1. Header: soft vertical-gradient bg + crests, names, centre logo
     HDR_H, HDR_MID, LOGO_SZ = 126, 63, 78
     _vgrad(0, 0, W, HDR_H, (255, 255, 255), (243, 245, 248))
 
@@ -2678,7 +2660,7 @@ def generate_scorecard_from_data(data: dict) -> io.BytesIO:
     _hgrad(0,    HDR_H - 4, HALF, HDR_H, tc1, _lighten(tc1, 0.45))
     _hgrad(HALF, HDR_H - 4, W,    HDR_H, _lighten(tc2, 0.45), tc2)
 
-    # ── 2. Context bar (compact): "MATCH N • STADIUM • FMT (N OVERS)" ──
+    # 2. Context bar (compact): "MATCH N • STADIUM • FMT (N OVERS)"
     BAR_Y1, BAR_Y2 = HDR_H, HDR_H + 32
     _vgrad(0, BAR_Y1, W, BAR_Y2, (238, 240, 243), (227, 230, 235))
     _fmt = "T20" if format_overs <= 20 else "ODI"
@@ -2690,7 +2672,7 @@ def generate_scorecard_from_data(data: dict) -> io.BytesIO:
     d.text(((W - get_tw(bar_txt, f_bar)) // 2, BAR_Y1 + (BAR_Y2 - BAR_Y1 - _th(f_bar)) // 2),
            bar_txt, fill=c_navy, font=f_bar)
 
-    # ── 3. Score band: diagonal split of two glossy team-colour gradients ──
+    # 3. Score band: diagonal split of two glossy team-colour gradients
     SB_Y1, SB_Y2 = BAR_Y2, BAR_Y2 + 96
     SB_MID = (SB_Y1 + SB_Y2) // 2
     _band_h = SB_Y2 - SB_Y1
@@ -2750,7 +2732,7 @@ def generate_scorecard_from_data(data: dict) -> io.BytesIO:
     _draw_score(t1_data, 0,    "left",  HALF - 150, tc1)
     _draw_score(t2_data, HALF, "right", HALF + 150, tc2)
 
-    # ── 4 & 5. Stat grids (batters then bowlers) ──────────────────────
+    # 4 & 5. Stat grids (batters then bowlers)
     GRID_ROWS = 4
     ROW_H = 50
     GHDR_H = 34
@@ -2769,11 +2751,11 @@ def generate_scorecard_from_data(data: dict) -> io.BytesIO:
 
     def _draw_grid(y_top, kind, col1_hdr, col2_hdr):
         # Batting strips use the batting team's colour. Bowling strips use the
-        # BOWLING team's colour — and team 1's column lists team 2's bowlers
+        # BOWLING team's colour - and team 1's column lists team 2's bowlers
         # (they bowled to team 1), so the bowling-bar colours swap sides.
         left_col  = tc1 if kind == "bat" else tc2
         right_col = tc2 if kind == "bat" else tc1
-        # Gradient strips: base colour at the outer edge → darker toward the seam.
+        # Gradient strips: base colour at the outer edge -> darker toward the seam.
         _hgrad(0,    y_top, HALF, y_top + GHDR_H, left_col, _darken(left_col, 0.72))
         _hgrad(HALF, y_top, W,    y_top + GHDR_H, _darken(right_col, 0.72), right_col)
         hy = y_top + (GHDR_H - _th(f_col)) // 2
@@ -2820,7 +2802,7 @@ def generate_scorecard_from_data(data: dict) -> io.BytesIO:
     bat_bottom = _draw_grid(SB_Y2, "bat", "R", "B")
     bwl_bottom = _draw_grid(bat_bottom, "bowl", "W-R", "O")
 
-    # ── 6. Footer (result + POTM): team-tinted navy gradient ──────────
+    # 6. Footer (result + POTM): team-tinted navy gradient
     _dt1, _dt2 = _darken(tc1, 0.42), _darken(tc2, 0.42)
     for x in range(W):
         t = x / (W - 1)
@@ -2860,7 +2842,7 @@ def _ccodi_font(size, bold=True, italic=False):
     return ImageFont.load_default()
 
 
-# ── CCODI scorecard layout (measured on assets/ccodi_scorecard.png, 1538×1022) ──
+# CCODI scorecard layout (measured on assets/ccodi_scorecard.png, 1538×1022)
 # One coordinate block per innings panel; edit the numbers here to nudge alignment.
 _CCODI_PANELS = {
     1: {"flag_cy": 315, "name_cy": 398, "innings_cy": 438, "score_cy": 322,
@@ -2878,7 +2860,7 @@ _CCODI_SCORE_CX = 393    # centre of the big total + overs block
 _CCODI_FLAG_SZ = 108
 _CCODI_EXTRAS_VX = 378   # x-start of the EXTRAS value (after the "EXTRAS" label ~x302-365)
 _CCODI_RR_VX = 340       # x-start of the RR value (after the "RR" label ~x302-322)
-# Column CENTRES, from the template grid separators — numbers are centre-aligned in
+# Column CENTRES, from the template grid separators - numbers are centre-aligned in
 # each cell (matching the centred headers). Batters seps: 741,800,855,908,961,1020.
 # Bowlers seps: 1205,1258,1309,1358,1408,1494. (name columns are left-aligned.)
 _CCODI_BAT_COLS = {"name": 545, "R": 773, "B": 830, "4s": 884, "6s": 936, "SR": 995}
@@ -2903,7 +2885,7 @@ def _ccodi_recolor_panel(img, box, hex_color, hue_lo, hue_hi):
     except Exception:
         return
     hh, ss, _vv = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
-    if ss < 0.22:            # grey / default colour → keep the template panel as-is
+    if ss < 0.22:            # grey / default colour -> keep the template panel as-is
         return
     target_h = int(hh * 255)
     region = img.crop(box).convert("HSV")
@@ -2931,7 +2913,7 @@ def generate_ccodi_scorecard(match: CricketMatch) -> io.BytesIO:
     def _ct(cx, y, s, font, fill=WHITE):
         d.text((cx - font.getbbox(str(s))[2] / 2, y), str(s), font=font, fill=fill)
 
-    # Team logo/colour lookup (the match's team dicts carry no logos → read the tourney).
+    # Team logo/colour lookup (the match's team dicts carry no logos -> read the tourney).
     tourney = None
     if getattr(match, "tournament_server_id", None):
         tourney = next((t for t in DB_CACHE.get("tournaments", []) if t.get("server_id") == match.tournament_server_id), None)
@@ -2957,7 +2939,7 @@ def generate_ccodi_scorecard(match: CricketMatch) -> io.BytesIO:
         tname = inn.batting_team["name"]
         logo, colr = _team_meta(tname)
 
-        # ── far-left block: flag/emoji · team name · INNINGS n ──
+        # far-left block: flag/emoji · team name · INNINGS n
         sz = _CCODI_FLAG_SZ
         x0, y0 = int(_CCODI_LEFT_CX - sz / 2), int(P["flag_cy"] - sz / 2)
         crest = None
@@ -2975,14 +2957,14 @@ def generate_ccodi_scorecard(match: CricketMatch) -> io.BytesIO:
         _ct(_CCODI_LEFT_CX, P["name_cy"], tname.upper()[:14], f_name)
         _ct(_CCODI_LEFT_CX, P["innings_cy"], f"INNINGS {idx}", f_inns, dim)
 
-        # ── middle: big total + overs (cover the template's placeholder, redraw) ──
+        # middle: big total + overs (cover the template's placeholder, redraw)
         _ct(_CCODI_SCORE_CX, P["score_cy"], f"{inn.total_runs}/{inn.wickets}", f_score)
         overs = f"{inn.total_balls // 6}.{inn.total_balls % 6}"
         bx = P["overs_box"]
         d.rectangle(bx, fill=img.getpixel((bx[0] - 6, bx[1] - 4)))   # cover placeholder w/ tinted panel
         _ct(_CCODI_SCORE_CX, P["overs_cy"], f"{overs} OVERS", f_overs)
 
-        # ── EXTRAS (with breakdown) + RR ──
+        # EXTRAS (with breakdown) + RR
         extras = getattr(inn, "extras", 0)
         byes = getattr(inn, "byes", 0); lb = getattr(inn, "legbyes", 0)
         nb = getattr(inn, "noballs", 0); wd = getattr(inn, "wides", 0)
@@ -2998,7 +2980,7 @@ def generate_ccodi_scorecard(match: CricketMatch) -> io.BytesIO:
                 s = s[:-1]
             return s + "…"
 
-        # ── batters: top 5 by runs, centred numbers, integer SR ──
+        # batters: top 5 by runs, centred numbers, integer SR
         bats = sorted([b for b in inn.batting_stats.values() if b.balls_faced > 0 or b.dismissal != "not out"],
                       key=lambda x: x.runs_scored, reverse=True)[:5]
         y = P["bat_y0"]; C = _CCODI_BAT_COLS
@@ -3013,7 +2995,7 @@ def generate_ccodi_scorecard(match: CricketMatch) -> io.BytesIO:
             _ct(C["SR"], y, f"{sr:.0f}", f_row, dim)
             y += _CCODI_BAT_ROW_H
 
-        # ── bowlers: top 7 by wickets, tighter rows, smaller font ──
+        # bowlers: top 7 by wickets, tighter rows, smaller font
         bowls = sorted([b for b in inn.bowling_stats.values() if b.balls_bowled > 0],
                        key=lambda x: (x.wickets_taken, -x.runs_conceded), reverse=True)[:7]
         y = P["bowl_y0"]; C = _CCODI_BOWL_COLS
@@ -3028,7 +3010,7 @@ def generate_ccodi_scorecard(match: CricketMatch) -> io.BytesIO:
             _ct(C["ECON"], y, f"{econ:.2f}", f_bowl, dim)
             y += _CCODI_BOWL_ROW_H
 
-    # ── result banner + POTM (bottom ribbon, y≈918-992) — only once the chase is done ──
+    # result banner + POTM (bottom ribbon, y≈918-992) - only once the chase is done
     if len(inns) == 2:
         i1, i2 = match.innings1, match.innings2
         target = getattr(match, "target", i1.total_runs + 1)
@@ -3056,7 +3038,7 @@ def generate_ccodi_scorecard(match: CricketMatch) -> io.BytesIO:
             _ctv(769, 942, res, _ccodi_font(34))
             _ctv(769, 977, f"PLAYER OF THE MATCH  •  {str(potm).upper()}", _ccodi_font(19), (240, 194, 66))
         else:
-            _ctv(769, 955, res, f_res)   # no POTM → single line, dead-centre of the ribbon
+            _ctv(769, 955, res, f_res)   # no POTM -> single line, dead-centre of the ribbon
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -3070,21 +3052,21 @@ def generate_tournament_score_image(match: CricketMatch) -> io.BytesIO:
         try:
             return generate_ccodi_scorecard(match)
         except Exception as _e:
-            print(f"⚠️ CCODI scorecard render failed, using generic: {_e}")
+            print(f"CCODI scorecard render failed, using generic: {_e}")
     return generate_scorecard_from_data(extract_scoreboard_data(match))
 
 
 def generate_ccodi_scorecard_from_data(data: dict):
     """Rebuild a match-like object from STORED scorecard data (reconstruct_scorecard_data)
-    and render the CCODI template — so `cvt match_scorecard` / `post_scorecards` show the
+    and render the CCODI template - so `cvt match_scorecard` / `post_scorecards` show the
     branded card, not the generic one. Returns None for matches stored before the CCODI
-    fields (no 4s/6s) — those keep the generic card rather than showing wrong zeros."""
+    fields (no 4s/6s) - those keep the generic card rather than showing wrong zeros."""
     from types import SimpleNamespace as _NS
     t1, t2 = data.get("t1"), data.get("t2")
     if not t1 or not t2 or not t1.get("batters") or not t2.get("batters"):
         return None
     if all(b.get("fours") is None for b in t1["batters"] + t2["batters"]):
-        return None   # pre-CCODI storage → fall back to the generic card
+        return None   # pre-CCODI storage -> fall back to the generic card
 
     def _inn(td):
         bats = {}
@@ -3114,9 +3096,7 @@ def generate_ccodi_scorecard_from_data(data: dict):
             _potm_name=data.get("potm"))
     return generate_ccodi_scorecard(m)
 
-# ==========================================
-# 🔄 5. MATCH PROGRESSION & LOOPS
-# ==========================================
+# ---- Match progression & loops ----
 
 async def advance_match_loop(interaction, match: CricketMatch):
     innings = match.current_innings
@@ -3135,7 +3115,7 @@ async def loop_current_innings_simulation(interaction, match: CricketMatch):
     channel = interaction.channel if hasattr(interaction, 'channel') else interaction
 
     while True:
-        # /endmatch (or anything that tears the match down) must stop the sim INSTANTLY —
+        # /endmatch (or anything that tears the match down) must stop the sim INSTANTLY
         # the loop only holds a private reference, so re-check the registry every ball.
         if active_games.get(channel.id) is not match:
             return
@@ -3178,7 +3158,7 @@ async def loop_current_innings_simulation(interaction, match: CricketMatch):
         # Only run over-end housekeeping when a LEGAL ball actually completed the over.
         # A wide/no-ball leaves total_balls on the over boundary (6N); without this guard
         # the clear would wipe over_log mid-over and the next bowler-pick would re-select
-        # a NEW bowler — the "verbose sim hands the over to a different bowler" bug.
+        # a NEW bowler - the "verbose sim hands the over to a different bowler" bug.
         if innings.total_balls > tb_before and innings.total_balls % 6 == 0:
             if getattr(match, 'verbose', False):
                 await channel.send(embed=render_embed_scoreboard(match))
@@ -3191,9 +3171,9 @@ async def loop_current_innings_simulation(interaction, match: CricketMatch):
 async def loop_current_innings_bbb(interaction, match: CricketMatch):
     """Ball-by-ball verbose: post ONE live scoreboard per over and EDIT it after each
     delivery (at a readable pace), with a fresh card for every new over. Then hand back
-    to the Over Hub for the next innings — same end-of-innings handling as the other sims."""
+    to the Over Hub for the next innings - same end-of-innings handling as the other sims."""
     channel = interaction.channel if hasattr(interaction, 'channel') else interaction
-    BALL_DELAY = 1.3   # seconds between deliveries — fast enough to follow, slow enough to read
+    BALL_DELAY = 1.3   # seconds between deliveries - fast enough to follow, slow enough to read
 
     def _innings_over(inn):
         mw = _match_max_wickets(match)
@@ -3249,7 +3229,7 @@ async def loop_current_innings_bbb(interaction, match: CricketMatch):
         while True:
             if active_games.get(channel.id) is not match:
                 match._bbb_active = False
-                return   # /endmatch mid-over — stop dead, no more balls or edits
+                return   # /endmatch mid-over - stop dead, no more balls or edits
             if _innings_over(innings):
                 break   # outer loop renders the final state + ends the innings cleanly
             tb_before = innings.total_balls
@@ -3270,7 +3250,7 @@ async def loop_current_innings_bbb(interaction, match: CricketMatch):
         innings.mystery_bowled_this_over = False
 
         # `cv verbose` was typed during this over: the over is now complete (or the
-        # innings ended mid-over) — hand the REST of the match to the verbose sim.
+        # innings ended mid-over) - hand the REST of the match to the verbose sim.
         # sim_only=True keeps innings 2 auto-simming instead of returning to the hub;
         # match end still flows through handle_innings_end, so tournament stats,
         # standings and the result dispatch are recorded exactly as normal.
@@ -3295,7 +3275,7 @@ async def loop_entire_match_simulation(interaction, match: CricketMatch):
         max_w = _match_max_wickets(match)
         if innings.wickets >= max_w or innings.total_balls >= match.max_balls or (match.current_innings_num == 2 and innings.total_runs >= getattr(match, "target", match.innings1.total_runs + 1)):
             # Verbose: if the innings ended MID-over (winning run / last wicket on a non-6th
-            # ball), that final partial over's card was never shown — render it before the
+            # ball), that final partial over's card was never shown - render it before the
             # scorecard so the last over isn't skipped.
             if getattr(match, 'verbose', False) and innings.over_log:
                 await channel.send(embed=render_embed_scoreboard(match))
@@ -3385,7 +3365,7 @@ def _so_reorder_batting(innings, opener_names):
         innings.batting_stats = {p["name"]: BatterStats(p) for p in new_players}
         return True
     except Exception as e:
-        print(f"⚠️ super over reorder failed: {e}")
+        print(f"super over reorder failed: {e}")
         return False
 
 
@@ -3395,7 +3375,7 @@ def _so_auto_openers(innings):
         top2 = sorted(innings.batting_team["players"], key=lambda p: p.get("bat", 0), reverse=True)[:2]
         _so_reorder_batting(innings, [p["name"] for p in top2])
     except Exception as e:
-        print(f"⚠️ super over auto-openers failed: {e}")
+        print(f"super over auto-openers failed: {e}")
 
 
 class SuperOverOpenersView(discord.ui.View):
@@ -3469,7 +3449,7 @@ class SuperOverOpenersView(discord.ui.View):
             await self.channel.send(f"⏳ Openers not picked in time — defaulting to **{s[0]['name']} & {s[1]['name']}**.")
             await prompt_bowler_then_hub(self.channel, self.match)
         except Exception as e:
-            print(f"⚠️ super over openers timeout fallback failed: {e}")
+            print(f"super over openers timeout fallback failed: {e}")
 
 
 async def begin_super_over_innings(channel, match):
@@ -3497,7 +3477,7 @@ async def begin_super_over_innings(channel, match):
             view=view,
         )
     except Exception as e:
-        print(f"⚠️ super over openers view failed, using defaults: {e}")
+        print(f"super over openers view failed, using defaults: {e}")
         await prompt_bowler_then_hub(channel, match)
 
 
@@ -3537,7 +3517,7 @@ async def _maybe_send_tbecs_ads(channel, match):
     other match type and when no ads are configured. Super-over innings are skipped
     so a tie-break doesn't spam the break ads again."""
     try:
-        from tbecs_manager import is_tbecs_match, build_tbecs_ad_embeds
+        from league.tbecs_manager import is_tbecs_match, build_tbecs_ad_embeds
         if not is_tbecs_match(match) or getattr(match, "is_super_over", False):
             return
         sid = getattr(match, "tournament_server_id", None)
@@ -3547,11 +3527,11 @@ async def _maybe_send_tbecs_ads(channel, match):
         if embeds:
             await channel.send(embeds=embeds[:10])   # Discord caps a message at 10 embeds
     except Exception as _ad_err:
-        print(f"⚠️ TBECS ad send failed: {_ad_err}")
+        print(f"TBECS ad send failed: {_ad_err}")
 
 
 async def handle_innings_end(interaction_context, match: CricketMatch):
-    if getattr(match, "is_debut", False):   # Career debut: never start innings 2 — score the trial.
+    if getattr(match, "is_debut", False):   # Career debut: never start innings 2 - score the trial.
         await handle_debut_end(interaction_context, match)
         return
     if getattr(match, "is_scenario", False):   # Solo scenario: single innings, then settle.
@@ -3572,7 +3552,7 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
         match.innings2 = InningsState(match.innings1.bowling_team, match.innings1.batting_team)
         match.current_innings = match.innings2
         
-        # 🌧️ DLS INTERRUPT SYSTEM
+        # DLS INTERRUPT SYSTEM
         target = match.innings1.total_runs + 1
         dls_msg = ""
         rain_chances = {"Light Rain": 0.15, "Drizzle": 0.30, "Heavy Rain": 0.65, "Thunderstorm": 0.85}
@@ -3609,12 +3589,12 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
 
         # Reset per-innings sim controls so the 2nd innings starts FRESH at the hub.
         # Otherwise a "Sim Innings (Verbose)" / whole-match pick from the 1st innings leaks
-        # in — e.g. "Sim 1 Over" in the 2nd innings would auto-sim the whole innings verbose.
+        # in - e.g. "Sim 1 Over" in the 2nd innings would auto-sim the whole innings verbose.
         if not getattr(match, 'sim_only', False):
             match.simulation_mode = "interactive"
             match.verbose = False
 
-        # Pass channel directly — no more DummyInteraction needed
+        # Pass channel directly - no more DummyInteraction needed
         if getattr(match, 'is_super_over', False):
             # Super Over innings 2: pick openers (interactive) / auto (sim·AI), then bowl.
             await begin_super_over_innings(channel, match)
@@ -3633,7 +3613,7 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
         is_tied = (inn2.total_runs == target - 1)
         
         if is_tied and not getattr(match, "tie_accepted", False) and not getattr(match, 'is_super_over', False):
-            # DLS may have reduced format_overs — judge the tie rule by the ORIGINAL format.
+            # DLS may have reduced format_overs - judge the tie rule by the ORIGINAL format.
             if getattr(match, "original_format_overs", match.format_overs) != 50:
                 # Show the completed (tied) scoreboard before the Super Over begins.
                 try:
@@ -3643,7 +3623,7 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
                         file=discord.File(fp=_tie_img, filename="tied_scoreboard.png"),
                     )
                 except Exception as _tie_err:
-                    print(f"⚠️ Tied scoreboard render failed: {_tie_err}")
+                    print(f"Tied scoreboard render failed: {_tie_err}")
                 await trigger_super_over(channel, match)
                 return
 
@@ -3665,7 +3645,7 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
             match_to_finalize = original_match
 
         # Increment counter BEFORE generating image so the scorecard shows the correct match number.
-        # Skip super overs — they're continuations, not standalone matches.
+        # Skip super overs - they're continuations, not standalone matches.
         if (not getattr(match_to_finalize, 'is_super_over', False)
                 and not getattr(match_to_finalize, 'is_player_test', False)):
             _base = getattr(match_to_finalize, 'original_format_overs', match_to_finalize.format_overs)
@@ -3682,7 +3662,7 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
                 img_buf = generate_final_score_image(img_match)
             embed_full = render_full_scorecard_embed(img_match, 2)
         except Exception as _img_err:
-            print(f"⚠️ Summary image failed ({'super over' if is_so_finish else 'match'}): {_img_err}")
+            print(f"Summary image failed ({'super over' if is_so_finish else 'match'}): {_img_err}")
             img_buf = generate_final_score_image(match_to_finalize)
             embed_full = render_full_scorecard_embed(match_to_finalize, 2)
 
@@ -3694,7 +3674,7 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
             header = "🏆 **Match over! Here is the final detailed scorecard and broadcast graphic:**"
         await channel.send(header, embed=embed_full, file=file)
 
-        # TBECS second-innings (match end) ads — shown at every innings end per spec.
+        # TBECS second-innings (match end) ads - shown at every innings end per spec.
         await _maybe_send_tbecs_ads(channel, match_to_finalize)
 
         # Send scorecard to match log channel if configured for this server
@@ -3713,26 +3693,26 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
                             file=log_file
                         )
                 except Exception as _log_err:
-                    print(f"⚠️ Match log send failed: {_log_err}")
+                    print(f"Match log send failed: {_log_err}")
 
         if getattr(match_to_finalize, "tournament_server_id", None):
             try:
                 match_to_finalize._scorecard_players = extract_scorecard_players(match_to_finalize)
             except Exception as _e:
-                print(f"⚠️ Could not extract scorecard players: {_e}")
+                print(f"Could not extract scorecard players: {_e}")
                 match_to_finalize._scorecard_players = None
 
         if getattr(match_to_finalize, "is_club", False) and _CAREER_OK:
             try:
                 await _club_match_payout(channel, match_to_finalize)
             except Exception as _e:
-                print(f"⚠️ Club match payout failed: {_e}")
+                print(f"Club match payout failed: {_e}")
 
         if getattr(match_to_finalize, "is_draft", False):
             try:
                 await _record_draft_result(channel, match_to_finalize)
             except Exception as _e:
-                print(f"⚠️ Draft result record failed: {_e}")
+                print(f"Draft result record failed: {_e}")
 
         if channel.id in active_games:
             del active_games[channel.id]
@@ -3740,9 +3720,7 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
         if getattr(match_to_finalize, "tournament_server_id", None):
             bot.dispatch("tournament_match_complete", match_to_finalize, channel)
 
-# ==========================================
-# 🏏 6. OVER HUB & INTERACTIVE MENUS
-# ==========================================
+# ---- Over hub & interactive menus ----
 
 def _insert_next_batter(innings, match, sel_idx):
     """Bring the chosen batter (currently at sel_idx) into the next batting slot and put
@@ -3750,7 +3728,7 @@ def _insert_next_batter(innings, match, sel_idx):
 
     Why not just `current_striker_idx = next_batter_idx`: if the wicket fell on the LAST
     ball of an over, the engine has already done its end-of-over strike swap using the
-    dismissed batter's index — so the out batter (prev_striker_idx) is now sitting at the
+    dismissed batter's index - so the out batter (prev_striker_idx) is now sitting at the
     NON-striker index and the surviving partner is the striker. Blindly overwriting the
     striker would orphan the survivor (he shows as a 3rd batter on the card and the
     non-striker pointer keeps pointing at a dismissed man, which also makes _solo_batting
@@ -3781,7 +3759,7 @@ async def prompt_next_batter(interaction, match: CricketMatch):
         if bs and bs.dismissal != "not out":
             await handle_scenario_end(interaction, match)
             return
-    # Innings is over once the wicket cap is reached — Super Over = 2, normal = 10.
+    # Innings is over once the wicket cap is reached - Super Over = 2, normal = 10.
     # (Without this, a Super Over wouldn't stop at 2 because the rest of the XI is still
     #  "available", so it would try to send a 3rd batter and crash the flow.)
     if innings.wickets >= _match_max_wickets(match):
@@ -3961,14 +3939,14 @@ async def prompt_bowler_then_hub(interaction, match: CricketMatch):
         innings.over_log.clear()
         innings.bouncers_in_over = 0; innings.cutters_in_over = 0
         innings.mystery_bowled_this_over = False
-        # Career debut / scenario / club: no Sim hub — go straight to interactive play.
+        # Career debut / scenario / club: no Sim hub - go straight to interactive play.
         if getattr(match, "is_debut", False) or getattr(match, "is_club", False) or getattr(match, "is_scenario", False):
             await run_interactive_delivery_sequence(interaction, match)
         else:
             await prompt_over_pacing_hub(interaction, match)
         return
 
-    # Bowling scenario: YOU bowl every over — auto-select the player, no dropdown/quota.
+    # Bowling scenario: YOU bowl every over - auto-select the player, no dropdown/quota.
     if getattr(match, "is_scenario", False) and getattr(match, "scenario_mode", "bat") == "bowl":
         innings.current_bowler = innings.bowling_team["players"][0]
         innings.over_log.clear()
@@ -4035,7 +4013,7 @@ async def prompt_bowler_then_hub(interaction, match: CricketMatch):
             return
         match._pending_bowler = next(p for p in innings.bowling_team["players"] if p["name"] == b_name)
         # The interaction token can be dead (10062) if the loop stalled between render and
-        # click. defer()/edit then 404 — but the downstream flow only needs the channel
+        # click. defer()/edit then 404 - but the downstream flow only needs the channel
         # (bot token), so swallow the failure and keep the over progressing instead of
         # crashing the match. The dropdown is removed via the bot-token message edit below.
         try:
@@ -4047,7 +4025,7 @@ async def prompt_bowler_then_hub(interaction, match: CricketMatch):
         except discord.HTTPException:
             pass
         if getattr(match, "is_club", False):
-            # Club matches are interactive-only — no Sim hub. Apply the bowler and bowl.
+            # Club matches are interactive-only - no Sim hub. Apply the bowler and bowl.
             innings.current_bowler = match._pending_bowler
             match._pending_bowler = None
             innings.over_log.clear()
@@ -4207,7 +4185,7 @@ class OverControlHubView(discord.ui.View):
         await interaction.message.edit(view=None)
         self.match.simulation_mode = "whole_match"
         self.match.verbose = True
-        # _pending_bowler kept — the selected bowler opens the verbose sim.
+        # _pending_bowler kept - the selected bowler opens the verbose sim.
         innings = self.match.current_innings
         innings.over_log.clear()
         innings.bouncers_in_over = 0; innings.cutters_in_over = 0
@@ -4220,7 +4198,7 @@ class OverControlHubView(discord.ui.View):
         await interaction.message.edit(view=None)
         self.match.simulation_mode = "whole_match"
         self.match.verbose = False              # bbb does its own per-ball rendering
-        # _pending_bowler kept — the selected bowler bowls the first broadcast over.
+        # _pending_bowler kept - the selected bowler bowls the first broadcast over.
         innings = self.match.current_innings
         innings.over_log.clear()
         innings.bouncers_in_over = 0; innings.cutters_in_over = 0
@@ -4262,7 +4240,7 @@ class PaceBowlingView(discord.ui.View):
         for cutter in ["Off Cutter", "Leg Cutter", "Knuckle"]:
             self.add_item(ActionButton(cutter, discord.ButtonStyle.secondary, 2, "cutter"))
 
-        # No Auto Ball in career mode — every delivery is picked by hand.
+        # No Auto Ball in career mode - every delivery is picked by hand.
         if not _is_career_match(match):
             self.add_item(ActionButton("🎲 Auto Ball", discord.ButtonStyle.secondary, 3, "auto"))
 
@@ -4325,7 +4303,7 @@ class SpinBowlingView(discord.ui.View):
             disabled = (spin == "Mystery" and mystery_used)
             self.add_item(ActionButton(spin, discord.ButtonStyle.primary, row, "spin", disabled=disabled))
 
-        # No Auto Ball in career mode — every delivery is picked by hand.
+        # No Auto Ball in career mode - every delivery is picked by hand.
         if not _is_career_match(match):
             self.add_item(ActionButton("🎲 Auto Ball", discord.ButtonStyle.secondary, 2, "auto"))
             
@@ -4470,13 +4448,13 @@ class DRSView(discord.ui.View):
 
             if getattr(self.match, "pending_next_batter", False):
                 self.match.pending_next_batter = False
-                # No replacement was promoted yet — the reprieved batter still holds
+                # No replacement was promoted yet - the reprieved batter still holds
                 # his crease end (after a last-ball wicket the end-change moved him to
                 # the non-striker end; that's where he belongs for the new over).
             else:
                 innings.next_batter_idx -= 1
                 _nb = innings.next_batter_idx
-                # Un-promote the auto-promoted new man from whichever end he took —
+                # Un-promote the auto-promoted new man from whichever end he took
                 # if the over ended after the wicket, the end-change parked him at
                 # the NON-striker end (blindly restoring the striker would point both
                 # ends at the same batter and kill strike rotation).
@@ -4527,7 +4505,7 @@ async def _send_career_commentary(channel, match):
         return
     comm = getattr(match, "last_commentary", "") or ""
     # Dedupe: this is called once before the bowling prompt and once before the shot
-    # prompt of the SAME ball — only post a given line once (fixes double commentary).
+    # prompt of the SAME ball - only post a given line once (fixes double commentary).
     if comm and comm == getattr(match, "_last_shown_commentary", None):
         return
     if comm and "initial" not in comm.lower():
@@ -4641,7 +4619,7 @@ async def prompt_batter_shot(channel, match: CricketMatch, prev=None):
 
         # A BOT batter can be dismissed too. In club matches (is_ai_game False) the engine
         # sets pending_next_batter instead of auto-advancing, so we MUST hand off to the
-        # next-batter flow here — otherwise the dismissed bot keeps facing balls and the
+        # next-batter flow here - otherwise the dismissed bot keeps facing balls and the
         # captain is never asked to send a replacement.
         if getattr(match, "pending_next_batter", False):
             match.pending_next_batter = False
@@ -4661,12 +4639,10 @@ async def prompt_batter_shot(channel, match: CricketMatch, prev=None):
         await channel.send(f"⚔️ <@{match.get_striker_user_id()}> (**{sn}**)\n🚨 The bowler bowled a **{match.current_delivery_selection}**!{free_hit_notice}\nSelect your shot:", view=BattingView(match))
 
 
-# ==========================================
-# 🎓 CAREER MODE — INTERACTIVE DEBUT (reuses the real engine + BattingView)
-# ==========================================
+# ---- CAREER MODE - INTERACTIVE DEBUT (reuses the real engine + BattingView) ----
 # A 2-over batting trial: you open vs an AI academy attack and play it ball-by-ball
 # exactly like a real match. Two guarded hooks (`is_debut`) reroute match-end to
-# handle_debut_end — they no-op for every normal match (attr defaults to False).
+# handle_debut_end - they no-op for every normal match (attr defaults to False).
 _DEBUT_OVERS = 2
 _DEBUT_TARGET = 16   # runs needed in the trial to pass
 
@@ -4789,9 +4765,7 @@ async def handle_debut_end(interaction_context, match: CricketMatch):
         await channel.send(embed=e)
 
 
-# ==========================================
-# 🎯 CAREER MODE — INTERACTIVE SCENARIO (solo, difficult, small reward + quests)
-# ==========================================
+# ---- CAREER MODE - INTERACTIVE SCENARIO (solo, difficult, small reward + quests) ----
 _SCENARIO_DEFS = [("Quickfire", 2), ("Run Chase", 3), ("Pressure Cooker", 4)]
 
 
@@ -4828,7 +4802,7 @@ def _challenge_batting(lvl, rlo=8, rhi=16):
 
 async def start_scenario_match(channel, author, career, mode="bat", difficulty="medium"):
     if channel.id in active_games or channel.id in active_setups:
-        # The entry fee was charged at the confirm step — refund it, don't eat it.
+        # The entry fee was charged at the confirm step - refund it, don't eat it.
         career["coins"] += CM.SCENARIO_ENTRY_FEE
         CM.async_save_career(career)
         return await channel.send("❌ A match or setup is already running here — entry fee refunded. Finish it (or `cv endmatch`) first.")
@@ -4845,7 +4819,7 @@ async def start_scenario_match(channel, author, career, mode="bat", difficulty="
         you_team = _scenario_player_team(career, pname, roles_are_field=True)
         opp = _challenge_batting(eng["bowl"], rlo, rhi)
         wkt_target = 2 if overs <= 3 else 3
-        # team1 = your (bowling) side, team2 = Challenge XI (bats) — AI bats, you bowl.
+        # team1 = your (bowling) side, team2 = Challenge XI (bats) - AI bats, you bowl.
         match = CricketMatch(pname, "Challenge XI", author.id, None, you_team, opp,
                              format_overs=overs, pitch=pitch, weather="Clear")
         match.batting_first_id = None          # AI bats
@@ -4990,9 +4964,7 @@ class ScenarioConfirmView(discord.ui.View):
         await interaction.response.edit_message(content="🚫 Scenario cancelled — no fee charged.", view=None)
 
 
-# ==========================================
-# ⚔️ CAREER MODE — CLUB MATCH (Phase 4.2): interactive, captain-controlled PvP
-# ==========================================
+# ---- CAREER MODE - CLUB MATCH (Phase 4.2): interactive, captain-controlled PvP ----
 # Both XIs are built from the joiners' careers. The top-OVR player on each side is
 # the captain who plays the match for their team. Reuses the full interactive engine
 # (toss -> innings -> BattingView / bowling views). `is_club` keeps it interactive-only
@@ -5007,7 +4979,7 @@ def _build_club_team(players, name, color):
         e["owner_id"] = p["id"]
         if p.get("is_bot"):
             e["is_bot"] = True
-        nm = e["name"]                       # engine stats key by name — keep them unique per team
+        nm = e["name"]                       # engine stats key by name - keep them unique per team
         if nm in seen:
             seen[nm] += 1
             e["name"] = f"{nm} ({seen[nm]})"
@@ -5018,7 +4990,7 @@ def _build_club_team(players, name, color):
 
 
 async def _club_match_payout(channel, match):
-    """Phase 4.3 — pay coins + record lifetime stats for every HUMAN player after a
+    """Phase 4.3 - pay coins + record lifetime stats for every HUMAN player after a
     club match. Bots earn nothing. Winner's side gets the victory bonus."""
     inns = [i for i in (match.innings1, match.innings2) if i]
     target = getattr(match, "target", match.innings1.total_runs + 1)
@@ -5122,7 +5094,7 @@ async def start_club_match(channel, lobby, host):
     match._caps = {team1["name"]: cap_a["id"], team2["name"]: cap_b["id"]}
     # All-out at squad size: the last batter bats ALONE (career-mode rule only).
     match.max_wickets = len(team1["players"])
-    # Everyone's an all-rounder, so all can bowl — give each enough overs to cover the
+    # Everyone's an all-rounder, so all can bowl - give each enough overs to cover the
     # innings (ceil(overs / squad)), else short sides run out of bowlers.
     match.bowler_quota = max(1, -(-lobby.overs // len(team1["players"])))
     match._cap_a_id = cap_a["id"]
@@ -5141,7 +5113,7 @@ async def start_club_match(channel, lobby, host):
 
 
 def _apply_club_names(match, name_a, name_b):
-    """Rename both club teams and rebuild the name→captain map (_cap_of keys on team name)."""
+    """Rename both club teams and rebuild the name->captain map (_cap_of keys on team name)."""
     name_a = " ".join(str(name_a or "").split()).strip()[:24] or "Team A"
     name_b = " ".join(str(name_b or "").split()).strip()[:24] or "Team B"
     if name_a.lower() == name_b.lower():
@@ -5206,13 +5178,13 @@ class ClubNameView(discord.ui.View):
         self.names = {}
         self.message = None
         self.done = False
-        # Bots can't type — auto-name them with the default.
+        # Bots can't type - auto-name them with the default.
         if _is_bot_uid(self.cap_a_id): self.names[self.cap_a_id] = self.default_a
         if _is_bot_uid(self.cap_b_id): self.names[self.cap_b_id] = self.default_b
 
     async def kickoff(self, channel):
         if self.cap_a_id in self.names and self.cap_b_id in self.names:
-            await self._finish(channel)     # both captains are bots → straight to toss
+            await self._finish(channel)     # both captains are bots -> straight to toss
 
     @discord.ui.button(label="🏷️ Name Your Team", style=discord.ButtonStyle.primary)
     async def name_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -5315,9 +5287,7 @@ async def prompt_club_openers(interaction, match):
     await channel.send(f"🧢 <@{cap_id}> (batting captain) — pick your **2 opening batsmen**:", view=view)
 
 
-# ==========================================
-# 🛠️ 7. NEW STEP-BY-STEP MATCH SETUP FLOW
-# ==========================================
+# ---- New step-by-step match setup flow ----
 
 active_setups = {}
 
@@ -5342,12 +5312,12 @@ class MatchSetupState:
         self.tournament_name = "TOURNAMENT"
         self.home_team_id = p1_id
         self.sim_only = False
-        # Player-test matches are a sandbox for evaluating players.  They must not
+        # Player-test matches are a sandbox for evaluating players. They must not
         # consume a subscriber's daily allowance or advance the public match totals.
         self.is_player_test = False
 
 
-# ── Captain & Wicket-Keeper rules (enforced at the start of every match setup) ──
+# Captain & Wicket-Keeper rules (enforced at the start of every match setup)
 # Every XI must carry a keeper, and exactly one player is captain (+1 to their main
 # skill). A line in a typed XI may end with '(C)' to name the captain inline; '(c)'
 # and '(captain)' are accepted too, though '(C)' is the documented form.
@@ -5355,7 +5325,7 @@ _CAPTAIN_MARK_RE = re.compile(r"\s*\(\s*(c|captain)\s*\)\s*$", re.IGNORECASE)
 
 
 def _strip_captain_mark(line):
-    """(clean_line, marked, lowercase_c_used) — pull a trailing captain marker off a
+    """(clean_line, marked, lowercase_c_used) - pull a trailing captain marker off a
     typed player line. lowercase_c_used flags the '(c)' form so we can nudge towards
     the documented '(C)'."""
     m = _CAPTAIN_MARK_RE.search(line)
@@ -5370,7 +5340,7 @@ _NOBOWL_MARK_RE = re.compile(r"\s*(?:\(\s*l\s*\)|\s+l)\s*$", re.IGNORECASE)
 
 
 def _strip_nobowl_mark(line):
-    """(clean_line, marked) — pull a trailing 'don't bowl him' marker off a typed line."""
+    """(clean_line, marked) - pull a trailing 'don't bowl him' marker off a typed line."""
     m = _NOBOWL_MARK_RE.search(line)
     if not m:
         return line, False
@@ -5384,7 +5354,7 @@ def _has_wk(players):
 
 def _captain_skill_field(p):
     """Which skill a captain's +1 lands on: a batter's bat, a bowler's bowl, an
-    all-rounder's STRONGER suit (bat==bowl → random) so we never boost a weak suit."""
+    all-rounder's STRONGER suit (bat==bowl -> random) so we never boost a weak suit."""
     role = p.get("role") or ""
     bat, bowl = int(p.get("bat", 0)), int(p.get("bowl", 0))
     if "All-Rounder" in role:
@@ -5397,7 +5367,7 @@ def _captain_skill_field(p):
 
 
 def _player_strength(p):
-    """A player's headline rating (their best suit) — used to auto-pick a captain."""
+    """A player's headline rating (their best suit) - used to auto-pick a captain."""
     role = p.get("role") or ""
     bat, bowl = int(p.get("bat", 0)), int(p.get("bowl", 0))
     if "All-Rounder" in role: return max(bat, bowl)
@@ -5442,7 +5412,7 @@ def captain_note(players):
 
 
 def parse_pasted_roster(raw_text, db_players, max_lines=16):
-    """Resolve typed names → player dicts. A player line may end with a captain marker
+    """Resolve typed names -> player dicts. A player line may end with a captain marker
     ('(C)' documented; '(c)'/'(captain)' also accepted) to name the captain inline and
     skip the captain prompt. `max_lines` caps how many lines are read (16 = 11 XI + 5
     impact; pass more for a squad). Returns
@@ -5453,7 +5423,7 @@ def parse_pasted_roster(raw_text, db_players, max_lines=16):
 
     found_players = []
     missing_names = []
-    seen_names = set() # 🚨 NEW: Tracks who is already in the XI
+    seen_names = set() # NEW: Tracks who is already in the XI
     captain_name = None
     captain_marks = 0
     lowercase_mark_used = False
@@ -5486,7 +5456,7 @@ def parse_pasted_roster(raw_text, db_players, max_lines=16):
         # 3. Duplicate check before adding to the team
         if matched_player:
             if nobowl:
-                # Copy first — the matched dict is the shared DB object.
+                # Copy first - the matched dict is the shared DB object.
                 matched_player = dict(matched_player)
                 matched_player["avoid_bowl"] = True
             if matched_player["name"] not in seen_names:
@@ -5498,7 +5468,7 @@ def parse_pasted_roster(raw_text, db_players, max_lines=16):
                 # If they try to add a duplicate, flag it as an error!
                 missing_names.append(f"{core} (Duplicate Entry)")
 
-    # More than one '(C)' is ambiguous → invalid (the caller re-prompts).
+    # More than one '(C)' is ambiguous -> invalid (the caller re-prompts).
     captain_error = "multiple" if captain_marks > 1 else None
     return found_players, missing_names, captain_name, captain_error, lowercase_mark_used
 
@@ -5533,8 +5503,8 @@ def _saved_team_lineup(ct):
     return players, impact, missing_xi, missing_impact
 
 
-# --- Step 1: Format & Impact Player ---
-# --- Step 1: Format & Impact Player ---
+# Step 1: Format & Impact Player
+# Step 1: Format & Impact Player
 
 def _setup_cancelled_check(view):
     """Fail-open guard for pre-match setup views: only blocks if endmatch explicitly
@@ -5612,7 +5582,7 @@ class CustomOversModal(discord.ui.Modal, title="Custom Over Count"):
                 return await interaction.followup.send(reason, ephemeral=True)
 
         self.state.format_overs = val
-        # 🚨 FIX: Atomic edit prevents the crash
+        # FIX: Atomic edit prevents the crash
     
         await interaction.edit_original_response(content=f"✅ Format set: **Custom ({val} overs)**", view=None)
         if getattr(self.state, "tournament_server_id", None):
@@ -5639,19 +5609,19 @@ class ImpactPlayerView(discord.ui.View):
     async def btn_no(self, interaction, button):
         if interaction.user.id != self.state.p1_id and interaction.user.id != getattr(self.state, "manager_id", None): return
         self.state.impact_player = False
-        # 🚨 FIX: Atomic edit
+        # FIX: Atomic edit
         await interaction.response.edit_message(content="✅ Standard rules applied.", view=None)
         if getattr(self.state, "tournament_server_id", None): await prompt_tournament_xi(self.channel, self.state, 1)
         else: await ask_team1_name(self.channel, self.state)
 
-# --- Step 2: Chat-Based Roster Collection Prompts ---
+# Step 2: Chat-Based Roster Collection Prompts
 
 async def ask_team1_name(channel, state):
     await channel.send(f"🏏 <@{state.p1_id}> — Type your **team name** (e.g. `India`):\n*(Reply directly in this channel)*")
     active_setups[channel.id] = ("awaiting_team1_name", state)
 
 def _saved_teams_hint(channel):
-    """A one-line hint about loading saved custom teams at the XI step (no name list — the
+    """A one-line hint about loading saved custom teams at the XI step (no name list - the
     global pool can be large, so we just point to `cv teams` to browse)."""
     if not list_custom_teams():
         return "\n-# 💡 Tip: save a lineup with `cv saveteam \"<name>\"`, then just type its name here to load it."
@@ -5678,7 +5648,7 @@ async def ask_team2_xi(channel, state):
     active_setups[channel.id] = ("awaiting_team2_xi", state)
 
 
-# --- Step 3: XI Verification UI ---
+# Step 3: XI Verification UI
 
 def _role_short(p):
     return (p.get("role") or "").replace("All-Rounder", "AR").replace("Bowler", "BWL").replace("Batter", "BAT").replace("_", " ")
@@ -5696,7 +5666,7 @@ def _finalize_captain(state, team_num, name):
 
 class CaptainSelectView(discord.ui.View):
     """Pick the captain from a locked XI. The chosen player gets +1 to their main skill
-    (an all-rounder's stronger suit; bat==bowl → random). `after(channel, state)` is the
+    (an all-rounder's stronger suit; bat==bowl -> random). `after(channel, state)` is the
     coroutine that continues setup once a captain is chosen."""
     def __init__(self, state, channel, team_num, players, after):
         super().__init__(timeout=120)
@@ -5792,7 +5762,7 @@ class Team2VerifyView(discord.ui.View):
         
 async def prompt_tournament_xi(channel, state, team_num):
     """Tournament XI selection: paste the 11 (order = batting order, optional '(C)'
-    captain marker) or hit ✅ Use Default XI. Replaces the old one-by-one dropdown
+    captain marker) or hit  Use Default XI. Replaces the old one-by-one dropdown
     picker. Validates: every name in the (injury-filtered) squad, no duplicates,
     exactly 11, and a wicket-keeper present."""
     owner_id = state.p1_id if team_num == 1 else state.p2_id
@@ -5827,7 +5797,7 @@ async def prompt_tournament_xi(channel, state, team_num):
             setattr(state, f"t{team_num}_captain", captain_name)
         await handle_captain_step(channel, state, team_num, xi, _after)
 
-    # ── prompt message: instructions + the squad for reference ──
+    # prompt message: instructions + the squad for reference
     inj_note = ""
     full_squad = state.t1_squad if team_num == 1 else state.t2_squad
     msg = (f"📋 <@{owner_id}> (or Manager) — **{t_name} XI Selection**\n"
@@ -5869,14 +5839,14 @@ async def prompt_tournament_xi(channel, state, team_num):
                 and m.author.id in (owner_id, getattr(state, "manager_id", None)))
 
     while not view.done:
-        # Abort silently if this setup was cancelled/replaced (endmatch, new match…).
+        # Abort silently if this setup was cancelled/replaced (endmatch, new match...).
         cur = active_setups.get(channel.id)
         if not cur or cur[1] is not state:
             return
         try:
             reply = await bot.wait_for("message", timeout=300, check=_check)
         except asyncio.TimeoutError:
-            continue   # no hard timeout — same behaviour as the old no-timeout picker
+            continue   # no hard timeout - same behaviour as the old no-timeout picker
         if view.done:
             return
         content = reply.content.strip()
@@ -5888,7 +5858,7 @@ async def prompt_tournament_xi(channel, state, team_num):
             continue
         lines = [l for l in content.split("\n") if l.strip()]
         if len(lines) < 8:
-            continue   # ordinary chat — ignore, keep waiting for a pasted XI
+            continue   # ordinary chat - ignore, keep waiting for a pasted XI
         found, missing, cap_name, cap_err, _low = parse_pasted_roster(
             content, squad, max_lines=16 if impact_on else 13)
         xi, subs = found[:11], found[11:]
@@ -5920,7 +5890,7 @@ async def prompt_tournament_xi(channel, state, team_num):
 
 class TournamentSubSelectView(discord.ui.View):
     def __init__(self, state, channel, team_num, remaining):
-        # No timeout — same reason as TournamentXIView: don't let the picker expire
+        # No timeout - same reason as TournamentXIView: don't let the picker expire
         # mid-selection.
         super().__init__(timeout=None)
         self.state = state
@@ -6008,13 +5978,13 @@ class TournamentSubSelectView(discord.ui.View):
             await proceed_to_conditions(self.channel, self.state)
 
 
-# --- Step 4: Pitch & Weather Select ---
+# Step 4: Pitch & Weather Select
 
 async def ask_pitch_and_weather(channel, state):
     await channel.send(f"🏟️ <@{state.home_team_id}> (**{state.t1_name}** — Home Team) — Select **Pitch & Weather** conditions:", view=PitchWeatherView(state, channel))
 
 async def proceed_to_conditions(channel, state):
-    """Tournament matches in auto/home conditions mode have pitch+weather preset → skip the
+    """Tournament matches in auto/home conditions mode have pitch+weather preset -> skip the
     picker and go straight to the toss. Manual mode (and casual/draft) still asks."""
     if getattr(state, "conditions_preset", False) and getattr(state, "pitch", None) and getattr(state, "weather", None):
         await channel.send(f"🏟️ **Pitch:** {state.pitch}  ·  🌤️ **Weather:** {state.weather}\n\nProceeding to the **toss**...")
@@ -6107,7 +6077,7 @@ class PitchWeatherView(discord.ui.View):
         await begin_toss(self.channel, self.state)
 
 
-# --- Step 5: Toss Engine ---
+# Step 5: Toss Engine
 
 async def begin_toss(channel, state):
     # Test format (90 overs) uses a completely different simulation engine
@@ -6135,7 +6105,7 @@ async def begin_toss(channel, state):
         match.draft_opp_name = state.draft_opp_name
         match.draft_host_team = state.t1_name        # team1 is always the host
     active_games[channel.id] = match
-    # Setup is done — hand the cancellation baton to active_games (toss views guard on it).
+    # Setup is done - hand the cancellation baton to active_games (toss views guard on it).
     setup_states.pop(channel.id, None)
 
     if getattr(state, 'sim_only', False):
@@ -6239,7 +6209,7 @@ class TossDecisionView(discord.ui.View):
     async def bowl(self, interaction, button): await self.finalize_toss(interaction, "Bowl")
 
 
-# --- The Listener connecting Chat inputs to the State Machine ---
+# The Listener connecting Chat inputs to the State Machine
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -6387,7 +6357,7 @@ async def on_message(message: discord.Message):
 
     await bot.process_commands(message)
 
-# --- The Slash Command Initialization ---
+# The Slash Command Initialization
 
 @bot.tree.command(name="match", description="Start a new Cricket Match simulation.")
 async def match_cmd(interaction: discord.Interaction, opponent: discord.Member = None):
@@ -6414,7 +6384,7 @@ async def match_cmd(interaction: discord.Interaction, opponent: discord.Member =
 
     state = MatchSetupState(interaction.user, opponent, interaction.user.id, opponent.id if opponent else None)
     
-    # 🚨 FIX: Register the setup immediately so /endmatch works instantly!
+    # FIX: Register the setup immediately so /endmatch works instantly!
     active_setups[interaction.channel.id] = ("format_selection", state)
     setup_states[interaction.channel.id] = state
     
@@ -6422,9 +6392,7 @@ async def match_cmd(interaction: discord.Interaction, opponent: discord.Member =
     
     await interaction.edit_original_response(content=f"🏏 **Match Setup**\n**Host:** {interaction.user.mention}\n**Opponent:** {opp_str}\n\nStep 1: Select Format below:", view=FormatSelectView(state, interaction.channel))
 
-# ==========================================
-# 🏏 TEST MATCH SIMULATION
-# ==========================================
+# ---- Test match simulation ----
 
 _TEST_SESSION_NAMES = {1: "Morning", 2: "Afternoon", 3: "Evening"}
 _TEST_SESSION_NAMES_PINK = {1: "Afternoon", 2: "Twilight", 3: "Night"}   # day-night Test
@@ -6434,11 +6402,11 @@ def _test_session_name(match, session=None):
     names = _TEST_SESSION_NAMES_PINK if getattr(match, "pink_ball", False) else _TEST_SESSION_NAMES
     return names.get(s, "Morning")
 
-# Rain weather types aren't in the test engine — map them to closest equivalent
+# Rain weather types aren't in the test engine - map them to closest equivalent
 
 
 def render_test_embed(match: TestMatchObj) -> discord.Embed:
-    """Live scoreboard — ODI/T20 style with per-team rows showing all innings."""
+    """Live scoreboard - ODI/T20 style with per-team rows showing all innings."""
     innings = match.current_innings
     embed   = discord.Embed(color=0xFFFFFF)
 
@@ -6463,7 +6431,7 @@ def render_test_embed(match: TestMatchObj) -> discord.Embed:
             return f"{inn.total_runs}/{inn.wickets}  ({inn.overs_str})"
         return f"{inn.total_runs}/{inn.wickets}{dec}"
 
-    # One row per team — both innings on the same line separated by " & "
+    # One row per team - both innings on the same line separated by " & "
     for team in [match.team1, match.team2]:
         tnm         = team["name"]
         is_batting  = (innings.batting_team["name"] == tnm)
@@ -6526,7 +6494,7 @@ def render_test_embed(match: TestMatchObj) -> discord.Embed:
 
 
 def render_test_final_embed(match: TestMatchObj) -> discord.Embed:
-    """Final match embed — compact per-innings summary (image has the full detail)."""
+    """Final match embed - compact per-innings summary (image has the full detail)."""
     embed = discord.Embed(title="📋 Test Match Scorecard", color=discord.Color.gold())
     result = match.result or "Match Drawn"
     embed.description = f"**Result:** {result}\n"
@@ -6627,7 +6595,7 @@ def _test_session_commentary(
 ) -> str:
     lines = []
 
-    # ── Session character ──────────────────────────────────────────────────
+    # Session character
     if balls_used == 0:
         return ""
     if rr >= 4.5:
@@ -6661,7 +6629,7 @@ def _test_session_commentary(
             "A miserable session for the bat — the pitch and conditions did the bowlers every favour.",
         ]))
 
-    # ── Wicket narrative ───────────────────────────────────────────────────
+    # Wicket narrative
     if wkts_fell == 0:
         lines.append(random.choice([
             "No wickets fell — the batting side will be pleased with their discipline.",
@@ -6693,7 +6661,7 @@ def _test_session_commentary(
             "Just the one wicket — the batting side largely had the better of the exchange.",
         ]))
 
-    # ── Standout bowler ────────────────────────────────────────────────────
+    # Standout bowler
     if sess_bowlers:
         _, _, best_name, best_ovs, best_runs, best_wkts = sess_bowlers[0]
         if best_wkts >= 4:
@@ -6703,7 +6671,7 @@ def _test_session_commentary(
         elif best_runs <= 12 and int(best_ovs.split(".")[0]) >= 5:
             lines.append(f"**{best_name}** was the standout in economy terms — miserly figures of {best_ovs}-{best_runs}-{best_wkts}.")
 
-    # ── Pitch / weather flavour ────────────────────────────────────────────
+    # Pitch / weather flavour
     pitch = match.pitch
     weather = match.weather
     if weather in ("Heavy Rain", "Thunderstorm") and balls_used > 0:
@@ -6719,7 +6687,7 @@ def _test_session_commentary(
 
 
 def _render_test_session_embed(match: TestMatchObj, snap: dict) -> discord.Embed:
-    """Session summary embed — replaces the old ASCII code-block output."""
+    """Session summary embed - replaces the old ASCII code-block output."""
     embed    = discord.Embed(color=0xFFFFFF)
     sess_nm  = _test_session_name(match, snap["session"])
     pink_tag = "<:pink:1518481735266996255> " if getattr(match, "pink_ball", False) else ""
@@ -6815,7 +6783,7 @@ def _render_test_session_embed(match: TestMatchObj, snap: dict) -> discord.Embed
 
 
 def _render_test_innings_embed(match: TestMatchObj, inn_idx: int) -> discord.Embed:
-    """Full innings scorecard embed — all batters with dismissals and all bowlers."""
+    """Full innings scorecard embed - all batters with dismissals and all bowlers."""
     inn   = match.innings_list[inn_idx]
     rr    = round(inn.total_runs / max(1, inn.total_balls) * 6, 2)
     dec   = "(dec)" if inn.declared else ""
@@ -6828,7 +6796,7 @@ def _render_test_innings_embed(match: TestMatchObj, inn_idx: int) -> discord.Emb
     potm_line = f"⭐ **Player of the Match:** {potm}\n\n" if potm else ""
     total_line = f"**{inn.total_runs}/{inn.wickets}{dec}**  ({inn.overs_str} ov)  ·  RR: {rr}\n\n"
 
-    # ── All batters ──────────────────────────────────────────────────────────
+    # All batters
     bat_lines = []
     for p in inn.batting_team["players"]:
         st = inn.batting_stats[p["name"]]
@@ -6846,7 +6814,7 @@ def _render_test_innings_embed(match: TestMatchObj, inn_idx: int) -> discord.Emb
     bat_block += "\n".join(bat_lines) + "\n"
     bat_block += "```\n"
 
-    # ── All bowlers ──────────────────────────────────────────────────────────
+    # All bowlers
     bowl_lines = []
     for p in inn.bowling_team["players"]:
         st = inn.bowling_stats[p["name"]]
@@ -6872,12 +6840,12 @@ def _test_potm_name(match):
 
 
 def generate_test_summary_image(match: TestMatchObj) -> io.BytesIO:
-    """Compact per-innings Test summary (rendered by test_image — previewable locally)."""
+    """Compact per-innings Test summary (rendered by test_image - previewable locally)."""
     return _ti_summary(match, _format_match_no_label("test"), _test_potm_name(match))
 
 
 def generate_test_scorecard_image(match: TestMatchObj) -> io.BytesIO:
-    """Full broadcast Test scorecard (rendered by test_image — previewable locally)."""
+    """Full broadcast Test scorecard (rendered by test_image - previewable locally)."""
     return _ti_scorecard(match, _format_match_no_label("test"), _test_potm_name(match))
 
 
@@ -6937,7 +6905,7 @@ class TestImageToggleView(discord.ui.View):
             file = discord.File(fp=gen(self.match), filename=fname)
             await interaction.response.edit_message(attachments=[file], view=self)
         except Exception as e:
-            print(f"⚠️ Test image toggle failed: {e}")
+            print(f"Test image toggle failed: {e}")
             try:
                 await interaction.response.send_message("⚠️ Couldn't switch the view.", ephemeral=True)
             except Exception:
@@ -6965,7 +6933,7 @@ async def _test_finish_match(match: TestMatchObj, channel_id: int, channel):
             file=file, view=TestImageToggleView(match)
         )
     except Exception as _e:
-        print(f"⚠️ Test summary image failed: {_e}")
+        print(f"Test summary image failed: {_e}")
         await channel.send(f"🏆 **Test Match Result:** {result_text}")
 
     # Interactive per-innings scorecard navigator
@@ -6987,7 +6955,7 @@ async def _test_finish_match(match: TestMatchObj, channel_id: int, channel):
                         file=log_file
                     )
             except Exception as _log_err:
-                print(f"⚠️ Test match log send failed: {_log_err}")
+                print(f"Test match log send failed: {_log_err}")
 
     active_test_matches.pop(channel_id, None)
 
@@ -7056,12 +7024,12 @@ class TestMultipleOversModal(discord.ui.Modal, title="Simulate Multiple Overs"):
         await self.channel.send(embed=render_test_embed(match), view=TestSimView(match, self.channel_id))
 
 
-# ── Interactive over-by-over mode ─────────────────────────────────────────────
+# Interactive over-by-over mode
 #
 # Flow per over:
-#   1. TestInteractiveBowlerSelectView  — pick who bowls
-#   2. TestInteractiveDeliveryView      — pick delivery type (each ball)
-#   3. TestInteractiveShotView          — pick shot (each ball) → execute → show result
+# 1. TestInteractiveBowlerSelectView - pick who bowls
+# 2. TestInteractiveDeliveryView - pick delivery type (each ball)
+# 3. TestInteractiveShotView - pick shot (each ball) -> execute -> show result
 #   After over: loop back to step 1.
 
 async def _test_ia_start_over(channel, match: TestMatchObj, channel_id: int):
@@ -7254,7 +7222,7 @@ async def _test_ia_ball_result(channel, match: TestMatchObj, channel_id: int,
         await channel.send(embed=render_test_embed(match))
         return await _test_ia_start_over(channel, match, channel_id)
 
-    # Same over continues — show next delivery prompt
+    # Same over continues - show next delivery prompt
     await _test_ia_show_delivery(channel, match, channel_id)
 
 
@@ -7486,7 +7454,7 @@ class TestSimView(discord.ui.View):
             return False
         return True
 
-    # ── Row 0: Interactive / quick simulation ──────────────────────────────────
+    # Row 0: Interactive / quick simulation
 
     @discord.ui.button(label="🏏 Play Interactive", style=discord.ButtonStyle.success, row=0)
     async def play_interactive(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -7578,7 +7546,7 @@ class TestSimView(discord.ui.View):
             TestMultipleOversModal(self.match, self.channel_id, interaction.channel)
         )
 
-    # ── Row 1: Session / Day / Innings ─────────────────────────────────────────
+    # Row 1: Session / Day / Innings
 
     @discord.ui.button(label="☕ Session", style=discord.ButtonStyle.secondary, row=1)
     async def sim_session(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -7592,7 +7560,7 @@ class TestSimView(discord.ui.View):
         await asyncio.to_thread(_test_sim_session, match)
 
         # Detect mid-session innings end.
-        # After FULL session: advance_session() resets overs_in_session → 0.
+        # After FULL session: advance_session() resets overs_in_session -> 0.
         # After MID-SESSION stop: overs_in_session left at partial count (> 0).
         sim_inn         = match.innings_list[inn_idx]
         innings_ended   = sim_inn.is_complete and match.overs_in_session > 0
@@ -7670,7 +7638,7 @@ class TestSimView(discord.ui.View):
         await interaction.channel.send(embed=inn_embed)
         await interaction.channel.send(embed=render_test_embed(match), view=TestSimView(match, self.channel_id))
 
-    # ── Row 2: Declaration ─────────────────────────────────────────────────────
+    # Row 2: Declaration
 
     @discord.ui.button(label="📣 Declare", style=discord.ButtonStyle.danger, row=2)
     async def declare_innings(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -7737,7 +7705,7 @@ class TestDeclareConfirmView(discord.ui.View):
         self.stop()
 
 
-# ── Test match toss views ──────────────────────────────────────────────────────
+# Test match toss views
 
 class TestTossCallView(discord.ui.View):
     """P2 calls heads/tails for the Test match toss."""
@@ -7792,7 +7760,7 @@ class TestTossDecisionView(discord.ui.View):
         match.is_player_test = getattr(state, "is_player_test", False)
         match.host_id  = state.p1_id
         match.p2_id    = getattr(state, "p2_id", None)
-        match.host_team = t1            # team identity → owner (NOT bat/bowl order)
+        match.host_team = t1            # team identity -> owner (NOT bat/bowl order)
         match.p2_team   = t2
         active_test_matches[self.channel.id] = match
 
@@ -7894,7 +7862,7 @@ async def on_start_tournament_match(channel, manager_id, tourney, match_data):
     current_mid = match_data["match_id"]
 
     # Injury expiry is COUNT-based and counted down at match COMPLETION
-    # (see on_tournament_match_complete) — NOT here. That way, starting a match that is
+    # (see on_tournament_match_complete) - NOT here. That way, starting a match that is
     # then abandoned/incomplete does not consume an injury. At match start we only need to
     # leave still-injured players out of the XI, which available_squad() does below.
 
@@ -7925,7 +7893,7 @@ async def on_start_tournament_match(channel, manager_id, tourney, match_data):
     state.tournament_name = tourney["name"]
     state.tournament_type = tourney.get("tournament_type", "round_robin")   # engine reads this (DSL realism mode)
 
-    # Default XIs (resolved against the FIT squad — an injured/missing player
+    # Default XIs (resolved against the FIT squad - an injured/missing player
     # invalidates the default and the owner types the XI instead).
     state.t1_default_xi = resolve_default_xi(t1_data, state.t1_squad)
     state.t2_default_xi = resolve_default_xi(t2_data, state.t2_squad)
@@ -7960,7 +7928,7 @@ async def on_start_tournament_match(channel, manager_id, tourney, match_data):
                 file=discord.File(banner_buf, filename="match_banner.png")
             )
         except Exception as e:
-            print(f"⚠️ Match banner failed: {e}")
+            print(f"Match banner failed: {e}")
             await channel.send(f"🏆 **Tournament Match {match_data['match_id']}**\n**{team1_name}** (<@{p1_id}>) vs **{team2_name}** (<@{p2_id}>)\n\nFormat: **{state.format_overs} Overs**")
     else:
         await channel.send(f"🏆 **Tournament Match {match_data['match_id']}**\n**{team1_name}** (<@{p1_id}>) vs **{team2_name}** (<@{p2_id}>)\n\nFormat: **{state.format_overs} Overs**")
@@ -7977,7 +7945,7 @@ def _force_end_channel(channel_id) -> bool:
         del active_setups[channel_id]; cleared = True
     if channel_id in active_test_matches:
         del active_test_matches[channel_id]; cleared = True
-    # Pre-match setup (format→pitch select): flag it cancelled so the live setup views bail.
+    # Pre-match setup (format->pitch select): flag it cancelled so the live setup views bail.
     st = setup_states.pop(channel_id, None)
     if st is not None:
         st.cancelled = True; cleared = True
@@ -7999,7 +7967,7 @@ async def endmatch_cmd(interaction: discord.Interaction):
     else:
         await interaction.response.send_message("⚠️ There is no active match or setup running in this channel.", ephemeral=True)
 
-# ── Help embeds ──────────────────────────────────────────────────────────────
+# Help embeds
 
 def _help_home_embed():
     e = discord.Embed(
@@ -8123,7 +8091,7 @@ def _help_owner_embed():
     e.add_field(name="Server Tiers", value="`Bronze` · `Silver` · `Gold` · `Diamond` · `None`",       inline=True)
     return e
 
-# ── Help navigation view ──────────────────────────────────────────────────────
+# Help navigation view
 
 class HelpNavigator(discord.ui.View):
     _PAGES = {"home": _help_home_embed, "match": _help_match_embed,
@@ -8263,9 +8231,7 @@ async def impact_player_cmd(interaction: discord.Interaction):
         
     await interaction.response.send_message("🔄 **Select your Impact Player Swap:**", view=ImpactPlayerSelectView(match, team_id), ephemeral=True)
 
-# ==========================================
-# 🔍 8. PUBLIC DATABASE SEARCH
-# ==========================================
+# ---- Public database search ----
 
 def _can_see_ratings(user_id: int, channel_id: int) -> bool:
     if user_id == ADMIN_DISCORD_ID:
@@ -8325,7 +8291,7 @@ async def searchplayer(interaction: discord.Interaction, name: str):
     await interaction.followup.send(msg)
 
 
-# ── Player list helpers ───────────────────────────────────────────────────────
+# Player list helpers
 
 _ROLE_DISPLAY = {
     "Batter":               "Batter",
@@ -8367,7 +8333,7 @@ def _best_xi(squad: list, n: int = 11, min_bowlers: int = 5) -> list:
 def resolve_default_xi(team_data: dict, fit_squad: list):
     """A team's saved default XI resolved against the currently-FIT squad, in the
     saved (batting) order. Returns the list of player dicts, or None unless every
-    one of the 11 names resolves to a fit squad member, uniquely, with a keeper —
+    one of the 11 names resolves to a fit squad member, uniquely, with a keeper -
     so an injured/transferred player automatically invalidates the default."""
     names = team_data.get("default_xi") or []
     if len(names) != 11:
@@ -8386,7 +8352,7 @@ def resolve_default_xi(team_data: dict, fit_squad: list):
 
 
 def resolve_default_subs(team_data: dict, fit_squad: list, xi: list):
-    """The saved default IMPACT subs resolved against the fit squad — best-effort:
+    """The saved default IMPACT subs resolved against the fit squad - best-effort:
     invalid entries (injured / left squad / already in the XI) are silently dropped
     rather than invalidating the whole default. Capped at 5, like the sub picker."""
     names = team_data.get("default_impact") or []
@@ -8408,7 +8374,7 @@ def _batting_order(players: list) -> list:
     archetype into a proper team sheet: aggressors/anchors open the top order, finishers
     sit at 5-7, all-rounders in the lower-middle, and bowlers form the tail (best-batting
     bowler first). Role weights dominate so a bowler never bats up top, but rating still
-    decides within a band — a strong specialist always out-ranks a weak one."""
+    decides within a band - a strong specialist always out-ranks a weak one."""
     def _pos(p):
         role = p.get("role", "")
         arch = p.get("archetype", "Standard")
@@ -8416,7 +8382,7 @@ def _batting_order(players: list) -> list:
         score = 100.0 - bat                       # better batters earlier
         if "Bowler" in role:        score += 80   # tail, no matter the rating
         elif "All-Rounder" in role: score += 35   # lower-middle (6-8)
-        if arch == "Vaibhav":       score -= 8    # ultra-aggressor — bat him at the top
+        if arch == "Vaibhav":       score -= 8    # ultra-aggressor - bat him at the top
         elif arch == "Aggressor":   score -= 6    # push openers up a touch
         elif arch == "Anchor":      score -= 2    # top order
         elif arch == "Finisher":    score += 8    # slot finishers at 5-7
@@ -8506,7 +8472,7 @@ def _build_playerlist_csv_txt(players: list) -> str:
 
 
 def _build_playerlist_ratings_txt(players: list) -> str:
-    """[OWNER] Full database WITH ratings — sorted by OVR. Separate from the ratings-hidden cv pl."""
+    """[OWNER] Full database WITH ratings - sorted by OVR. Separate from the ratings-hidden cv pl."""
     rows = sorted(players, key=lambda p: _player_overall(p), reverse=True)
     lines = [
         "═" * 88,
@@ -8580,7 +8546,7 @@ async def srating_slash(interaction: discord.Interaction, player: str = None, ba
     sid = str(interaction.guild.id)
     all_p = get_all_players()
 
-    # No player → list this server's overrides
+    # No player -> list this server's overrides
     if not player:
         srv = get_server_overrides(sid)
         if not srv:
@@ -8818,9 +8784,7 @@ async def my_tier_cmd(interaction: discord.Interaction):
         
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# ==========================================
-# 🛡️ 9. ADMIN DATABASE CONTROLS 
-# ==========================================
+# ---- Admin database controls ----
 
 async def log_db_update(action: str, player_name: str, user: discord.User, details: str):
     if not LOG_CHANNEL_ID: return
@@ -8837,10 +8801,7 @@ async def log_db_update(action: str, player_name: str, user: discord.User, detai
             pass
 
 
-
-# ==========================================
-# 🛡️ OWNER SLASH COMMANDS (dropdown-based)
-# ==========================================
+# ---- OWNER SLASH COMMANDS (dropdown-based) ----
 
 @bot.tree.command(name="set_user_tier", description="[OWNER] Assign a subscription tier to a user.")
 @app_commands.choices(tier=[
@@ -8873,9 +8834,7 @@ async def set_server_tier_cmd(interaction: discord.Interaction, server_id: str, 
     msg = update_server_tier(server_id, tier.value, tier.name, days=days)
     await interaction.response.send_message(msg, ephemeral=True)
 
-# ==========================================
-# 💬 10. PREFIX COMMANDS & COG
-# ==========================================
+# ---- Prefix commands & cog ----
 
 def to_bool(value: str) -> bool:
     return value.lower() in ['true', '1', 't', 'y', 'yes']
@@ -8947,7 +8906,7 @@ class DraftModeView(discord.ui.View):
 
 
 async def _record_draft_result(channel, match):
-    """On a draft match's finish, record the win — PvP to the leaderboard, vs-AI separately."""
+    """On a draft match's finish, record the win - PvP to the leaderboard, vs-AI separately."""
     inn1, inn2 = match.innings1, match.innings2
     target = getattr(match, "target", inn1.total_runs + 1)
     if getattr(match, "tiebreak_winner_name", None):
@@ -8955,7 +8914,7 @@ async def _record_draft_result(channel, match):
     elif inn2.total_runs >= target:
         win_name = inn2.batting_team["name"]
     elif inn2.total_runs == target - 1:
-        win_name = None   # tie — but tournament/draft ties go to a Super Over, so rare
+        win_name = None   # tie - but tournament/draft ties go to a Super Over, so rare
     else:
         win_name = inn1.batting_team["name"]
     if win_name is None:
@@ -8984,7 +8943,7 @@ async def _record_draft_result(channel, match):
 
 
 class CSVSyncConfirmView(discord.ui.View):
-    """Owner confirmation for `cv sync_csv` — previews the new players found in the
+    """Owner confirmation for `cv sync_csv` - previews the new players found in the
     CSV and lets the owner toggle any of them off before committing the import."""
     PAGE = 25   # Discord select menus cap at 25 options
 
@@ -9189,7 +9148,7 @@ class PrefixCog(commands.Cog):
         active_setups[ctx.channel.id] = ("testplayer_setup", state)
         setup_states[ctx.channel.id] = state
 
-        def _alive():   # endmatch clears the dicts — abort quietly if that happened
+        def _alive():   # endmatch clears the dicts - abort quietly if that happened
             return active_setups.get(ctx.channel.id, (None, None))[1] is state
 
         handed_off = False
@@ -9197,7 +9156,7 @@ class PrefixCog(commands.Cog):
         def _cleanup():
             if _alive():
                 del active_setups[ctx.channel.id]
-                # On hand-off, setup_states must SURVIVE until begin_toss pops it —
+                # On hand-off, setup_states must SURVIVE until begin_toss pops it
                 # endmatch flags state.cancelled through it, and cv order edits it.
                 if not handed_off:
                     setup_states.pop(ctx.channel.id, None)
@@ -9215,7 +9174,7 @@ class PrefixCog(commands.Cog):
             return msg.content.strip() if _alive() else None
 
         try:
-            # ── 1: collect ALL the names in one message (real DB ratings, overrides applied) ──
+            # 1: collect ALL the names in one message (real DB ratings, overrides applied)
             raw = await _ask("🧪 **Player Test** — paste **all the players you want to test** in one message\n"
                              "*(one per line or comma-separated · **1-11** = they join one XI vs a net side · "
                              "**12-22** = split into two Test XIs that play each other)*\n"
@@ -9236,7 +9195,7 @@ class PrefixCog(commands.Cog):
                     continue
                 found, missing, seen, pins = [], [], set(), {}
                 for nm in names:
-                    # a 1-11 pins the batting position — both "Virat Kohli 3" and
+                    # a 1-11 pins the batting position - both "Virat Kohli 3" and
                     # "3. Virat Kohli" work (so a pasted numbered list IS the order)
                     pin = None
                     pm = re.match(r"^(\d{1,2})\s*[.):\-]?\s+(.*\S)$", nm)
@@ -9276,7 +9235,7 @@ class PrefixCog(commands.Cog):
                                      (f" · pinned #{pins[p['name']]})" if p["name"] in pins else ")")
                                      for p in tested))
 
-            # ── 3: difficulty of everyone else, relative to the tested players ──
+            # 3: difficulty of everyone else, relative to the tested players
             avg_ovr = sum(_player_overall(p) for p in tested) / len(tested)
             view = _TestDifficultyView(ctx.author.id)
             await ctx.send("⚔️ **What type of other players do you need?**\n"
@@ -9288,7 +9247,7 @@ class PrefixCog(commands.Cog):
                 return await ctx.send("⏳ **Cancelled** — no difficulty chosen.")
             target = max(40.0, min(95.0, avg_ovr + _TEST_DIFFICULTY[view.value]))
 
-            # ── 4: format, then hand off to the NORMAL pitch/weather → toss → match flow ──
+            # 4: format, then hand off to the NORMAL pitch/weather -> toss -> match flow
             fview = _TestFormatView(ctx.author.id)
             await ctx.send("🏏 **Format?**", view=fview)
             await fview.wait()
@@ -9297,14 +9256,14 @@ class PrefixCog(commands.Cog):
             state.format_overs = fview.value
 
             # Batting order: the ENGINE decides (_batting_order: rating + archetype +
-            # role) — except players PINNED with a trailing number, who bat exactly there.
+            # role) - except players PINNED with a trailing number, who bat exactly there.
             if len(tested) <= 11:
                 state.t1_name = "Test XI"
                 state.t1_roster = _apply_order_pins(_batting_order(build_test_home_xi(tested, target)), pins)
                 state.t2_name = "Net Opposition"
                 state.t2_roster = _batting_order(build_test_away_xi(target))
             else:
-                # 12-22 tested → snake-split by OVR into two even sides that play EACH
+                # 12-22 tested -> snake-split by OVR into two even sides that play EACH
                 # OTHER; fillers (at the chosen difficulty) complete each XI.
                 ranked = sorted(tested, key=_player_overall, reverse=True)
                 side_a, side_b = [], []
@@ -9331,7 +9290,7 @@ class PrefixCog(commands.Cog):
         finally:
             _cleanup()
 
-    # ── DRAFT MODE (blind, knowledge-based) ──────────────────────────────────
+    # DRAFT MODE (blind, knowledge-based)
     @commands.group(name="draft", invoke_without_command=True,
                     help="Blind player draft → interactive match. Answer by typing a name.\nUsage: draft [@opponent]   (no opponent = vs AI)   ·   draft lb")
     async def draft(self, ctx, opponent: discord.Member = None):
@@ -9427,7 +9386,7 @@ class PrefixCog(commands.Cog):
             host_name = host.display_name
             opp_name = "AI" if vs_ai else opponent.display_name
 
-            # 1) Host picks the player pool (OVR caps are backend-only — never shown).
+            # 1) Host picks the player pool (OVR caps are backend-only - never shown).
             mv = DraftModeView(host.id)
             await channel.send(
                 f"🎚️ **{host_name}, choose the player pool:**\n"
@@ -9487,11 +9446,11 @@ class PrefixCog(commands.Cog):
             state.home_team_id = host.id
             state.is_draft = True
             state.draft_host_id = host.id
-            state.draft_host_name = host_name        # PERSON name → leaderboard
+            state.draft_host_name = host_name        # PERSON name -> leaderboard
             state.draft_opp_id = (None if vs_ai else opponent.id)
-            state.draft_opp_name = opp_name          # PERSON name → leaderboard
+            state.draft_opp_name = opp_name          # PERSON name -> leaderboard
             active_drafts.discard(channel.id)
-            # Pick phase done — hand the cancellation baton to the setup flow so endmatch
+            # Pick phase done - hand the cancellation baton to the setup flow so endmatch
             # still works while choosing pitch/weather for the drafted match.
             setup_states[channel.id] = state
             await ask_pitch_and_weather(channel, state)
@@ -9502,7 +9461,7 @@ class PrefixCog(commands.Cog):
                 pass
             return
         except Exception as e:
-            print(f"⚠️ draft error: {e}")
+            print(f"draft error: {e}")
             await channel.send(f"❌ Draft error: {e}")
         finally:
             active_drafts.discard(channel.id)
@@ -9534,7 +9493,7 @@ class PrefixCog(commands.Cog):
             file=discord.File(fp=buf, filename="cricverse_players_compact.txt")
         )
 
-    # ── Custom saved teams (server-shared XI presets) ────────────────────────
+    # Custom saved teams (server-shared XI presets)
     async def _log_team_action(self, ctx, action, team_name, players, impact):
         """Log saveteam/editteam to the global player-database update channel (teams are global)."""
         try:
@@ -9545,7 +9504,7 @@ class PrefixCog(commands.Cog):
             details += f"\n\nBy {ctx.author}"
             await log_db_update(f"Team {action}", team_name, ctx.author, details)
         except Exception as _e:
-            print(f"⚠️ Team action log send failed: {_e}")
+            print(f"Team action log send failed: {_e}")
 
     @staticmethod
     def _team_admin(ctx):
@@ -10016,7 +9975,7 @@ class PrefixCog(commands.Cog):
                                 f"vs {opp_label}",
                           description="\n".join(rows), color=0x2ecc71)
         e.add_field(name="🧢 Captain", value=cap, inline=True)
-        if imp:   # impact player is a T20-only rule — omit the field for ODIs
+        if imp:   # impact player is a T20-only rule - omit the field for ODIs
             e.add_field(name="⚡ Impact Player",
                         value=f"{imp['name']} ({category(imp)})", inline=True)
         e.add_field(name="Win %", value=f"{r['winpct']:.0f}%", inline=True)
@@ -10210,7 +10169,7 @@ class PrefixCog(commands.Cog):
         await ctx.send(f"✅ Updated `{final_name}` in the database!")
         await log_db_update("Player Updated", final_name, ctx.author, f"Bat: {bat} | Bowl: {bowl}\nRole: {role}\nArchetype: {archetype}")
 
-    # ── Per-server rating overrides (OWNER-only, separate from the global player DB) ──────
+    # Per-server rating overrides (OWNER-only, separate from the global player DB)
     @commands.command(name="srating", aliases=["serverrating", "soverride"], help="[OWNER] Override a player's ratings for THIS server only (global DB untouched).\nUsage: srating \"<player>\" bat=86 bowl=20 [role=Batter] [arch=Anchor]   ·   srating \"<player>\" reset")
     async def srating(self, ctx, player: str, *args):
         if ctx.author.id != ADMIN_DISCORD_ID:
@@ -10384,7 +10343,7 @@ class PrefixCog(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ Restore failed: {e}")
 
-    # ── Match recovery ────────────────────────────────────────────────────────────
+    # Match recovery
     @commands.command(name="resume", aliases=["forcehub", "showhub", "rescue"],
                       help="Recover a stuck match — re-shows whatever prompt was lost (over hub / bowler pick / next batter / toss / innings end).\nUsage: resume")
     async def resume_match_cmd(self, ctx):
@@ -10417,7 +10376,7 @@ class PrefixCog(commands.Cog):
         if not allowed:
             return await ctx.send("❌ Only the players, the match manager, or a server admin can resume this match.")
 
-        # Toss never finished → re-issue the right toss prompt.
+        # Toss never finished -> re-issue the right toss prompt.
         if match.current_innings is None or match.innings1 is None:
             if match.toss_winner is not None:
                 return await channel.send(f"🛟 Re-sending the toss decision — <@{match.toss_winner}>, choose:",
@@ -10427,7 +10386,7 @@ class PrefixCog(commands.Cog):
                                           view=TossCallView(match))
             return await ctx.send("❌ This match never got past the toss — use `/endmatch` and start again.")
 
-        # A DRS window lost to the crash can't be rebuilt mid-flight — decision stands.
+        # A DRS window lost to the crash can't be rebuilt mid-flight - decision stands.
         if getattr(match, "pending_drs", False):
             match.pending_drs = False
             await channel.send("⚖️ The pending **DRS window was lost** in the crash — the on-field decision stands.")
@@ -10435,7 +10394,7 @@ class PrefixCog(commands.Cog):
         await channel.send("🛟 **Resuming the match from its last saved state…**")
         innings = match.current_innings
 
-        # Innings/match already decided → the end-of-innings router handles 1st→2nd
+        # Innings/match already decided -> the end-of-innings router handles 1st->2nd
         # innings, super overs, and full completion (incl. tournament recording).
         target = getattr(match, "target", match.innings1.total_runs + 1) if match.current_innings_num == 2 else None
         if (innings.wickets >= _match_max_wickets(match)
@@ -10457,9 +10416,9 @@ class PrefixCog(commands.Cog):
         if innings.total_balls % 6 == 0 and (innings.over_log or not innings.current_bowler):
             match.over_completed = False                                  # over just ended (or fresh over, no bowler)
             return await prompt_bowler_then_hub(channel, match)
-        return await run_interactive_delivery_sequence(channel, match)    # mid-over → bowl the next ball
+        return await run_interactive_delivery_sequence(channel, match)    # mid-over -> bowl the next ball
 
-    # ── DSL (Dominators Super League) owner controls ─────────────────────────────
+    # DSL (Dominators Super League) owner controls
     @commands.command(name="enable_dsl", help="[OWNER] Grant a server access to the Dominators Super League.\nUsage: enable_dsl [server_id]  (defaults to this server)")
     async def enable_dsl(self, ctx, server_id: str = None):
         if ctx.author.id != ADMIN_DISCORD_ID:
@@ -10494,7 +10453,7 @@ class PrefixCog(commands.Cog):
         if ctx.author.id != ADMIN_DISCORD_ID:
             return await ctx.send("❌ Owner only.")
         sid = str(server_id or ctx.guild.id)
-        from dsl_manager import list_season_archives
+        from league.dsl_manager import list_season_archives
         n_arch = len(list_season_archives(sid))
         has_t = any(str(t.get("server_id")) == sid and t.get("tournament_type") == "dsl"
                     for t in DB_CACHE.get("tournaments", []))
@@ -10552,12 +10511,12 @@ class PrefixCog(commands.Cog):
     async def sync_csv(self, ctx):
         if ctx.author.id != ADMIN_DISCORD_ID:
             return await ctx.send("❌ Owner only.")
-        if not os.path.exists("players_master.csv"):
-            return await ctx.send("❌ `players_master.csv` not found.")
+        if not os.path.exists("data/players_master.csv"):
+            return await ctx.send("❌ `data/players_master.csv` not found.")
         try:
             existing = {p["name"].lower() for p in get_all_players()}
             new_players, seen = [], set()
-            with open("players_master.csv", "r", encoding="utf-8-sig") as f:
+            with open("data/players_master.csv", "r", encoding="utf-8-sig") as f:
                 reader = csv.DictReader(f)
                 for row in reader:
                     name = row["Name"].strip()
@@ -10591,7 +10550,7 @@ class PrefixCog(commands.Cog):
             "Career Beta": "Career Beta (Career Mode Access)",
             "None": "None (Remove)"
         }
-        # Optional trailing day-count: "Standard 30" → 30-day auto-expiry.
+        # Optional trailing day-count: "Standard 30" -> 30-day auto-expiry.
         days = 0
         tier = tier.strip()
         parts = tier.rsplit(None, 1)
@@ -10667,7 +10626,7 @@ class PrefixCog(commands.Cog):
                 server_lines.append(f"`{i:>2}.` {who} — **{tier}**{tail}")
         e = discord.Embed(title=f"📋 Active Subscriptions ({len(rows)})",
                           color=discord.Color.blurple())
-        # Embed fields cap at 1024 chars — chunk each section into as many fields as needed.
+        # Embed fields cap at 1024 chars - chunk each section into as many fields as needed.
         for label, lines in (("👤 Users", user_lines), ("🏠 Servers", server_lines)):
             if not lines:
                 continue
@@ -11116,7 +11075,7 @@ class PrefixCog(commands.Cog):
         if not career:
             return await ctx.send("❌ Start a career first: `cv start_career`.")
         ICON = {"power": "🏏 POWER", "control": "🎯 CONTROL", "bowling": "🎳 BOWLING", "stamina": "🫀 STAMINA"}
-        # ── Menu (no/invalid attribute) ──
+        # Menu (no/invalid attribute)
         if not attribute or attribute.lower() not in CM.ATTRS:
             a = career["attributes"]
             coins = career["coins"]
@@ -11141,7 +11100,7 @@ class PrefixCog(commands.Cog):
                 e.set_footer(text="💎 Diamond — the summit. Keep pushing toward a 99 OVR.")
             return await ctx.send(embed=e)
 
-        # ── Buy ──
+        # Buy
         attribute = attribute.lower()
         amount = max(1, min(amount, 30))
         old_ovr, old_tier = career["ovr"], career["tier"]
@@ -11348,9 +11307,8 @@ class PrefixCog(commands.Cog):
         career_match.LOBBIES.pop(ctx.channel.id, None)
         await start_club_match(ctx.channel, lobby, ctx.author)
 
-    # ======================================================================
 
-    # ── Tournament helpers ────────────────────────────────────────────────
+    # Tournament helpers
     def _is_tourney_mgr(self, ctx, tourney):
         """True if the caller may act as a tournament manager."""
         return ((ctx.author.id == ADMIN_DISCORD_ID)
@@ -11358,7 +11316,7 @@ class PrefixCog(commands.Cog):
                 or (str(ctx.author.id) in (tourney or {}).get("managers", [])))
 
     def _team_by_ref(self, ctx, tourney, team_name):
-        """Resolve a team by @owner mention (preferred) or by name — so anywhere a
+        """Resolve a team by @owner mention (preferred) or by name - so anywhere a
         <team_name> is accepted you can ping the owner instead. Returns team or None."""
         if ctx.message.mentions:
             oid = str(ctx.message.mentions[0].id)
@@ -11370,8 +11328,8 @@ class PrefixCog(commands.Cog):
 
     def _resolve_squad_target(self, ctx, tourney, args):
         """For owner/manager squad-edit commands, decide which team is being edited.
-        - Ping an @owner → that owner's team (caller must be that owner or a manager).
-        - No mention → the caller's own team.
+        - Ping an @owner -> that owner's team (caller must be that owner or a manager).
+        - No mention -> the caller's own team.
         Returns (team, cleaned_args, error_msg); on error team is None and error_msg is set."""
         if ctx.message.mentions:
             owner = ctx.message.mentions[0]
@@ -11437,7 +11395,7 @@ class PrefixCog(commands.Cog):
             "double_roundrobin": "double_round_robin", "double_round_robin": "double_round_robin",
             "t20wc": "t20_world_cup", "t20_world_cup": "t20_world_cup", "worldcup": "t20_world_cup", "wc": "t20_world_cup",
             "acl": "acl",
-            "ccodi": "ccodi",   # 10 teams · 2 groups of 5 · round-wise double RR · top-2 → KO1/KO2 → Q1/Eliminator → Q2 → Final
+            "ccodi": "ccodi",   # 10 teams · 2 groups of 5 · round-wise double RR · top-2 -> KO1/KO2 -> Q1/Eliminator -> Q2 -> Final
             "ipl": "ipl", "indian_premier_league": "ipl",   # 10 teams · 2 groups of 5 · 14 matches each · combined table · top-4 playoffs
         }
         cond_map = {"manual": "manual", "auto": "auto", "home": "home", "home_pitch": "home", "homepitch": "home"}
@@ -11844,7 +11802,7 @@ class PrefixCog(commands.Cog):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
 
-        # `cvt start dsl` with no tournament → create the preconfigured DSL season.
+        # `cvt start dsl` with no tournament -> create the preconfigured DSL season.
         if league and league.strip().lower() in ("dsl", DSL_CONFIG["display_name"].lower()):
             if not tourney:
                 if not is_dsl_enabled(server_id):
@@ -11867,9 +11825,9 @@ class PrefixCog(commands.Cog):
                 )
             elif not is_dsl_tournament(tourney):
                 return await ctx.send("❌ A different tournament already exists in this server. Finish or `cvt force_delete` it first.")
-            # DSL tournament already exists → fall through to the normal start validation.
+            # DSL tournament already exists -> fall through to the normal start validation.
 
-        # `cvt start rating` / `cvt start conquest` → create the Conquest (rating) League.
+        # `cvt start rating` / `cvt start conquest` -> create the Conquest (rating) League.
         if league and league.strip().lower() in ("rating", "conquest", "cql", RATING_CONFIG["display_name"].lower()):
             if not tourney:
                 if not ctx.author.guild_permissions.administrator and ctx.author.id != ADMIN_DISCORD_ID:
@@ -11900,7 +11858,7 @@ class PrefixCog(commands.Cog):
         if err:
             return await ctx.send(err)
 
-        # Conditions mode was chosen at create — generate straight away.
+        # Conditions mode was chosen at create - generate straight away.
         await self._generate_and_start(ctx.channel, tourney)
 
     def _validate_startable(self, tourney):
@@ -11969,7 +11927,7 @@ class PrefixCog(commands.Cog):
         mode, mark active, and announce. Conditions mode must already be set on `tourney`."""
         t_type = tourney.get("tournament_type", "round_robin")
 
-        # Conquest League: no schedule — open play. Just go live.
+        # Conquest League: no schedule - open play. Just go live.
         if t_type == "rating":
             tourney["status"] = "active"
             tourney["current_match_idx"] = 0
@@ -12013,7 +11971,7 @@ class PrefixCog(commands.Cog):
             groups_txt = "\n".join(f"**Group {g}:** {' · '.join(teams_by_group[g])}" for g in "ABCD")
             return await channel.send(f"🏆 **TOURNAMENT STARTED: {tourney['name']}!** — T20 World Cup\n{groups_txt}\nGenerated **{len(schedule)} group stage matches** (interleaved){self._cond_note(tourney)}. Use `cv tournament status` to view fixtures!")
 
-        # IPL — 10 teams, no groups: one flat 70-match league (14 per team) laid out as
+        # IPL - 10 teams, no groups: one flat 70-match league (14 per team) laid out as
         # 14 rounds of 5, then a Top-4 playoff off the single combined table.
         if t_type == "ipl":
             teams = [t["name"] for t in tourney["teams"]]   # add order = seeding
@@ -12033,14 +11991,14 @@ class PrefixCog(commands.Cog):
                 f"`cv tournament status` for fixtures · `cv tournament standings` for the table."
             )
 
-        # CCODI — 2 groups of 5, DOUBLE round robin organised into ROUNDS (each team
-        # plays at most once per round; venues never repeat within a round) → top 2
-        # per group → IPL-style knockout ladder (KO1/KO2 → Q1/Eliminator → Q2 → Final).
+        # CCODI - 2 groups of 5, DOUBLE round robin organised into ROUNDS (each team
+        # plays at most once per round; venues never repeat within a round) -> top 2
+        # per group -> IPL-style knockout ladder (KO1/KO2 -> Q1/Eliminator -> Q2 -> Final).
         if t_type == "ccodi":
             teams_by_group = {"A": [], "B": []}
             for t in tourney["teams"]:
                 teams_by_group.setdefault(t.get("group"), []).append(t["name"])
-            # Circle method per group → per-round pair lists (5 teams + BYE = 5 rounds
+            # Circle method per group -> per-round pair lists (5 teams + BYE = 5 rounds
             # a leg, 2 matches + 1 bye per round). Leg 2 mirrors leg 1 home/away.
             rounds_by_group = {}
             for group in ("A", "B"):
@@ -12088,7 +12046,7 @@ class PrefixCog(commands.Cog):
                 f"`cv tournament status` for the round-wise fixtures · `cv tournament standings` for the tables."
             )
 
-        # DSL — Dominators Super League (home/away league on home grounds → Top-4 Playoffs)
+        # DSL - Dominators Super League (home/away league on home grounds -> Top-4 Playoffs)
         if t_type == "dsl":
             tourney["schedule"] = dsl_generate_league_schedule(tourney)
             tourney["status"] = "active"
@@ -12106,10 +12064,10 @@ class PrefixCog(commands.Cog):
                 f"🏆 When the league ends, the **Top-4 Playoffs** (Semi-Final 1: 1v4 · Semi-Final 2: 2v3 → Final) generate automatically."
             )
 
-        # ACL — Akatsuki Cricket League (14-team single round robin → Playoffs → Super Cup)
+        # ACL - Akatsuki Cricket League (14-team single round robin -> Playoffs -> Super Cup)
         if t_type == "acl":
             teams = [t["name"] for t in tourney["teams"]]
-            n = len(teams)  # 14, even — no BYE needed
+            n = len(teams)  # 14, even - no BYE needed
             matchups = []
             for r in range(n - 1):  # 13 rounds
                 round_matches = []
@@ -12321,7 +12279,7 @@ class PrefixCog(commands.Cog):
         import re as _re
         lines = [l.strip() for l in msg.content.split("\n") if l.strip()]
 
-        # Build lookup: frozenset of lowercased names → match entry
+        # Build lookup: frozenset of lowercased names -> match entry
         schedule_map = {}
         for m in schedule:
             schedule_map[frozenset([m["team1"].lower(), m["team2"].lower()])] = m
@@ -12449,7 +12407,7 @@ class PrefixCog(commands.Cog):
             team = next((t for t in tourney["teams"] if t.get("owner_id") == str(ctx.author.id)), None)
             if not team:
                 return await ctx.send("❌ You don't own a team here. Specify a team: `cvt fixtures <team name>`.")
-        from tournament_manager import build_fixtures_view
+        from league.tournament_manager import build_fixtures_view
         view = build_fixtures_view(tourney, team["name"])
         embed = build_team_fixtures_embed(tourney, team["name"])
         if view:
@@ -12457,7 +12415,7 @@ class PrefixCog(commands.Cog):
         else:
             await ctx.send(embed=embed)
 
-    # ── TBECS innings-break ads ─────────────────────────────────────────────────
+    # TBECS innings-break ads
     # Managed per server; shown at every innings end of a TBECS match (see
     # _maybe_send_tbecs_ads). Manager/admin/owner gated. Store is per-server, so these
     # work whether or not a TBECS tournament is currently live in the server.
@@ -12476,8 +12434,8 @@ class PrefixCog(commands.Cog):
     async def t_tbecs_ad(self, ctx, *, message: str = None):
         if not self._is_ad_manager(ctx):
             return await ctx.send("❌ Managers only.")
-        from tbecs_manager import add_tbecs_ad
-        # Reply-capture: `cvt tbecs_ad` as a reply saves the replied-to message verbatim —
+        from league.tbecs_manager import add_tbecs_ad
+        # Reply-capture: `cvt tbecs_ad` as a reply saves the replied-to message verbatim
         # the reliable path for pre-composed multi-line ads with links/formatting.
         if message is None and ctx.message.reference and ctx.message.reference.message_id:
             try:
@@ -12505,7 +12463,7 @@ class PrefixCog(commands.Cog):
     async def t_tbecs_ads(self, ctx):
         if not self._is_ad_manager(ctx):
             return await ctx.send("❌ Managers only.")
-        from tbecs_manager import get_tbecs_ads
+        from league.tbecs_manager import get_tbecs_ads
         ads = get_tbecs_ads(str(ctx.guild.id))
         if not ads:
             return await ctx.send("ℹ️ No TBECS ads set. Add one with `cvt tbecs_ad <message>`.")
@@ -12525,7 +12483,7 @@ class PrefixCog(commands.Cog):
     async def t_tbecs_ad_remove(self, ctx, index: int):
         if not self._is_ad_manager(ctx):
             return await ctx.send("❌ Managers only.")
-        from tbecs_manager import remove_tbecs_ad
+        from league.tbecs_manager import remove_tbecs_ad
         _ok, msg = remove_tbecs_ad(str(ctx.guild.id), index)
         await ctx.send(msg)
 
@@ -12534,7 +12492,7 @@ class PrefixCog(commands.Cog):
     async def t_tbecs_ad_clear(self, ctx):
         if not self._is_ad_manager(ctx):
             return await ctx.send("❌ Managers only.")
-        from tbecs_manager import clear_tbecs_ads
+        from league.tbecs_manager import clear_tbecs_ads
         _n, msg = clear_tbecs_ads(str(ctx.guild.id))
         await ctx.send(msg)
 
@@ -12543,7 +12501,7 @@ class PrefixCog(commands.Cog):
     async def t_tbecs_ad_preview(self, ctx):
         if not self._is_ad_manager(ctx):
             return await ctx.send("❌ Managers only.")
-        from tbecs_manager import build_tbecs_ad_embeds
+        from league.tbecs_manager import build_tbecs_ad_embeds
         embeds = build_tbecs_ad_embeds(str(ctx.guild.id))
         if not embeds:
             return await ctx.send("ℹ️ No TBECS ads set. Add one with `cvt tbecs_ad`.")
@@ -12718,12 +12676,12 @@ class PrefixCog(commands.Cog):
         if not tourney: return await ctx.send("❌ No tournament exists.")
         t_type = tourney.get("tournament_type")
         if t_type == "dsl":
-            from dsl_manager import _dsl_get
+            from league.dsl_manager import _dsl_get
             if not _dsl_get(tourney, "Semi-Final 1"):
                 return await ctx.send("ℹ️ The Playoffs haven't been generated yet — they appear automatically once every league match is done.")
             return await ctx.send(embed=dsl_bracket_embed(tourney))
         if t_type == "rating":
-            from rating_league import _rating_get
+            from league.rating_league import _rating_get
             if not _rating_get(tourney, "Semi-Final 1"):
                 return await ctx.send("ℹ️ Playoffs not generated yet — a manager runs `cvt end_league` once teams have played enough games.")
             return await ctx.send(embed=rating_bracket_embed(tourney))
@@ -12733,7 +12691,7 @@ class PrefixCog(commands.Cog):
             return await ctx.send("ℹ️ The Playoffs haven't been generated yet. A Manager runs `cv tournament generate_playoffs` once all 91 league games are done.")
         await ctx.send(embed=acl_bracket_embed(tourney))
 
-    # ── Conquest League: open play, ladder, trades, credits & boosts ──────────────
+    # Conquest League: open play, ladder, trades, credits & boosts
     @tournament.command(name="challenge", aliases=["chal", "play_open", "vs"], help="[Conquest/OWNER] Challenge another team to a ladder match — play anyone available.\nUsage: tournament challenge \"<team>\"")
     async def t_challenge(self, ctx, *, team_name: str):
         server_id = str(ctx.guild.id)
@@ -12750,13 +12708,13 @@ class PrefixCog(commands.Cog):
             return await ctx.send("❌ You don't own a team here. (Managers can launch any pairing.)")
         if my and my["name"] == opp["name"]:
             return await ctx.send("❌ You can't challenge your own team.")
-        if my is None:  # manager launching — needs both teams named? default: pick opp only is ambiguous
+        if my is None:  # manager launching - needs both teams named? default: pick opp only is ambiguous
             return await ctx.send("❌ Owners challenge with `cvt challenge \"<team>\"`. Managers: use `cvt play <id>` after a challenge, or own a team.")
         for tm in (my, opp):
             if any(len(t.get("squad", [])) < 2 for t in (my, opp)):
                 return await ctx.send("❌ Both teams need submitted squads.")
-        # Playoffs generated → ladder is closed.
-        from rating_league import RATING_KO_STAGES
+        # Playoffs generated -> ladder is closed.
+        from league.rating_league import RATING_KO_STAGES
         if any(m.get("stage") in RATING_KO_STAGES for m in tourney.get("schedule", [])):
             return await ctx.send("❌ The ladder is closed — the playoffs have begun.")
         m = create_open_match(tourney, my["name"], opp["name"])
@@ -12851,7 +12809,7 @@ class PrefixCog(commands.Cog):
         await vb.wait()
         if not vb.value:
             return await pb.edit(content=summary + "\n\n❌ The other owner declined (or it timed out).", view=None)
-        # manager approval — any manager/admin may approve (custom interaction check)
+        # manager approval - any manager/admin may approve (custom interaction check)
         mgr_ids = set(tourney.get("managers", [])) | {str(ADMIN_DISCORD_ID)}
         vm = SquadConfirmView(None)
         async def _mgr_check(inter):
@@ -12998,7 +12956,7 @@ class PrefixCog(commands.Cog):
                         _p.pop("injured", None); _p.pop("injury_until_match", None); _p.pop("injury_severity", None)
 
             # XI priority: the team's saved DEFAULT XI (kept in its saved batting order,
-            # when all 11 are fit) — otherwise the BEST balanced XI (top 11 by rating,
+            # when all 11 are fit) - otherwise the BEST balanced XI (top 11 by rating,
             # ≥5 who can bowl) sorted into a proper batting order.
             def _sim_roster(tdata, squad):
                 fit = _available(squad)
@@ -13010,7 +12968,7 @@ class PrefixCog(commands.Cog):
             roster2 = _sim_roster(t2_data, s2)
             # Use the match's assigned conditions if valid; otherwise pick a fully random
             # pitch from the FULL valid set (not a tiny flat/dead-heavy list) so sims cover
-            # every surface — green seamers, dustbowls, crackers, the lot.
+            # every surface - green seamers, dustbowls, crackers, the lot.
             pitch = canonical_pitch(m_data.get("pitch")) or random.choice(ALL_PITCHES)
             weather = canonical_weather(m_data.get("weather")) or "Clear"
             t1 = {"name": m_data["team1"], "players": roster1, "color": t1_data.get("color", "#6B7280")}
@@ -13040,11 +12998,11 @@ class PrefixCog(commands.Cog):
             try:
                 match._scorecard_players = extract_scorecard_players(match)
             except Exception as _e:
-                print(f"⚠️ simall scorecard extract failed M{m_data['match_id']}: {_e}")
+                print(f"simall scorecard extract failed M{m_data['match_id']}: {_e}")
                 match._scorecard_players = None
 
             # Trigger the existing stats + progression listener directly (sequential, no race)
-            from tournament_manager import TournamentCog as _TC
+            from league.tournament_manager import TournamentCog as _TC
             tc = self.bot.cogs.get("TournamentCog")
             if tc:
                 await tc.on_tournament_match_complete(match)
@@ -13088,7 +13046,7 @@ class PrefixCog(commands.Cog):
         if len(header) + len(lines) <= 1990:
             await status_msg.edit(content=header + lines)
         else:
-            # too long for one message — show a tail and post the rest in follow-ups
+            # too long for one message - show a tail and post the rest in follow-ups
             await status_msg.edit(content=header + f"*(showing last results; {len(results)} total)*")
             chunk, buf = [], 0
             for ln in results:
@@ -13121,7 +13079,7 @@ class PrefixCog(commands.Cog):
     @tournament.command(name="sim", aliases=["simulate", "sim_match"], help="[MANAGER] Instantly simulate ONE match (scorecard + stats saved, default XI used).\nUsage: tournament sim <match_id>")
     async def t_sim_match(self, ctx, match_id: int):
         """Single-match version of simulate_all: same headless engine, same stats/
-        scorecard recording, same injury handling — for exactly one pending match.
+        scorecard recording, same injury handling - for exactly one pending match.
         Uses each team's default XI when valid, else the built-in best-XI picker."""
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
@@ -13189,7 +13147,7 @@ class PrefixCog(commands.Cog):
         try:
             match._scorecard_players = extract_scorecard_players(match)
         except Exception as _e:
-            print(f"⚠️ cvt sim scorecard extract failed M{match_id}: {_e}")
+            print(f"cvt sim scorecard extract failed M{match_id}: {_e}")
             match._scorecard_players = None
 
         tc = self.bot.cogs.get("TournamentCog")
@@ -13279,18 +13237,18 @@ class PrefixCog(commands.Cog):
         try:
             embeds = build_tournament_summary_embeds(tourney)
         except Exception as e:
-            print(f"⚠️ tournament summary failed: {e}")
+            print(f"tournament summary failed: {e}")
             return await ctx.send(f"❌ Couldn't build the report: {e}")
         for e in embeds:
             await ctx.send(embed=e)
-            await asyncio.sleep(0.4)   # gentle pacing — the report is 4-6 embeds
+            await asyncio.sleep(0.4)   # gentle pacing - the report is 4-6 embeds
 
     @tournament.command(name="force_delete", help="[ADMIN] Forcefully delete this server's tournament.\nUsage: tournament force_delete")
     async def t_force_delete(self, ctx):
         if not ctx.author.guild_permissions.administrator and ctx.author.id != ADMIN_DISCORD_ID:
             return await ctx.send("❌ Server Admins only.")
         server_id = str(ctx.guild.id)
-        from subscription_manager import DB_CACHE
+        from core.subscription_manager import DB_CACHE
         before = DB_CACHE.get("tournaments", []) or []
         # Match on str() of both sides so an entry saved with an int server_id still gets cleaned.
         DB_CACHE["tournaments"] = [t for t in before if str(t.get("server_id")) != server_id]
@@ -13371,20 +13329,20 @@ class PrefixCog(commands.Cog):
         e.set_footer(text=foot)
         await ctx.send(embed=e)
 
-    # ── Stadiums (cosmetic ACL venue labels) ──────────────────────────────────
+    # Stadiums (cosmetic ACL venue labels)
     @tournament.command(name="stadiums", aliases=["venues", "stadium_list", "stadium"], help="List the stadium pool — or one venue's all-time stats (DSL).\nUsage: tournament stadiums [venue]")
     async def t_stadiums(self, ctx, *, name: str = None):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney: return await ctx.send("❌ No tournament exists.")
         if name:
-            # `cvt stadium <name>` → full all-time venue stats (DSL); cosmetic label elsewhere.
+            # `cvt stadium <name>` -> full all-time venue stats (DSL); cosmetic label elsewhere.
             if is_dsl_tournament(tourney):
                 return await self.t_venue_stats.callback(self, ctx, venue=name)
             return await ctx.send("🏟️ ACL stadiums are cosmetic labels — per-venue stats are a **DSL** feature (`cvt venue_stats`).")
-        from stadium_manager import linked_stadiums
+        from league.stadium_manager import linked_stadiums
         if linked_stadiums(tourney) and not is_dsl_tournament(tourney):
-            # Linked mode: the "pool" is the teams' home grounds — show those.
+            # Linked mode: the "pool" is the teams' home grounds - show those.
             return await self.t_home_stadiums.callback(self, ctx)
         pool = get_stadium_pool(tourney)
         sched = tourney.get("schedule", [])
@@ -13459,7 +13417,7 @@ class PrefixCog(commands.Cog):
         if not cs: return await ctx.send(f"❌ **{name.strip()}** isn't in the pool. `cvt stadiums` to view.")
         pool.remove(cs)
         if not pool:
-            tourney["stadiums_cleared"] = True   # empty on purpose — don't reseed defaults
+            tourney["stadiums_cleared"] = True   # empty on purpose - don't reseed defaults
         save_tournament(tourney)
         await ctx.send(f"🗑️ Removed **{cs}** from the pool ({len(pool)} left). *Matches already on it keep the label — re-roll or `cvt set_stadium` to change.*")
 
@@ -13484,7 +13442,7 @@ class PrefixCog(commands.Cog):
         if not tourney: return await ctx.send("❌ No tournament exists.")
         is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
         if not is_mgr: return await ctx.send("❌ Managers only.")
-        from stadium_manager import linked_stadiums
+        from league.stadium_manager import linked_stadiums
         if is_dsl_tournament(tourney) or linked_stadiums(tourney):
             return await ctx.send("🔒 Matches are played at the **home team's ground** — venues can't be rerolled.")
         pool = get_stadium_pool(tourney)
@@ -13515,13 +13473,13 @@ class PrefixCog(commands.Cog):
         save_tournament(tourney)
         await ctx.send(f"🏟️ Match **#{match_id}** ({m['team1']} vs {m['team2']}) → 📍 **{m['stadium']}**{note}")
 
-    # ── DSL (Dominators Super League) — home venues, venue stats & seasons ─────────
+    # DSL (Dominators Super League) - home venues, venue stats & seasons
     @tournament.command(name="set_home_stadium", aliases=["sethomestadium", "home_stadium", "shs"], help="[MANAGER/OWNER] Set a team's home ground.\nDSL: tournament set_home_stadium \"<team>\" <venue>\nLinked-stadium tournaments: tournament set_home_stadium \"<team>\" <stadium name> <pitch>")
     async def t_set_home_stadium(self, ctx, team_name: str, *, venue: str):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney: return await ctx.send("❌ No tournament exists.")
-        from stadium_manager import linked_stadiums
+        from league.stadium_manager import linked_stadiums
         if not is_dsl_tournament(tourney) and not linked_stadiums(tourney):
             return await ctx.send("❌ Home stadiums need a **DSL** season or a tournament created with **stadiums=linked**.")
         if tourney["status"] != "registration":
@@ -13559,7 +13517,7 @@ class PrefixCog(commands.Cog):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney: return await ctx.send("❌ No tournament exists.")
-        from stadium_manager import linked_stadiums
+        from league.stadium_manager import linked_stadiums
         is_dsl = is_dsl_tournament(tourney)
         if not is_dsl and not linked_stadiums(tourney):
             return await ctx.send("❌ Home stadiums need a **DSL** season or a tournament created with **stadiums=linked**.")
@@ -13583,7 +13541,7 @@ class PrefixCog(commands.Cog):
         e.set_footer(text=f"{set_n}/{len(teams)} set · all required before cvt start")
         await ctx.send(embed=e)
 
-    # ── Default XI ────────────────────────────────────────────────────────────────
+    # Default XI
     @tournament.command(name="set_default_xi", aliases=["sdxi", "set_default11", "setdefaultxi"], help="[OWNER/MANAGER] Save your team's default XI (paste 11 names; order = batting order; '(C)' marks captain; impact tournaments: lines 12-16 = Impact Subs; 'clear' removes).\nUsage: tournament set_default_xi [team]")
     async def t_set_default_xi(self, ctx, *, team_name: str = None):
         server_id = str(ctx.guild.id)
@@ -13780,7 +13738,7 @@ class PrefixCog(commands.Cog):
     @tournament.command(name="venue_stats", aliases=["pitch_stats", "venuestats"], help="[DSL] All-time venue numbers across every season.\nUsage: tournament venue_stats [venue]")
     async def t_venue_stats(self, ctx, *, venue: str = None):
         server_id = str(ctx.guild.id)
-        tourney = get_server_tournament(server_id)   # may be None between seasons — that's fine
+        tourney = get_server_tournament(server_id)   # may be None between seasons - that's fine
         stats = aggregate_venue_stats(server_id, tourney)
         if not stats:
             return await ctx.send("📊 No venue data yet — stats build up as DSL matches are completed.")
@@ -13856,7 +13814,7 @@ class PrefixCog(commands.Cog):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
 
-        # `cvt season 1 <player>` → that player's stats IN that season, with his team
+        # `cvt season 1 <player>` -> that player's stats IN that season, with his team
         if season is not None and player:
             rows = player_season_history(server_id, player, tourney)
             if not rows:
@@ -13875,7 +13833,7 @@ class PrefixCog(commands.Cog):
                     ps, pname, team, season_label=f"{DSL_CONFIG['short_name']} Season {s_no}"))
             return
 
-        # `cvt season 1` → the full season review (from the archive JSON / live season)
+        # `cvt season 1` -> the full season review (from the archive JSON / live season)
         if season is not None:
             data = get_season_summary(server_id, season, tourney)
             if not data:
@@ -14156,7 +14114,7 @@ class PrefixCog(commands.Cog):
         try:
             await announce_ch.send(report)
         except Exception as _e:
-            print(f"⚠️ Injury report send failed: {_e}")
+            print(f"Injury report send failed: {_e}")
         await ctx.send(f"✅ **{player['name']}** ({team['name']}) injured for **{sev}** {m_word}.")
 
     @tournament.command(name="match_scorecard", help="View the scorecard image for a completed match.\nUsage: tournament match_scorecard <match_id>")
@@ -14186,21 +14144,21 @@ class PrefixCog(commands.Cog):
                     try:
                         img_buf = generate_ccodi_scorecard_from_data(full_data)
                     except Exception as _ce:
-                        print(f"⚠️ CCODI stored-card render failed, using generic: {_ce}")
+                        print(f"CCODI stored-card render failed, using generic: {_ce}")
                 if img_buf is None:
                     img_buf = generate_scorecard_from_data(full_data)
                 file = discord.File(fp=img_buf, filename=f"scorecard_m{match_id}.png")
                 await ctx.send(embed=embed, file=file)
                 sent = True
             except Exception as _e:
-                print(f"⚠️ Scorecard image render failed for match {match_id}: {_e}")
+                print(f"Scorecard image render failed for match {match_id}: {_e}")
             try:
                 card_embeds = build_stored_scorecard_embeds(full_data)
                 if card_embeds:
                     await ctx.send(embeds=card_embeds)
                     sent = True
             except Exception as _e:
-                print(f"⚠️ Text scorecard render failed for match {match_id}: {_e}")
+                print(f"Text scorecard render failed for match {match_id}: {_e}")
             if sent:
                 return
         embed.add_field(name="No scorecard", value="No scorecard data saved for this match.", inline=False)
@@ -14221,9 +14179,9 @@ class PrefixCog(commands.Cog):
         if len(db_players) < 11:
             return await ctx.send("❌ Not enough players in the database.")
 
-        # ── Curated pool from "message (13) copy 2.txt": use ONLY the players listed there
+        # Curated pool from draft_pool.txt: use ONLY the players listed there
         #    (one per line, flag emoji ignored). Category headers and any name not found in
-        #    the DB are skipped silently — never crashes on a missing/misspelt player. ──
+        # the DB are skipped silently - never crashes on a missing/misspelt player.
         def _strip_emoji(s):
             keep = []
             for c in s:
@@ -14244,12 +14202,12 @@ class PrefixCog(commands.Cog):
         try:
             if tourney.get("tournament_type") == "ccodi":
                 raise FileNotFoundError   # CCODI drafts straight from the full player DB
-            with open("message (13) copy 2.txt", encoding="utf-8") as _fh:
+            with open("data/draft_pool.txt", encoding="utf-8") as _fh:
                 _lines = _fh.read().splitlines()
             _dbmap = {p["name"].lower(): p for p in db_players}
             _curated, _seen = [], set()
             for _ln in _lines:
-                if not _has_emoji(_ln):          # category header / blank → ignore
+                if not _has_emoji(_ln):          # category header / blank -> ignore
                     continue
                 _nm = _strip_emoji(_ln)
                 if not _nm:
@@ -14259,12 +14217,12 @@ class PrefixCog(commands.Cog):
                     if _p["name"] not in _seen:
                         _curated.append(_p); _seen.add(_p["name"])
                 else:
-                    _skipped += 1                # listed but not in DB → skip
+                    _skipped += 1                # listed but not in DB -> skip
             if len(_curated) >= 11:
                 db_players = _curated            # use the curated set as the draft pool
                 _used_curated = True
         except FileNotFoundError:
-            pass                                 # no file → fall back to the full DB
+            pass                                 # no file -> fall back to the full DB
         _pool_note = (f"\n📋 Used **{len(db_players)}** curated players from the list · skipped **{_skipped}** not in DB."
                       if _used_curated else "")
 
@@ -14309,7 +14267,7 @@ class PrefixCog(commands.Cog):
         # Snake draft from one ranked pool: prioritises high-rated players, balances the
         # teams, and guarantees every player is dealt to ONLY ONE team (no shared players).
         # Rating DOMINATES (small ±2.5 jitter only breaks near-ties) so every genuinely good
-        # player is guaranteed into the drafted pool — the top (teams × squad) all get a squad,
+        # player is guaranteed into the drafted pool - the top (teams × squad) all get a squad,
         # and _best_xi then puts the best of each squad into the XI that actually plays.
         num_teams = len(team_config)
         ranked = sorted(db_players, key=lambda p: _player_overall(p) + random.uniform(-2.5, 2.5), reverse=True)
@@ -14407,7 +14365,7 @@ class PrefixCog(commands.Cog):
             return await prompt.edit(content="❌ Award cancelled — match left as-is.", view=None)
 
         # Walkover result: zero runs/balls contribute nothing to NRR (0 runs over 0 overs),
-        # no batted_first → venue stats skip it, no stats_delta → nothing on leaderboards.
+        # no batted_first -> venue stats skip it, no stats_delta -> nothing on leaderboards.
         m_data["status"] = "completed"
         m_data["result"] = {
             "winner": winner, "loser": loser, "format_overs": tourney.get("format_overs", 20),
@@ -14417,14 +14375,14 @@ class PrefixCog(commands.Cog):
         }
         tourney["current_match_idx"] = tourney.get("current_match_idx", 0) + 1
 
-        # Knockout / bracket progression — same paths a played match triggers.
+        # Knockout / bracket progression - same paths a played match triggers.
         t_type = tourney.get("tournament_type", "round_robin")
         if t_type == "acl":
             _acl_try_advance(tourney)
         elif t_type == "ipl":
             ipl_try_advance(tourney)
         elif t_type == "dsl":
-            from dsl_manager import DSL_CONFIG, dsl_generate_playoffs, _dsl_try_advance
+            from league.dsl_manager import DSL_CONFIG, dsl_generate_playoffs, _dsl_try_advance
             if DSL_CONFIG["auto_playoffs"]:
                 dsl_generate_playoffs(tourney)
             _dsl_try_advance(tourney)
@@ -14478,7 +14436,7 @@ class PrefixCog(commands.Cog):
         if not tourney: return await ctx.send("❌ No tournament exists.")
         is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (str(ctx.author.id) in tourney.get("managers", []))
         if not is_mgr: return await ctx.send("❌ Managers only.")
-        # NOTE: deliberately NO status check — this is the post-tournament archive dump.
+        # NOTE: deliberately NO status check - this is the post-tournament archive dump.
 
         ch = None
         if ctx.message.channel_mentions:
@@ -14520,7 +14478,7 @@ class PrefixCog(commands.Cog):
                     try:
                         buf = generate_ccodi_scorecard_from_data(full)
                     except Exception as _ce:
-                        print(f"⚠️ CCODI stored-card render failed, using generic: {_ce}")
+                        print(f"CCODI stored-card render failed, using generic: {_ce}")
                 if buf is None:
                     buf = generate_scorecard_from_data(full)
                 r_label = f"Round {m['round']}" if isinstance(m.get("round"), int) else m.get("round", "")
@@ -14529,7 +14487,7 @@ class PrefixCog(commands.Cog):
                 posted += 1
             except Exception as e:
                 skipped += 1
-                print(f"⚠️ post_scorecards failed for match {m.get('match_id')}: {e}")
+                print(f"post_scorecards failed for match {m.get('match_id')}: {e}")
             # Pacing: one image every ~2s keeps well inside Discord's rate limits
             # even for a 132-match season dump.
             await asyncio.sleep(2.0)
@@ -14707,7 +14665,7 @@ class PrefixCog(commands.Cog):
         elif c_val == "mvp": sp = sorted(all_players, key=lambda x: _mvp(x["stats"]), reverse=True)
         else: sp = []
         cat_labels = {"runs":"Most Runs","wickets":"Most Wickets","sr":"Best Strike Rate","bat_avg":"Best Batting Avg","fours":"Most Fours","sixes":"Most Sixes","fifties":"Most 50s","hundreds":"Most 100s","econ":"Best Economy","bowl_avg":"Best Bowling Avg","mvp":"MVP Score"}
-        # runs / wickets / MVP → first 50, paginated 10-per-page with ◀ ▶ buttons.
+        # runs / wickets / MVP -> first 50, paginated 10-per-page with buttons.
         PAGINATED = {"runs", "wickets", "mvp"}
         limit = 50 if c_val in PAGINATED else 10
         title = f"🏆 Leaderboard: {cat_labels.get(c_val, c_val)}"
@@ -14758,7 +14716,7 @@ class PrefixCog(commands.Cog):
 
     @tournament.command(name="help_guide", aliases=["help", "commands", "guide"], help="Show the tournament commands guide.\nUsage: cvt help")
     async def t_help_guide(self, ctx):
-        # ── Card 1: quickstart flows per event type ──
+        # Card 1: quickstart flows per event type
         qs = discord.Embed(
             title="🏆 Tournament Guide  ·  Quickstarts",
             description=("Event types: **Round Robin** · **Double Round Robin** · **T20 World Cup** (4 groups → Super 8 → KO) · "
@@ -14809,7 +14767,7 @@ class PrefixCog(commands.Cog):
         )
         qs.set_footer(text="At match start: paste your XI (order = batting order, (C) = captain) or ✅ Use Default XI")
 
-        # ── Card 2: the complete command reference ──
+        # Card 2: the complete command reference
         ref = discord.Embed(title="📖 Tournament Command Reference  ·  `cvt …`", color=discord.Color.blurple())
         ref.add_field(
             name="🛠️ Setup & squads",
@@ -14905,13 +14863,13 @@ class PrefixCog(commands.Cog):
 
         # Conquest League: the standings ARE the Elo rating ladder.
         if tourney.get("tournament_type") == "rating":
-            from rating_league import rating_board_embed
+            from league.rating_league import rating_board_embed
             return await ctx.send(embed=rating_board_embed(tourney))
 
         # CCODI: custom points-table image (assets/ccodi_table.png) with logos; the
         # text embed below is the fallback if the render fails.
         if tourney.get("tournament_type") == "ccodi":
-            from tournament_manager import get_group_standings, generate_ccodi_points_table
+            from league.tournament_manager import get_group_standings, generate_ccodi_points_table
             try:
                 buf = generate_ccodi_points_table(tourney)
                 ko = [m for m in tourney.get("schedule", []) if m.get("stage") == "knockout"]
@@ -14925,7 +14883,7 @@ class PrefixCog(commands.Cog):
                     ko_txt = "🔥 **Knockouts**\n" + "\n".join(kl)
                 return await ctx.send(content=ko_txt, file=discord.File(fp=buf, filename="ccodi_points_table.png"))
             except Exception as _e:
-                print(f"⚠️ CCODI points table image failed: {_e}")
+                print(f"CCODI points table image failed: {_e}")
             e = discord.Embed(title=f"🏏 {tourney['name']} — Standings", color=discord.Color.blue())
             for grp in ("A", "B"):
                 st = [(n, d) for n, d in get_group_standings(tourney, "group", grp) if n != "BYE"]
@@ -14955,12 +14913,12 @@ class PrefixCog(commands.Cog):
             ko_matches     = [m for m in schedule if m.get("stage") == "knockout"]
 
             if not super8_matches and not ko_matches:
-                # Group stage only — single image, no navigation needed
+                # Group stage only - single image, no navigation needed
                 try:
                     buf = generate_t20wc_points_table(tourney)
                     return await ctx.send(file=discord.File(fp=buf, filename="points_table.png"))
                 except Exception as e:
-                    print(f"⚠️ Points table image failed: {e}")
+                    print(f"Points table image failed: {e}")
 
             # Build available pages
             pages = []
@@ -14968,20 +14926,20 @@ class PrefixCog(commands.Cog):
                 s16_buf = generate_t20wc_points_table(tourney)
                 pages.append(("Group Stage", "points_table.png", s16_buf))
             except Exception as e:
-                print(f"⚠️ Super16 table failed: {e}")
+                print(f"Super16 table failed: {e}")
             if super8_matches:
                 try:
                     s8_buf = generate_t20wc_super8_table(tourney)
                     pages.append(("Super 8", "super8_table.png", s8_buf))
                 except Exception as e:
-                    print(f"⚠️ Super8 table failed: {e}")
+                    print(f"Super8 table failed: {e}")
             if ko_matches:
                 try:
                     ko_buf = generate_t20wc_knockouts_image(tourney)
                     if ko_buf:
                         pages.append(("Knockouts", "knockouts.png", ko_buf))
                 except Exception as e:
-                    print(f"⚠️ Knockouts image failed: {e}")
+                    print(f"Knockouts image failed: {e}")
 
             if len(pages) >= 2:
                 start_idx = len(pages) - 1
@@ -14994,8 +14952,8 @@ class PrefixCog(commands.Cog):
                 buf.seek(0)
                 return await ctx.send(file=discord.File(fp=buf, filename=fname))
 
-            # Both images failed — text embed fallback
-            from tournament_manager import get_group_standings
+            # Both images failed - text embed fallback
+            from league.tournament_manager import get_group_standings
             embed = discord.Embed(title=f"🌍 {tourney['name']} — Standings", color=discord.Color.gold())
             for sg in ["A", "B"]:
                 st = get_group_standings(tourney, "super8", sg)
@@ -15014,7 +14972,7 @@ class PrefixCog(commands.Cog):
                 buf = generate_acl_points_table(tourney)
                 return await ctx.send(file=discord.File(fp=buf, filename="acl_points_table.png"))
             except Exception as e:
-                print(f"⚠️ ACL points table failed, using default: {e}")
+                print(f"ACL points table failed, using default: {e}")
 
         # Everything else (Round Robin / Double RR / IPL): the shared points-table
         # image, delivered inside an embed titled with the tournament name.
@@ -15023,9 +14981,7 @@ class PrefixCog(commands.Cog):
             return await ctx.send("No matches have been completed yet.")
         await ctx.send(embed=embed)
 
-# ==========================================
-# 🚀 STARTUP SEQUENCE
-# ==========================================
+# ---- Startup sequence ----
 
 if __name__ == "__main__":
     import time as _time
@@ -15034,17 +14990,17 @@ if __name__ == "__main__":
 
     TOKEN = os.environ.get("DISCORD_TOKEN")
     if not TOKEN:
-        print("🚨 CRITICAL ERROR: DISCORD_TOKEN environment variable is missing from Render!")
+        print("CRITICAL ERROR: DISCORD_TOKEN environment variable is missing from Render!")
     else:
         try:
             bot.run(TOKEN)
         except discord.HTTPException as e:
             # 429 at login == Cloudflare error 1015 (host IP temporarily rate-limited).
             # If we exit now, the supervisor (Render) restarts instantly and logs in again,
-            # which KEEPS the ban alive. Instead stay alive and back off ~12 min — the keep_alive
-            # web server keeps the process healthy so Render won't cycle it — letting the ban clear.
+            # which KEEPS the ban alive. Instead stay alive and back off ~12 min - the keep_alive
+            # web server keeps the process healthy so Render won't cycle it - letting the ban clear.
             if getattr(e, "status", None) == 429:
-                print("⚠️ 429 / Cloudflare 1015 at login: host IP is temporarily rate-limited by Discord.")
+                print("429 / Cloudflare 1015 at login: host IP is temporarily rate-limited by Discord.")
                 print("   Backing off ~12 min before exit to avoid a restart storm that sustains the ban.")
                 print("   If this repeats, STOP the service and leave it down for ~1 hour.")
                 _time.sleep(720)

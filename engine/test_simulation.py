@@ -1,6 +1,6 @@
 
 """
-Test Cricket Simulation v2.0 — standalone local runner.
+Test Cricket Simulation v2.0 - standalone local runner.
 Run: $env:PYTHONIOENCODING="utf-8"; python CricVerse/test_simulation.py
 Three modes: simulate_session | simulate_innings | simulate_match
 """
@@ -8,9 +8,7 @@ import random
 from dataclasses import dataclass
 from typing import Optional, List, Dict
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CONSTANTS
-# ─────────────────────────────────────────────────────────────────────────────
+# ---- Constants ----
 SPIN_SHOT_MATRIX = {
     "Off spin":  ["Sweep", "Drive", "Flick"],
     "Carrom":    ["Cut", "Drive", "Loft"],
@@ -47,9 +45,7 @@ _OV_6   = "<:6run:1520143037945090105>"
 _OV_W   = "<:wicket:1520143043683156051>"
 _OV_WD  = "<:wide:1520143046900191344>"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# DATA CLASSES
-# ─────────────────────────────────────────────────────────────────────────────
+# ---- Data classes ----
 @dataclass
 class TestBattingStats:
     balls_faced: int = 0
@@ -127,7 +123,7 @@ class TestMatch:
         self.team2   = team2
         self.pitch   = pitch
         self.weather = weather
-        # Day-night Test: the pink ball swings/seams under lights — twilight (session 2)
+        # Day-night Test: the pink ball swings/seams under lights - twilight (session 2)
         # is the danger period and it stays lively into the night (session 3).
         self.pink_ball = pink_ball
 
@@ -167,11 +163,9 @@ class TestMatch:
             self.day += 1
         return self.day > 5
 
-# ─────────────────────────────────────────────────────────────────────────────
-# PITCH / CONDITION HELPERS
-# ─────────────────────────────────────────────────────────────────────────────
+# ---- Pitch / condition helpers ----
 def _wear_level(match: TestMatch) -> float:
-    """Dynamic pitch wear: 1.0 (fresh) → 5.0 (crumbling), based on total match overs."""
+    """Dynamic pitch wear: 1.0 (fresh) -> 5.0 (crumbling), based on total match overs."""
     rate = PITCH_WEAR_RATE.get(match.pitch, 1.0)
     return min(5.0, max(1.0, 1.0 + (match.total_match_overs / 90.0) * rate))
 
@@ -179,10 +173,10 @@ def _wear_mods(wear: float, bowler: dict):
     """Returns (bowl_bonus, bat_penalty, wicket_mult) for given wear level and bowler type."""
     pace = "Pace" in bowler["role"]
     spin = "Spin" in bowler["role"]
-    if wear < 1.5:    # fresh — pacers have edge, not overwhelming
+    if wear < 1.5:    # fresh - pacers have edge, not overwhelming
         if pace: return  3, -1, 1.06
         if spin: return -3,  0, 0.78
-    elif wear < 2.2:  # batting day — even contest
+    elif wear < 2.2:  # batting day - even contest
         if pace: return  1,  0, 1.00
         if spin: return  1,  0, 0.94
     elif wear < 3.0:  # spinners bite
@@ -199,7 +193,7 @@ def _wear_mods(wear: float, bowler: dict):
 def _ball_condition_bonus(ball_age: int, bowler: dict) -> float:
     """
     Extra bowl_rating from ball condition for pace bowlers.
-    Phases: new ball swing → old ball → reverse swing → second new ball.
+    Phases: new ball swing -> old ball -> reverse swing -> second new ball.
     """
     if "Pace" not in bowler["role"]:
         return 0.0
@@ -218,7 +212,7 @@ def _ball_condition_bonus(ball_age: int, bowler: dict) -> float:
 def _pitch_intent(pitch: str) -> float:
     """Baseline batting tempo for the pitch (innings 1-3). ASYMMETRIC: roads get a big
     attack boost (the original 'flat is too slow' fix), but bowler decks only ease off
-    mildly — grinding them to a crawl makes innings eat 180 overs and forces fake draws.
+    mildly - grinding them to a crawl makes innings eat 180 overs and forces fake draws.
     Flat 1.33 · Dead 1.44 · Hard 1.17 · neutral 1.0 · Green 0.92 · Turning 0.90 · Sticky 0.87."""
     dev = _PITCH_SCORING_RATE.get(pitch, 3.0) - 3.0
     return max(0.85, min(1.55, 1.0 + dev * (0.55 if dev >= 0 else 0.26)))
@@ -244,51 +238,49 @@ def _batting_intent(match: TestMatch) -> float:
 
     wickets_left  = 10 - innings.wickets
     sessions_left = (5 - match.day) * 3 + (3 - match.session)
-    # Include remaining overs in the CURRENT session — sessions_left only counts
+    # Include remaining overs in the CURRENT session - sessions_left only counts
     # FUTURE sessions, so without this correction, a last-session chase reads
     # overs_left = 0 and drops into "survive" mode even with 25 overs remaining.
     overs_left = max(0, sessions_left * 30 + max(0, 30 - match.overs_in_session))
 
     if overs_left == 0:
-        return 0.2   # time up — just survive last over
+        return 0.2   # time up - just survive last over
 
     rpo_needed = runs_needed / overs_left
 
     # The chase keys off WICKETS IN HAND, not "a wicket fell": losing 2 early
     # (8 in hand) keeps chasing; only a thinning line-up plays for the draw.
 
-    # Win is a near-formality — knock it off regardless of how many are down.
+    # Win is a near-formality - knock it off regardless of how many are down.
     if rpo_needed < 1.3:
         return 0.90
 
-    # ── 0-3 down (7+ in hand): chase freely, the win is clearly on ────────
+    # 0-3 down (7+ in hand): chase freely, the win is clearly on
     if wickets_left >= 7:
         if rpo_needed < 2.5:  return 1.00
         if rpo_needed < 4.0:  return 1.25
         if rpo_needed < 5.5:  return 1.55
         if rpo_needed < 8.0:  return 1.78   # going for the win
-        return 0.35                          # truly impossible → bat for draw
+        return 0.35                          # truly impossible -> bat for draw
 
-    # ── 4-5 down (5-6 in hand): push if the win is realistic, else protect ─
+    # 4-5 down (5-6 in hand): push if the win is realistic, else protect
     if wickets_left >= 5:
         if rpo_needed < 3.0:  return 1.10
         if rpo_needed < 4.5:  return 1.35
         if rpo_needed < 6.0:  return 1.45   # last real push
-        return 0.24                          # win gone + wickets thinning → save it
+        return 0.24                          # win gone + wickets thinning -> save it
 
-    # ── 6-7 down (3-4 in hand): tail exposed — the draw is the floor ──────
+    # 6-7 down (3-4 in hand): tail exposed - the draw is the floor
     if wickets_left >= 3:
-        if rpo_needed < 2.2:  return 0.85   # gettable — knock it off carefully
+        if rpo_needed < 2.2:  return 0.85   # gettable - knock it off carefully
         return 0.18                          # otherwise dig in for the draw
 
-    # ── 8-9 down (1-2 in hand): survive — unless a tiny target is right there
+    # 8-9 down (1-2 in hand): survive - unless a tiny target is right there
     if rpo_needed < 2.0:
         return 0.70
     return 0.16
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SHOT SELECTION
-# ─────────────────────────────────────────────────────────────────────────────
+# ---- Shot selection ----
 def _get_delivery(bowler: dict, innings: TestInnings) -> str:
     if "Spin" in bowler["role"]:
         if "Off" in bowler["role"]:
@@ -313,7 +305,7 @@ _ARCH_TEMPO = {"Vaibhav": 1.34, "Aggressor": 1.18, "Finisher": 1.06, "Anchor": 0
 
 # Wicket multiplier when a batter is in full survival/block-for-the-draw mode. Low enough
 # that blocking is genuinely hard to break in a short defence, high enough that a long
-# rearguard (80+ overs) realistically gets prised open — so 3rd-innings declarations win.
+# rearguard (80+ overs) realistically gets prised open - so 3rd-innings declarations win.
 _SURVIVAL_WKT = 0.52
 
 
@@ -330,7 +322,7 @@ def _get_shot(deliv: str, is_collapse: bool, balls_faced: int, archetype: str, i
             return random.choices(["Duck", "Leave", "Block"], [45, 40, 15])[0]
         if "Yorker" in deliv:
             return random.choices(["Block", "Defensive"], [65, 35])[0]
-        # Never drive at swing — tail-enders prod/leave it
+        # Never drive at swing - tail-enders prod/leave it
         if "Outswing" in deliv or "Inswing" in deliv or "Seam" in deliv:
             return random.choices(["Block", "Leave", "Defensive"], [42, 38, 20])[0]
         if deliv in SPIN_SHOT_MATRIX:
@@ -390,16 +382,14 @@ def _get_shot(deliv: str, is_collapse: bool, balls_faced: int, archetype: str, i
         return random.choices(["Drive","Sweep","Block","Leave","Cut"], [30,22,20,15,13])[0]
     return random.choices(["Drive","Cut","Flick","Block","Leave","Defensive"], [27,22,20,15,10,6])[0]
 
-# ─────────────────────────────────────────────────────────────────────────────
-# AI BOWLER SELECTION
-# ─────────────────────────────────────────────────────────────────────────────
+# ---- AI bowler selection ----
 def get_smart_test_bowler(innings: TestInnings, match: TestMatch) -> Optional[dict]:
     current_over = innings.total_balls // 6
     wear  = _wear_level(match)
     ball_age = innings.ball_age
 
     # No back-to-back overs: exclude the bowler who bowled the PREVIOUS over. (current_bowler
-    # is None at selection time — it's reset at over-end — so we must check prev_bowler.)
+    # is None at selection time - it's reset at over-end - so we must check prev_bowler.)
     def _nc(p):   return innings.prev_bowler is None or innings.prev_bowler["name"] != p["name"]
     def _main(p): return "Bowler" in p["role"] or "All-Rounder" in p["role"]
     def _pace(p): return "Pace" in p["role"]
@@ -473,7 +463,7 @@ def get_smart_test_bowler(innings: TestInnings, match: TestMatch) -> Optional[di
         elif match.weather == "Dry Heat" and _spin(p) and ball_age > 180:
             base *= 1.4
 
-        # Pink ball under lights — captains turn to pace at twilight / night
+        # Pink ball under lights - captains turn to pace at twilight / night
         if getattr(match, "pink_ball", False) and _pace(p) and match.session >= 2:
             base *= (1.6 if match.session == 2 else 1.35)
 
@@ -488,9 +478,7 @@ def get_smart_test_bowler(innings: TestInnings, match: TestMatch) -> Optional[di
 
     return random.choices(pool, weights=weights, k=1)[0]
 
-# ─────────────────────────────────────────────────────────────────────────────
-# BALL MATH
-# ─────────────────────────────────────────────────────────────────────────────
+# ---- Ball math ----
 def execute_test_ball(match: TestMatch) -> bool:
     """
     Execute one ball. Returns True if it was a LEGAL delivery (ball counts toward over).
@@ -506,7 +494,7 @@ def execute_test_ball(match: TestMatch) -> bool:
     bat_r  = float(striker["bat"])
     bowl_r = float(bowler["bowl"])
 
-    # ── Form factor: batter builds innings slowly ──────────────────────────
+    # Form factor: batter builds innings slowly
     bf = b_stats.balls_faced
     if   bf < 12:   bat_r *= 0.85
     elif bf < 30:   bat_r *= 0.93
@@ -515,30 +503,30 @@ def execute_test_ball(match: TestMatch) -> bool:
     elif bf < 250:  bat_r *= 1.04
     else:           bat_r *= 1.02
 
-    # ── Batting position — tail-enders are less equipped ───────────────────
+    # Batting position - tail-enders are less equipped
     # Kept modest: tail bat ratings are already low; we just add a small
     # context penalty for the pressure of batting with the tail.
     position = innings.current_striker_idx
-    if position >= 9:       # No. 10, 11 — genuine rabbits
+    if position >= 9:       # No. 10, 11 - genuine rabbits
         bat_r -= 0
-    elif position >= 7:     # No. 8, 9 — lower-order
+    elif position >= 7:     # No. 8, 9 - lower-order
         bat_r -= 0
 
-    # ── Bowler spell fatigue ────────────────────────────────────────────────
+    # Bowler spell fatigue
     if "Pace" in bowler["role"]:
         if bow_stats.spell_balls >= 108:  bowl_r -= 14   # 18+ over spell
         elif bow_stats.spell_balls >= 72: bowl_r -= 7
 
-    # ── Ball condition (swing / reverse) ───────────────────────────────────
+    # Ball condition (swing / reverse)
     bowl_r += _ball_condition_bonus(innings.ball_age, bowler)
 
-    # ── Pitch wear ─────────────────────────────────────────────────────────
+    # Pitch wear
     wear = _wear_level(match)
     wb, bat_pen, wkt_mult = _wear_mods(wear, bowler)
     bowl_r += wb
     bat_r  += bat_pen
 
-    # ── Pitch type ─────────────────────────────────────────────────────────
+    # Pitch type
     cb       = innings.total_balls             # balls in this innings (new-ball periods)
     total_cb = match.total_match_overs * 6    # balls across whole match (cross-innings wear)
     if   match.pitch == "Green"  and "Pace" in bowler["role"]:                  bowl_r += 7
@@ -547,7 +535,7 @@ def execute_test_ball(match: TestMatch) -> bool:
         bowl_r += 6;  bat_r -= 4
     elif match.pitch == "Hard"   and "Pace" in bowler["role"]:
         # True bounce all innings: bats beautifully (fast outfield, full value for shots),
-        # so it posts BIG scores — results come from the fast tempo + declarations, with
+        # so it posts BIG scores - results come from the fast tempo + declarations, with
         # the odd extra edge off the carry. A road, never a seamer.
         bowl_r += 2;  bat_r  += 6
     elif match.pitch == "Cracked":
@@ -569,7 +557,7 @@ def execute_test_ball(match: TestMatch) -> bool:
     elif match.pitch == "Dry"    and "Spin" in bowler["role"] and total_cb > 150:
         bowl_r += 6;  bat_r -= 4
 
-    # ── Weather ────────────────────────────────────────────────────────────
+    # Weather
     new_ball_period = cb < 180
     mid_period      = 180 <= cb < 480
     if   match.weather == "Clear":                                               bat_r  += 4
@@ -596,19 +584,19 @@ def execute_test_ball(match: TestMatch) -> bool:
     elif match.weather == "Thunderstorm" and "Pace" in bowler["role"]:
         bowl_r += (11 if new_ball_period else 6); bat_r -= 4
 
-    # ── Pink ball (day-night Test): swings & seams under lights for PACE. Twilight
+    # Pink ball (day-night Test): swings & seams under lights for PACE. Twilight
     # (session 2) is the famous danger session; it stays lively at night (session 3).
-    # A fresh pink ball is lethal; once it scuffs (lacquer gone) the movement calms. ──
+    # A fresh pink ball is lethal; once it scuffs (lacquer gone) the movement calms.
     if getattr(match, "pink_ball", False) and "Pace" in bowler["role"] and match.session >= 2:
         _fresh = innings.ball_age < 240   # roughly the first 40 overs of the ball
-        if match.session == 2:            # twilight — the danger period
+        if match.session == 2:            # twilight - the danger period
             bowl_r += 8 if _fresh else 4
             bat_r  -= 4 if _fresh else 2
-        else:                             # session 3 — under lights at night
+        else:                             # session 3 - under lights at night
             bowl_r += 5 if _fresh else 2
             bat_r  -= 2 if _fresh else 1
 
-    # ── Cap total condition bonus — raised to 18 to let extremes show through ─
+    # Cap total condition bonus - raised to 18 to let extremes show through
     raw_bowl_bonus = bowl_r - float(bowler["bowl"])
     if raw_bowl_bonus > 18:
         bowl_r = float(bowler["bowl"]) + 18
@@ -623,7 +611,7 @@ def execute_test_ball(match: TestMatch) -> bool:
 
     diff = bat_r - bowl_r   # positive = batter advantage
 
-    # ── Base weights ───────────────────────────────────────────────────────
+    # Base weights
     # Calibrated to REAL Test cricket: wickets are dear (innings last ~100 overs),
     # run-rate ~3.2, so first innings average ~300-340, matches consume time and
     # ~25-35% are drawn. Conditions still bite (collapses on bowler pitches).
@@ -638,31 +626,31 @@ def execute_test_ball(match: TestMatch) -> bool:
 
     wkt_w *= wkt_mult
 
-    # True-bounce surfaces: pace gets extra carry → more edges/catches (results, not
+    # True-bounce surfaces: pace gets extra carry -> more edges/catches (results, not
     # draws) without choking the run-rate the way a green/turning deck does.
     if "Pace" in bowler["role"]:
-        if   match.pitch == "Hard":   wkt_w *= 1.06   # true carry — a few extra edges, still bats well
+        if   match.pitch == "Hard":   wkt_w *= 1.06   # true carry - a few extra edges, still bats well
         elif match.pitch == "Bouncy": wkt_w *= 1.15
         elif match.pitch == "Green":  wkt_w *= 1.08   # seam movement finds the edge
-        # Pink ball under lights — extra edges carry to slip/keeper (twilight worst)
+        # Pink ball under lights - extra edges carry to slip/keeper (twilight worst)
         if getattr(match, "pink_ball", False) and match.session >= 2:
             _fresh = innings.ball_age < 240
             if match.session == 2:   wkt_w *= (1.20 if _fresh else 1.10)
             else:                    wkt_w *= (1.12 if _fresh else 1.05)
 
-    # ── Per-batter intent: pitch/chase baseline × the striker's batting STYLE ──
-    # This is what syncs Test with the other formats — an Aggressor on a road goes
+    # Per-batter intent: pitch/chase baseline × the striker's batting STYLE
+    # This is what syncs Test with the other formats - an Aggressor on a road goes
     # into attack mode, an Anchor controls, a tail-ender just survives.
     intent = _batting_intent(match)
     intent *= _ARCH_TEMPO.get(striker.get("archetype", ""), 1.0)
     if innings.current_striker_idx >= 7:      # tail: rein it in further
         intent *= 0.88
     intent = max(0.12, min(1.60, intent))
-    if intent < 0.5:          # survival: dig in for the draw — hard, but breakable over time
+    if intent < 0.5:          # survival: dig in for the draw - hard, but breakable over time
         four_w *= 0.35; six_w *= 0.20; wkt_w *= _SURVIVAL_WKT; dot_w *= 1.45
     else:
         # Smooth scaling around 1.0: higher intent (flat tracks / chases) rotates more
-        # strike and finds the boundary → fewer dots, faster SR; lower intent grinds.
+        # strike and finds the boundary -> fewer dots, faster SR; lower intent grinds.
         f = intent - 1.0
         dot_w  *= max(0.45, 1.0 - f * 0.55)
         sing_w *= (1.0 + f * 0.20)
@@ -671,18 +659,18 @@ def execute_test_ball(match: TestMatch) -> bool:
         six_w  *= (1.0 + f * 1.25)
         wkt_w  *= (1.0 + max(0.0, f) * 0.30)   # attacking carries a little more risk
 
-    # ── Partnership protection ─────────────────────────────────────────────
+    # Partnership protection
     if innings.partnership_runs > 100:
         wkt_w *= 0.80
     elif innings.partnership_runs > 60:
         wkt_w *= 0.88
 
-    # ── Collapse: batters tighten up ───────────────────────────────────────
+    # Collapse: batters tighten up
     is_collapse = innings.wickets >= 4 and innings.partnership_runs < 25
     if is_collapse:
         four_w *= 0.70; six_w *= 0.50; dot_w *= 1.15
 
-    # ── Delivery + Shot ────────────────────────────────────────────────────
+    # Delivery + Shot
     if match.current_delivery_selection:
         deliv = match.current_delivery_selection
         match.current_delivery_selection = ""
@@ -725,7 +713,7 @@ def execute_test_ball(match: TestMatch) -> bool:
         elif perf_shot:
             four_w *= 1.35; wkt_w *= 0.70
 
-        # Batting style — quality nuance only (tempo is already set via intent above):
+        # Batting style - quality nuance only (tempo is already set via intent above):
         # Aggressors take a touch more risk, Anchors are harder to dislodge, Finishers
         # cut loose once the tail is exposed.
         arch = striker.get("archetype", "")
@@ -751,11 +739,11 @@ def execute_test_ball(match: TestMatch) -> bool:
     elif "Seam"    in deliv and shot in ["Drive","Cut","Flick"]: wkt_w *= 1.20
     elif deliv in ("Off Cutter", "Leg Cutter", "Knuckle") and shot in ["Drive","Cut"]: wkt_w *= 1.25; four_w *= 0.85
 
-    # ── Modern-Test strike rotation ─────────────────────────────────────────
+    # Modern-Test strike rotation
     # Real Test batters milk singles rather than soak up dot after dot, so even
     # bowler-friendly decks tick along at 2-3 an over (and a road nearer 3.5)
     # instead of crawling at 1.5-2.0. Rotate a slice of the remaining DOT weight
-    # into SINGLES — this lifts the run-rate and trims the overs an innings eats —
+    # into SINGLES - this lifts the run-rate and trims the overs an innings eats
     # and bump the WICKET weight in lock-step so runs-per-wicket (hence the innings
     # TOTAL) barely moves: same score, fewer overs. Deliberately skipped on
     # defensive shots and during collapses/survival so a real wobble still grinds
@@ -765,7 +753,7 @@ def execute_test_ball(match: TestMatch) -> bool:
         shifted   = dot_w * rot
         dot_w    -= shifted
         sing_w   += shifted
-        wkt_w    *= 1.0 + rot * 1.15   # hold runs-per-wicket → totals steady, overs fall
+        wkt_w    *= 1.0 + rot * 1.15   # hold runs-per-wicket -> totals steady, overs fall
 
     # Hard caps
     four_w = max(0.1, min(four_w, 18.0))
@@ -773,24 +761,24 @@ def execute_test_ball(match: TestMatch) -> bool:
     wkt_w  = max(0.30, min(wkt_w, 18.0))
     dot_w  = max(22.0, min(dot_w, 140.0))
 
-    # ── Wide (not a legal ball, return False immediately) ──────────────────
+    # Wide (not a legal ball, return False immediately)
     if random.random() < 0.012 and "Yorker" not in deliv:
         innings.total_runs += 1
         innings.extras     += 1
         bow_stats.runs_conceded += 1
         innings.over_log.append(_OV_WD)
-        return False   # illegal — caller must re-loop
+        return False   # illegal - caller must re-loop
 
-    # ── No ball (1 extra, then STILL bowl a legal delivery this call) ──────
+    # No ball (1 extra, then STILL bowl a legal delivery this call)
     is_no_ball = random.random() < 0.005
     if is_no_ball:
         innings.total_runs += 1
         innings.extras     += 1
         bow_stats.runs_conceded += 1
-        # Continue — the ball is still bowled (no-ball delivery in Test is replayed
+        # Continue - the ball is still bowled (no-ball delivery in Test is replayed
         # but we count the runs off the bat too; we simplify: just add the extra and proceed)
 
-    # ── Outcome ────────────────────────────────────────────────────────────
+    # Outcome
     weights = [dot_w, sing_w, two_w, thr_w, four_w, six_w, wkt_w]
     outcome = random.choices(["dot","single","two","three","four","six","wicket"], weights=weights)[0]
 
@@ -892,11 +880,11 @@ def execute_test_ball(match: TestMatch) -> bool:
             innings.current_striker_idx, innings.current_non_striker_idx = (
                 innings.current_non_striker_idx, innings.current_striker_idx)
 
-    # ── End of over ────────────────────────────────────────────────────────
+    # End of over
     if innings.total_balls % 6 == 0:
         match.over_completed = True
         innings.mystery_bowled_this_over = False
-        # End-of-over END CHANGE: ALWAYS switch — a 1/3 off the last ball already
+        # End-of-over END CHANGE: ALWAYS switch - a 1/3 off the last ball already
         # crossed the batters mid-ball, so this second switch puts the single-taker
         # BACK on strike ("single to keep the strike"); otherwise the partner faces.
         innings.current_striker_idx, innings.current_non_striker_idx = (
@@ -923,9 +911,7 @@ def execute_test_ball(match: TestMatch) -> bool:
 
     return True   # legal delivery
 
-# ─────────────────────────────────────────────────────────────────────────────
-# BOWLER SELECTION FOR UPCOMING OVER
-# ─────────────────────────────────────────────────────────────────────────────
+# ---- Bowler selection for upcoming over ----
 def _select_bowler(match: TestMatch):
     innings = match.current_innings
 
@@ -993,9 +979,7 @@ def prepare_over_interactive(match: TestMatch, bowler_name: str):
     innings.bowling_stats[bowler_name].over_run_start = innings.bowling_stats[bowler_name].runs_conceded
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# RESULT HELPERS
-# ─────────────────────────────────────────────────────────────────────────────
+# ---- Result helpers ----
 def _get_chase_target(match: TestMatch) -> Optional[int]:
     """Returns runs STILL NEEDED in innings 4 by the current batting team."""
     if match.current_innings_idx != 3:
@@ -1031,7 +1015,7 @@ def _check_result(match: TestMatch) -> Optional[str]:
 
     if n == 3 and len(inns) == 3:
         # Guard len(inns)==3: once the 4th innings is appended, t1/t2 include its
-        # in-progress runs — so a chase drawing LEVEL (aggregate equal) would
+        # in-progress runs - so a chase drawing LEVEL (aggregate equal) would
         # falsely return "Match Tied" and stop a live 4th innings that still has
         # wickets/overs in hand. Let it fall through to None until inn4 completes.
         if match.follow_on_enforced:
@@ -1076,7 +1060,6 @@ def _start_next_innings(match: TestMatch):
             match._new_innings(match.team2, match.team1)
     match.current_innings_idx = len(match.innings_list) - 1
 
-# ─────────────────────────────────────────────────────────────────────────────
 # DECLARATION LOGIC
 
 # Typical runs-per-over on each pitch type (used by both declaration and intent)
@@ -1106,13 +1089,13 @@ def _should_declare(match: TestMatch) -> bool:
     bat_name = inn.batting_team["name"]
 
     # First-innings declarations are rare, but real teams DO close a huge total
-    # rather than bat forever (e.g. 7/600 dec) — this also caps runaway innings.
+    # rather than bat forever (e.g. 7/600 dec) - this also caps runaway innings.
     batted_before = sum(
         1 for i in match.innings_list[:-1]
         if i.batting_team["name"] == bat_name and i.is_complete
     )
     if batted_before == 0:
-        # Even a flat/dead road won't be batted forever — close a massive total.
+        # Even a flat/dead road won't be batted forever - close a massive total.
         inn_overs = inn.total_balls / 6
         if inn.total_runs >= 550 and inn_overs >= 125:
             return True
@@ -1132,7 +1115,7 @@ def _should_declare(match: TestMatch) -> bool:
     # A captain declares the 3rd innings to SET A TARGET and still leave enough overs to
     # bowl the opposition out. Two things matter: the lead must be defensible, and there
     # must be time to take 10 wickets. Declaring too late (over-batting) is what kills
-    # results — so once the lead is safe we close and attack.
+    # results - so once the lead is safe we close and attack.
     #
     # Defensible-lead floor scales with the pitch (a flat road needs more runs in the
     # bank than a turner): Dead 206 · Flat 192 · default 150 · Green 129 · Turning 122.
@@ -1145,7 +1128,7 @@ def _should_declare(match: TestMatch) -> bool:
         return True
 
     # The cardinal rule: NEVER set a soft, gettable target. The opponent must be asked to
-    # chase at ABOVE the pitch's par rate — a below-par asking rate is a free stroll that
+    # chase at ABOVE the pitch's par rate - a below-par asking rate is a free stroll that
     # loses Tests, so a captain bats on instead. With plenty of time we hold out for a
     # clearly-tough target (≥ 1.10× par); as the clock runs down we'll accept par.
     asking = lead / overs_left
@@ -1155,9 +1138,7 @@ def _should_declare(match: TestMatch) -> bool:
     return asking >= par * 1.0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SIMULATION MODES
-# ─────────────────────────────────────────────────────────────────────────────
+# ---- Simulation modes ----
 MAX_SESSION_OVERS = 30
 
 def _rain_overs_lost(weather: str, available: int) -> int:
@@ -1171,7 +1152,7 @@ def _rain_overs_lost(weather: str, available: int) -> int:
 
 def simulate_session(match: TestMatch) -> str:
     """Simulate up to (30 − already_bowled) overs in the current session.
-    Stops at the session boundary OR when the innings ends — whichever comes first.
+    Stops at the session boundary OR when the innings ends - whichever comes first.
     Does NOT carry over into the next innings; the caller (simulate_match /
     simulate_innings / the Discord buttons) handles innings transitions."""
 
@@ -1212,7 +1193,7 @@ def simulate_session(match: TestMatch) -> str:
     fallen: list  = []
 
     while session_overs < remaining:
-        # Innings complete — stop session, no carry-over
+        # Innings complete - stop session, no carry-over
         if innings.is_complete or innings.wickets >= 10:
             innings.is_complete = True
             res = _check_result(match)
@@ -1262,7 +1243,7 @@ def simulate_session(match: TestMatch) -> str:
             innings.is_complete = True
             innings.declared    = True
 
-    # ── Build text summary (used by simulate_match text output) ──────────────
+    # Build text summary (used by simulate_match text output)
     runs_scored  = innings.total_runs  - start_runs
     wkts_fallen  = innings.wickets     - start_wkts
     balls_played = innings.total_balls - start_balls
@@ -1302,7 +1283,7 @@ def simulate_session(match: TestMatch) -> str:
 def simulate_one_over_verbose(match: TestMatch) -> tuple:
     """Simulate one over (or remaining balls of a partial over) with emoji timeline.
     Returns (text, innings_ended). Updates overs_in_session / total_match_overs.
-    Does NOT advance the session — caller checks overs_in_session >= 30."""
+    Does NOT advance the session - caller checks overs_in_session >= 30."""
     innings = match.current_innings
     if innings.is_complete:
         return "", True
@@ -1313,7 +1294,7 @@ def simulate_one_over_verbose(match: TestMatch) -> tuple:
     if balls_done > 0 and innings.current_bowler is not None:
         bowler = innings.current_bowler        # continue same bowler
     else:
-        innings.over_log = []                  # fresh over — reset timeline
+        innings.over_log = []                  # fresh over - reset timeline
         _select_bowler(match)
         bowler = innings.current_bowler
 
@@ -1535,9 +1516,7 @@ def simulate_match(match: TestMatch) -> str:
         lines.append(f"\n  Player of the Match :  {pom}")
     return "\n".join(lines)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# OUTPUT
-# ─────────────────────────────────────────────────────────────────────────────
+# ---- Output ----
 def _format_scorecard(innings: TestInnings) -> str:
     lines = [
         f"\n{'─'*62}",
@@ -1582,10 +1561,10 @@ def _format_scorecard(innings: TestInnings) -> str:
 def _player_of_match(match: TestMatch) -> str:
     """POTM by whole-match contribution. Impact = aggregate RUNS + 20 per WICKET,
     summed across BOTH innings. There is deliberately NO strike-rate or economy
-    term — Test cricket values accumulation and wicket-taking, not tempo, so slow
+    term - Test cricket values accumulation and wicket-taking, not tempo, so slow
     batters aren't penalised and tight bowlers aren't artificially boosted.
     All-rounders are rewarded since runs and wickets add into one impact score."""
-    agg = {}   # name -> {"runs", "wkts"}  aggregated over the match
+    agg = {}   # name -> {"runs", "wkts"} aggregated over the match
     for inn in match.innings_list:
         for n, st in inn.batting_stats.items():
             agg.setdefault(n, {"runs": 0, "wkts": 0})["runs"] += st.runs_scored
@@ -1599,9 +1578,7 @@ def _player_of_match(match: TestMatch) -> str:
     if a["wkts"] > 0: parts.append(f"{a['wkts']} wkts")
     return f"{name} ({' & '.join(parts)})" if parts else name
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TEAMS  (good vs bad ratings clearly matter)
-# ─────────────────────────────────────────────────────────────────────────────
+# ---- TEAMS (good vs bad ratings clearly matter) ----
 TEAM_ALPHA = {
     "name": "Thunderstrike XI",
     "players": [
@@ -1635,9 +1612,7 @@ TEAM_BETA = {
     ],
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# MAIN — demonstrates all three modes
-# ─────────────────────────────────────────────────────────────────────────────
+# ---- MAIN - demonstrates all three modes ----
 def run_test_simulation():
     pitch   = random.choice(PITCH_TYPES)
     weather = random.choice(WEATHER_TYPES)

@@ -1,9 +1,9 @@
-# Ball-by-ball / over-by-over T20 engine audit — the things total-score audits hide:
+# Ball-by-ball / over-by-over T20 engine audit - the things total-score audits hide:
 #   1. CHASE STRENGTH: P(successful chase) vs a FIXED target (innings 2 simulated alone)
 #   2. EXTRAS: wides / no-balls / leg-byes per innings, vs real T20 counts
 #   3. OVER VOLATILITY: over-score histogram + how often the SAME bowler concedes
 #      both a ≤4 over and a ≥16 over in one innings
-# Run from repo root:  python tools/over_audit.py [n]
+# Run from repo root: python tools/over_audit.py [n]
 
 import os
 import random
@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from sim_harness import CricketMatch, InningsState, build_team
-from t20_simulation import execute_ball_math_t20, get_smart_ai_bowler_t20
+from engine.t20_simulation import execute_ball_math_t20, get_smart_ai_bowler_t20
 
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 400
 
@@ -63,7 +63,7 @@ def sim_innings_instrumented(m, innings, stats):
         stats["overs"].append(over_runs)
 
 
-# ── 1. CHASE STRENGTH vs fixed target ──────────────────────────────────────────
+# 1. CHASE STRENGTH vs fixed target
 def chase_test(pitch, target, n, dsl=False):
     wins = 0
     balls_left_on_win = []
@@ -93,7 +93,7 @@ def chase_test(pitch, target, n, dsl=False):
     }
 
 
-# ── 2+3. EXTRAS & OVER VOLATILITY from full innings ───────────────────────────
+# 2+3. EXTRAS & OVER VOLATILITY from full innings
 def innings_audit(pitch, n, chase=False, target=None):
     agg = {"wides": [], "noballs": [], "lb_balls": [], "lb_runs": [],
            "overs": [], "swing_matches": 0, "bowler_innings": 0}

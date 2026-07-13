@@ -3,7 +3,7 @@ import random, statistics
 from collections import Counter
 import sim_harness as H
 import t20_simulation_v1 as T1, odi_simulation_v1 as O1   # original engine
-import t20_simulation as T2, odi_simulation as O2          # 2.0
+from engine import t20_simulation as T2, odi_simulation as O2          # 2.0
 
 
 def run(engine_t20, engine_odi, fo, specA, specB, n, pitch="Hard", weather="Clear"):

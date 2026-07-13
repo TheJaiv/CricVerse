@@ -1,15 +1,14 @@
-# Ascension League headless tests — Elo math, weak-team credit economy, boost
-# caps, playoff flow. Run from repo root:  python tools/rating_league_test.py
+# Ascension League headless tests - Elo math, weak-team credit economy, boost
+# caps, playoff flow. Run from repo root: python tools/rating_league_test.py
 import os, sys, random
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import rating_league as R
-
+from league import rating_league as R
 PASS = 0
 def ok(c, label):
     global PASS
     assert c, "FAIL: " + label
     PASS += 1
-    print("  ✓ " + label)
+    print("" + label)
 
 
 def mk_tourney(n_teams=6):
@@ -90,7 +89,7 @@ def main():
     t2 = mk_tourney(2)
     t2["teams"][0]["rating"] = 1400; t2["teams"][0]["games"] = 20
     t2["teams"][1]["rating"] = 760;  t2["teams"][1]["games"] = 20
-    play(t,  "T1", "T0", "T1")   # weak (T1) beats strong (T0) — underdog
+    play(t,  "T1", "T0", "T1")   # weak (T1) beats strong (T0) - underdog
     play(t2, "T0", "T1", "T0")   # strong beats weak
     weak_earn = t["teams"][1]["credits"]
     strong_earn = t2["teams"][0]["credits"]
@@ -118,7 +117,7 @@ def main():
     okb, msg = R.apply_boost(t, team, "Star", "bat")
     ok(not okb and "maxed" in msg, "per-player cap (+3) enforced")
     ok(team["squad"][0]["tboost_bat"] == R.BOOST_MAX_PER_PLAYER, "3 boosts recorded")
-    okb, msg = R.apply_boost(t, team, "Ace", "bowl")   # 95 already → +1 would be 96
+    okb, msg = R.apply_boost(t, team, "Ace", "bowl")   # 95 already -> +1 would be 96
     ok(not okb and "maximum" in msg, "95 ceiling enforced (95→96 blocked)")
     # per-team cap: fresh team, keep boosting distinct players until team cap hits
     t2 = mk_tourney(1); tm = t2["teams"][0]; tm["credits"] = 100_000
@@ -163,7 +162,7 @@ def main():
     R._rating_try_advance(t)
     ok(t.get("rating_champion") == "T0" and t["status"] == "completed", "champion crowned")
 
-    print(f"\nALL {PASS} CHECKS PASSED ✅")
+    print(f"\nALL {PASS} CHECKS PASSED ")
 
 
 if __name__ == "__main__":

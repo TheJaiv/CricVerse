@@ -1,7 +1,7 @@
-# ── Ascension League (rating-based open ladder) ───────────────────────────────
+# Ascension League (rating-based open ladder)
 # An open, ~2-week Elo league: teams challenge anyone available anytime, nobody is
 # eliminated, and SKILL (not volume) decides rank. Squads are set by an EXTERNAL
-# auction bot and loaded via the normal `submit_squad` flow — no auction here.
+# auction bot and loaded via the normal `submit_squad` flow - no auction here.
 #
 # Elo (margin + opponent weighted): beating a higher-rated team gains more; a
 # bigger win margin gains more; farming a much weaker team gains ≈0 (diminishing
@@ -10,7 +10,7 @@
 #
 # Two roster-evolution features ride on top (generic to ANY active tournament):
 #   • player-for-player TRADES (both owners + a manager confirm), and
-#   • a HARD, weak-team-favouring CREDIT economy → small player BOOSTS (+1, capped),
+# • a HARD, weak-team-favouring CREDIT economy -> small player BOOSTS (+1, capped),
 #     so strugglers can slowly grow but nobody can build a super-team.
 #
 # Import direction: this module imports from the manager modules; they import
@@ -20,15 +20,13 @@ import datetime
 
 import discord
 
-from subscription_manager import DB_CACHE, async_save_tournament_to_bin
-from tournament_manager import (
+from core.subscription_manager import DB_CACHE, async_save_tournament_to_bin
+from league.tournament_manager import (
     get_tournament_standings, save_tournament,
     _acl_fill, _acl_winner_loser, _acl_next_mid, _acl_match_line,
 )
 
-# ══════════════════════════════════════════════════════════════════════════════
-# CONFIG — the single tuning point.
-# ══════════════════════════════════════════════════════════════════════════════
+# ---- CONFIG - the single tuning point. ----
 RATING_CONFIG = {
     "type_key": "rating",
     "display_name": "Conquest League",
@@ -52,16 +50,16 @@ RATING_CONFIG = {
 RATING_PLAYOFF_STAGE = "rating_playoff"
 RATING_KO_STAGES = (RATING_PLAYOFF_STAGE,)
 
-# ── HARD, weak-team-favouring credit economy (see module header) ──────────────
+# HARD, weak-team-favouring credit economy (see module header)
 CREDITS_CONFIG = {
     "win": 8, "tie": 5, "loss": 3,        # base per completed match (loss = consolation floor)
-    "catchup_k": 1.0,                     # catch-up mult = 1 + k·(1 − strongness) → weak teams up to ~×2
+    "catchup_k": 1.0,                     # catch-up mult = 1 + k·(1 − strongness) -> weak teams up to ~×2
     "underdog_bonus": 14.0,               # × strength-gap, added on an underdog WIN
     "underdog_pair_cap": 24,              # max underdog bonus farmable vs ONE opponent per season
     "ms_fifty": 1, "ms_hundred": 3, "ms_3wkt": 2, "ms_5wkt": 4,  # small milestone credits
     "per_match_cap": 26,                  # hard ceiling on credits from a single match
 }
-# Boosts — deliberately hard so no super-teams.
+# Boosts - deliberately hard so no super-teams.
 BOOST_COST           = 40    # credits per +1
 BOOST_MAX_PER_PLAYER = 3     # total +1s a single player can ever receive
 BOOST_MAX_PER_TEAM   = 10    # total +1s across a whole squad
@@ -72,9 +70,7 @@ def is_rating_tournament(tourney):
     return bool(tourney) and tourney.get("tournament_type") == RATING_CONFIG["type_key"]
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# FACTORY
-# ══════════════════════════════════════════════════════════════════════════════
+# ---- Factory ----
 def create_rating_tournament(server_id, creator_id):
     """A fresh Ascension League in registration. Caller saves + announces."""
     return {
@@ -92,7 +88,7 @@ def create_rating_tournament(server_id, creator_id):
         "impact_player": RATING_CONFIG["impact_player"],
         "injuries_enabled": RATING_CONFIG["injuries"],
         "tournament_type": RATING_CONFIG["type_key"],
-        "conditions_mode": "auto",         # open play → auto pitch/weather per match
+        "conditions_mode": "auto",         # open play -> auto pitch/weather per match
         "match_order": "random",           # open play is inherently free-order
         "stadiums": [],
     }
@@ -106,9 +102,7 @@ def team_rating(team):
     return team.get("rating", RATING_CONFIG["base_rating"])
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# ELO
-# ══════════════════════════════════════════════════════════════════════════════
+# ---- ELO ----
 def expected(r_a, r_b):
     return 1.0 / (1.0 + 10 ** ((r_b - r_a) / 400.0))
 
@@ -119,9 +113,9 @@ def _k_for(team):
 
 
 def margin_multiplier(result):
-    """1.0 (nailbiter/tie) → margin_cap (thrashing). Win by runs scales on the run
+    """1.0 (nailbiter/tie) -> margin_cap (thrashing). Win by runs scales on the run
     gap; win by wickets on wickets in hand. Opponent-weighting is separate (the Elo
-    E term) — this is purely how DECISIVE the win was."""
+    E term) - this is purely how DECISIVE the win was."""
     winner = result.get("winner")
     if not winner or winner == "TIE":
         return 1.0
@@ -131,9 +125,9 @@ def margin_multiplier(result):
         w_runs, w_wkts, l_runs = result["t1_runs"], result["t1_wickets"], result["t2_runs"]
     else:
         w_runs, w_wkts, l_runs = result["t2_runs"], result["t2_wickets"], result["t1_runs"]
-    if bf and winner == bf:                       # defended a total → won by runs
+    if bf and winner == bf:                       # defended a total -> won by runs
         frac = max(0.0, (w_runs - l_runs)) / 100.0
-    else:                                         # chased → won by wickets in hand
+    else:                                         # chased -> won by wickets in hand
         frac = max(0.0, (10 - w_wkts)) / 10.0
     return min(RATING_CONFIG["margin_cap"], 1.0 + min(1.0, frac))
 
@@ -199,15 +193,13 @@ def revert_match_rating(tourney, m_data):
             t["losses"] = max(0, t.get("losses", 0) - 1)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# CREDITS + BOOSTS (generic — any active tournament)
-# ══════════════════════════════════════════════════════════════════════════════
+# ---- CREDITS + BOOSTS (generic - any active tournament) ----
 def _player_ovr(p):
     return max(float(p.get("bat", 50)), float(p.get("bowl", 50)))
 
 
 def team_strongness(tourney, team):
-    """0 (weakest) .. 1 (strongest). Rating league → Elo band; else → avg top-11 OVR band."""
+    """0 (weakest) .. 1 (strongest). Rating league -> Elo band; else -> avg top-11 OVR band."""
     if is_rating_tournament(tourney):
         return max(0.0, min(1.0, (team_rating(team) - 900.0) / 200.0))
     ovrs = sorted((_player_ovr(p) for p in team.get("squad", [])), reverse=True)[:11]
@@ -317,7 +309,7 @@ def apply_boost(tourney, team, player_name, skill):
     team["credits"] = team.get("credits", 0) - BOOST_COST
     _, team_total = _boost_totals(team)
     skill_word = "batting" if skill == "bat" else "bowling"
-    # NOTE: never reveal the numeric rating — players don't see ratings in this bot.
+    # NOTE: never reveal the numeric rating - players don't see ratings in this bot.
     return True, (f"⬆️ **{p['name']}**'s {skill_word} boosted! "
                   f"(−{BOOST_COST} credits, **{team['credits']}** left · "
                   f"this player {cur_player+1}/{BOOST_MAX_PER_PLAYER}, squad {team_total}/{BOOST_MAX_PER_TEAM})")
@@ -333,7 +325,7 @@ def apply_tournament_boosts(roster):
     for p in roster or []:
         tb, tbo = p.get("tboost_bat", 0), p.get("tboost_bowl", 0)
         if tb or tbo:
-            p = dict(p)   # copy — never touch the stored squad dict
+            p = dict(p)   # copy - never touch the stored squad dict
             if tb:
                 p["bat"] = min(BOOST_RATING_CAP, float(p.get("bat", 50)) + tb)
             if tbo:
@@ -342,9 +334,7 @@ def apply_tournament_boosts(roster):
     return out
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# OPEN PLAY + STANDINGS
-# ══════════════════════════════════════════════════════════════════════════════
+# ---- Open play + standings ----
 def create_open_match(tourney, team1, team2):
     """A fresh on-demand ladder match dict (caller appends to schedule + dispatches)."""
     return {
@@ -383,9 +373,7 @@ def rating_board_embed(tourney):
     return e
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# PLAYOFFS — top-4 eligible → SF1 (1v4) · SF2 (2v3) → Final  (clone of DSL)
-# ══════════════════════════════════════════════════════════════════════════════
+# ---- PLAYOFFS - top-4 eligible -> SF1 (1v4) · SF2 (2v3) -> Final (clone of DSL) ----
 def _rating_get(tourney, round_name):
     return next((m for m in tourney.get("schedule", [])
                  if m.get("stage") in RATING_KO_STAGES and m.get("round") == round_name), None)
@@ -418,7 +406,7 @@ def generate_rating_playoffs(tourney):
     mk("Semi-Final 1", s1, s4, "1st · Ladder", "4th · Ladder", "pending")
     mk("Semi-Final 2", s2, s3, "2nd · Ladder", "3rd · Ladder", "pending")
     mk("Final", None, None, "Winner · Semi-Final 1", "Winner · Semi-Final 2", "locked")
-    from tournament_manager import assign_tournament_conditions
+    from league.tournament_manager import assign_tournament_conditions
     assign_tournament_conditions(tourney)
     save_tournament(tourney)
     return True, "ok"

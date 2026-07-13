@@ -12,7 +12,7 @@ Lower total error = more realistic engine. We report per-scenario winner + total
 import random, statistics
 import sim_harness as H
 import t20_simulation_v1 as T1, odi_simulation_v1 as O1
-import t20_simulation as T2, odi_simulation as O2
+from engine import t20_simulation as T2, odi_simulation as O2
 
 PITCHES = ["Flat", "Green", "Dry", "Dusty", "Hard", "Soft", "Cracked", "Damp",
            "Dead", "Worn", "Turning", "Two-Paced", "Slow", "Bouncy", "Sticky"]

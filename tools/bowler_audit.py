@@ -1,12 +1,12 @@
-# Bowler realism audit — does a bowler's RATING show up in his FIGURES, and are
+# Bowler realism audit - does a bowler's RATING show up in his FIGURES, and are
 # those figures consistent match to match? Runs the identical controlled attack
 # through BOTH engines so the approved T20 engine acts as the feel reference.
-# Run from repo root:  python tools/bowler_audit.py [n] [pitch]
+# Run from repo root: python tools/bowler_audit.py [n] [pitch]
 #
 # Real-ODI anchors (modern era, frontline 10-over spells):
 #   elite (93): econ ~4.6-5.0 · ~2.2 wkts/inn · avg ~25 · 4+ hauls ~10% · 0-fer ~15-20%
-#   weak  (76): econ ~6.0-6.5 · ~1.0 wkts/inn · avg ~45
-#   econ spread elite→weak ≥ 1.0 rpo · maidens ~1-2/inn (team) · econ SD ~0.9-1.2
+# weak (76): econ ~6.0-6.5 · ~1.0 wkts/inn · avg ~45
+# econ spread elite->weak ≥ 1.0 rpo · maidens ~1-2/inn (team) · econ SD ~0.9-1.2
 import os
 import random
 import statistics
@@ -17,8 +17,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from sim_harness import CricketMatch, InningsState, build_team
-from t20_simulation import execute_ball_math_t20, get_smart_ai_bowler_t20
-from odi_simulation import execute_ball_math_odi, get_smart_ai_bowler_odi
+from engine.t20_simulation import execute_ball_math_t20, get_smart_ai_bowler_t20
+from engine.odi_simulation import execute_ball_math_odi, get_smart_ai_bowler_odi
 
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 400
 PITCH = sys.argv[2] if len(sys.argv) > 2 else "Hard"
@@ -124,8 +124,8 @@ def run_block(fmt, pitch, n=N):
 
 
 def rating_sweep(fmt, pitch, n=N):
-    """One pace bowler's rating swept 70→94 (rest of attack fixed at 82):
-    the rating→figures curve, i.e. 'does bowler skill matter'."""
+    """One pace bowler's rating swept 70->94 (rest of attack fixed at 82):
+    the rating->figures curve, i.e. 'does bowler skill matter'."""
     label = "ODI" if fmt == 50 else "T20"
     print(f"\n━━ {label} rating→figures sweep (A_PB1, attack rest=82) · {pitch} ━━")
     print(f"  {'rating':>6}{'ov/in':>6}{'econ':>6}{'ecoSD':>6}{'wk/in':>6}{'avg':>6}{'P0':>5}{'P3+':>5}")

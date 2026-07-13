@@ -1,17 +1,17 @@
 """
-CricVerse DRAFT MODE — pure logic (no Discord, no DB imports; everything takes data as args).
+CricVerse DRAFT MODE - pure logic (no Discord, no DB imports; everything takes data as args).
 
 A knowledge game: 11 rounds build a BALANCED XI. Each round = one team slot with a pool of
 5 questions (the bot fires one). Both captains answer the SAME question (toss-winner first),
-naming a player from memory — RATINGS ARE NEVER SHOWN. Validation is role/archetype ONLY.
+naming a player from memory - RATINGS ARE NEVER SHOWN. Validation is role/archetype ONLY.
 
-Wrong/unknown/taken answer → up to 3 retries → a 78-OVR "net" filler of that slot (keeps the
+Wrong/unknown/taken answer -> up to 3 retries -> a 78-OVR "net" filler of that slot (keeps the
 XI at 11 and balanced).
 """
 import random
 import difflib
 
-# ── Role categories (match the exact DB role strings) ───────────────────────
+# Role categories (match the exact DB role strings)
 def _is_bat(r):       return r in ("Batter", "Batter_WK")
 def _is_wk(r):        return r == "Batter_WK"
 def _is_pace_bowl(r): return r == "Bowler_Pace"
@@ -34,8 +34,8 @@ _CATS = {
 def _q(prompt, cat, arch=None):
     return {"q": prompt, "cat": cat, "arch": arch}
 
-# ── The 11 balanced slots (each: label · filler spec · 5 questions) ──────────
-# filler: (name_base, bat, bowl, role, archetype)  → ~78 OVR "net" player for the slot
+# The 11 balanced slots (each: label · filler spec · 5 questions)
+# filler: (name_base, bat, bowl, role, archetype) -> ~78 OVR "net" player for the slot
 DRAFT_SLOTS = [
     ("Aggressive Opener",  ("Net Opener", 78, 20, "Batter", "Aggressor"), [
         _q("an aggressive opening batter", "BAT", "Aggressor"),
@@ -118,8 +118,8 @@ DRAFT_SLOTS = [
 
 NUM_ROUNDS = len(DRAFT_SLOTS)   # 11
 
-# Player-pool tiers. OVR caps are BACKEND ONLY — never shown to players.
-#   legends   = everyone · greats = OVR <= 92 (all-time untouchables excluded) · youngsters = OVR <= 85
+# Player-pool tiers. OVR caps are BACKEND ONLY - never shown to players.
+# legends = everyone · greats = OVR <= 92 (all-time untouchables excluded) · youngsters = OVR <= 85
 POOL_CAPS = {"legends": None, "greats": 92, "youngsters": 85}
 TIER_LABELS = {"legends": "Legends", "greats": "Greats", "youngsters": "Youngsters"}
 
@@ -133,12 +133,12 @@ def filter_pool(players, mode, ovr_of):
 
 
 def player_tier(ovr):
-    """The *minimal* pool a player belongs to — used to explain an out-of-range pick (no OVR shown)."""
-    if ovr > POOL_CAPS["greats"]:       # > 92 → only in Legends
+    """The *minimal* pool a player belongs to - used to explain an out-of-range pick (no OVR shown)."""
+    if ovr > POOL_CAPS["greats"]:       # > 92 -> only in Legends
         return "Legends"
-    if ovr > POOL_CAPS["youngsters"]:   # 86-92 → Legends + Greats
+    if ovr > POOL_CAPS["youngsters"]:   # 86-92 -> Legends + Greats
         return "Greats"
-    return "Youngsters"                 # <= 85 → every pool
+    return "Youngsters"                 # <= 85 -> every pool
 
 
 def slot_label(round_idx):
@@ -162,11 +162,11 @@ def question_matches(player, question):
     return pa == arch if isinstance(arch, str) else pa in arch
 
 
-# ── Name resolution (accurate verification of a typed answer) ────────────────
+# Name resolution (accurate verification of a typed answer)
 def resolve_name(text, players):
     """Resolve a typed name to a DB player.
     Returns (player|None, status): 'ok' | 'none' | 'ambiguous'(player=None, plus candidates via resolve_candidates).
-    Order: exact (case-insensitive) → unique substring → close fuzzy."""
+    Order: exact (case-insensitive) -> unique substring -> close fuzzy."""
     t = (text or "").strip().lower()
     if not t:
         return None, "none"
@@ -174,7 +174,7 @@ def resolve_name(text, players):
     for p in players:
         if p["name"].lower() == t:
             return p, "ok"
-    # substring — must be unique to accept
+    # substring - must be unique to accept
     subs = [p for p in players if t in p["name"].lower()]
     if len(subs) == 1:
         return subs[0], "ok"
@@ -214,7 +214,7 @@ def verify_answer(text, question, players, taken_names, full_pool=None, ovr_of=N
         if not question_matches(player, question):
             return None, "wrong_type"
         return player, "ok"
-    # Not in the tier-filtered pool — is it a real player excluded by the tier, or truly unknown?
+    # Not in the tier-filtered pool - is it a real player excluded by the tier, or truly unknown?
     if full_pool is not None:
         fp, fstatus = resolve_name(text, full_pool)
         if fstatus == "ambiguous":
@@ -224,18 +224,18 @@ def verify_answer(text, question, players, taken_names, full_pool=None, ovr_of=N
     return None, "unknown"
 
 
-# ── AI captain ──────────────────────────────────────────────────────────────
+# AI captain
 def ai_pick(players, taken_names, question, ovr_of):
-    """AI names a valid available player for the question — competent but not always the best."""
+    """AI names a valid available player for the question - competent but not always the best."""
     valid = [p for p in players if p["name"] not in taken_names and question_matches(p, question)]
     if not valid:
         return None
     valid.sort(key=ovr_of, reverse=True)
-    top = valid[: max(3, len(valid) // 5)]   # top slice → realistic but beatable
+    top = valid[: max(3, len(valid) // 5)]   # top slice -> realistic but beatable
     return random.choice(top)
 
 
-# ── 78-OVR "net" filler (3 strikes and you're out) ──────────────────────────
+# 78-OVR "net" filler (3 strikes and you're out)
 def make_filler(round_idx, tag=""):
     """A fresh ~78-OVR generic player for the slot. `tag` keeps the name unique across both XIs."""
     base, bat, bowl, role, arch = DRAFT_SLOTS[round_idx][1]

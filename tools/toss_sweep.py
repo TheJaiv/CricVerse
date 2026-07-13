@@ -1,7 +1,7 @@
-# Bat-first vs chase win% on EVERY pitch — the toss-neutrality audit.
+# Bat-first vs chase win% on EVERY pitch - the toss-neutrality audit.
 # Equal 85v85 teams, Clear weather; ties excluded. A pitch is toss-fair when
 # bat-first sits within ~50±2.5% (1σ at n=3000 is ±0.9%).
-# Run from repo root:  python tools/toss_sweep.py [n] [odi|t20|dsl] [pitch1,pitch2,...]
+# Run from repo root: python tools/toss_sweep.py [n] [odi|t20|dsl] [pitch1,pitch2,...]
 import os
 import random
 import sys

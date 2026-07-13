@@ -19,7 +19,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tools.sim_harness import build_team, CricketMatch, run_full_match
 
-# Canonical pitch list (mirrors tournament_manager.ALL_PITCHES — kept inline to
+# Canonical pitch list (mirrors tournament_manager.ALL_PITCHES - kept inline to
 # avoid importing discord). Sticky is placed last so it prints at the bottom.
 ALL_PITCHES = ["Flat", "Green", "Dry", "Dusty", "Hard", "Soft", "Cracked", "Damp",
                "Dead", "Worn", "Turning", "Two-Paced", "Slow", "Bouncy", "Sticky"]
@@ -36,7 +36,7 @@ def run_pitch(pitch, n, rating=RATING, weather=WEATHER, format_overs=20):
         # Two identical specs. Distinct names so the engine treats them as 2 sides.
         t_bat = build_team("BAT", rating, rating)
         t_bowl = build_team("BWL", rating, rating)
-        # t_bat always bats first; t_bowl always chases. (No swap — we WANT to
+        # t_bat always bats first; t_bowl always chases. (No swap - we WANT to
         # measure the innings-order effect, not remove it.)
         m = CricketMatch(t_bat, t_bowl, format_overs, pitch, weather)
         run_full_match(m)

@@ -1,9 +1,9 @@
-# Full T20 pitch realism audit — Monte Carlo every pitch (Clear weather, equal
+# Full T20 pitch realism audit - Monte Carlo every pitch (Clear weather, equal
 # 85v85 teams) in BOTH engine modes (normal + DSL league-realism) and report
 # the numbers that matter for realism:
 #   1st-inn par / spread / run-rate / wickets / all-out% / boundary balls per
 #   innings (4s+6s) / six share / chase-win% / tie%.
-# Run from repo root:  python tools/pitch_audit.py [n_per_pitch]
+# Run from repo root: python tools/pitch_audit.py [n_per_pitch]
 
 import os
 import random
@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from sim_harness import CricketMatch, InningsState, build_team, run_full_match
-from tournament_manager import ALL_PITCHES
+from league.tournament_manager import ALL_PITCHES
 
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 500
 

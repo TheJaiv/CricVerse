@@ -1,7 +1,7 @@
 # Jaiv's reported miracle: chasing 197 on Green, 85/7 in 19 ov, a 36-bat tail
 # blocked out 40(80)* alongside a 90-batter and WON vs a 97 attack. This
 # recreates that exact match state and measures how often the engine allows it.
-# Run from repo root:  python tools/rescue_check.py [n]
+# Run from repo root: python tools/rescue_check.py [n]
 import os
 import random
 import statistics
@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from sim_harness import CricketMatch, InningsState, build_team
-from odi_simulation import execute_ball_math_odi, get_smart_ai_bowler_odi
+from engine.odi_simulation import execute_ball_math_odi, get_smart_ai_bowler_odi
 
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 2000
 
@@ -46,7 +46,7 @@ def main():
         m.current_innings = m.innings2
         m.current_innings_num = 2
         inn = m.innings2
-        # ── recreate 85/7 after 19 overs ──
+        # recreate 85/7 after 19 overs
         inn.total_runs = 85
         inn.total_balls = 114
         inn.wickets = 7

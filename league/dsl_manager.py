@@ -1,6 +1,6 @@
-# ── Dominators Super League (DSL) ─────────────────────────────────────────────
+# Dominators Super League (DSL)
 # A recurring, multi-season franchise league. Everything about the league is
-# predecided in DSL_CONFIG below (format, team count, fixtures, venues) — a server
+# predecided in DSL_CONFIG below (format, team count, fixtures, venues) - a server
 # only needs the bot-owner's access grant, then `cvt start dsl` does the rest.
 #
 # Season model:
@@ -8,12 +8,12 @@
 #     "dsl", league_key "dsl", season N).
 #   • `cvt end_season` exports the season to dsl_archive/<server_id>_s<N>.json and
 #     frees the server's tournament slot. The owner commits that file to GitHub so
-#     it ships with every future deploy — Mongo stays light.
+# it ships with every future deploy - Mongo stays light.
 #   • All-time ("overall") player + venue stats merge the archive files with the
 #     current season at query time (cached on file mtime/size).
 #
 # Venues:
-#   • Each venue has ONE FIXED PITCH from the existing 15 pitch types — the same
+# • Each venue has ONE FIXED PITCH from the existing 15 pitch types - the same
 #     ground always plays the same way (no new pitch names, so the sim engines
 #     need zero changes). Each team picks a home venue; league fixtures are played
 #     at team1's (the home side's) ground on that ground's pitch.
@@ -32,19 +32,17 @@ import datetime
 
 import discord
 
-from subscription_manager import DB_CACHE, async_save_to_bin, async_save_tournament_to_bin
-from tournament_manager import (
+from core.subscription_manager import DB_CACHE, async_save_to_bin, async_save_tournament_to_bin
+from league.tournament_manager import (
     ALL_PITCHES, canonical_pitch, pick_conditions, get_tournament_standings,
     save_tournament, _acl_fill, _acl_winner_loser, _acl_next_mid, _acl_match_line,
     _TM_STAT_KEYS,
 )
 
-# ══════════════════════════════════════════════════════════════════════════════
-# CONFIG — the single tuning point for the whole league. Edit freely.
-# ══════════════════════════════════════════════════════════════════════════════
+# ---- CONFIG - the single tuning point for the whole league. Edit freely. ----
 # Each venue has ONE FIXED PITCH (from the existing engine pitch types): the same
 # ground always plays the same way, every match, every season.
-# Production venue set (12 grounds, one per franchise) — swap back in after testing
+# Production venue set (12 grounds, one per franchise) - swap back in after testing
 # by setting "team_count": 12 and "venues": _PROD_VENUES below.
 _PROD_VENUES = {
     "Wankhede Stadium":            "Flat",
@@ -61,7 +59,7 @@ _PROD_VENUES = {
     "HPCA Stadium Dharamsala":     "Green",
 }
 
-# ── TEST venue set: 5 grounds, 5 distinct pitch characters ──
+# TEST venue set: 5 grounds, 5 distinct pitch characters
 _TEST_VENUES = {
     "Thunder Dome":        "Flat",     # batting paradise
     "Desert Fort Arena":   "Dusty",    # spin hell
@@ -78,7 +76,7 @@ DSL_CONFIG = {
     "format_overs": 50,                     # DSL is an ODI league (league-realism mode
                                             # lives in odi_simulation.py: DSL_ODI_*)
     "team_count": 5,                        # TEST (production: 12)
-    "double_round_robin": True,             # home & away legs (5 teams → 20 matches; 12 → 132)
+    "double_round_robin": True,             # home & away legs (5 teams -> 20 matches; 12 -> 132)
     "min_squad": 11,
     "max_squad": 18,
     "impact_player": False,                 # real ODIs have no impact player (flip to re-enable)
@@ -87,10 +85,10 @@ DSL_CONFIG = {
     "match_order": "random",                # "random" | "sequential" (strict schedule) | "round"
     "require_unique_venues": True,          # every team must claim a different home ground
     "auto_playoffs": True,                  # generate the Semis automatically when league ends
-    # Playoff venues: "random" → random ground per playoff match, or a dict like
+    # Playoff venues: "random" -> random ground per playoff match, or a dict like
     # {"Semi-Final 1": "Thunder Dome", "Final": "Thunder Dome"}.
     "playoff_venue_policy": "random",
-    # venue → its ONE fixed pitch (same ground = same pitch, always).
+    # venue -> its ONE fixed pitch (same ground = same pitch, always).
     "venues": _TEST_VENUES,                 # TEST (production: _PROD_VENUES)
 }
 
@@ -101,7 +99,7 @@ DSL_PLAYOFF_ROUNDS = ("Semi-Final 1", "Semi-Final 2", "Final")
 ARCHIVE_DIR = "dsl_archive"
 ARCHIVE_SCHEMA_VERSION = 1
 
-# ── Config sanity check (import time — fail loudly on a typo'd pitch name) ────
+# Config sanity check (import time - fail loudly on a typo'd pitch name)
 for _v, _pitch in DSL_CONFIG["venues"].items():
     if canonical_pitch(_pitch) != _pitch:
         raise ValueError(
@@ -114,9 +112,7 @@ def is_dsl_tournament(tourney):
     return bool(tourney) and tourney.get("tournament_type") == DSL_CONFIG["type_key"]
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# ACCESS (bot-owner grants, independent of the Gold/Diamond tier system)
-# ══════════════════════════════════════════════════════════════════════════════
+# ---- ACCESS (bot-owner grants, independent of the Gold/Diamond tier system) ----
 def _league_access():
     la = DB_CACHE.setdefault("league_access", {})
     return la.setdefault(DSL_CONFIG["league_key"], {})
@@ -144,9 +140,7 @@ def bump_last_season(server_id: str, season: int):
     async_save_to_bin()
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SEASON NUMBERING + TOURNAMENT FACTORY
-# ══════════════════════════════════════════════════════════════════════════════
+# ---- Season numbering + tournament factory ----
 def next_season_number(server_id: str) -> int:
     """1 + max(highest archived season on disk, Mongo last_season floor)."""
     archived = [s for s, _ in list_season_archives(server_id)]
@@ -180,9 +174,7 @@ def create_dsl_tournament(server_id: str, creator_id) -> dict:
     }
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# VENUES & CONDITIONS
-# ══════════════════════════════════════════════════════════════════════════════
+# ---- Venues & conditions ----
 def canonical_venue(name):
     """Case-insensitive match against the configured venue list, or None."""
     if not name:
@@ -218,8 +210,8 @@ def _playoff_venue(round_name, rng=random):
 
 
 def assign_dsl_stadiums(tourney):
-    """Idempotent venue assignment: league match → home (team1) team's ground;
-    playoff match → per playoff_venue_policy. Called via stadium_manager.assign_stadiums."""
+    """Idempotent venue assignment: league match -> home (team1) team's ground;
+    playoff match -> per playoff_venue_policy. Called via stadium_manager.assign_stadiums."""
     homes = {t["name"]: t.get("home_stadium") for t in tourney.get("teams", [])}
     for m in tourney.get("schedule", []):
         if m.get("status") == "completed" or m.get("stadium"):
@@ -241,9 +233,7 @@ def pick_dsl_conditions(stadium, is_knockout: bool):
     return pitch, weather
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# LEAGUE SCHEDULE (circle method; team1 = HOME side)
-# ══════════════════════════════════════════════════════════════════════════════
+# ---- LEAGUE SCHEDULE (circle method; team1 = HOME side) ----
 def dsl_generate_league_schedule(tourney):
     """Build the league fixtures. Leg 1 = circle-method round robin with the r%2
     flip balancing home/away; leg 2 (double_round_robin) mirrors leg 1 with venues
@@ -278,17 +268,15 @@ def dsl_generate_league_schedule(tourney):
             for i, m in enumerate(matchups)]
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# PLAYOFFS — Top 4: Semi-Final 1 (1v4), Semi-Final 2 (2v3) → Final
+# PLAYOFFS - Top 4: Semi-Final 1 (1v4), Semi-Final 2 (2v3) -> Final
 # (Locked-slot bracket in the ACL style; reuses its generic helpers.)
-# ══════════════════════════════════════════════════════════════════════════════
 def _dsl_get(tourney, round_name):
     return next((m for m in tourney.get("schedule", [])
                  if m.get("stage") in DSL_KO_STAGES and m.get("round") == round_name), None)
 
 
 def dsl_generate_playoffs(tourney):
-    """Build the Top-4 knockout bracket (2 Semis → Final). Returns (ok, message).
+    """Build the Top-4 knockout bracket (2 Semis -> Final). Returns (ok, message).
     Idempotent: refuses when the league isn't finished or the bracket already exists."""
     if not is_dsl_tournament(tourney):
         return False, "This isn't a DSL tournament."
@@ -322,8 +310,8 @@ def dsl_generate_playoffs(tourney):
     mk("Semi-Final 2", s2, s3,     "2nd · League",         "3rd · League",         "pending")
     mk("Final",        None, None, "Winner · Semi-Final 1", "Winner · Semi-Final 2", "locked")
 
-    # Venues + conditions for the new matches (lazy import — see module header).
-    from tournament_manager import assign_tournament_conditions
+    # Venues + conditions for the new matches (lazy import - see module header).
+    from league.tournament_manager import assign_tournament_conditions
     assign_tournament_conditions(tourney)
     save_tournament(tourney)
     return True, "ok"
@@ -356,7 +344,7 @@ def _dsl_try_advance(tourney):
 
 
 def dsl_bracket_embed(tourney):
-    """Compact playoffs view: SF1 / SF2 → Final."""
+    """Compact playoffs view: SF1 / SF2 -> Final."""
     color = discord.Color.from_rgb(20, 60, 160)
     season = tourney.get("season", "?")
     e = discord.Embed(title=f"🔵 {tourney.get('name', DSL_CONFIG['display_name'])} — Playoffs", color=color)
@@ -373,9 +361,7 @@ def dsl_bracket_embed(tourney):
     return e
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SEASON ARCHIVES (dsl_archive/<server_id>_s<N>.json — committed to GitHub by the owner)
-# ══════════════════════════════════════════════════════════════════════════════
+# ---- SEASON ARCHIVES (dsl_archive/<server_id>_s<N>.json - committed to GitHub by the owner) ----
 _ARCHIVE_FILE_RE = re.compile(r"_s(\d+)\.json$")
 # {server_id: (files_signature, [season dicts])}
 _archive_cache = {}
@@ -419,7 +405,7 @@ def load_all_seasons(server_id):
             if data.get("league_key") == DSL_CONFIG["league_key"]:
                 seasons.append(data)
         except Exception as e:
-            print(f"⚠️ DSL archive unreadable, skipping {path}: {e}")
+            print(f"DSL archive unreadable, skipping {path}: {e}")
     _archive_cache[server_id] = (sig, seasons)
     return seasons
 
@@ -562,7 +548,7 @@ def _compact_match_record(m):
 
 
 def write_season_archive(tourney):
-    """Export a finished season to dsl_archive/. Returns (path, bytes) — the bytes
+    """Export a finished season to dsl_archive/. Returns (path, bytes) - the bytes
     are for the Discord attachment so the owner always has an offsite copy to commit."""
     server_id = str(tourney["server_id"])
     season = int(tourney.get("season", next_season_number(server_id)))
@@ -624,9 +610,7 @@ def save_uploaded_archive(raw_bytes):
     return True, f"✅ {verb} archive **S{season}** for server `{server_id}` → `{path}`."
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# CROSS-SEASON AGGREGATION (archives + current season)
-# ══════════════════════════════════════════════════════════════════════════════
+# ---- CROSS-SEASON AGGREGATION (archives + current season) ----
 def _current_if_dsl(server_id, current_tourney):
     if current_tourney and is_dsl_tournament(current_tourney) \
             and str(current_tourney.get("server_id")) == str(server_id):
@@ -719,7 +703,7 @@ def aggregate_venue_stats(server_id, current_tourney=None):
 
 def player_season_history(server_id, player_name, current_tourney=None):
     """[(season, team, canonical_name, stats)] for every season the player appears
-    in — archives first, then the in-progress season. Exact (case-insensitive)
+    in - archives first, then the in-progress season. Exact (case-insensitive)
     name match; callers can fuzzy-resolve the name via aggregate_player_stats."""
     pl = str(player_name).strip().lower()
     rows = []
@@ -741,7 +725,7 @@ def player_season_history(server_id, player_name, current_tourney=None):
 def reset_dsl_server(server_id):
     """Factory-reset a server's DSL data (owner tool, for wiping TEST seasons before
     the real league): removes its current DSL tournament from the cache, deletes its
-    archive files on disk, and zeroes the Mongo season counter — so the next
+    archive files on disk, and zeroes the Mongo season counter - so the next
     `cvt start dsl` is a clean Season 1. The access grant itself is kept.
     Returns (tournaments_removed, archives_deleted)."""
     server_id = str(server_id)
@@ -756,7 +740,7 @@ def reset_dsl_server(server_id):
         try:
             os.remove(path)
         except OSError as e:
-            print(f"⚠️ dsl_reset: couldn't delete {path}: {e}")
+            print(f"dsl_reset: couldn't delete {path}: {e}")
     entry = _league_access().get(server_id)
     if entry:
         entry["last_season"] = 0
@@ -767,7 +751,7 @@ def reset_dsl_server(server_id):
 
 
 def season_history(server_id, current_tourney=None):
-    """[(season, name, champion, runner_up)] oldest→newest; current season appended
+    """[(season, name, champion, runner_up)] oldest->newest; current season appended
     as in-progress (champion None) or completed."""
     rows = [(s.get("season"), s.get("name"), s.get("champion"), s.get("runner_up"))
             for s in load_all_seasons(server_id)]

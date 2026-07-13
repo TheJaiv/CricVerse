@@ -1,5 +1,5 @@
 """
-Career Mode data layer for CricVerse  (v2 — all-rounder model, synced to the sim DB).
+Career Mode data layer for CricVerse  (v2 - all-rounder model, synced to the sim DB).
 
 Stores one document per user in a dedicated `careers` Mongo collection (NOT the
 single cricket_bot_data blob) to avoid the 16MB limit and concurrent-save races.
@@ -19,22 +19,22 @@ import random
 import datetime
 from threading import Thread
 
-from subscription_manager import _get_db
+from core.subscription_manager import _get_db
 
 CAREER_CACHE = {}   # user_id(str) -> career dict
 
-# Four upgradeable attributes (pace/spin merged into one "bowling" stat — your
+# Four upgradeable attributes (pace/spin merged into one "bowling" stat - your
 # chosen bowling type decides HOW you bowl, this is HOW WELL).
 ATTRS = ("power", "control", "bowling", "stamina")
 
-# Bowling type → sim engine role (all All-Rounder_* since everyone bats+bowls)
+# Bowling type -> sim engine role (all All-Rounder_* since everyone bats+bowls)
 BOWLING_TYPES = {
     "pace":    {"label": "Express Pace", "emoji": "🔥", "engine_role": "All-Rounder_Pace"},
     "offspin": {"label": "Off-Spin",     "emoji": "🌀", "engine_role": "All-Rounder_Spin_Off"},
     "legspin": {"label": "Leg-Spin",     "emoji": "🪀", "engine_role": "All-Rounder_Spin_Leg"},
 }
 
-# Batting mindset → sim engine archetype
+# Batting mindset -> sim engine archetype
 MINDSETS = {
     "aggressor": {"label": "Aggressor", "emoji": "💥", "engine_arch": "Aggressor",
                   "desc": "Attacking intent, high strike rate, clears the ropes."},
@@ -44,12 +44,12 @@ MINDSETS = {
                   "desc": "Low-risk accumulator who builds long innings."},
 }
 
-# Rookie starts at a clean OVR 60 (normalised exactly at creation) — a raw prospect
+# Rookie starts at a clean OVR 60 (normalised exactly at creation) - a raw prospect
 # below the sim's pro floor, with a long climb through the tiers to the 90s legends.
 BASE_ATTRS = {"power": 58, "control": 62, "bowling": 56, "stamina": 60}
 BASE_OVR = 60
 
-# Tiers spread across the full 60→99 career range.
+# Tiers spread across the full 60->99 career range.
 TIERS = [  # (min, max, name, blurb)
     (93, 99, "Diamond",  "The Legend"),
     (85, 92, "Platinum", "The Elite"),
@@ -103,11 +103,11 @@ def career_to_engine(career: dict) -> dict:
     }
 
 
-# ── Progression economics (deliberately HARD — tiers must be earned) ─────────
+# Progression economics (deliberately HARD - tiers must be earned)
 # Cost ramps steeply so Gold is a multi-week goal, Platinum months, and Diamond
 # a long-term grind that even premium players can't rush.
 def upgrade_cost(v: int) -> int:
-    """Coin cost to raise an attribute from v to v+1 — EXPONENTIAL: every point is
+    """Coin cost to raise an attribute from v to v+1 - EXPONENTIAL: every point is
     dearer than the last, so the higher tiers get punishingly hard (you can't sprint
     to 95). Each +1 costs ~16% more than the one before:
       v60≈28  v68≈92  v77≈365  v85≈1146  v90≈2403  v95≈5045  v98≈7876  v99≈9136."""
@@ -166,16 +166,16 @@ def refresh_ovr(career: dict):
     return old, career["tier"]
 
 
-# ── Persistence ─────────────────────────────────────────────────────────────
+# Persistence
 def load_careers():
     try:
         col = _get_db()["careers"]
         CAREER_CACHE.clear()
         for doc in col.find({}):
             CAREER_CACHE[doc["_id"]] = doc
-        print(f"✅ Loaded {len(CAREER_CACHE)} career(s) from MongoDB!")
+        print(f"Loaded {len(CAREER_CACHE)} career(s) from MongoDB!")
     except Exception as e:
-        print(f"❌ Career load error: {e}")
+        print(f"Career load error: {e}")
 
 
 def all_careers():
@@ -186,7 +186,7 @@ def all_careers():
             CAREER_CACHE[d["_id"]] = d
         return docs
     except Exception as e:
-        print(f"❌ all_careers error: {e}")
+        print(f"all_careers error: {e}")
         return list(CAREER_CACHE.values())
 
 
@@ -200,7 +200,7 @@ def get_career(user_id):
             CAREER_CACHE[uid] = doc
             return doc
     except Exception as e:
-        print(f"❌ get_career error: {e}")
+        print(f"get_career error: {e}")
     return None
 
 
@@ -209,7 +209,7 @@ def save_career(career: dict):
         _get_db()["careers"].replace_one({"_id": career["_id"]}, career, upsert=True)
         return True
     except Exception as e:
-        print(f"❌ save_career error: {e}")
+        print(f"save_career error: {e}")
         return False
 
 
@@ -226,7 +226,7 @@ def delete_career(user_id):
         res = _get_db()["careers"].delete_one({"_id": uid})
         return existed or res.deleted_count > 0
     except Exception as e:
-        print(f"❌ delete_career error: {e}")
+        print(f"delete_career error: {e}")
         return existed
 
 
@@ -244,7 +244,7 @@ def create_career(user_id, username, bowling_type, mindset):
     return c, None
 
 
-# ── Economy / progression actions ───────────────────────────────────────────
+# Economy / progression actions
 def upgrade_attribute(career: dict, attr: str, want: int = 1):
     """Spend coins to raise `attr` by up to `want` points (as many as affordable).
     Returns (bought:int, spent:int, msg:str)."""
@@ -271,11 +271,11 @@ def upgrade_attribute(career: dict, attr: str, want: int = 1):
     return bought, spent, "ok"
 
 
-DAILY_MIN, DAILY_MAX = 25, 55      # tightened — dailies alone are a slow trickle, not a fast-track
-STREAK_BONUS_PER_DAY = 3           # +3 coins per consecutive day beyond the first…
-STREAK_BONUS_CAP_DAYS = 10         # …capped at +30/day so streaks reward habit, not wealth
+DAILY_MIN, DAILY_MAX = 25, 55      # tightened - dailies alone are a slow trickle, not a fast-track
+STREAK_BONUS_PER_DAY = 3           # +3 coins per consecutive day beyond the first...
+STREAK_BONUS_CAP_DAYS = 10         # ...capped at +30/day so streaks reward habit, not wealth
 STREAK_GRACE = 48 * 3600           # claim within 48h of the last one to keep the streak
-RENAME_COST = 250                  # cv rename — cosmetic, so priced as a luxury
+RENAME_COST = 250                  # cv rename - cosmetic, so priced as a luxury
 WEEKLY_AMOUNT  = 800               # PREMIUM ONLY
 MONTHLY_AMOUNT = 3000              # PREMIUM ONLY
 WEEK_BOOST = 1.05                  # 5% coin boost for the week (premium weekly perk)
@@ -366,7 +366,7 @@ def claim_monthly(career: dict):
 
 def award_match_earnings(career, *, runs=0, fifties=0, hundreds=0, wickets=0,
                          maidens=0, catches=0, stumpings=0, won=False, is_real_match=True):
-    """Match payout — PvP/club matches ONLY. AI matches earn ZERO coins (they exist
+    """Match payout - PvP/club matches ONLY. AI matches earn ZERO coins (they exist
     purely for quests/practice). Returns coins awarded."""
     if not is_real_match:
         return 0
@@ -386,7 +386,7 @@ def get_today_str():
     return datetime.date.today().isoformat()
 
 
-# ── Daily quests ──────────────────────────────────────────────────────────────
+# Daily quests
 # A pool of 25 quests; each player is dealt 3 RANDOM ones per day (deterministic by
 # player+date). Progress is tracked all day; rewards are CLAIMED via `cv quests`.
 QUEST_POOL = [
@@ -442,7 +442,7 @@ def _active_quests(career):
 
 
 def quest_progress(career, metric, amount=1):
-    """Track progress toward today's 3 quests (does not pay — claim via claim_quests)."""
+    """Track progress toward today's 3 quests (does not pay - claim via claim_quests)."""
     if amount <= 0:
         return
     q = _ensure_quests(career)
@@ -477,13 +477,13 @@ def quest_status(career):
     return out
 
 
-# ── Solo scenarios (interactive challenges; small coins, separate stats) ──────
+# Solo scenarios (interactive challenges; small coins, separate stats)
 SCENARIO_DAILY_CAP = 6   # paid scenarios per day; extras still feed quests, pay 0
-SCENARIO_ENTRY_FEE = 10  # coins to enter a scenario (skill bet — beat it to profit)
+SCENARIO_ENTRY_FEE = 10  # coins to enter a scenario (skill bet - beat it to profit)
 
 # Difficulty tiers. `rlo`/`rhi` = how many rating points ABOVE the player the Challenge XI
 # is (Easy = same rating as you). `mult` scales the performance coins; `pass_bonus` is the
-# clear bonus — Easy's clear bonus is deliberately > the entry fee so beating Easy profits.
+# clear bonus - Easy's clear bonus is deliberately > the entry fee so beating Easy profits.
 SCENARIO_DIFFS = {
     "easy":   {"label": "Easy",   "rlo": 0, "rhi": 0, "mult": 0.8, "pass_bonus": 14},
     "medium": {"label": "Medium", "rlo": 4, "rhi": 6, "mult": 1.0, "pass_bonus": 22},
@@ -497,7 +497,7 @@ def scenarios_done_today(career):
 
 def scenario_complete(career, runs=0, fours=0, sixes=0, wickets=0, passed=False, mode="bat", difficulty="medium"):
     """Settle a finished interactive scenario (batting OR bowling). Reward is tied to
-    PERFORMANCE and DIFFICULTY — no flat freebie, so a poor loss pays ~0 and you forfeit
+    PERFORMANCE and DIFFICULTY - no flat freebie, so a poor loss pays ~0 and you forfeit
     the entry fee. Stats are SEPARATE from cv stats; quests are fed. Returns (coins, capped, left)."""
     done = scenarios_done_today(career)
     capped = done >= SCENARIO_DAILY_CAP
@@ -506,7 +506,7 @@ def scenario_complete(career, runs=0, fours=0, sixes=0, wickets=0, passed=False,
     raw  = perf * d["mult"] + (d["pass_bonus"] if passed else 0)
     coins = 0 if capped else max(0, int(round(raw)))
     # A LOSS must never be net-profitable. Performance coins are only a partial consolation
-    # on a defeat — capped below the entry fee so you always forfeit something (otherwise a
+    # on a defeat - capped below the entry fee so you always forfeit something (otherwise a
     # couple of wickets in a losing bowling scenario would out-earn the fee). Clearing the
     # scenario (passed) is the only path to profit, via the pass_bonus.
     if coins and not passed:
@@ -514,7 +514,7 @@ def scenario_complete(career, runs=0, fours=0, sixes=0, wickets=0, passed=False,
     if coins:
         career["coins"] += coins
 
-    # Separate practice stats — NOT part of the real career stats shown in `cv stats`.
+    # Separate practice stats - NOT part of the real career stats shown in `cv stats`.
     ss = career.setdefault("scenario_stats", {"played": 0, "runs": 0, "best": 0, "passed": 0, "wickets": 0})
     ss["played"] += 1
     ss["runs"] += runs
