@@ -297,7 +297,7 @@ def apply_boost(tourney, team, player_name, skill):
     Enforces credits, per-player cap, per-team cap, and the 95 effective ceiling."""
     skill = skill.strip().lower()
     if skill not in ("bat", "bowl"):
-        return False, "❌ Boost a **bat** or **bowl** rating."
+        return False, "❌ Boost **bat** or **bowl**."
     p = next((x for x in team.get("squad", []) if x["name"].lower() == player_name.strip().lower()), None)
     if not p:
         return False, f"❌ **{player_name}** isn't in **{team['name']}**'s squad."
@@ -318,7 +318,7 @@ def apply_boost(tourney, team, player_name, skill):
     _, team_total = _boost_totals(team)
     skill_word = "batting" if skill == "bat" else "bowling"
     # NOTE: never reveal the numeric rating — players don't see ratings in this bot.
-    return True, (f"⬆️ **{p['name']}**'s {skill_word} boosted (+1)! "
+    return True, (f"⬆️ **{p['name']}**'s {skill_word} boosted! "
                   f"(−{BOOST_COST} credits, **{team['credits']}** left · "
                   f"this player {cur_player+1}/{BOOST_MAX_PER_PLAYER}, squad {team_total}/{BOOST_MAX_PER_TEAM})")
 

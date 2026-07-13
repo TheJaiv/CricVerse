@@ -2868,6 +2868,32 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         save_tournament(tourney)
         await interaction.response.send_message(f"🔥 **Knockout Stage Set!**\n**Semi-Final 1:** {top4[0]} vs {top4[3]}\n**Semi-Final 2:** {top4[1]} vs {top4[2]}\n\nUse `/tournament play_next` to begin!")
 
+    @app_commands.command(name="generate_finals", description="[MANAGER] Generate the Final for the Top 2 teams — skips Semi-Finals. (Double Round Robin only)")
+    async def generate_finals(self, interaction: discord.Interaction):
+        server_id = str(interaction.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
+        if not self.is_manager(interaction, tourney): return await interaction.response.send_message("❌ Managers only.", ephemeral=True)
+        if tourney["status"] != "active": return await interaction.response.send_message("❌ Tournament is not active.", ephemeral=True)
+        if tourney.get("tournament_type") != "double_round_robin":
+            return await interaction.response.send_message("❌ This command is for **Double Round Robin** tournaments only. Use `/tournament generate_knockouts` for Round Robin, or `/tournament generate_playoffs` for ACL/DSL.", ephemeral=True)
+
+        gs_matches = [m for m in tourney["schedule"] if isinstance(m.get("round"), int)]
+        if any(m["status"] == "pending" for m in gs_matches):
+            return await interaction.response.send_message("❌ Cannot generate the Final until all league matches are completed.", ephemeral=True)
+        if any(not isinstance(m.get("round"), int) for m in tourney["schedule"]):
+            return await interaction.response.send_message("❌ The Final has already been generated.", ephemeral=True)
+
+        standings = get_tournament_standings(tourney)
+        real_teams = [t[0] for t in standings if t[0] != "BYE"]
+        if len(real_teams) < 2:
+            return await interaction.response.send_message("❌ Need at least 2 teams to play a Final.", ephemeral=True)
+        top2 = real_teams[:2]
+        final = {"match_id": _tm_next_mid(tourney), "round": "Final", "stage": "knockout", "team1": top2[0], "team2": top2[1], "status": "pending", "result": None}
+        tourney["schedule"].append(final)
+        save_tournament(tourney)
+        await interaction.response.send_message(f"🏆 **The Final is Set!**\n**{top2[0]}** (1st) vs **{top2[1]}** (2nd)\n\nUse `/tournament play_next` to begin!")
+
     @app_commands.command(name="generate_super8", description="[MANAGER] Generate Super 8 stage after Group Stage. (T20 World Cup only)")
     async def generate_super8(self, interaction: discord.Interaction):
         server_id = str(interaction.guild.id)
@@ -3894,7 +3920,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         )
         embed.add_field(
             name="🔥 Knockouts (Managers)",
-            value=("**ACL:** `generate_playoffs`/`gp`  ·  **Round Robin/Double RR:** `generate_knockouts`  ·  **T20 WC:** `generate_super8`"),
+            value=("**ACL:** `generate_playoffs`/`gp`  ·  **Round Robin/Double RR:** `generate_knockouts`  ·  **Double RR (Top-2 Final):** `generate_finals`/`gf`  ·  **T20 WC:** `generate_super8`"),
             inline=False,
         )
         embed.set_footer(text="More admin tools are prefix-only: cvt transfer_team · replace_player · force_delete · set_theme · remove_injury · repair_schedule · simulate_all")

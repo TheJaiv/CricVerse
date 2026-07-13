@@ -2658,9 +2658,12 @@ def generate_scorecard_from_data(data: dict) -> io.BytesIO:
     except Exception:
         _logo = None
     if _logo is not None:
+        # Flatten onto white so transparent logo pixels don't render black
+        _flat = Image.new("RGBA", (96, 96), (255, 255, 255, 255))
+        _flat.alpha_composite(_logo)
         _mask = Image.new("L", (96, 96), 0)
         ImageDraw.Draw(_mask).ellipse((0, 0, 96, 96), fill=255)
-        img.paste(_logo, (W // 2 - 48, HDR_MID - 48), _mask)
+        img.paste(_flat, (W // 2 - 48, HDR_MID - 48), _mask)
     else:
         d.ellipse([(W // 2 - 48, HDR_MID - 48), (W // 2 + 48, HDR_MID + 48)],
                   outline=c_grid, width=3)
@@ -5430,12 +5433,12 @@ def with_captain(players):
 
 
 def captain_note(players):
-    """One-line summary of who the captain is and where their +1 went, for setup msgs."""
+    """One-line summary of who the captain is and where their boost went, for setup msgs."""
     cap = next((p for p in players if p.get("is_captain")), None)
     if not cap:
         return ""
     skill = "Batting" if cap.get("captain_skill") == "bat" else "Bowling"
-    return f"🧢 **Captain:** {cap['name']}  ·  +1 {skill}"
+    return f"🧢 **Captain:** {cap['name']}  ·  Boost to {skill}"
 
 
 def parse_pasted_roster(raw_text, db_players, max_lines=16):
@@ -5734,7 +5737,7 @@ async def handle_captain_step(channel, state, team_num, players, after):
         return await after(channel, state)
     owner_id = state.p1_id if team_num == 1 else (getattr(state, "p2_id", None) or state.p1_id)
     await channel.send(
-        f"🧢 <@{owner_id}> — **Who is your Captain?** They get **+1** to their main skill.\n"
+        f"🧢 <@{owner_id}> — **Who is your Captain?** They get a **boost** to their main skill.\n"
         f"-# Tip: next time put `(C)` after a name in your XI to set the captain inline and skip this step.",
         view=CaptainSelectView(state, channel, team_num, players, after))
 
@@ -8036,7 +8039,7 @@ def _help_match_embed():
 
 def _help_players_embed(is_admin: bool):
     e = discord.Embed(title="🔍 Players & Database", color=discord.Color.blue())
-    e.add_field(name="/searchplayer <name>  ·  `cv sp`", value="Search for a player — shows their role (ratings & archetype hidden unless you're an admin in a ratings channel).", inline=False)
+    e.add_field(name="/searchplayer <name>  ·  `cv sp`", value="Search for a player — shows their role.", inline=False)
     e.add_field(name="/playerlist  ·  `cv playerlist`  ·  `cv pl`", value="Download the full player database as a .txt file — names only, grouped by tier, shuffled within each tier.", inline=False)
     e.add_field(name="`cv playerlistcompact`  ·  `cv pla`", value="Same tier-grouped list, but names are comma-separated within each tier (compact).", inline=False)
     e.add_field(name="📋 How to enter Playing XI",        value="When prompted during a match, paste 11 player names (one per line). Names must match the database exactly.", inline=False)
@@ -8047,7 +8050,6 @@ def _help_players_embed(is_admin: bool):
         e.add_field(name="/updateplayer <name>  ·  `cv up`",  value="Edit an existing player — all fields pre-filled, change only what you need.", inline=False)
         e.add_field(name="`cv deleteplayer`  ·  `cv dp`",     value="Remove a player from the database.", inline=False)
         e.add_field(name="`cv cleanduplicates`  ·  `cv cd`",  value="Remove duplicate entries from the database.", inline=False)
-    e.set_footer(text="Ratings are hidden in public channels — use a ratings channel or contact owner")
     return e
 
 def _help_tournament_embed():
@@ -8065,7 +8067,7 @@ def _help_tournament_embed():
     e.add_field(name="⚙️ Manage",
         value=("`create <name> <format>` · `add_team <name> @owner` · `start`\n"
                "`set_theme` · `set_team_color` · `set_team_logo` · `set_schedule`\n"
-               "`generate_knockouts` · `force_delete`"),
+               "`generate_knockouts` · `generate_finals`/`gf` · `force_delete`"),
         inline=False)
     e.add_field(name="🔧 Schedule / Dev",
         value=("`admin_restore_schedule` · `admin_force_restore_schedule`\n"
@@ -8284,7 +8286,6 @@ async def send_player_profile(interaction, player: dict, show_ratings: bool = Tr
         embed = discord.Embed(title=f"🏏 {player['name']}", color=0x1D4ED8)
         embed.add_field(name="📋 Role", value=role_str, inline=False)
         embed.description = "*Use `/match` to pick this player and put them to the test!*"
-        embed.set_footer(text="Ratings & archetype are hidden.")
     await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="searchplayer", description="Search for a player in the Cloud DB.")
@@ -8527,7 +8528,7 @@ def _build_playerlist_ratings_txt(players: list) -> str:
     return "\n".join(lines)
 
 
-@bot.tree.command(name="playerlist", description="Download the full player database grouped by tier (no ratings shown).")
+@bot.tree.command(name="playerlist", description="Download the full player database grouped by tier.")
 async def playerlist_cmd(interaction: discord.Interaction):
     await interaction.response.defer()
     players = get_all_players()
@@ -8537,7 +8538,7 @@ async def playerlist_cmd(interaction: discord.Interaction):
     buf = io.BytesIO(txt.encode("utf-8"))
     buf.seek(0)
     await interaction.followup.send(
-        f"📋 **Player Database** — {len(players)} players across 4 tiers.\nRatings are hidden. Players within each tier are shuffled.",
+        f"📋 **Player Database** — {len(players)} players across 4 tiers.\nPlayers within each tier are shuffled.",
         file=discord.File(fp=buf, filename="cricverse_players.txt")
     )
 
@@ -8982,6 +8983,130 @@ async def _record_draft_result(channel, match):
         pass
 
 
+class CSVSyncConfirmView(discord.ui.View):
+    """Owner confirmation for `cv sync_csv` — previews the new players found in the
+    CSV and lets the owner toggle any of them off before committing the import."""
+    PAGE = 25   # Discord select menus cap at 25 options
+
+    def __init__(self, ctx, new_players):
+        super().__init__(timeout=180)
+        self.ctx = ctx
+        self.players = new_players    # CSV order
+        self.skipped = set()          # names toggled off the import
+        self.page = 0
+        self.message = None
+        self._done = False
+        self.update_ui()
+
+    @property
+    def pages(self):
+        return (len(self.players) - 1) // self.PAGE + 1
+
+    def _page_players(self):
+        start = self.page * self.PAGE
+        return self.players[start:start + self.PAGE]
+
+    def build_embed(self):
+        adding = len(self.players) - len(self.skipped)
+        lines = []
+        for p in self._page_players():
+            mark = "⛔" if p["name"] in self.skipped else "✅"
+            lines.append(f"{mark} **{p['name']}** — {p['role']} · Bat {p['bat']} / Bowl {p['bowl']}")
+        e = discord.Embed(title="📥 CSV Sync — Confirm Import",
+                          description="\n".join(lines),
+                          color=discord.Color.orange())
+        footer = f"Adding {adding} of {len(self.players)} new players · pick from the menu to toggle off/on"
+        if self.pages > 1:
+            footer += f" · Page {self.page + 1}/{self.pages}"
+        e.set_footer(text=footer)
+        return e
+
+    def update_ui(self):
+        self.clear_items()
+        opts = [discord.SelectOption(label=p["name"][:100],
+                                     description=f"{p['role']} · Bat {p['bat']} / Bowl {p['bowl']}"[:100],
+                                     value=p["name"],
+                                     emoji="⛔" if p["name"] in self.skipped else "✅")
+                for p in self._page_players()]
+        sel = discord.ui.Select(placeholder="Pick players to toggle skip/add…",
+                                options=opts, min_values=1, max_values=len(opts))
+        sel.callback = self.toggle_cb
+        self.add_item(sel)
+        if self.pages > 1:
+            prev = discord.ui.Button(label="◀", style=discord.ButtonStyle.secondary, disabled=self.page == 0)
+            prev.callback = self.prev_cb
+            self.add_item(prev)
+            nxt = discord.ui.Button(label="▶", style=discord.ButtonStyle.secondary, disabled=self.page >= self.pages - 1)
+            nxt.callback = self.next_cb
+            self.add_item(nxt)
+        adding = len(self.players) - len(self.skipped)
+        conf = discord.ui.Button(label=f"Add {adding} Player{'s' if adding != 1 else ''}",
+                                 style=discord.ButtonStyle.success, disabled=adding == 0)
+        conf.callback = self.confirm_cb
+        self.add_item(conf)
+        cancel = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.danger)
+        cancel.callback = self.cancel_cb
+        self.add_item(cancel)
+
+    async def interaction_check(self, interaction: discord.Interaction):
+        if interaction.user.id != ADMIN_DISCORD_ID:
+            await interaction.response.send_message("❌ Owner only.", ephemeral=True)
+            return False
+        return True
+
+    async def _refresh(self, interaction):
+        self.update_ui()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    async def toggle_cb(self, interaction: discord.Interaction):
+        for name in interaction.data["values"]:
+            if name in self.skipped:
+                self.skipped.discard(name)
+            else:
+                self.skipped.add(name)
+        await self._refresh(interaction)
+
+    async def prev_cb(self, interaction: discord.Interaction):
+        self.page = max(0, self.page - 1)
+        await self._refresh(interaction)
+
+    async def next_cb(self, interaction: discord.Interaction):
+        self.page = min(self.pages - 1, self.page + 1)
+        await self._refresh(interaction)
+
+    async def confirm_cb(self, interaction: discord.Interaction):
+        if self._done:
+            return
+        self._done = True
+        self.stop()
+        chosen = [p for p in self.players if p["name"] not in self.skipped]
+        added = add_players_bulk(chosen)
+        skipped_n = len(self.players) - len(chosen)
+        msg = f"✅ Sync complete! Added **{added}** new players."
+        if skipped_n:
+            msg += f" Skipped **{skipped_n}** (deselected)."
+        await interaction.response.edit_message(content=msg, embed=None, view=None)
+        if added > 0:
+            await log_db_update("CSV Sync", "Batch Import", self.ctx.author,
+                                f"Added {added} new players from CSV ({skipped_n} deselected).")
+
+    async def cancel_cb(self, interaction: discord.Interaction):
+        if self._done:
+            return
+        self._done = True
+        self.stop()
+        await interaction.response.edit_message(content="❌ CSV sync cancelled — no players added.", embed=None, view=None)
+
+    async def on_timeout(self):
+        if self._done:
+            return
+        self._done = True
+        try:
+            await self.message.edit(content="⏳ CSV sync confirmation timed out — no players added.", embed=None, view=None)
+        except Exception:
+            pass
+
+
 class PrefixCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -9208,7 +9333,7 @@ class PrefixCog(commands.Cog):
 
     # ── DRAFT MODE (blind, knowledge-based) ──────────────────────────────────
     @commands.group(name="draft", invoke_without_command=True,
-                    help="Blind player draft → interactive match. Ratings hidden; answer by typing a name.\nUsage: draft [@opponent]   (no opponent = vs AI)   ·   draft lb")
+                    help="Blind player draft → interactive match. Answer by typing a name.\nUsage: draft [@opponent]   (no opponent = vs AI)   ·   draft lb")
     async def draft(self, ctx, opponent: discord.Member = None):
         if not ctx.guild:
             return await ctx.send("❌ Use draft inside a server.")
@@ -9325,7 +9450,7 @@ class PrefixCog(commands.Cog):
                 f"🎲 **DRAFT — {host_team} vs {opp_team}**\n"
                 f"🪙 Toss won by **{first_team}** — they answer first each round.\n"
                 f"📋 **{dm.NUM_ROUNDS} rounds**, same question both answer · pick by **typing a player's name** · "
-                f"**ratings hidden** — pure cricket knowledge. Build a balanced XI!"
+                f"**pure cricket knowledge** — build a balanced XI!"
             )
 
             taken, host_xi, opp_xi = set(), [], []
@@ -9383,7 +9508,7 @@ class PrefixCog(commands.Cog):
             active_drafts.discard(channel.id)
             draft_tasks.pop(channel.id, None)
 
-    @commands.command(name="playerlist", aliases=["pl"], help="Download full player database grouped by tier (no ratings).\nUsage: playerlist")
+    @commands.command(name="playerlist", aliases=["pl"], help="Download full player database grouped by tier.\nUsage: playerlist")
     async def playerlist(self, ctx):
         players = get_all_players()
         if not players:
@@ -9392,11 +9517,11 @@ class PrefixCog(commands.Cog):
         buf = io.BytesIO(txt.encode("utf-8"))
         buf.seek(0)
         await ctx.send(
-            f"📋 **Player Database** — {len(players)} players across 4 tiers.\nRatings are hidden. Players within each tier are shuffled.",
+            f"📋 **Player Database** — {len(players)} players across 4 tiers.\nPlayers within each tier are shuffled.",
             file=discord.File(fp=buf, filename="cricverse_players.txt")
         )
 
-    @commands.command(name="playerlistcompact", aliases=["pla"], help="Download full player database grouped by tier, names comma-separated (no ratings).\nUsage: pla")
+    @commands.command(name="playerlistcompact", aliases=["pla"], help="Download full player database grouped by tier, names comma-separated.\nUsage: pla")
     async def playerlistcompact(self, ctx):
         players = get_all_players()
         if not players:
@@ -9405,7 +9530,7 @@ class PrefixCog(commands.Cog):
         buf = io.BytesIO(txt.encode("utf-8"))
         buf.seek(0)
         await ctx.send(
-            f"📋 **Player Database (compact)** — {len(players)} players across 4 tiers.\nRatings are hidden. Players within each tier are shuffled, comma-separated.",
+            f"📋 **Player Database (compact)** — {len(players)} players across 4 tiers.\nPlayers within each tier are shuffled, comma-separated.",
             file=discord.File(fp=buf, filename="cricverse_players_compact.txt")
         )
 
@@ -10423,30 +10548,34 @@ class PrefixCog(commands.Cog):
         ok, msg = save_uploaded_archive(raw)
         await ctx.send(msg)
 
-    @commands.command(name="sync_csv", aliases=["scsv"], help="[OWNER] Sync players from players_master.csv to DB.\nUsage: sync_csv")
+    @commands.command(name="sync_csv", aliases=["scsv"], help="[OWNER] Sync players from players_master.csv to DB.\nShows the new players first — toggle off any you don't want, then confirm.\nUsage: sync_csv")
     async def sync_csv(self, ctx):
         if ctx.author.id != ADMIN_DISCORD_ID:
             return await ctx.send("❌ Owner only.")
         if not os.path.exists("players_master.csv"):
             return await ctx.send("❌ `players_master.csv` not found.")
         try:
-            new_players = []
+            existing = {p["name"].lower() for p in get_all_players()}
+            new_players, seen = [], set()
             with open("players_master.csv", "r", encoding="utf-8-sig") as f:
                 reader = csv.DictReader(f)
                 for row in reader:
+                    name = row["Name"].strip()
+                    key = name.lower()
+                    if key in existing or key in seen:
+                        continue
+                    seen.add(key)
                     new_players.append({
-                        "name": row["Name"].strip(),
+                        "name": name,
                         "bat": int(row["Bat"]),
                         "bowl": int(row["Bowl"]),
                         "role": row["Role"].strip(),
                         "archetype": row["Archetype"].strip()
                     })
-            added_count = add_players_bulk(new_players)
-            if added_count > 0:
-                await ctx.send(f"✅ Sync complete! Added **{added_count}** new players.")
-                await log_db_update("CSV Sync", "Batch Import", ctx.author, f"Added {added_count} new players from CSV.")
-            else:
-                await ctx.send("✅ Sync complete! No new players found (database already up to date).")
+            if not new_players:
+                return await ctx.send("✅ Sync complete! No new players found (database already up to date).")
+            view = CSVSyncConfirmView(ctx, new_players)
+            view.message = await ctx.send(embed=view.build_embed(), view=view)
         except Exception as e:
             await ctx.send(f"❌ Error during sync: {e}")
 
@@ -12517,6 +12646,38 @@ class PrefixCog(commands.Cog):
         
         await ctx.send(f"🔥 **Knockout Stage Set!**\n**Semi-Final 1:** {top4[0]} vs {top4[3]}\n**Semi-Final 2:** {top4[1]} vs {top4[2]}\n\nUse `cv tournament play_next` to begin!")
 
+    @tournament.command(name="generate_finals", aliases=["gf", "finals"], help="[MANAGER] Generate the Final for the Top 2 teams. (Double Round Robin only)\nUsage: tournament generate_finals")
+    async def t_generate_finals(self, ctx):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (tourney and str(ctx.author.id) in tourney.get("managers", []))
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        if tourney["status"] != "active": return await ctx.send("❌ Tournament is not active.")
+        if tourney.get("tournament_type") != "double_round_robin":
+            return await ctx.send("❌ This command is for **Double Round Robin** tournaments only. Use `cvt generate_knockouts` for Round Robin, or `cvt generate_playoffs` for ACL/DSL.")
+
+        gs_matches = [m for m in tourney["schedule"] if isinstance(m.get("round"), int)]
+        if any(m["status"] == "pending" for m in gs_matches):
+            return await ctx.send("❌ Cannot generate the Final until all league matches are completed.")
+
+        if any(not isinstance(m.get("round"), int) for m in tourney["schedule"]):
+            return await ctx.send("❌ The Final has already been generated.")
+
+        standings = get_tournament_standings(tourney)
+        real_teams = [t[0] for t in standings if t[0] != "BYE"]
+
+        if len(real_teams) < 2:
+            return await ctx.send("❌ Need at least 2 teams to play a Final.")
+
+        top2 = real_teams[:2]
+
+        final = {"match_id": _tm_next_mid(tourney), "round": "Final", "stage": "knockout", "team1": top2[0], "team2": top2[1], "status": "pending", "result": None}
+        tourney["schedule"].append(final)
+        save_tournament(tourney)
+
+        await ctx.send(f"🏆 **The Final is Set!**\n**{top2[0]}** (1st) vs **{top2[1]}** (2nd)\n\nUse `cv tournament play_next` to begin!")
+
     @tournament.command(name="generate_playoffs", aliases=["gp", "playoffs"], help="[MANAGER] Generate the Playoffs (ACL Top-6 / DSL Top-4).\nUsage: tournament generate_playoffs")
     async def t_generate_playoffs(self, ctx):
         server_id = str(ctx.guild.id)
@@ -12719,7 +12880,7 @@ class PrefixCog(commands.Cog):
         save_tournament(tourney)
         await pm.edit(content=summary + "\n\n✅ **Trade complete!** Squads updated.", view=None)
 
-    @tournament.command(name="boost", help="[OWNER] Spend credits to boost a squad player's bat/bowl (+1).\nUsage: tournament boost \"<player>\" <bat|bowl>")
+    @tournament.command(name="boost", help="[OWNER] Spend credits to boost a squad player's bat/bowl.\nUsage: tournament boost \"<player>\" <bat|bowl>")
     async def t_boost(self, ctx, player_name: str, skill: str):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
@@ -14627,7 +14788,7 @@ class PrefixCog(commands.Cog):
             value=("**1.** `cvt create \"League S1\" t20 event=double_rr`\n"
                    "**2.** `cvt add_team \"<team>\" @owner` for every team · owners `cvt ss`\n"
                    "**3.** `cvt start` → everyone plays everyone twice, once each way\n"
-                   "**4.** after league matches: mgr `cvt generate_knockouts` for Top-4 semis"),
+                   "**4.** after league matches: mgr `cvt generate_knockouts` for Top-4 semis, **or** `cvt gf` for a direct Top-2 Final"),
             inline=False,
         )
         qs.add_field(
@@ -14692,13 +14853,14 @@ class PrefixCog(commands.Cog):
             value=("`challenge`/`vs \"<team>\"` — play anyone, anytime\n"
                    "`ratings`/`ladder`/`elo` — the Elo ladder\n"
                    "`trade \"<team>\" | mine | theirs` — owners + mgr confirm\n"
-                   "`boost \"<player>\" bat|bowl` — spend credits (+1) · `credits`/`cr [team]` · `boosts [team]`\n"
+                   "`boost \"<player>\" bat|bowl` — spend credits · `credits`/`cr [team]` · `boosts [team]`\n"
                    "`end_league` — [MGR] close the season → Top-4 playoffs"),
             inline=False,
         )
         ref.add_field(
             name="🔥 Knockouts (Managers)",
             value=("`generate_knockouts` — Semis for Round Robin / Double RR / T20 WC\n"
+                   "`generate_finals`/`gf` — direct Top-2 Final, no semis (Double RR)\n"
                    "`generate_playoffs`/`gp` — ACL Top-6 / DSL Top-4\n"
                    "`bracket`/`br` — the knockout bracket\n"
                    "*(CCODI semis auto-generate once both groups finish.)*"),
