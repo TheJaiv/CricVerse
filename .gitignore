@@ -29,6 +29,10 @@ data/ccpl_backup.json
 match_counts.json
 *.bin
 
+# global player stats live in a local json backed up via owner DMs - never in git
+data/global_stats.json
+data/global_stats.json.tmp
+
 # throwaway preview renders from local test/preview scripts
 summary.png
 scorecard.png

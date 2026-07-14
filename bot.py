@@ -4,6 +4,7 @@ from discord.ext import commands, tasks
 import random
 import re
 import csv
+import signal
 import difflib
 import asyncio
 import io
@@ -68,6 +69,7 @@ from core.subscription_manager import (
     save_custom_team, get_custom_team, delete_custom_team, list_custom_teams,
 )
 from league import draft_mode as dm
+from core import global_stats as gstats
 # Career Mode (LIVE)
 # Launched for everyone after the 2026-07-06 hardcore verification pass (see
 # tools/career_flow_test.py). Career code still loads defensively: any failure
@@ -327,6 +329,14 @@ class CricketBot(commands.Bot):
         print("Slash commands synchronized globally.")
         print("Prefix commands loaded.")
 
+        # Catch Render's SIGTERM so the global stats file can be DM'd out before the
+        # disk is wiped (no-op on platforms without unix signals, e.g. Windows).
+        try:
+            asyncio.get_running_loop().add_signal_handler(
+                signal.SIGTERM, lambda: asyncio.create_task(_stats_shutdown_backup()))
+        except (NotImplementedError, RuntimeError) as e:
+            print(f"SIGTERM stats backup not hooked: {e}")
+
 bot = CricketBot()
 active_games = {}
 active_setups = {}
@@ -347,6 +357,35 @@ async def auto_sync_db():
         try: load_careers()
         except Exception as e: print(f"⚠️ load_careers failed (ignored): {e}")
 
+@tasks.loop(hours=6)
+async def global_stats_backup():
+    """Crash safety net for the SIGTERM backup: if the process dies without a graceful
+    shutdown (hard kill / crash), the owner still has a DM'd copy at most 6h old."""
+    if not gstats.is_dirty():
+        return
+    try:
+        owner = await bot.fetch_user(ADMIN_DISCORD_ID)
+        await owner.send(f"🗃️ Periodic global stats backup — **{gstats.player_count()}** players:",
+                         file=discord.File(gstats.flush_to_disk(), filename="global_stats.json"))
+        gstats.clear_dirty()
+    except Exception as e:
+        print(f"Periodic stats backup failed: {e}")
+
+async def _stats_shutdown_backup():
+    """Render sends SIGTERM ~30s before killing the process (deploy/restart/spin-down).
+    The local disk is wiped, so the stats file gets DM'd out while the gateway is
+    still connected; the owner re-uploads it with `cv importstats` after the restart."""
+    try:
+        if gstats.is_dirty() and gstats.player_count():
+            owner = await bot.fetch_user(ADMIN_DISCORD_ID)
+            await owner.send("⚠️ **Bot is restarting** — restore with `cv importstats` once it's back:",
+                             file=discord.File(gstats.flush_to_disk(), filename="global_stats.json"))
+            gstats.clear_dirty()
+    except Exception as e:
+        print(f"Shutdown stats backup failed: {e}")
+    finally:
+        await bot.close()
+
 @bot.event
 async def on_ready():
     print(f"Logged in successfully as {bot.user.name}")
@@ -357,6 +396,8 @@ async def on_ready():
         except Exception as e: print(f"⚠️ load_careers failed (ignored): {e}")
     if not auto_sync_db.is_running():
         auto_sync_db.start()
+    if not global_stats_backup.is_running():
+        global_stats_backup.start()
     print("Memory Cache Loaded and Ready.")
 # ---- Core data structures & fallbacks ----
 
@@ -907,6 +948,12 @@ def _run_full_match_sync(match: CricketMatch):
             _sim_super_over(match)
         except Exception as _so_err:
             print(f"Sim super over failed, leaving tie for fallback: {_so_err}")
+
+    # Headless sims never reach handle_innings_end, so global stats are folded in here.
+    try:
+        gstats.record_limited_overs_match(match)
+    except Exception as _gs_err:
+        print(f"Global stats record failed (sim): {_gs_err}")
 
 
 def _sim_super_over(match: CricketMatch):
@@ -3650,6 +3697,10 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
                 and not getattr(match_to_finalize, 'is_player_test', False)):
             _base = getattr(match_to_finalize, 'original_format_overs', match_to_finalize.format_overs)
             _increment_match_count("odi" if _base == 50 else "t20")
+            try:
+                gstats.record_limited_overs_match(match_to_finalize)
+            except Exception as _gs_err:
+                print(f"Global stats record failed: {_gs_err}")
 
         # At a Super Over's end, show the SUPER OVER's own summary (the main-match scoreboard was
         # already shown when scores tied). A normal match shows itself. Result recording below
@@ -6924,6 +6975,10 @@ async def _test_finish_match(match: TestMatchObj, channel_id: int, channel):
     """Post a Test result, advancing the counter unless this is a player test."""
     if not getattr(match, "is_player_test", False):
         _increment_match_count("test")
+        try:
+            gstats.record_test_match(match)
+        except Exception as _gs_err:
+            print(f"Global stats record failed (test): {_gs_err}")
     result_text = match.result or "Match Drawn"
     try:
         file = discord.File(fp=generate_test_summary_image(match), filename="test_summary.png")
@@ -9133,6 +9188,91 @@ class PrefixCog(commands.Cog):
             await ctx.send("🛑 **Match and setup forcefully terminated.** Memory cleared.")
         else:
             await ctx.send("⚠️ There is no active match or setup running in this channel.")
+
+    # ---- Global player stats (local json - see core/global_stats.py) ----
+
+    @commands.command(name="globalstats", aliases=["gstats", "gs"],
+                      help="Global career stats across every real match (testplayer excluded), split by T20/ODI/Test/Custom.\nUsage: globalstats <player> — or no name for the all-format leaderboards.")
+    async def globalstats(self, ctx, *, player_name: str = None):
+        if not gstats.player_count():
+            return await ctx.send("📭 No global stats recorded yet — finish some matches first!")
+
+        if not player_name:
+            runs = gstats.leaderboard("runs")
+            wkts = gstats.leaderboard("wickets")
+            embed = discord.Embed(title="🌍 Global Player Stats — All Formats", color=discord.Color.gold())
+            embed.add_field(name="🏏 Most Runs",
+                            value="\n".join(f"`{i + 1:>2}.` **{n}** — {v}" for i, (n, v) in enumerate(runs)) or "—",
+                            inline=True)
+            embed.add_field(name="🎯 Most Wickets",
+                            value="\n".join(f"`{i + 1:>2}.` **{n}** — {v}" for i, (n, v) in enumerate(wkts)) or "—",
+                            inline=True)
+            embed.set_footer(text=f"{gstats.player_count()} players tracked · cv globalstats <name> for a player card")
+            return await ctx.send(embed=embed)
+
+        names = gstats.player_names()
+        target = next((n for n in names if n.lower() == player_name.lower()), None)
+        if not target:
+            close = difflib.get_close_matches(player_name, names, n=1, cutoff=0.6)
+            if not close:
+                return await ctx.send(f"❌ No global stats for **{player_name}** yet.")
+            target = close[0]
+
+        p = gstats.player_stats(target)
+        embed = discord.Embed(title=f"🌍 Global Stats — {target}", color=discord.Color.blurple())
+        fmt_labels = {"t20": "T20", "odi": "ODI", "test": "TEST", "custom": "CUSTOM OVERS"}
+        for fmt in gstats.FORMATS:
+            f = p.get(fmt)
+            if not f:
+                continue
+            bat_avg = f"{f['runs'] / f['outs']:.1f}" if f["outs"] else "—"
+            sr = f"{f['runs'] / f['balls'] * 100:.1f}" if f["balls"] else "—"
+            hs = f"{f['hs']}{'*' if f['hs_not_out'] else ''}" if f["bat_innings"] else "—"
+            lines = [
+                f"**Matches:** {f['matches']}",
+                f"🏏 {f['runs']} runs @ {bat_avg} · SR {sr} · HS {hs}",
+                f"50s/100s: {f['fifties']}/{f['hundreds']} · 4s/6s: {f['fours']}/{f['sixes']} · Ducks: {f['ducks']}",
+            ]
+            if f["balls_bowled"]:
+                bowl_avg = f"{f['runs_conceded'] / f['wickets']:.1f}" if f["wickets"] else "—"
+                econ = f"{f['runs_conceded'] / f['balls_bowled'] * 6:.2f}"
+                best = f"{f['best_wkts']}/{f['best_runs']}" if f["best_runs"] >= 0 else "—"
+                overs = f"{f['balls_bowled'] // 6}.{f['balls_bowled'] % 6}"
+                lines.append(f"🎯 {f['wickets']} wkts @ {bowl_avg} · Econ {econ} · Best {best}")
+                extra = f"Overs: {overs} · 5w: {f['five_hauls']}"
+                if fmt == "test":
+                    extra += f" · Maidens: {f['maidens']}"
+                lines.append(extra)
+            embed.add_field(name=f"— {fmt_labels[fmt]} —", value="\n".join(lines), inline=False)
+        await ctx.send(embed=embed)
+
+    @commands.command(name="exportstats", aliases=["exps"],
+                      help="[OWNER] DM yourself the global stats json backup.\nUsage: exportstats")
+    async def exportstats(self, ctx):
+        if ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("❌ Owner only.")
+        if not gstats.player_count():
+            return await ctx.send("📭 Nothing to export yet.")
+        path = gstats.flush_to_disk()
+        try:
+            await ctx.author.send(f"📦 Global stats backup — **{gstats.player_count()}** players:",
+                                  file=discord.File(path, filename="global_stats.json"))
+        except discord.Forbidden:
+            return await ctx.send("❌ Couldn't DM you — check your DM privacy settings.")
+        gstats.clear_dirty()
+        if ctx.guild:
+            await ctx.send("📬 Backup sent to your DMs.")
+
+    @commands.command(name="importstats", aliases=["imps"],
+                      help="[OWNER] Restore global stats from an exported json — REPLACES everything currently tracked.\nUsage: importstats (attach global_stats.json to the message)")
+    async def importstats(self, ctx):
+        if ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("❌ Owner only.")
+        if not ctx.message.attachments:
+            return await ctx.send("❌ Attach the exported `global_stats.json` to the command message.")
+        raw = await ctx.message.attachments[0].read()
+        ok, msg = gstats.import_raw(raw)
+        await ctx.send(f"✅ {msg}." if ok else f"❌ {msg}.")
 
     @commands.command(name="testplayer", aliases=["tp", "playertest", "test_player"],
                       help="Test up to 22 players in a live match. 1-11: they join a balanced XI vs a Weak/Balanced/Tough net side. 12-22: split into two even Test XIs that play each other. Engine picks the batting order — add a number after a name (\"Virat Kohli 3\") to pin their spot.\nUsage: testplayer")
