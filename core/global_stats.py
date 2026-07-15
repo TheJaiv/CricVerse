@@ -23,14 +23,15 @@ _dirty = False             # something recorded since the last owner backup DM
 
 def _blank():
     return {
-        "matches": 0,
+        "matches": 0,   # only matches where the player actually batted or bowled
         # batting
         "bat_innings": 0, "runs": 0, "balls": 0, "outs": 0,
-        "fours": 0, "sixes": 0, "hs": 0, "hs_not_out": False,
+        "fours": 0, "sixes": 0, "hs": 0, "hs_balls": 0, "hs_not_out": False,
         "fifties": 0, "hundreds": 0, "ducks": 0,
         # bowling (maidens only tracked by the test engine)
         "bowl_innings": 0, "balls_bowled": 0, "runs_conceded": 0,
-        "wickets": 0, "maidens": 0, "best_wkts": 0, "best_runs": -1, "five_hauls": 0,
+        "wickets": 0, "maidens": 0, "best_wkts": 0, "best_runs": -1,
+        "three_hauls": 0, "five_hauls": 0, "hattricks": 0,
     }
 
 
@@ -75,13 +76,13 @@ def format_key(match):
 
 
 def _apply_innings(innings, fmt, played):
-    """Fold one innings' batting + bowling cards into the totals.
-    `played` collects everyone in either XI so match counts include non-batting fielders."""
+    """Fold one innings' batting + bowling cards into the totals. `played` collects
+    only players who actually batted or bowled - fielding-only XIs don't get a match."""
     for name, bs in innings.batting_stats.items():
-        played.add(name)
         out = bs.dismissal != "not out"
         if bs.balls_faced == 0 and bs.runs_scored == 0 and not out:
             continue   # did not bat
+        played.add(name)
         b = _bucket(name, fmt)
         b["bat_innings"] += 1
         b["runs"] += bs.runs_scored
@@ -100,18 +101,22 @@ def _apply_innings(innings, fmt, played):
         if (bs.runs_scored > b["hs"]
                 or (bs.runs_scored == b["hs"] and not out and not b["hs_not_out"])):
             b["hs"] = bs.runs_scored
+            b["hs_balls"] = bs.balls_faced
             b["hs_not_out"] = not out
 
     for name, ws in innings.bowling_stats.items():
-        played.add(name)
         if ws.balls_bowled == 0:
             continue
+        played.add(name)
         b = _bucket(name, fmt)
         b["bowl_innings"] += 1
         b["balls_bowled"] += ws.balls_bowled
         b["runs_conceded"] += ws.runs_conceded
         b["wickets"] += ws.wickets_taken
         b["maidens"] += getattr(ws, "maidens", 0)
+        b["hattricks"] += getattr(ws, "hattricks", 0)
+        if ws.wickets_taken >= 3:
+            b["three_hauls"] += 1
         if ws.wickets_taken >= 5:
             b["five_hauls"] += 1
         # best_runs -1 means "no best yet"; more wickets wins, fewer runs breaks ties
@@ -174,7 +179,7 @@ def player_stats(name):
 
 
 # hs/best figures aren't summable - they take the best across formats instead
-_NON_SUM_KEYS = ("hs", "hs_not_out", "best_wkts", "best_runs")
+_NON_SUM_KEYS = ("hs", "hs_balls", "hs_not_out", "best_wkts", "best_runs")
 
 def combined_totals():
     """Per-player counters summed across all formats, for the all-format leaderboards."""
@@ -189,6 +194,7 @@ def combined_totals():
                 if (f.get("hs", 0) > t["hs"]
                         or (f.get("hs", 0) == t["hs"] and f.get("hs_not_out") and not t["hs_not_out"])):
                     t["hs"], t["hs_not_out"] = f.get("hs", 0), f.get("hs_not_out", False)
+                    t["hs_balls"] = f.get("hs_balls", 0)
                 fbr = f.get("best_runs", -1)
                 if fbr >= 0 and (t["best_runs"] < 0
                                  or f["best_wkts"] > t["best_wkts"]

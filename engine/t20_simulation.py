@@ -1218,6 +1218,11 @@ def execute_ball_math_t20(match):
     innings.last_ball_boundary = False
     outcome_text = ""
 
+    # hat-trick bookkeeping: the streak only survives this ball if it's a
+    # bowler-credited wicket (run outs and denied no-ball wickets break it)
+    _hat_prev = getattr(bow_stats, "hat_streak", 0)
+    bow_stats.hat_streak = 0
+
     if outcome == "wicket":
         innings.wickets += 1
         innings.partnership_runs = 0
@@ -1261,6 +1266,9 @@ def execute_ball_math_t20(match):
                 b_stats.dismissal = f"c. {fielder} b. {bowler['name']}"
 
             bow_stats.wickets_taken += 1
+            bow_stats.hat_streak = _hat_prev + 1
+            if bow_stats.hat_streak >= 3:
+                bow_stats.hattricks = getattr(bow_stats, "hattricks", 0) + 1
         innings.over_log.append("<:wicket:1520143043683156051>")
         outcome_text = f"WICKET! ({dismissal_type.upper()})"
         

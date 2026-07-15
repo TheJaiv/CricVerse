@@ -1101,6 +1101,11 @@ def execute_ball_math_odi(match):
     b_stats.balls_faced += 1
     outcome_text = ""
 
+    # hat-trick bookkeeping: the streak only survives this ball if it's a
+    # bowler-credited wicket (run outs and denied no-ball wickets break it)
+    _hat_prev = getattr(bow_stats, "hat_streak", 0)
+    bow_stats.hat_streak = 0
+
     if outcome == "wicket":
         innings.wickets += 1
         innings.partnership_runs = 0
@@ -1143,6 +1148,9 @@ def execute_ball_math_odi(match):
                 b_stats.dismissal = f"c. {fielder} b. {bowler['name']}"
 
             bow_stats.wickets_taken += 1
+            bow_stats.hat_streak = _hat_prev + 1
+            if bow_stats.hat_streak >= 3:
+                bow_stats.hattricks = getattr(bow_stats, "hattricks", 0) + 1
         innings.over_log.append("<:wicket:1520143043683156051>")
         match.prev_striker_idx = innings.current_striker_idx
         if dismissal_type in ["LBW", "Caught Behind"] and match.simulation_mode == "interactive":

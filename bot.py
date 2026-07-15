@@ -5360,6 +5360,10 @@ class MatchSetupState:
         self.t2_captain = None
         self.pitch = "Flat"
         self.weather = "Clear"
+        # The toss now runs BEFORE the XIs are entered, so its result lives on the
+        # setup state until the match object is built. winner None = AI opponent.
+        self.toss_winner_id = None
+        self.toss_choice = None      # "Bat" / "Bowl"
         self.tournament_name = "TOURNAMENT"
         self.home_team_id = p1_id
         self.sim_only = False
@@ -5609,7 +5613,7 @@ class FormatSelectView(discord.ui.View):
                 label = {"50": "ODI (50 overs)", "90": "Test (5 Days · 4 Innings)"}.get(val, f"{val} overs")
                 await interaction.edit_original_response(content=f"✅ Format set: **{label}**", view=None)
                 if getattr(self.state, "tournament_server_id", None):
-                    await prompt_tournament_xi(self.channel, self.state, 1)
+                    await proceed_to_conditions(self.channel, self.state)
                 else:
                     await ask_team1_name(self.channel, self.state)
 
@@ -5637,7 +5641,7 @@ class CustomOversModal(discord.ui.Modal, title="Custom Over Count"):
     
         await interaction.edit_original_response(content=f"✅ Format set: **Custom ({val} overs)**", view=None)
         if getattr(self.state, "tournament_server_id", None):
-            await prompt_tournament_xi(self.channel, self.state, 1)
+            await proceed_to_conditions(self.channel, self.state)
         else:
             await ask_team1_name(self.channel, self.state)
 
@@ -5654,7 +5658,7 @@ class ImpactPlayerView(discord.ui.View):
         self.state.impact_player = True
         
         await interaction.response.edit_message(content="✅ **Impact Player rule enabled!**", view=None)
-        if getattr(self.state, "tournament_server_id", None): await prompt_tournament_xi(self.channel, self.state, 1)
+        if getattr(self.state, "tournament_server_id", None): await proceed_to_conditions(self.channel, self.state)
         else: await ask_team1_name(self.channel, self.state)
     @discord.ui.button(label="No (Standard 11)", style=discord.ButtonStyle.secondary)
     async def btn_no(self, interaction, button):
@@ -5662,10 +5666,12 @@ class ImpactPlayerView(discord.ui.View):
         self.state.impact_player = False
         # FIX: Atomic edit
         await interaction.response.edit_message(content="✅ Standard rules applied.", view=None)
-        if getattr(self.state, "tournament_server_id", None): await prompt_tournament_xi(self.channel, self.state, 1)
+        if getattr(self.state, "tournament_server_id", None): await proceed_to_conditions(self.channel, self.state)
         else: await ask_team1_name(self.channel, self.state)
 
-# Step 2: Chat-Based Roster Collection Prompts
+# Step 2: Chat-Based Team Name / XI Prompts
+# (Setup order: names -> pitch & weather -> toss -> XIs, so captains can shape
+#  their 11 around the toss result and conditions.)
 
 async def ask_team1_name(channel, state):
     await channel.send(f"🏏 <@{state.p1_id}> — Type your **team name** (e.g. `India`):\n*(Reply directly in this channel)*")
@@ -5699,7 +5705,7 @@ async def ask_team2_xi(channel, state):
     active_setups[channel.id] = ("awaiting_team2_xi", state)
 
 
-# Step 3: XI Verification UI
+# Step 5: XI Verification UI (the XIs are the LAST setup step, after the toss)
 
 def _role_short(p):
     return (p.get("role") or "").replace("All-Rounder", "AR").replace("Bowler", "BWL").replace("Batter", "BAT").replace("_", " ")
@@ -5778,7 +5784,7 @@ class Team1VerifyView(discord.ui.View):
         await interaction.response.defer()
         await interaction.message.edit(view=None)
         await self.channel.send("✅ **Team 1 XI confirmed!**")
-        await handle_captain_step(self.channel, self.state, 1, self.players, ask_team2_name)
+        await handle_captain_step(self.channel, self.state, 1, self.players, after_team1_xi)
     @discord.ui.button(label="✏️ Re-enter XI", style=discord.ButtonStyle.danger)
     async def redo(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.state.p1_id: return
@@ -5802,7 +5808,7 @@ class Team2VerifyView(discord.ui.View):
         await interaction.response.defer()
         await interaction.message.edit(view=None)
         await self.channel.send("✅ **Team 2 XI confirmed!**")
-        await handle_captain_step(self.channel, self.state, 2, self.players, ask_pitch_and_weather)
+        await handle_captain_step(self.channel, self.state, 2, self.players, start_match)
     @discord.ui.button(label="✏️ Re-enter XI", style=discord.ButtonStyle.danger)
     async def redo(self, interaction: discord.Interaction, button: discord.ui.Button):
         target_id = self.state.p2_id if self.state.p2_id else self.state.p1_id
@@ -5838,7 +5844,7 @@ async def prompt_tournament_xi(channel, state, team_num):
             elif team_num == 1:
                 await prompt_tournament_xi(ch, st, 2)
             else:
-                await proceed_to_conditions(ch, st)
+                await start_match(ch, st)
 
         locked = f"✅ **{t_name} XI locked** ({via}):\n" + format_xi_display(xi)
         if subs:
@@ -6026,10 +6032,10 @@ class TournamentSubSelectView(discord.ui.View):
             await prompt_tournament_xi(self.channel, self.state, 2)
         else:
             self.state.t2_subs = self.selected_subs
-            await proceed_to_conditions(self.channel, self.state)
+            await start_match(self.channel, self.state)
 
 
-# Step 4: Pitch & Weather Select
+# Step 3: Pitch & Weather Select
 
 async def ask_pitch_and_weather(channel, state):
     await channel.send(f"🏟️ <@{state.home_team_id}> (**{state.t1_name}** — Home Team) — Select **Pitch & Weather** conditions:", view=PitchWeatherView(state, channel))
@@ -6039,7 +6045,7 @@ async def proceed_to_conditions(channel, state):
     picker and go straight to the toss. Manual mode (and casual/draft) still asks."""
     if getattr(state, "conditions_preset", False) and getattr(state, "pitch", None) and getattr(state, "weather", None):
         await channel.send(f"🏟️ **Pitch:** {state.pitch}  ·  🌤️ **Weather:** {state.weather}\n\nProceeding to the **toss**...")
-        await begin_toss(channel, state)
+        await begin_pre_toss(channel, state)
     else:
         await ask_pitch_and_weather(channel, state)
 
@@ -6125,12 +6131,99 @@ class PitchWeatherView(discord.ui.View):
         note = " *(DLS rules active)*" if self.state.weather == "Rain Threat" else ""
         ball_txt = "  ·  <:pink:1518481735266996255> **Pink Ball (Day-Night)**" if self.s_pink else ("  ·  🔴 Red Ball" if self._is_test else "")
         await self.channel.send(f"✅ Pitch: **{self.s_pitch}** | Weather: **{self.s_weather}**{ball_txt}{note}\n\nProceeding to the **toss**...")
-        await begin_toss(self.channel, self.state)
+        await begin_pre_toss(self.channel, self.state)
 
 
-# Step 5: Toss Engine
+# Step 4: Toss Engine (runs BEFORE the XIs so captains can shape their 11 around it)
 
-async def begin_toss(channel, state):
+async def begin_pre_toss(channel, state):
+    """Interactive toss on the setup state. The result (winner + Bat/Bowl choice)
+    is stored on the state; start_match applies it once the XIs are locked."""
+    if getattr(state, 'sim_only', False):
+        # /simulatematch rolls its own toss at sim time - nothing to ask here.
+        return await continue_to_xi(channel, state)
+    if state.p2_id is None:
+        # vs AI: auto coin flip, the human only decides if they win it
+        if random.choice([True, False]):
+            state.toss_winner_id = state.p1_id
+            await channel.send(f"🪙 **Toss!** You won the toss, <@{state.p1_id}>. Select your decision:", view=PreTossDecisionView(state, channel))
+        else:
+            state.toss_winner_id = None   # AI (team 2) won
+            state.toss_choice = random.choice(["Bat", "Bowl"])
+            await channel.send(f"🪙 **Toss!** AI wins and elects to **{state.toss_choice} First**!")
+            await continue_to_xi(channel, state)
+    else:
+        await channel.send(f"🪙 **Toss Time!** <@{state.p2_id}> — call the coin!", view=PreTossCallView(state, channel))
+
+
+class PreTossCallView(discord.ui.View):
+    """Pre-XI toss: the opponent calls the coin while both XIs are still open."""
+    def __init__(self, state, channel):
+        super().__init__(timeout=300)
+        self.state = state
+        self.channel = channel
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await _setup_cancelled_check(self)(interaction)
+    async def handle_call(self, interaction, call):
+        if interaction.user.id != self.state.p2_id and interaction.user.id != getattr(self.state, "manager_id", None): return
+        flip = random.choice(["Heads", "Tails"])
+        self.state.toss_winner_id = self.state.p2_id if call == flip else self.state.p1_id
+        await interaction.response.defer()
+        await interaction.message.edit(view=None)
+        await interaction.channel.send(f"🪙 Landed on **{flip}**! <@{self.state.toss_winner_id}> wins the toss — choose:", view=PreTossDecisionView(self.state, self.channel))
+    @discord.ui.button(label="Heads", style=discord.ButtonStyle.primary)
+    async def heads(self, interaction, button): await self.handle_call(interaction, "Heads")
+    @discord.ui.button(label="Tails", style=discord.ButtonStyle.secondary)
+    async def tails(self, interaction, button): await self.handle_call(interaction, "Tails")
+
+
+class PreTossDecisionView(discord.ui.View):
+    """Toss winner picks Bat/Bowl; the XIs are entered after this."""
+    def __init__(self, state, channel):
+        super().__init__(timeout=300)
+        self.state = state
+        self.channel = channel
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not await _setup_cancelled_check(self)(interaction):
+            return False
+        if interaction.user.id != self.state.toss_winner_id and interaction.user.id != getattr(self.state, "manager_id", None):
+            await interaction.response.send_message("Not your turn.", ephemeral=True)
+            return False
+        return True
+    async def finalize_toss(self, interaction, choice):
+        self.state.toss_choice = choice
+        await interaction.response.defer()
+        await interaction.message.edit(view=None)
+        win_name = self.state.t1_name if self.state.toss_winner_id == self.state.p1_id else self.state.t2_name
+        await self.channel.send(f"🪙 **{win_name}** win the toss and elect to **{choice.lower()} first**!")
+        await continue_to_xi(self.channel, self.state)
+    @discord.ui.button(label="🏏 Bat First", style=discord.ButtonStyle.success)
+    async def bat(self, interaction, button): await self.finalize_toss(interaction, "Bat")
+    @discord.ui.button(label="🎯 Bowl First", style=discord.ButtonStyle.danger)
+    async def bowl(self, interaction, button): await self.finalize_toss(interaction, "Bowl")
+
+
+async def continue_to_xi(channel, state):
+    """After the toss: collect the XIs - or start straight away if they're already
+    locked (draft and player-test matches hand their rosters in pre-made)."""
+    if state.t1_roster and state.t2_roster:
+        return await start_match(channel, state)
+    if getattr(state, "tournament_server_id", None):
+        return await prompt_tournament_xi(channel, state, 1)
+    await ask_team1_xi(channel, state)
+
+
+async def after_team1_xi(channel, state):
+    """Continuation once Team 1's XI + captain are locked. An AI opponent's roster
+    was preset at the name step, so the match can start immediately."""
+    if state.t2_roster:
+        return await start_match(channel, state)
+    await ask_team2_xi(channel, state)
+
+
+# Final step: build the match object and start play (the toss already ran pre-XI)
+
+async def start_match(channel, state):
     # Test format (90 overs) uses a completely different simulation engine
     if state.format_overs == 90:
         return await _begin_test_match(channel, state)
@@ -6156,7 +6249,7 @@ async def begin_toss(channel, state):
         match.draft_opp_name = state.draft_opp_name
         match.draft_host_team = state.t1_name        # team1 is always the host
     active_games[channel.id] = match
-    # Setup is done - hand the cancellation baton to active_games (toss views guard on it).
+    # Setup is done - hand the cancellation baton to active_games (play views guard on it).
     setup_states.pop(channel.id, None)
 
     if getattr(state, 'sim_only', False):
@@ -6185,20 +6278,14 @@ async def begin_toss(channel, state):
         await loop_entire_match_simulation(channel, match)
         return
 
-    if match.is_ai_game:
-        if random.choice([True, False]):
-            match.toss_winner = match.p1_id
-            await channel.send(f"🪙 **Toss!** You won the toss, <@{match.p1_id}>. Select your decision:", view=TossDecisionView(match))
-        else:
-            ai_choice = random.choice(["Bat", "Bowl"])
-            await channel.send(f"🪙 **Toss!** AI wins and elects to **{ai_choice} First**!")
-            match.batting_first_id = match.p2_id if ai_choice == "Bat" else match.p1_id
-            match.bowling_first_id = match.p1_id if ai_choice == "Bat" else match.p2_id
-            match.innings1 = InningsState(match.team2 if ai_choice == "Bat" else match.team1, match.team1 if ai_choice == "Bat" else match.team2)
-            match.current_innings = match.innings1
-            await prompt_bowler_then_hub(channel, match)
-    else:
-        await channel.send(f"🪙 **Toss Time!** <@{match.p2_id}> — call the coin!", view=TossCallView(match))
+    # Apply the pre-XI toss result (winner None = the AI side, team 2).
+    match.toss_winner = state.toss_winner_id
+    apply_toss_decision(match, state.toss_choice)
+    win_name = match.team1["name"] if state.toss_winner_id == match.p1_id else match.team2["name"]
+    lose_name = match.team2["name"] if state.toss_winner_id == match.p1_id else match.team1["name"]
+    bat_name = win_name if state.toss_choice == "Bat" else lose_name
+    await channel.send(f"🪙 Toss recap: **{win_name}** chose to **{state.toss_choice.lower()} first** — **{bat_name}** will bat. Let's play!")
+    await prompt_bowler_then_hub(channel, match)
 
 class TossCallView(discord.ui.View):
     def __init__(self, match):
@@ -6287,7 +6374,7 @@ async def on_message(message: discord.Message):
         state.t1_name = message.content.strip()[:30]
         del active_setups[channel_id]
         await message.channel.send(f"✅ Team 1 name set: **{state.t1_name}**")
-        await ask_team1_xi(message.channel, state)
+        await ask_team2_name(message.channel, state)
 
     elif stage == "awaiting_team1_xi":
         if message.author.id != state.p1_id: return
@@ -6352,9 +6439,9 @@ async def on_message(message: discord.Message):
             else:
                 state.t2_subs = []
             await message.channel.send(f"🤖 AI team **{state.t2_name}** will use the built-in roster.")
-            await ask_pitch_and_weather(message.channel, state)
+            await proceed_to_conditions(message.channel, state)
         else:
-            await ask_team2_xi(message.channel, state)
+            await proceed_to_conditions(message.channel, state)
 
     elif stage == "awaiting_team2_xi":
         target_id = state.p2_id if state.p2_id else state.p1_id
@@ -7760,79 +7847,8 @@ class TestDeclareConfirmView(discord.ui.View):
         self.stop()
 
 
-# Test match toss views
-
-class TestTossCallView(discord.ui.View):
-    """P2 calls heads/tails for the Test match toss."""
-    def __init__(self, state, channel):
-        super().__init__(timeout=120)
-        self.state   = state
-        self.channel = channel
-
-    async def _call(self, interaction: discord.Interaction, call: str):
-        if interaction.user.id != self.state.p2_id:
-            return await interaction.response.send_message("Only the opponent calls the toss.", ephemeral=True)
-        flip = random.choice(["Heads", "Tails"])
-        winner_id = self.state.p2_id if call == flip else self.state.p1_id
-        self.state._test_toss_winner = winner_id
-        await interaction.response.defer()
-        await interaction.message.edit(view=None)
-        await interaction.channel.send(
-            f"🪙 Landed on **{flip}**! <@{winner_id}> wins the toss — choose:",
-            view=TestTossDecisionView(self.state, self.channel))
-
-    @discord.ui.button(label="Heads", style=discord.ButtonStyle.primary)
-    async def heads(self, i, b): await self._call(i, "Heads")
-    @discord.ui.button(label="Tails", style=discord.ButtonStyle.secondary)
-    async def tails(self, i, b): await self._call(i, "Tails")
-
-
-class TestTossDecisionView(discord.ui.View):
-    """Toss winner picks Bat/Bowl for the Test match."""
-    def __init__(self, state, channel):
-        super().__init__(timeout=120)
-        self.state   = state
-        self.channel = channel
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.state._test_toss_winner:
-            await interaction.response.send_message("Only the toss winner can decide.", ephemeral=True)
-            return False
-        return True
-
-    async def _decide(self, interaction: discord.Interaction, choice: str):
-        state = self.state
-        _sid = getattr(state, "tournament_server_id", None) or (str(self.channel.guild.id) if getattr(self.channel, "guild", None) else None)
-        t1 = {"name": state.t1_name, "players": with_captain(apply_server_overrides(state.t1_roster, _sid)), "color": getattr(state, 't1_color', '#1D4ED8')}
-        t2 = {"name": state.t2_name, "players": with_captain(apply_server_overrides(state.t2_roster, _sid)), "color": getattr(state, 't2_color', '#DC2626')}
-        winner_is_p1 = (state._test_toss_winner == state.p1_id)
-        winning_team = t1 if winner_is_p1 else t2
-        losing_team  = t2 if winner_is_p1 else t1
-        t_bat  = winning_team if choice == "Bat" else losing_team
-        t_bowl = losing_team  if choice == "Bat" else winning_team
-
-        match          = TestMatchObj(t_bat, t_bowl, state.pitch, state.weather, pink_ball=getattr(state, "pink_ball", False))
-        match.is_player_test = getattr(state, "is_player_test", False)
-        match.host_id  = state.p1_id
-        match.p2_id    = getattr(state, "p2_id", None)
-        match.host_team = t1            # team identity -> owner (NOT bat/bowl order)
-        match.p2_team   = t2
-        active_test_matches[self.channel.id] = match
-
-        await interaction.response.defer()
-        await interaction.message.edit(view=None)
-        await self.channel.send(
-            f"**{t_bat['name']}** will bat first.\n\nChoose how to simulate:")
-        await self.channel.send(embed=render_test_embed(match), view=TestSimView(match, self.channel.id))
-
-    @discord.ui.button(label="🏏 Bat First", style=discord.ButtonStyle.success)
-    async def bat(self, i, b): await self._decide(i, "Bat")
-    @discord.ui.button(label="🎯 Bowl First", style=discord.ButtonStyle.danger)
-    async def bowl(self, i, b): await self._decide(i, "Bowl")
-
-
 async def _begin_test_match(channel, state):
-    """Branch from begin_toss for Test (format_overs == 90) matches."""
+    """Branch from start_match for Test (format_overs == 90) matches."""
     _sid = getattr(state, "tournament_server_id", None) or (str(channel.guild.id) if getattr(channel, "guild", None) else None)
     t1 = {"name": state.t1_name, "players": with_captain(apply_server_overrides(state.t1_roster, _sid)), "color": getattr(state, 't1_color', '#1D4ED8')}
     t2 = {"name": state.t2_name, "players": with_captain(apply_server_overrides(state.t2_roster, _sid)), "color": getattr(state, 't2_color', '#DC2626')}
@@ -7855,29 +7871,23 @@ async def _begin_test_match(channel, state):
         await _test_finish_match(match, channel.id, channel)
         return
 
-    # AI game: auto-toss, show TestSimView
-    if state.p2_id is None:
-        ai_choice   = random.choice(["Bat", "Bowl"])
-        t_bat  = t2 if ai_choice == "Bat" else t1   # AI is team2
-        t_bowl = t1 if ai_choice == "Bat" else t2
-        await channel.send(
-            f"🪙 **Toss!** AI wins and elects to **{ai_choice}** first! "
-            f"**{t_bat['name']}** will bat.\n\nChoose simulation mode:")
-        match          = TestMatchObj(t_bat, t_bowl, state.pitch, weather)
-        match.is_player_test = getattr(state, "is_player_test", False)
-        match.host_id  = state.p1_id
-        match.p2_id    = getattr(state, "p2_id", None)
-        match.host_team = t1            # host owns team 1; AI owns team 2
-        match.p2_team   = t2
-        active_test_matches[channel.id] = match
-        await channel.send(embed=render_test_embed(match), view=TestSimView(match, channel.id))
-        return
+    # The toss already ran before the XIs - just apply the stored result.
+    # winner None = the AI side (team 2).
+    winner_is_p1 = (state.toss_winner_id == state.p1_id)
+    winning_team = t1 if winner_is_p1 else t2
+    losing_team  = t2 if winner_is_p1 else t1
+    t_bat  = winning_team if state.toss_choice == "Bat" else losing_team
+    t_bowl = losing_team  if state.toss_choice == "Bat" else winning_team
 
-    # Two-player: interactive toss
-    state._test_toss_winner = None
-    await channel.send(
-        f"🪙 **Toss Time!** <@{state.p2_id}> — call the coin!",
-        view=TestTossCallView(state, channel))
+    match          = TestMatchObj(t_bat, t_bowl, state.pitch, weather, pink_ball=getattr(state, "pink_ball", False))
+    match.is_player_test = getattr(state, "is_player_test", False)
+    match.host_id  = state.p1_id
+    match.p2_id    = getattr(state, "p2_id", None)
+    match.host_team = t1            # team identity -> owner (NOT bat/bowl order)
+    match.p2_team   = t2
+    active_test_matches[channel.id] = match
+    await channel.send(f"**{t_bat['name']}** will bat first.\n\nChoose how to simulate:")
+    await channel.send(embed=render_test_embed(match), view=TestSimView(match, channel.id))
 
 
 @bot.tree.command(name="simulatematch", description="Simulate a full match between two custom teams instantly.")
@@ -7988,7 +7998,8 @@ async def on_start_tournament_match(channel, manager_id, tourney, match_data):
     else:
         await channel.send(f"🏆 **Tournament Match {match_data['match_id']}**\n**{team1_name}** (<@{p1_id}>) vs **{team2_name}** (<@{p2_id}>)\n\nFormat: **{state.format_overs} Overs**")
 
-    await prompt_tournament_xi(channel, state, 1)
+    # Conditions + toss first, so both owners pick their XI knowing the result.
+    await proceed_to_conditions(channel, state)
 
 def _force_end_channel(channel_id) -> bool:
     """Tear down EVERY kind of activity in a channel (match / setup / test / draft).
@@ -9185,6 +9196,74 @@ def build_gs_board_embed(cat_key):
     embed.set_footer(text=foot + " · cv gs <name> for a player card")
     return embed
 
+_GS_FMT_LABELS = {"t20": "T20", "odi": "ODI", "test": "TEST", "custom": "CUSTOM OVERS"}
+
+def build_gs_player_embed(name, p, fmt):
+    """Two-column scorecard-sheet embed for one player in one format."""
+    f = p[fmt]
+    g = lambda k: f.get(k, 0)
+
+    bat_avg = f"{g('runs') / g('outs'):.2f}" if g("outs") else ("—" if not g("runs") else f"{g('runs')}*")
+    bat_sr = f"{g('runs') / g('balls') * 100:.1f}" if g("balls") else "0"
+    hs = "—"
+    if g("bat_innings"):
+        hs = f"{g('hs')}{'*' if f.get('hs_not_out') else ''}"
+        if g("hs_balls"):
+            hs += f"({g('hs_balls')})"
+    bat_rows = [
+        ("Inns", g("bat_innings")), ("Runs", g("runs")),
+        ("50s", g("fifties")), ("100s", g("hundreds")),
+        ("4/6", f"{g('fours')}/{g('sixes')}"), ("Avg", bat_avg),
+        ("SR", bat_sr), ("Ducks", g("ducks")), ("HS", hs),
+    ]
+
+    bowl_avg = f"{g('runs_conceded') / g('wickets'):.2f}" if g("wickets") else "0"
+    bowl_sr = f"{g('balls_bowled') / g('wickets'):.1f}" if g("wickets") else "0"
+    econ = f"{g('runs_conceded') / g('balls_bowled') * 6:.1f}" if g("balls_bowled") else "0"
+    bbf = f"{g('best_wkts')}/{g('best_runs')}" if f.get("best_runs", -1) >= 0 else "—"
+    bowl_rows = [
+        ("Inns", g("bowl_innings")), ("Wickets", g("wickets")),
+        ("3-Fers", g("three_hauls")), ("5-Fers", g("five_hauls")),
+        ("Hattricks", g("hattricks")), ("Avg", bowl_avg),
+        ("Economy", econ), ("SR", bowl_sr), ("BBF", bbf),
+    ]
+
+    left = ["Batting"] + [f"{k}: {v}" for k, v in bat_rows]
+    right = ["Bowling"] + [f"{k}: {v}" for k, v in bowl_rows]
+    width = max(len(s) for s in left) + 4
+    sheet = "\n".join(f"{l:<{width}}{r}".rstrip() for l, r in zip(left, right))
+
+    embed = discord.Embed(
+        title=f"🌍 Global Stats — {name}",
+        description=f"**{_GS_FMT_LABELS[fmt]}** · {f.get('matches', 0)} matches\n```\n{sheet}\n```",
+        color=discord.Color.blurple(),
+    )
+    embed.set_footer(text="Matches count only games where they batted or bowled · cv gs for leaderboards")
+    return embed
+
+class GlobalPlayerCardView(discord.ui.View):
+    """Format pager for the player card - one page per format the player has stats in."""
+    def __init__(self, name, p, active):
+        super().__init__(timeout=600)
+        self.name, self.p = name, p
+        for fmt in (k for k in gstats.FORMATS if k in p):
+            self.add_item(self._fmt_button(fmt, fmt == active))
+
+    def _fmt_button(self, fmt, is_active):
+        btn = discord.ui.Button(
+            label=_GS_FMT_LABELS[fmt],
+            style=discord.ButtonStyle.primary if is_active else discord.ButtonStyle.secondary,
+            disabled=is_active,
+        )
+        async def _flip(interaction: discord.Interaction, _f=fmt):
+            await interaction.response.edit_message(
+                embed=build_gs_player_embed(self.name, self.p, _f),
+                view=GlobalPlayerCardView(self.name, self.p, _f),
+            )
+        btn.callback = _flip
+        return btn
+
+
 class GlobalBoardView(discord.ui.View):
     """cv gs leaderboard with a dropdown to flip between stat categories."""
     def __init__(self):
@@ -9293,32 +9372,11 @@ class PrefixCog(commands.Cog):
             target = close[0]
 
         p = gstats.player_stats(target)
-        embed = discord.Embed(title=f"🌍 Global Stats — {target}", color=discord.Color.blurple())
-        fmt_labels = {"t20": "T20", "odi": "ODI", "test": "TEST", "custom": "CUSTOM OVERS"}
-        for fmt in gstats.FORMATS:
-            f = p.get(fmt)
-            if not f:
-                continue
-            bat_avg = f"{f['runs'] / f['outs']:.1f}" if f["outs"] else "—"
-            sr = f"{f['runs'] / f['balls'] * 100:.1f}" if f["balls"] else "—"
-            hs = f"{f['hs']}{'*' if f['hs_not_out'] else ''}" if f["bat_innings"] else "—"
-            lines = [
-                f"**Matches:** {f['matches']}",
-                f"🏏 {f['runs']} runs @ {bat_avg} · SR {sr} · HS {hs}",
-                f"50s/100s: {f['fifties']}/{f['hundreds']} · 4s/6s: {f['fours']}/{f['sixes']} · Ducks: {f['ducks']}",
-            ]
-            if f["balls_bowled"]:
-                bowl_avg = f"{f['runs_conceded'] / f['wickets']:.1f}" if f["wickets"] else "—"
-                econ = f"{f['runs_conceded'] / f['balls_bowled'] * 6:.2f}"
-                best = f"{f['best_wkts']}/{f['best_runs']}" if f["best_runs"] >= 0 else "—"
-                overs = f"{f['balls_bowled'] // 6}.{f['balls_bowled'] % 6}"
-                lines.append(f"🎯 {f['wickets']} wkts @ {bowl_avg} · Econ {econ} · Best {best}")
-                extra = f"Overs: {overs} · 5w: {f['five_hauls']}"
-                if fmt == "test":
-                    extra += f" · Maidens: {f['maidens']}"
-                lines.append(extra)
-            embed.add_field(name=f"— {fmt_labels[fmt]} —", value="\n".join(lines), inline=False)
-        await ctx.send(embed=embed)
+        first = next((fmt for fmt in gstats.FORMATS if fmt in p), None)
+        if not first:
+            return await ctx.send(f"❌ No global stats for **{target}** yet.")
+        await ctx.send(embed=build_gs_player_embed(target, p, first),
+                       view=GlobalPlayerCardView(target, p, first))
 
     @commands.command(name="exportstats", aliases=["exps"],
                       help="[OWNER] DM yourself the global stats json backup.\nUsage: exportstats")
@@ -9370,7 +9428,7 @@ class PrefixCog(commands.Cog):
         def _cleanup():
             if _alive():
                 del active_setups[ctx.channel.id]
-                # On hand-off, setup_states must SURVIVE until begin_toss pops it
+                # On hand-off, setup_states must SURVIVE until start_match pops it
                 # endmatch flags state.cancelled through it, and cv order edits it.
                 if not handed_off:
                     setup_states.pop(ctx.channel.id, None)

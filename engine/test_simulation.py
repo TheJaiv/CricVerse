@@ -787,6 +787,10 @@ def execute_test_ball(match: TestMatch) -> bool:
         outcome = "dot"
 
     # Legal ball statistics
+    # hat-trick bookkeeping: the streak only survives this ball if it's a
+    # bowler-credited wicket (run outs and denied no-ball wickets break it)
+    _hat_prev = getattr(bow_stats, "hat_streak", 0)
+    bow_stats.hat_streak = 0
     b_stats.balls_faced   += 1
     bow_stats.balls_bowled += 1
     bow_stats.spell_balls  += 1
@@ -851,6 +855,9 @@ def execute_test_ball(match: TestMatch) -> bool:
                     b_stats.dismissal = f"c. {fielder} b. {bowler['name']}"
 
             bow_stats.wickets_taken += 1
+            bow_stats.hat_streak = _hat_prev + 1
+            if bow_stats.hat_streak >= 3:
+                bow_stats.hattricks = getattr(bow_stats, "hattricks", 0) + 1
 
         if innings.wickets < 10:
             innings.current_striker_idx = innings.next_batter_idx
