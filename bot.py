@@ -9121,6 +9121,89 @@ class CSVSyncConfirmView(discord.ui.View):
             pass
 
 
+# ---- Global stats leaderboards (cv gs) ----
+
+# key -> (label, emoji, qualification note shown in the footer)
+GS_BOARDS = {
+    "runs":       ("Most Runs", "🏏", None),
+    "wickets":    ("Most Wickets", "🎯", None),
+    "sixes":      ("Most Sixes", "💥", None),
+    "fours":      ("Most Fours", "🏹", None),
+    "hundreds":   ("Most 100s", "💯", None),
+    "fifties":    ("Most 50s", "🎖️", None),
+    "hs":         ("Highest Score", "🚀", None),
+    "bat_avg":    ("Best Batting Average", "📈", "min 30 balls faced + 1 dismissal"),
+    "sr":         ("Best Strike Rate", "⚡", "min 30 balls faced"),
+    "econ":       ("Best Economy", "🪙", "min 5 overs bowled"),
+    "bowl_avg":   ("Best Bowling Average", "📉", "min 3 wickets"),
+    "five_hauls": ("Most 5-Wicket Hauls", "🖐️", None),
+    "ducks":      ("Most Ducks", "🦆", None),
+}
+
+def _gs_board_rows(cat_key, top=10):
+    """(sort_value, name, display) rows for one leaderboard, best first. Rate boards
+    carry a volume hint in the display so a 3-ball cameo is readable next to a career."""
+    rows = []
+    for name, t in gstats.combined_totals().items():
+        if cat_key in ("runs", "wickets", "sixes", "fours", "hundreds", "fifties", "five_hauls", "ducks"):
+            if t[cat_key] > 0:
+                rows.append((t[cat_key], name, str(t[cat_key])))
+        elif cat_key == "hs":
+            if t["hs"] > 0:
+                # +0.5 so 105* outranks 105 in the sort, matching the HS convention
+                rows.append((t["hs"] + (0.5 if t["hs_not_out"] else 0), name,
+                             f"{t['hs']}{'*' if t['hs_not_out'] else ''}"))
+        elif cat_key == "bat_avg":
+            if t["balls"] >= 30 and t["outs"] > 0:
+                v = t["runs"] / t["outs"]
+                rows.append((v, name, f"{v:.1f} ({t['runs']} runs)"))
+        elif cat_key == "sr":
+            if t["balls"] >= 30:
+                v = t["runs"] / t["balls"] * 100
+                rows.append((v, name, f"{v:.1f} ({t['balls']} balls)"))
+        elif cat_key == "econ":
+            if t["balls_bowled"] >= 30:
+                v = t["runs_conceded"] / t["balls_bowled"] * 6
+                rows.append((-v, name, f"{v:.2f} ({t['balls_bowled'] // 6}.{t['balls_bowled'] % 6} ov)"))
+        elif cat_key == "bowl_avg":
+            if t["wickets"] >= 3:
+                v = t["runs_conceded"] / t["wickets"]
+                rows.append((-v, name, f"{v:.1f} ({t['wickets']} wkts)"))
+    rows.sort(key=lambda r: r[0], reverse=True)
+    return rows[:top]
+
+def build_gs_board_embed(cat_key):
+    label, emoji, note = GS_BOARDS[cat_key]
+    rows = _gs_board_rows(cat_key)
+    desc = "\n".join(f"`{i + 1:>2}.` **{n}** — {disp}" for i, (_, n, disp) in enumerate(rows)) \
+        or "*Nobody qualifies for this board yet.*"
+    embed = discord.Embed(title=f"🌍 Global Leaderboard — {emoji} {label}",
+                          description=desc, color=discord.Color.gold())
+    foot = f"All formats combined · {gstats.player_count()} players tracked"
+    if note:
+        foot += f" · {note}"
+    embed.set_footer(text=foot + " · cv gs <name> for a player card")
+    return embed
+
+class GlobalBoardView(discord.ui.View):
+    """cv gs leaderboard with a dropdown to flip between stat categories."""
+    def __init__(self):
+        super().__init__(timeout=600)
+        self.select = discord.ui.Select(
+            placeholder="📊 Pick a leaderboard…",
+            options=[discord.SelectOption(label=lbl, value=key, emoji=em, default=(key == "runs"))
+                     for key, (lbl, em, _n) in GS_BOARDS.items()],
+        )
+        self.select.callback = self._pick
+        self.add_item(self.select)
+
+    async def _pick(self, interaction: discord.Interaction):
+        cat = self.select.values[0]
+        for o in self.select.options:   # keep the picked entry shown in the closed dropdown
+            o.default = o.value == cat
+        await interaction.response.edit_message(embed=build_gs_board_embed(cat), view=self)
+
+
 class PrefixCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -9198,17 +9281,8 @@ class PrefixCog(commands.Cog):
             return await ctx.send("📭 No global stats recorded yet — finish some matches first!")
 
         if not player_name:
-            runs = gstats.leaderboard("runs")
-            wkts = gstats.leaderboard("wickets")
-            embed = discord.Embed(title="🌍 Global Player Stats — All Formats", color=discord.Color.gold())
-            embed.add_field(name="🏏 Most Runs",
-                            value="\n".join(f"`{i + 1:>2}.` **{n}** — {v}" for i, (n, v) in enumerate(runs)) or "—",
-                            inline=True)
-            embed.add_field(name="🎯 Most Wickets",
-                            value="\n".join(f"`{i + 1:>2}.` **{n}** — {v}" for i, (n, v) in enumerate(wkts)) or "—",
-                            inline=True)
-            embed.set_footer(text=f"{gstats.player_count()} players tracked · cv globalstats <name> for a player card")
-            return await ctx.send(embed=embed)
+            # Most Runs by default; the dropdown flips between every other board.
+            return await ctx.send(embed=build_gs_board_embed("runs"), view=GlobalBoardView())
 
         names = gstats.player_names()
         target = next((n for n in names if n.lower() == player_name.lower()), None)

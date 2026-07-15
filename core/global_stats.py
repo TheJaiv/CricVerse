@@ -173,13 +173,29 @@ def player_stats(name):
         return json.loads(json.dumps(p)) if p else None   # copy - callers must not mutate
 
 
-def leaderboard(key, top=10):
-    """Top players by a counter summed across all formats, e.g. leaderboard('runs')."""
+# hs/best figures aren't summable - they take the best across formats instead
+_NON_SUM_KEYS = ("hs", "hs_not_out", "best_wkts", "best_runs")
+
+def combined_totals():
+    """Per-player counters summed across all formats, for the all-format leaderboards."""
     with _lock:
-        rows = [(n, sum(f.get(key, 0) for f in fmts.values())) for n, fmts in _load().items()]
-    rows = [(n, v) for n, v in rows if v > 0]
-    rows.sort(key=lambda r: r[1], reverse=True)
-    return rows[:top]
+        out = {}
+        for name, fmts in _load().items():
+            t = _blank()
+            for f in fmts.values():
+                for k in t:
+                    if k not in _NON_SUM_KEYS:
+                        t[k] += f.get(k, 0)
+                if (f.get("hs", 0) > t["hs"]
+                        or (f.get("hs", 0) == t["hs"] and f.get("hs_not_out") and not t["hs_not_out"])):
+                    t["hs"], t["hs_not_out"] = f.get("hs", 0), f.get("hs_not_out", False)
+                fbr = f.get("best_runs", -1)
+                if fbr >= 0 and (t["best_runs"] < 0
+                                 or f["best_wkts"] > t["best_wkts"]
+                                 or (f["best_wkts"] == t["best_wkts"] and fbr < t["best_runs"])):
+                    t["best_wkts"], t["best_runs"] = f["best_wkts"], fbr
+            out[name] = t
+        return out
 
 
 def player_count():
