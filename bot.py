@@ -282,26 +282,28 @@ class LeaderboardView(discord.ui.View):
         self.category = category
         self.scope = scope
 
-    async def _refresh(self, interaction):
+    # NOTE: named _rerender because discord.py's View defines a private _refresh(components)
+    # that the gateway calls on every message edit - overriding it breaks the view store.
+    async def _rerender(self, interaction):
         await interaction.response.edit_message(
             embed=_build_lb_embed(self.guild, self.category, self.scope, self.requester), view=self)
 
     @discord.ui.button(label="OVR", style=discord.ButtonStyle.primary, emoji="🏆")
     async def by_ovr(self, interaction, button):
-        self.category = "ovr"; await self._refresh(interaction)
+        self.category = "ovr"; await self._rerender(interaction)
 
     @discord.ui.button(label="Coins", style=discord.ButtonStyle.secondary, emoji="🪙")
     async def by_coins(self, interaction, button):
-        self.category = "coins"; await self._refresh(interaction)
+        self.category = "coins"; await self._rerender(interaction)
 
     @discord.ui.button(label="Wins", style=discord.ButtonStyle.secondary, emoji="✅")
     async def by_wins(self, interaction, button):
-        self.category = "wins"; await self._refresh(interaction)
+        self.category = "wins"; await self._rerender(interaction)
 
     @discord.ui.button(label="Server / Global", style=discord.ButtonStyle.success, emoji="🌍")
     async def toggle_scope(self, interaction, button):
         self.scope = "global" if self.scope == "server" else "server"
-        await self._refresh(interaction)
+        await self._rerender(interaction)
 
 
 # Match counters (backed by MongoDB via subscription_manager)
@@ -9084,7 +9086,9 @@ class CSVSyncConfirmView(discord.ui.View):
             return False
         return True
 
-    async def _refresh(self, interaction):
+    # NOTE: named _rerender because discord.py's View defines a private _refresh(components)
+    # that the gateway calls on every message edit - overriding it breaks the view store.
+    async def _rerender(self, interaction):
         self.update_ui()
         await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
@@ -9094,15 +9098,15 @@ class CSVSyncConfirmView(discord.ui.View):
                 self.skipped.discard(name)
             else:
                 self.skipped.add(name)
-        await self._refresh(interaction)
+        await self._rerender(interaction)
 
     async def prev_cb(self, interaction: discord.Interaction):
         self.page = max(0, self.page - 1)
-        await self._refresh(interaction)
+        await self._rerender(interaction)
 
     async def next_cb(self, interaction: discord.Interaction):
         self.page = min(self.pages - 1, self.page + 1)
-        await self._refresh(interaction)
+        await self._rerender(interaction)
 
     async def confirm_cb(self, interaction: discord.Interaction):
         if self._done:
@@ -9297,7 +9301,9 @@ class GlobalBoardView(discord.ui.View):
         self.cat_select.callback = self._pick_cat
         self.add_item(self.cat_select)
 
-    async def _refresh(self, interaction, select):
+    # NOTE: named _rerender because discord.py's View defines a private _refresh(components)
+    # that the gateway calls on every message edit - overriding it breaks the view store.
+    async def _rerender(self, interaction, select):
         for o in select.options:   # keep the picked entry shown in the closed dropdown
             o.default = o.value == select.values[0]
         await interaction.response.edit_message(embed=build_gs_board_embed(self.cat, self.fmt), view=self)
@@ -9305,11 +9311,11 @@ class GlobalBoardView(discord.ui.View):
     async def _pick_fmt(self, interaction: discord.Interaction):
         v = self.fmt_select.values[0]
         self.fmt = None if v == "all" else v
-        await self._refresh(interaction, self.fmt_select)
+        await self._rerender(interaction, self.fmt_select)
 
     async def _pick_cat(self, interaction: discord.Interaction):
         self.cat = self.cat_select.values[0]
-        await self._refresh(interaction, self.cat_select)
+        await self._rerender(interaction, self.cat_select)
 
 
 class PrefixCog(commands.Cog):
