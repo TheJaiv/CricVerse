@@ -37,6 +37,11 @@ from engine.test_image import (
     generate_test_scorecard_image as _ti_scorecard,
 )
 from league.tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_ccodi_round_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, revert_tournament_match, rebuild_tournament_stats, repair_tournament_schedule, _tm_next_mid, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS, SquadConfirmView, build_squad_confirm_text, build_squad_confirm_embed, match_order_gate, MATCH_ORDER_LABELS, build_tournament_summary_embeds, generate_round_robin_schedule, generate_ipl_schedule, ipl_try_advance, build_standings_message
+from league.custom_tournament import (
+    CustomSetupView, custom_try_advance, custom_start_error, custom_generate_first_stage,
+    build_custom_standings_message, custom_config_summary_lines,
+    stage_letters as custom_stage_letters,
+)
 from league import rating_league
 from league.rating_league import (
     RATING_CONFIG, is_rating_tournament, create_rating_tournament, create_open_match,
@@ -11693,6 +11698,7 @@ class PrefixCog(commands.Cog):
             "acl": "acl",
             "ccodi": "ccodi",   # 10 teams · 2 groups of 5 · round-wise double RR · top-2 -> KO1/KO2 -> Q1/Eliminator -> Q2 -> Final
             "ipl": "ipl", "indian_premier_league": "ipl",   # 10 teams · 2 groups of 5 · 14 matches each · combined table · top-4 playoffs
+            "custom": "custom",   # build-your-own format via the setup wizard
         }
         cond_map = {"manual": "manual", "auto": "auto", "home": "home", "home_pitch": "home", "homepitch": "home"}
         order_map = {"random": "random", "any": "random",
@@ -11722,7 +11728,7 @@ class PrefixCog(commands.Cog):
                 elif key in ('event', 'event_type', 'type'):
                     et = event_map.get(value.strip().lower())
                     if not et:
-                        return await ctx.send(f"❌ Invalid event `{value}`. Use `roundrobin`, `double_rr`, `t20wc`, `ccodi`, `ipl`, or `acl`.")
+                        return await ctx.send(f"❌ Invalid event `{value}`. Use `roundrobin`, `double_rr`, `t20wc`, `ccodi`, `ipl`, `acl`, or `custom`.")
                     t_type = et
             except ValueError:
                 return await ctx.send(f"❌ Invalid option format: `{opt}`. Must be `key=value`.")
@@ -11754,8 +11760,18 @@ class PrefixCog(commands.Cog):
             "stadium_mode": kwargs['stadium_mode'],
             "stadiums": default_stadium_pool(t_type),
         }
+
+        # Custom: park in "configuring" and run the setup wizard - registration
+        # only opens once the creator confirms their format.
+        if t_type == "custom":
+            t_data["status"] = "configuring"
+            save_tournament(t_data)
+            view = CustomSetupView(server_id, ctx.author.id, name)
+            view.message = await ctx.send(embed=view._embed(), view=view)
+            return
+
         save_tournament(t_data)
-        type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League", "ipl": "Indian Premier League"}.get(t_type, "Round Robin")
+        type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League", "ipl": "Indian Premier League", "custom": "Custom Tournament"}.get(t_type, "Round Robin")
         extra = ""
         if t_type == "acl":
             extra = "\n🔴 **ACL needs exactly 14 teams** — each plays every other once (91 matches) → Top 6 Playoffs → Super Cup."
@@ -11822,6 +11838,24 @@ class PrefixCog(commands.Cog):
                 return await ctx.send(f"❌ Group **{group_val}** already has {cap} teams.")
         elif t_type == "ipl" and len(tourney["teams"]) >= 10:
             return await ctx.send("❌ **IPL is full** — 10 teams already added.")
+        elif t_type == "custom":
+            cfg = tourney.get("custom_config") or {}
+            st0 = (cfg.get("stages") or [{}])[0]
+            want = st0.get("groups", 0) * st0.get("teams_per_group", 0)
+            if want and len(tourney["teams"]) >= want:
+                return await ctx.send(f"❌ **Tournament is full** — this custom format takes exactly {want} teams.")
+            if st0.get("assignment") == "manual" and st0.get("groups", 1) > 1:
+                letters = custom_stage_letters(st0)
+                lset = "".join(letters)
+                gm = (re.search(rf"(?:^|\s)group\s*[=:]?\s*([{lset}{lset.lower()}])(?=\s|$)", txt)
+                      or re.search(rf"(?:^|\s)([{lset}{lset.lower()}])\s*$", txt)
+                      or re.search(rf"^\s*([{lset}{lset.lower()}])(?=\s)", txt))
+                if not gm:
+                    return await ctx.send(f"❌ **Group ({'/'.join(letters)}) is required** — `cvt add_team \"<team>\" @owner <group>`.")
+                group_val = gm.group(1).upper()
+                txt = (txt[:gm.start()] + " " + txt[gm.end():]).strip()
+                if sum(1 for t in tourney["teams"] if t.get("group") == group_val) >= st0["teams_per_group"]:
+                    return await ctx.send(f"❌ Group **{group_val}** already has {st0['teams_per_group']} teams.")
 
         team_name = txt.strip().strip('"').strip("'").strip()[:30]
         if not team_name:
@@ -12147,6 +12181,8 @@ class PrefixCog(commands.Cog):
         is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (tourney and str(ctx.author.id) in tourney.get("managers", []))
         if not tourney: return await ctx.send("❌ No tournament exists. (DSL servers: `cvt start dsl` to open a season.)")
         if not is_mgr: return await ctx.send("❌ Managers only.")
+        if tourney["status"] == "configuring":
+            return await ctx.send("❌ The custom-format setup wizard wasn't finished — complete it (or `cvt force_delete` and recreate).")
         if tourney["status"] != "registration": return await ctx.send("❌ Tournament already started.")
 
         # Validate startability (team counts, squads, and home pitches if home mode).
@@ -12176,6 +12212,10 @@ class PrefixCog(commands.Cog):
         elif t_type == "acl":
             if len(tourney["teams"]) != 14:
                 return f"❌ **ACL requires exactly 14 teams** (currently {len(tourney['teams'])})."
+        elif t_type == "custom":
+            err = custom_start_error(tourney)
+            if err:
+                return err
         elif t_type == "rating":
             if len(tourney["teams"]) < RATING_CONFIG["playoff_teams"]:
                 return f"❌ **{RATING_CONFIG['short_name']} needs at least {RATING_CONFIG['playoff_teams']} teams** (currently {len(tourney['teams'])})."
@@ -12235,6 +12275,31 @@ class PrefixCog(commands.Cog):
                 f"📈 Beat higher-rated teams to climb fast; farming weak teams is pointless. Play ≥{RATING_CONFIG['min_games_qualify']} games to qualify.\n"
                 f"💪 Weak squads earn more **credits** — spend them on `cvt boost`. Deal via `cvt trade`.\n"
                 f"🏆 When you're ready to finish, a manager runs `cvt end_league` → Top-{RATING_CONFIG['playoff_teams']} playoffs."
+            )
+
+        # Custom: stage-1 fixtures straight from the wizard config; later stages
+        # and the playoff bracket generate themselves as results come in.
+        if t_type == "custom":
+            err = custom_generate_first_stage(tourney)
+            if err:
+                return await channel.send(err)
+            tourney["status"] = "active"
+            tourney["current_match_idx"] = 0
+            assign_tournament_conditions(tourney)
+            save_tournament(tourney)
+            cfg = tourney["custom_config"]
+            groups = tourney.get("custom_groups", {}).get("group", {})
+            groups_txt = ("\n".join(f"**Group {g}:** {' · '.join(ts)}" for g, ts in sorted(groups.items()))
+                          if len(groups) > 1 else "")
+            summary = "\n".join(custom_config_summary_lines(cfg, include_seeds=False))
+            n_s1 = len(tourney["schedule"])
+            return await channel.send(
+                f"🏆 **TOURNAMENT STARTED: {tourney['name']}!** — Custom Format\n"
+                + (groups_txt + "\n" if groups_txt else "")
+                + f"Generated **{n_s1} stage-1 matches**{self._cond_note(tourney)}.\n"
+                + f"{summary}\n"
+                + "Later stages & playoffs generate automatically as results come in. "
+                  "`cv tournament status` for fixtures · `cv tournament standings` for the tables."
             )
 
         if t_type == "t20_world_cup":
@@ -12431,7 +12496,7 @@ class PrefixCog(commands.Cog):
 
         if tourney["status"] == "registration":
             t_type = tourney.get("tournament_type", "round_robin")
-            type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League", "ipl": "Indian Premier League"}.get(t_type, "Round Robin")
+            type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League", "ipl": "Indian Premier League", "custom": "Custom Tournament"}.get(t_type, "Round Robin")
             embed = discord.Embed(title=f"🏆 {tourney['name']}", color=discord.Color.gold())
             cmode = tourney.get("conditions_mode", "manual")
             cmode_txt = {"auto": "🎲 Auto conditions", "home": "🏟️ Home-Pitch conditions"}.get(cmode, "🎛️ Manual conditions")
@@ -12836,11 +12901,14 @@ class PrefixCog(commands.Cog):
             "t2_runs": t2_runs, "t2_wickets": t2_wkts, "t2_balls": t2_balls
         }
         tourney["current_match_idx"] += 1
-        # Advance the ACL bracket / Super Cup / IPL playoffs if applicable
+        # Advance the ACL bracket / Super Cup / IPL playoffs / custom stages if applicable
         if tourney.get("tournament_type") == "acl":
             _acl_try_advance(tourney)
         elif tourney.get("tournament_type") == "ipl":
             ipl_try_advance(tourney)
+        elif tourney.get("tournament_type") == "custom":
+            custom_try_advance(tourney)
+            assign_tournament_conditions(tourney)
         save_tournament(tourney)
         extra = "\n🏆 Bracket updated — `cv tournament bracket` to view." if tourney.get("tournament_type") == "acl" else "\nPoints Table and NRR updated."
         await ctx.send(f"✅ **Match {match_id} forcefully completed!**\nWinner: **{winner_team}**{extra}")
@@ -12875,6 +12943,8 @@ class PrefixCog(commands.Cog):
         if tourney["status"] != "active": return await ctx.send("❌ Tournament is not active.")
         if tourney.get("tournament_type") == "acl":
             return await ctx.send("❌ This is an ACL tournament. Use `cv tournament generate_playoffs` (alias `gp`) instead.")
+        if tourney.get("tournament_type") == "custom":
+            return await ctx.send("❌ This is a Custom tournament — its stages and playoffs generate automatically from your config.")
 
         gs_matches = [m for m in tourney["schedule"] if isinstance(m.get("round"), int)]
         if any(m["status"] == "pending" for m in gs_matches):
@@ -14559,6 +14629,16 @@ class PrefixCog(commands.Cog):
                 ("Fire Hawks", None), ("Ice Wolves", None), ("Steel Giants", None),
                 ("Golden Lions", None), ("Silver Eagles", None),
             ]
+            # Custom: exactly groups x teams_per_group sides, letters stamped when
+            # the config wants manual assignment (random draws letter at start).
+            if t_type == "custom":
+                cfg = tourney.get("custom_config") or {}
+                st0 = (cfg.get("stages") or [{}])[0]
+                g, tpg = st0.get("groups", 2), st0.get("teams_per_group", 4)
+                pool = [n for n, _ in team_config] + [f"Custom XI {i}" for i in range(1, g * tpg + 1)]
+                manual = st0.get("assignment") == "manual" and g > 1
+                team_config = [(pool[i], custom_stage_letters(st0)[i // tpg] if manual else None)
+                               for i in range(g * tpg)]
 
         # Snake draft from one ranked pool: prioritises high-rated players, balances the
         # teams, and guarantees every player is dealt to ONLY ONE team (no shared players).
@@ -14876,6 +14956,9 @@ class PrefixCog(commands.Cog):
             _acl_try_advance(tourney)
         elif tourney.get("tournament_type") == "ipl":
             ipl_try_advance(tourney)
+        elif tourney.get("tournament_type") == "custom":
+            custom_try_advance(tourney)
+            assign_tournament_conditions(tourney)
         else:
             sf1 = next((m for m in tourney["schedule"] if m["round"] == "Semi-Final 1"), None)
             sf2 = next((m for m in tourney["schedule"] if m["round"] == "Semi-Final 2"), None)
@@ -15269,6 +15352,13 @@ class PrefixCog(commands.Cog):
                 return await ctx.send(file=discord.File(fp=buf, filename="acl_points_table.png"))
             except Exception as e:
                 print(f"ACL points table failed, using default: {e}")
+
+        # Custom: per-stage/group text tables with the configured qualifying cutoffs.
+        if tourney.get("tournament_type") == "custom":
+            embed = build_custom_standings_message(tourney)
+            if not embed:
+                return await ctx.send("No matches have been completed yet.")
+            return await ctx.send(embed=embed)
 
         # Everything else (Round Robin / Double RR / IPL): the shared points-table
         # image, delivered inside an embed titled with the tournament name.

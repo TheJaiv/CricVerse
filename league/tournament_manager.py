@@ -13,6 +13,12 @@ from league.stadium_manager import (
     stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium,
     assign_stadiums, reroll_stadiums, stadium_label, DEFAULT_ACL_STADIUMS,
 )
+from league.custom_tournament import (
+    CUSTOM_TYPE_LABEL, CustomSetupView, custom_try_advance, custom_match_rank,
+    custom_revert_cleanup, custom_stage_standings, custom_stage_cutoff,
+    build_custom_status_pages, build_custom_standings_message,
+    custom_config_summary_lines, stage_letters as custom_stage_letters,
+)
 
 # Tournament pitch & weather conditions
 # Canonical engine lists (mirror the PitchWeatherView dropdowns in bot.py).
@@ -1139,6 +1145,10 @@ def _build_status_pages(tourney):
     t_type = tourney.get("tournament_type", "round_robin")
     pages = []
 
+    if t_type == "custom":
+        # Per stage x group pages (chunked) + Knockouts, straight off the config.
+        return build_custom_status_pages(tourney)
+
     if t_type == "t20_world_cup":
         for grp in ["A", "B", "C", "D"]:
             matches = [m for m in schedule if m.get("stage") == "group" and m.get("group") == grp]
@@ -1290,7 +1300,22 @@ def _build_status_embed(tourney, page_info):
     for i, chunk in enumerate(chunks):
         embed.add_field(name="Matches" if i == 0 else "​", value=chunk, inline=False)
 
-    if stage_type in ("group", "super8") and group_key:
+    if tourney.get("tournament_type") == "custom" and group_key and stage_type not in ("knockout", "flat"):
+        # Custom pages carry their stage key in stage_type; standings are
+        # carry-over aware and the cutoff comes from the stage's config.
+        from league.custom_tournament import stage_index_of
+        idx = stage_index_of(stage_type)
+        st = custom_stage_standings(tourney, idx, group_key) if idx is not None else []
+        cutoff = custom_stage_cutoff(tourney, stage_type)
+        if st:
+            rows = ["```", f"{'':2}{'#':<3}{'Team':<20}{'P':>2}{'W':>2}{'L':>2}{'Pts':>4}{'NRR':>7}", "─"*44]
+            for i, (nm, d) in enumerate(st, 1):
+                arrow = "→ " if cutoff and i <= cutoff else "  "
+                rows.append(f"{arrow}{i:<3}{nm[:18]:<20}{d['P']:>2}{d['W']:>2}{d['L']:>2}{d['Pts']:>4}{d['NRR']:>+7.2f}")
+            rows.append("```")
+            label = f"Standings  (→ top {cutoff} advance)" if cutoff else "Standings  (table decides the champion)"
+            embed.add_field(name=label, value="\n".join(rows), inline=False)
+    elif stage_type in ("group", "super8") and group_key:
         st = get_group_standings(tourney, stage_type, group_key)
         if st:
             rows = ["```", f"{'':2}{'#':<3}{'Team':<20}{'P':>2}{'W':>2}{'L':>2}{'Pts':>4}{'NRR':>7}", "─"*44]
@@ -2056,15 +2081,16 @@ def build_tournament_summary_embeds(tourney):
     type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup",
                   "acl": "Akatsuki Cricket League", "ccodi": "CCODI",
                   "dsl": "Dominators Super League", "rating": "Conquest League",
-                  "ipl": "Indian Premier League"}.get(t_type, "Round Robin")
+                  "ipl": "Indian Premier League", "custom": CUSTOM_TYPE_LABEL}.get(t_type, "Round Robin")
     gold = discord.Color.gold()
     embeds = []
 
     # 1. OVERVIEW
     champion = (tourney.get("acl_champion") or tourney.get("dsl_champion")
+                or tourney.get("custom_champion")
                 or next((m["result"]["winner"] for m in done
                          if str(m.get("round")) in ("Final", "Grand Final")), None))
-    runner = tourney.get("acl_runner_up") or tourney.get("dsl_runner_up")
+    runner = tourney.get("acl_runner_up") or tourney.get("dsl_runner_up") or tourney.get("custom_runner_up")
     if champion and not runner:
         fin = next((m for m in done if str(m.get("round")) in ("Final", "Grand Final")), None)
         if fin:
@@ -2086,7 +2112,18 @@ def build_tournament_summary_embeds(tourney):
 
     # 2. STANDINGS
     st_e = discord.Embed(title="🏁 Final Standings", color=gold)
-    if t_type == "t20_world_cup":
+    if t_type == "custom":
+        from league.custom_tournament import stage_key, stage_name
+        cfg = tourney.get("custom_config") or {"stages": []}
+        for idx, stg in enumerate(cfg["stages"]):
+            if not any(m.get("stage") == stage_key(idx) for m in sched):
+                continue
+            for grp in custom_stage_letters(stg):
+                rows = custom_stage_standings(tourney, idx, grp)
+                if rows:
+                    nm = stage_name(cfg, idx) + (f" — Group {grp}" if stg["groups"] > 1 else "")
+                    st_e.add_field(name=nm, value=_standings_block(rows), inline=False)
+    elif t_type == "t20_world_cup":
         for grp in ["A", "B", "C", "D"]:
             rows = get_group_standings(tourney, "group", grp)
             if rows:
@@ -2246,6 +2283,10 @@ def repair_tournament_schedule(tourney):
 def _match_bracket_rank(tourney, m):
     """How far into the tournament a match sits - higher = later. Used to find
     the matches that were built on (i.e. depend on) another match's result."""
+    if tourney.get("tournament_type") == "custom":
+        # Custom league stages depend on each other in config order, so stage 2
+        # ranks above stage 1 even though both use integer rounds.
+        return custom_match_rank(m)
     if m.get("stage") in ("group", "league", "ladder") or isinstance(m.get("round"), int):
         return 0
     t_type = tourney.get("tournament_type", "round_robin")
@@ -2520,6 +2561,10 @@ def revert_tournament_match(tourney, match_id):
             for k in ("rating_champion", "rating_runner_up"):
                 tourney.pop(k, None)
             _rating_try_advance(tourney)
+    elif t_type == "custom":
+        # Later league stages / bracket slots regenerate off the fresh result;
+        # derived groups, carried points, seeds and crowns are cleared with them.
+        removed = custom_revert_cleanup(tourney, m)
     else:
         # Round Robin / T20 World Cup: drop later-stage matches - they regenerate
         # automatically once the earlier stage is completed again.
@@ -2563,6 +2608,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         app_commands.Choice(name="CCODI (2 Groups of 5 → Double RR → Qualifiers → Final)", value="ccodi"),
         app_commands.Choice(name="ACL (14 Teams → League → Playoffs → Super Cup)", value="acl"),
         app_commands.Choice(name="IPL (10 Teams → 14 Matches Each → Top 4 Playoffs)", value="ipl"),
+        app_commands.Choice(name="Custom — build your own format (setup wizard)", value="custom"),
     ])
     @app_commands.choices(conditions=[
         app_commands.Choice(name="Manual — pick pitch & weather each match", value="manual"),
@@ -2600,7 +2646,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         if max_squad < min_squad: return await interaction.response.send_message("❌ Max squad size cannot be less than Min squad size.", ephemeral=True)
 
         t_type = event_type.value if event_type else "round_robin"
-        type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League", "ipl": "Indian Premier League"}.get(t_type, "Round Robin")
+        type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League", "ipl": "Indian Premier League", "custom": CUSTOM_TYPE_LABEL}.get(t_type, "Round Robin")
 
         stadium_mode = stadiums.value if stadiums else "random"
         cond_mode = conditions.value if conditions else "manual"
@@ -2627,6 +2673,17 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             "stadium_mode": stadium_mode,
             "stadiums": default_stadium_pool(t_type),
         }
+
+        # Custom: park the tournament in "configuring" and run the setup wizard -
+        # registration only opens once the creator confirms their format.
+        if t_type == "custom":
+            t_data["status"] = "configuring"
+            save_tournament(t_data)
+            view = CustomSetupView(server_id, interaction.user.id, name)
+            await interaction.response.send_message(embed=view._embed(), view=view)
+            view.message = await interaction.original_response()
+            return
+
         save_tournament(t_data)
 
         extra = ""
@@ -2690,6 +2747,21 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         elif t_type == "ipl":
             if len(tourney["teams"]) >= 10:
                 return await interaction.response.send_message("❌ **IPL is full** — 10 teams already added.", ephemeral=True)
+        elif t_type == "custom":
+            cfg = tourney.get("custom_config") or {}
+            st0 = (cfg.get("stages") or [{}])[0]
+            want = st0.get("groups", 0) * st0.get("teams_per_group", 0)
+            if want and len(tourney["teams"]) >= want:
+                return await interaction.response.send_message(f"❌ **Tournament is full** — this custom format takes exactly {want} teams.", ephemeral=True)
+            if st0.get("assignment") == "manual" and st0.get("groups", 1) > 1:
+                letters = custom_stage_letters(st0)
+                if not group:
+                    return await interaction.response.send_message(f"❌ **Group ({'/'.join(letters)}) is required** for this custom format. Use the `group` parameter.", ephemeral=True)
+                group_val = group.strip().upper()
+                if group_val not in letters:
+                    return await interaction.response.send_message(f"❌ Group must be one of **{'/'.join(letters)}**.", ephemeral=True)
+                if sum(1 for t in tourney["teams"] if t.get("group") == group_val) >= st0["teams_per_group"]:
+                    return await interaction.response.send_message(f"❌ Group **{group_val}** already has {st0['teams_per_group']} teams.", ephemeral=True)
 
         for t in tourney["teams"]:
             if t["name"].lower() == team_name.lower():
@@ -2798,7 +2870,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         # Registration phase - no schedule yet
         if tourney["status"] == "registration":
             t_type = tourney.get("tournament_type", "round_robin")
-            type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League", "ipl": "Indian Premier League"}.get(t_type, "Round Robin")
+            type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League", "ipl": "Indian Premier League", "custom": "Custom Tournament"}.get(t_type, "Round Robin")
             embed = discord.Embed(title=f"🏆 {tourney['name']}", color=discord.Color.gold())
             embed.description = f"📝 **Registration Phase** · {type_label}"
             team_lines = []
@@ -2847,6 +2919,8 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             return await interaction.response.send_message("❌ This is an ACL tournament. Use `/tournament generate_playoffs` instead.", ephemeral=True)
         if tourney.get("tournament_type") == "dsl":
             return await interaction.response.send_message("❌ This is a DSL season — its Top-4 Playoffs generate automatically when the league ends (or `cvt gp`).", ephemeral=True)
+        if tourney.get("tournament_type") == "custom":
+            return await interaction.response.send_message("❌ This is a Custom tournament — its stages and playoffs generate automatically from your config.", ephemeral=True)
 
         gs_matches = [m for m in tourney["schedule"] if isinstance(m.get("round"), int)]
         if any(m["status"] == "pending" for m in gs_matches):
@@ -3574,6 +3648,14 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         # KNOCKOUTS AUTO-PROGRESSION
         t_type = tourney.get("tournament_type", "round_robin")
 
+        if t_type == "custom":
+            # Custom engine: next league stage the moment one finishes, then the
+            # configured playoff bracket, then the champion - all from the config.
+            custom_try_advance(tourney)
+            assign_tournament_conditions(tourney)
+            save_tournament(tourney)
+            return
+
         if t_type == "acl":
             # ACL: resolve playoff bracket + Super Cup as feeder results come in
             _acl_try_advance(tourney)
@@ -3716,6 +3798,13 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             except Exception as e:
                 print(f"ACL points table failed, using default: {e}")
             # fall through to the generic renderer below on failure
+
+        # Custom: per-stage/group text tables with the configured qualifying cutoffs.
+        if t_type == "custom":
+            embed = build_custom_standings_message(tourney)
+            if not embed:
+                return await interaction.followup.send("No matches have been completed yet.")
+            return await interaction.followup.send(embed=embed)
 
         # Everything else (Round Robin / Double RR / IPL): the shared points-table
         # image, delivered inside an embed titled with the tournament name.
