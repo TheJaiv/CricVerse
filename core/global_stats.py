@@ -204,6 +204,20 @@ def combined_totals():
         return out
 
 
+def format_totals(fmt):
+    """Per-player counters for ONE format (players who never played it are absent).
+    Values are copies with defaults backfilled, safe for callers to read freely."""
+    with _lock:
+        out = {}
+        for name, fmts in _load().items():
+            f = fmts.get(fmt)
+            if f:
+                t = _blank()
+                t.update(f)
+                out[name] = t
+        return out
+
+
 def player_count():
     with _lock:
         return len(_load())

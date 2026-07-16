@@ -9151,11 +9151,13 @@ GS_BOARDS = {
     "ducks":      ("Most Ducks", "🦆", None),
 }
 
-def _gs_board_rows(cat_key, top=10):
-    """(sort_value, name, display) rows for one leaderboard, best first. Rate boards
-    carry a volume hint in the display so a 3-ball cameo is readable next to a career."""
+def _gs_board_rows(cat_key, fmt=None, top=10):
+    """(sort_value, name, display) rows for one leaderboard, best first. fmt None means
+    all formats combined; otherwise only that format's numbers. Rate boards carry a
+    volume hint in the display so a 3-ball cameo is readable next to a career."""
+    totals = gstats.format_totals(fmt) if fmt else gstats.combined_totals()
     rows = []
-    for name, t in gstats.combined_totals().items():
+    for name, t in totals.items():
         if cat_key in ("runs", "wickets", "sixes", "fours", "hundreds", "fifties", "five_hauls", "ducks"):
             if t[cat_key] > 0:
                 rows.append((t[cat_key], name, str(t[cat_key])))
@@ -9183,14 +9185,15 @@ def _gs_board_rows(cat_key, top=10):
     rows.sort(key=lambda r: r[0], reverse=True)
     return rows[:top]
 
-def build_gs_board_embed(cat_key):
+def build_gs_board_embed(cat_key, fmt=None):
     label, emoji, note = GS_BOARDS[cat_key]
-    rows = _gs_board_rows(cat_key)
+    rows = _gs_board_rows(cat_key, fmt)
     desc = "\n".join(f"`{i + 1:>2}.` **{n}** — {disp}" for i, (_, n, disp) in enumerate(rows)) \
         or "*Nobody qualifies for this board yet.*"
-    embed = discord.Embed(title=f"🌍 Global Leaderboard — {emoji} {label}",
+    fmt_label = _GS_FMT_LABELS[fmt].title() if fmt else "All Formats"
+    embed = discord.Embed(title=f"🌍 {fmt_label} Leaderboard — {emoji} {label}",
                           description=desc, color=discord.Color.gold())
-    foot = f"All formats combined · {gstats.player_count()} players tracked"
+    foot = f"{gstats.player_count()} players tracked"
     if note:
         foot += f" · {note}"
     embed.set_footer(text=foot + " · cv gs <name> for a player card")
@@ -9264,23 +9267,44 @@ class GlobalPlayerCardView(discord.ui.View):
         return btn
 
 
+_GS_FMT_EMOJI = {"t20": "⚡", "odi": "🏟️", "test": "🔴", "custom": "🔧"}
+
 class GlobalBoardView(discord.ui.View):
-    """cv gs leaderboard with a dropdown to flip between stat categories."""
+    """cv gs leaderboard - format filter on top, stat category dropdown below."""
     def __init__(self):
         super().__init__(timeout=600)
-        self.select = discord.ui.Select(
-            placeholder="📊 Pick a leaderboard…",
+        self.cat, self.fmt = "runs", None   # fmt None = all formats combined
+
+        self.fmt_select = discord.ui.Select(
+            placeholder="🌐 Pick a format…", row=0,
+            options=[discord.SelectOption(label="All Formats", value="all", emoji="🌐", default=True)]
+                    + [discord.SelectOption(label=_GS_FMT_LABELS[k].title(), value=k, emoji=_GS_FMT_EMOJI[k])
+                       for k in gstats.FORMATS],
+        )
+        self.fmt_select.callback = self._pick_fmt
+        self.add_item(self.fmt_select)
+
+        self.cat_select = discord.ui.Select(
+            placeholder="📊 Pick a leaderboard…", row=1,
             options=[discord.SelectOption(label=lbl, value=key, emoji=em, default=(key == "runs"))
                      for key, (lbl, em, _n) in GS_BOARDS.items()],
         )
-        self.select.callback = self._pick
-        self.add_item(self.select)
+        self.cat_select.callback = self._pick_cat
+        self.add_item(self.cat_select)
 
-    async def _pick(self, interaction: discord.Interaction):
-        cat = self.select.values[0]
-        for o in self.select.options:   # keep the picked entry shown in the closed dropdown
-            o.default = o.value == cat
-        await interaction.response.edit_message(embed=build_gs_board_embed(cat), view=self)
+    async def _refresh(self, interaction, select):
+        for o in select.options:   # keep the picked entry shown in the closed dropdown
+            o.default = o.value == select.values[0]
+        await interaction.response.edit_message(embed=build_gs_board_embed(self.cat, self.fmt), view=self)
+
+    async def _pick_fmt(self, interaction: discord.Interaction):
+        v = self.fmt_select.values[0]
+        self.fmt = None if v == "all" else v
+        await self._refresh(interaction, self.fmt_select)
+
+    async def _pick_cat(self, interaction: discord.Interaction):
+        self.cat = self.cat_select.values[0]
+        await self._refresh(interaction, self.cat_select)
 
 
 class PrefixCog(commands.Cog):
