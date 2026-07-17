@@ -9431,14 +9431,17 @@ class PrefixCog(commands.Cog):
             await ctx.send("📬 Backup sent to your DMs.")
 
     @commands.command(name="importstats", aliases=["imps"],
-                      help="[OWNER] Restore global stats from an exported json — REPLACES everything currently tracked.\nUsage: importstats (attach global_stats.json to the message)")
-    async def importstats(self, ctx):
+                      help="[OWNER] Fold an exported json backup into the global stats. MERGES by default, so matches recorded after a restart survive; add `replace` to overwrite everything with the file instead.\nUsage: importstats [replace] (attach global_stats.json to the message)")
+    async def importstats(self, ctx, mode: str = "merge"):
         if ctx.author.id != ADMIN_DISCORD_ID:
             return await ctx.send("❌ Owner only.")
         if not ctx.message.attachments:
             return await ctx.send("❌ Attach the exported `global_stats.json` to the command message.")
+        mode = mode.lower()
+        if mode not in ("merge", "replace"):
+            return await ctx.send("❌ Mode must be `replace` — or leave it out to merge.")
         raw = await ctx.message.attachments[0].read()
-        ok, msg = gstats.import_raw(raw)
+        ok, msg = gstats.import_raw(raw, mode)
         await ctx.send(f"✅ {msg}." if ok else f"❌ {msg}.")
 
     @commands.command(name="testplayer", aliases=["tp", "playertest", "test_player"],

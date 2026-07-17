@@ -7,6 +7,7 @@ Discord instead of git: the owner gets the file DM'd on SIGTERM + every few hour
 
 Player-test matches (cv testplayer) and super overs never reach these recorders.
 """
+import hashlib
 import json
 import os
 import threading
@@ -231,10 +232,33 @@ def flush_to_disk():
     return STATS_PATH if os.path.exists(STATS_PATH) else None
 
 
-def import_raw(raw):
-    """Replace ALL stats with an uploaded backup. Validates before overwriting so a
-    bad upload can never nuke the current data. Returns (ok, message)."""
-    global _stats, _dirty
+def _merge_bucket(dst, src):
+    """Fold one format bucket from a backup into the live one: counters add up,
+    HS and best figures keep the better of the two."""
+    s = _blank()
+    s.update(src)
+    for k in _blank():
+        if k not in _NON_SUM_KEYS:
+            dst[k] += s[k]
+    if (s["hs"] > dst["hs"]
+            or (s["hs"] == dst["hs"] and s["hs_not_out"] and not dst["hs_not_out"])):
+        dst["hs"], dst["hs_balls"], dst["hs_not_out"] = s["hs"], s["hs_balls"], s["hs_not_out"]
+    if s["best_runs"] >= 0 and (dst["best_runs"] < 0
+                                or s["best_wkts"] > dst["best_wkts"]
+                                or (s["best_wkts"] == dst["best_wkts"] and s["best_runs"] < dst["best_runs"])):
+        dst["best_wkts"], dst["best_runs"] = s["best_wkts"], s["best_runs"]
+
+
+_last_import_digest = None   # guards against merging the identical file twice in a session
+
+
+def import_raw(raw, mode="merge"):
+    """Fold an uploaded backup into the current stats (mode="merge", default) or
+    replace everything with it (mode="replace"). Merge exists for the missed-restart
+    case: matches recorded after the wipe stay counted, the backup adds the history.
+    Validates before touching anything so a bad upload can never nuke current data.
+    Returns (ok, message)."""
+    global _stats, _dirty, _last_import_digest
     try:
         data = json.loads(raw)
     except Exception as e:
@@ -244,11 +268,32 @@ def import_raw(raw):
     for name, fmts in data.items():
         if not isinstance(fmts, dict) or not all(k in FORMATS and isinstance(v, dict) for k, v in fmts.items()):
             return False, f"that JSON isn't a stats file (bad entry for '{name}')"
+
+    digest = hashlib.sha1(raw if isinstance(raw, bytes) else raw.encode()).hexdigest()
     with _lock:
-        _stats = data
-        _dirty = False
+        _load()
+        if mode == "replace":
+            _stats = data
+            _dirty = False
+            _last_import_digest = digest
+            _save()
+            return True, f"replaced everything - stats restored for **{len(data)}** players"
+
+        # merging the same file twice would double every counter in it
+        if digest == _last_import_digest:
+            return False, ("that's the exact file already merged - doing it again would "
+                           "double-count it. Use `importstats replace` to restore exactly this file")
+        new_players = 0
+        for name, fmts in data.items():
+            if name not in _stats:
+                new_players += 1
+            for fmt, f in fmts.items():
+                _merge_bucket(_bucket(name, fmt), f)
+        _dirty = True   # merged state exists nowhere else - make sure a backup goes out
+        _last_import_digest = digest
         _save()
-    return True, f"restored stats for **{len(data)}** players"
+    return True, (f"merged backup into current stats - **{len(data)}** players in file, "
+                  f"**{new_players}** of them new, matches played since the restart kept")
 
 
 def is_dirty():
