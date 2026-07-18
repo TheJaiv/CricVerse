@@ -15001,8 +15001,9 @@ class PrefixCog(commands.Cog):
         _skipped = 0
         _used_curated = False
         try:
-            if tourney.get("tournament_type") == "ccodi":
-                raise FileNotFoundError   # CCODI drafts straight from the full player DB
+            if tourney.get("tournament_type") in ("ccodi", "tbecs"):
+                raise FileNotFoundError   # CCODI/TBECS draft straight from the full player DB
+                                          # (TBECS needs 54x20 = 1080 players - curated pool is too small)
             with open("data/draft_pool.txt", encoding="utf-8") as _fh:
                 _lines = _fh.read().splitlines()
             _dbmap = {p["name"].lower(): p for p in db_players}
@@ -15058,6 +15059,20 @@ class PrefixCog(commands.Cog):
                 ("Ahmedabad Avengers", None), ("Jaipur Jaguars", None), ("Punjab Panthers", None),
                 ("Lucknow Legends", None), ("Navi Mumbai Ninjas", None), ("Dharamsala Dragons", None),
             ][:DSL_CONFIG["team_count"]]
+        elif t_type == "tbecs":
+            # 54 generated city sides; the 2 GOAT XIs are re-appended after the draft.
+            from league.tbecs_manager import TBECS_CONFIG as _TBC
+            _cities = ["Mumbai", "Delhi", "Chennai", "Kolkata", "Punjab", "Jaipur", "Bangalore",
+                       "Hyderabad", "Gujarat", "Lucknow", "Goa", "Kerala", "Pune", "Indore",
+                       "Nagpur", "Surat", "Kanpur", "Patna", "Bhopal", "Ranchi", "Raipur",
+                       "Amritsar", "Varanasi", "Agra", "Meerut", "Thane", "Nashik", "Vadodara",
+                       "Rajkot", "Madurai", "Mysore", "Hubli", "Vizag", "Guntur", "Warangal",
+                       "Cuttack", "Rourkela", "Durgapur", "Asansol", "Siliguri", "Gaya",
+                       "Dhanbad", "Jamshedpur", "Bokaro", "Aligarh", "Bareilly", "Moradabad",
+                       "Saharanpur", "Gorakhpur", "Jhansi", "Ajmer", "Udaipur", "Kochi", "Trichy"]
+            _sfx = ["Titans", "Riders", "Blasters", "Kings", "Panthers", "Falcons"]
+            team_config = [(f"{c} {_sfx[i % len(_sfx)]}", None)
+                           for i, c in enumerate(_cities[:_TBC["addable_teams"]])]
         else:
             team_config = [
                 ("Thunder Kings", None), ("Lightning Bolts", None), ("Storm Riders", None),
@@ -15093,6 +15108,11 @@ class PrefixCog(commands.Cog):
         tourney["teams"] = []
         for _i, (name, grp) in enumerate(team_config):
             tourney["teams"].append({"name": name, "owner_id": str(ctx.author.id), "squad": squads[_i], "group": grp})
+        if t_type == "tbecs":
+            # The reset above wiped the pre-seeded GOAT XIs - restore them (fixed
+            # 99/99 squads, one per group at the split).
+            from league.tbecs_manager import build_goat_teams
+            tourney["teams"] += build_goat_teams(ADMIN_DISCORD_ID)
 
         should_start = auto_start.lower() not in ("no", "false", "0")
         if not should_start:
