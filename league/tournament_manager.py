@@ -369,6 +369,204 @@ def get_group_standings(tourney, stage: str, group: str):
     return sorted(teams.items(), key=lambda x: (x[1]["Pts"], x[1]["NRR"]), reverse=True)
 
 
+# ---- TBECS branded images ----------------------------------------------------
+# All coordinates below are pixel-measured on the 1536x1024 templates in assets/
+# (grid-line probe + zoomed crops). Edit the constant blocks to nudge alignment.
+# Stage keys mirror TBECS_CONFIG (kept literal — this module must not import
+# tbecs_manager at the top level).
+TBECS_SUPER_STAGE = "super20"
+TBECS_SUPER_GROUP = "S"
+
+def _tbecs_font(size, bold=True):
+    for p in ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+              "/System/Library/Fonts/Supplemental/Arial Bold.ttf" if bold else "/System/Library/Fonts/Supplemental/Arial.ttf",
+              "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf"):
+        try:
+            return ImageFont.truetype(p, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def _tbecs_team_logos(tourney):
+    return {t["name"]: t.get("logo_standings") or t.get("logo_match") for t in tourney.get("teams", [])}
+
+
+def _tbecs_fit(d, s, font, maxw):
+    if font.getbbox(s)[2] <= maxw:
+        return s
+    while s and font.getbbox(s + "…")[2] > maxw:
+        s = s[:-1]
+    return s + "…"
+
+
+def _tbecs_fit_full(s, base_size, maxw, min_size=14):
+    """Shrink the font until the FULL name fits; only truncate below min_size.
+    Returns (font, text)."""
+    for size in range(base_size, min_size - 1, -1):
+        f = _tbecs_font(size)
+        if f.getbbox(s)[2] <= maxw:
+            return f, s
+    f = _tbecs_font(min_size)
+    while s and f.getbbox(s + "…")[2] > maxw:
+        s = s[:-1]
+    return f, s + "…"
+
+
+# Group-stage table (tbecs_groupstage.png): ONE group of 28 per image, split into
+# two 14-row halves (POS 1-14 left, 15-28 right). Group name goes right of the
+# POINTS TABLE ribbon.
+_TBECS_GRP = {
+    "row0_cy": 288.0, "row_h": 49.05,            # 14 rows per half
+    "L": {"pos": 75,  "team": 133, "P": 403,  "W": 475,  "L": 548,  "PTS": 620,  "NRR": 704},
+    "R": {"pos": 821, "team": 881, "P": 1155, "W": 1227, "L": 1298, "PTS": 1370, "NRR": 1454},
+    "team_w_l": 228, "team_w_r": 232,            # name width budget (incl. the logo)
+    "label_cx": 1075, "label_cy": 190,           # "GROUP A" — blank space right of the ribbon
+}
+
+def generate_tbecs_group_table(tourney, group) -> io.BytesIO:
+    """One tbecs_groupstage.png render per group: that group's 28 teams over the
+    1-14 / 15-28 halves, group name stamped beside the POINTS TABLE ribbon."""
+    img = Image.open("assets/tbecs_groupstage.png").convert("RGBA")
+    d = ImageDraw.Draw(img)
+    G = _TBECS_GRP
+    f_row = _tbecs_font(22); f_name = _tbecs_font(20); f_label = _tbecs_font(40)
+    WHITE = "#FFFFFF"; GOLD = "#F0C242"
+    logos = _tbecs_team_logos(tourney)
+    goats = {t["name"] for t in tourney.get("teams", []) if t.get("goat")}
+
+    d.text((G["label_cx"], G["label_cy"]), f"GROUP {group}", font=f_label, fill=WHITE, anchor="mm")
+
+    rows = get_group_standings(tourney, "group", group)
+    LOGO = 28
+    for i, (nm, st) in enumerate(rows[:28]):
+        half, r = ("L", i) if i < 14 else ("R", i - 14)
+        C = G[half]
+        cy = int(G["row0_cy"] + G["row_h"] * r)
+        fill = GOLD if nm in goats else WHITE   # GOATs pop, and gold marks "can't qualify"
+        logo = _fetch_emoji_img(logos.get(nm), LOGO)
+        tx = C["team"]
+        if logo:
+            img.paste(logo, (tx, cy - LOGO // 2), logo)
+            tx += LOGO + 6
+        maxw = (G["team_w_l"] if half == "L" else G["team_w_r"]) - (LOGO + 6 if logo else 0)
+        nf, ntxt = _tbecs_fit_full(nm.upper(), 20, maxw)   # full name: shrink, don't chop
+        d.text((tx, cy), ntxt, font=nf, fill=fill, anchor="lm")
+        for k in ("P", "W", "L", "PTS", "NRR"):
+            v = f"{st['NRR']:+.2f}" if k == "NRR" else str(st["Pts"] if k == "PTS" else st[k])
+            d.text((C[k], cy), v, font=f_row, fill=fill, anchor="mm")
+
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
+# Super 20 table (tbecs_20.png): single 20-row table.
+_TBECS_S20 = {
+    "row0_cy": 283.0, "row_h": 36.16,
+    "pos": 106, "team": 185, "team_w": 470,
+    "P": 762, "W": 915, "L": 1069, "PTS": 1225, "NRR": 1394,
+}
+
+def generate_tbecs_super20_table(tourney) -> io.BytesIO:
+    img = Image.open("assets/tbecs_20.png").convert("RGBA")
+    d = ImageDraw.Draw(img)
+    S = _TBECS_S20
+    f_row = _tbecs_font(21); f_name = _tbecs_font(22)
+    WHITE = "#FFFFFF"; Q = "#7FE07F"   # top-8 qualification zone tint
+    logos = _tbecs_team_logos(tourney)
+
+    rows = get_group_standings(tourney, TBECS_SUPER_STAGE, TBECS_SUPER_GROUP)
+    LOGO = 28
+    for i, (nm, st) in enumerate(rows[:20]):
+        cy = int(S["row0_cy"] + S["row_h"] * i)
+        fill = Q if i < 8 else WHITE
+        logo = _fetch_emoji_img(logos.get(nm), LOGO)
+        tx = S["team"]
+        if logo:
+            img.paste(logo, (tx, cy - LOGO // 2), logo)
+            tx += LOGO + 8
+        d.text((tx, cy), _tbecs_fit(d, nm.upper(), f_name, S["team_w"] - (LOGO + 8 if logo else 0)),
+               font=f_name, fill=fill, anchor="lm")
+        for k in ("P", "W", "L", "PTS", "NRR"):
+            v = f"{st['NRR']:+.2f}" if k == "NRR" else str(st["Pts"] if k == "PTS" else st[k])
+            d.text((S[k], cy), v, font=f_row, fill=fill, anchor="mm")
+
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
+# Knockout bracket (tbecs_knockouts.png). Per slot: logo into the outlined square,
+# name centred above its underline. Square tops probed per box (spacing is uneven).
+_TBECS_KO = {
+    "QF": [{"sq1": 328, "sq2": 394}, {"sq1": 515, "sq2": 578},
+           {"sq1": 696, "sq2": 759}, {"sq1": 876, "sq2": 939}],
+    "qf_x": 91, "qf_sq": 48, "qf_ncx": 261, "qf_n1": 22, "qf_n2": 12, "qf_nw": 215,
+    "SF": [{"sq1": 411, "sq2": 483}, {"sq1": 693, "sq2": 765}],
+    "sf_x": 500, "sf_sq": 48, "sf_ncx": 660, "sf_n1": 31, "sf_n2": 15, "sf_nw": 210,
+    "F": {"sq1": 507, "sq2": 589, "x": 888, "sq": 47, "ncx": 1033, "n1": 44, "n2": 24, "nw": 175},
+    "CH": {"cx": 1347, "cy": 583, "sz": 128, "name_cy": 689, "nw": 200},
+}
+
+def generate_tbecs_bracket(tourney) -> io.BytesIO:
+    img = Image.open("assets/tbecs_knockouts.png").convert("RGBA")
+    d = ImageDraw.Draw(img)
+    K = _TBECS_KO
+    WHITE = "#FFFFFF"
+    logos = _tbecs_team_logos(tourney)
+    colors = {t["name"]: t.get("color", "#334155") for t in tourney.get("teams", [])}
+    sched = tourney.get("schedule", [])
+
+    def _slot(name, sq_x, sq_top, sq_sz, ncx, n_cy, nw, base_size):
+        if not name:
+            return
+        logo = _fetch_emoji_img(logos.get(name), sq_sz - 4)
+        if logo:
+            img.paste(logo, (sq_x + 2, sq_top + 2), logo)
+        else:
+            try:
+                fill = tuple(int(colors.get(name, "#334155").lstrip("#")[i:i+2], 16) for i in (0, 2, 4))
+            except Exception:
+                fill = (51, 65, 85)
+            d.rectangle([sq_x + 3, sq_top + 3, sq_x + sq_sz - 3, sq_top + sq_sz - 3], fill=fill)
+        nf, ntxt = _tbecs_fit_full(name.upper(), base_size, nw, min_size=13)
+        d.text((ncx, n_cy), ntxt, font=nf, fill=WHITE, anchor="mm")
+
+    def _round(prefix, n):
+        m = next((x for x in sched if x.get("round") == f"{prefix} {n}"), None)
+        return m or {}
+
+    for i, box in enumerate(K["QF"], 1):
+        m = _round("Quarter-Final", i)
+        _slot(m.get("team1"), K["qf_x"], box["sq1"], K["qf_sq"], K["qf_ncx"], box["sq1"] + K["qf_n1"], K["qf_nw"], 19)
+        _slot(m.get("team2"), K["qf_x"], box["sq2"], K["qf_sq"], K["qf_ncx"], box["sq2"] + K["qf_n2"], K["qf_nw"], 19)
+    for i, box in enumerate(K["SF"], 1):
+        m = _round("Semi-Final", i)
+        _slot(m.get("team1"), K["sf_x"], box["sq1"], K["sf_sq"], K["sf_ncx"], box["sq1"] + K["sf_n1"], K["sf_nw"], 19)
+        _slot(m.get("team2"), K["sf_x"], box["sq2"], K["sf_sq"], K["sf_ncx"], box["sq2"] + K["sf_n2"], K["sf_nw"], 19)
+    fm = next((x for x in sched if x.get("round") == "Final"), {})
+    F = K["F"]
+    _slot(fm.get("team1"), F["x"], F["sq1"], F["sq"], F["ncx"], F["sq1"] + F["n1"], F["nw"], 19)
+    _slot(fm.get("team2"), F["x"], F["sq2"], F["sq"], F["ncx"], F["sq2"] + F["n2"], F["nw"], 19)
+
+    champ = (fm.get("result") or {}).get("winner")
+    if champ:
+        CH = K["CH"]
+        logo = _fetch_emoji_img(logos.get(champ), CH["sz"])
+        if logo:
+            img.paste(logo, (CH["cx"] - CH["sz"] // 2, CH["cy"] - CH["sz"] // 2), logo)
+        nf, ntxt = _tbecs_fit_full(champ.upper(), 24, CH["nw"], min_size=14)
+        d.text((CH["cx"], CH["name_cy"]), ntxt, font=nf, fill="#F0C242", anchor="mm")
+
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
 def generate_t20wc_points_table(tourney) -> io.BytesIO:
     """Fill super16_table.png template with live group standings for T20 WC group stage."""
     img = Image.open("assets/super16_table.png").convert("RGBA")
@@ -2306,6 +2504,14 @@ def _match_bracket_rank(tourney, m):
     if t_type == "ipl":
         return {"Qualifier 1": 1, "Eliminator": 1,
                 "Qualifier 2": 2, "Final": 3}.get(m.get("round"), 1)
+    if t_type == "tbecs":
+        # group(0) < Super 20(1) < QFs(2) < SFs(3) < Final(4)
+        if m.get("stage") == "super20":
+            return 1
+        r = str(m.get("round", ""))
+        if r.startswith("Quarter-Final"): return 2
+        if r.startswith("Semi-Final"):    return 3
+        return 4   # Final
     if m.get("stage") == "super8":
         return 1
     return 4 if str(m.get("round")) == "Final" else 3   # knockout: Semi-Finals(3) < Final(4)
@@ -3178,7 +3384,15 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             await interaction.response.defer()
             sent = False
             try:
-                img_buf = generate_scorecard_from_data(full_data)
+                img_buf = None
+                if tourney.get("tournament_type") == "tbecs":
+                    try:
+                        from bot import generate_tbecs_scorecard_from_data
+                        img_buf = generate_tbecs_scorecard_from_data(full_data)
+                    except Exception as _te:
+                        print(f"TBECS card failed for match {match_id}, using generic: {_te}")
+                if img_buf is None:
+                    img_buf = generate_scorecard_from_data(full_data)
                 file = discord.File(fp=img_buf, filename=f"scorecard_m{match_id}.png")
                 await interaction.followup.send(embed=embed, file=file)
                 sent = True
@@ -3509,11 +3723,21 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         # A locked stats table (cvt lock_stats) freezes the player leaderboard: the
         # match result/points/NRR still count, but no player stats are recorded
         # (and stats_delta stays empty, so cancel_match has nothing to reverse).
+        # TBECS GOAT XIs: the match counts (points/NRR) and the NORMAL side's players
+        # record stats as usual, but GOAT players never enter the leaderboards - skip
+        # their whole side. stats_delta only carries the normal side, so cancel_match
+        # reverses exactly what was recorded.
+        _goat_names = set()
+        if tourney.get("tournament_type") == "tbecs":
+            from league.tbecs_manager import goat_team_names
+            _goat_names = goat_team_names(tourney)
         if tourney.get("stats_locked"):
             m_data["result"]["stats_delta"] = None
         else:
-            process_team_stats(t1_name, t1_inn, t2_inn)
-            process_team_stats(t2_name, t2_inn, t1_inn)
+            if t1_name not in _goat_names:
+                process_team_stats(t1_name, t1_inn, t2_inn)
+            if t2_name not in _goat_names:
+                process_team_stats(t2_name, t2_inn, t1_inn)
             m_data["result"]["stats_delta"] = stats_delta
 
         # CONQUEST (rating) LEAGUE: Elo update, and CREDIT economy for any league
@@ -3545,6 +3769,12 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                                 _buf = generate_ccodi_scorecard_from_data(_full)
                             except Exception as _ce:
                                 print(f"CCODI gallery card failed, using generic: {_ce}")
+                        elif tourney.get("tournament_type") == "tbecs":
+                            try:
+                                from bot import generate_tbecs_scorecard_from_data
+                                _buf = generate_tbecs_scorecard_from_data(_full)
+                            except Exception as _ce:
+                                print(f"TBECS gallery card failed, using generic: {_ce}")
                         if _buf is None:
                             _buf = generate_scorecard_from_data(_full)
                         _rl = _tm_round_label(m_data)
@@ -3683,6 +3913,14 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             save_tournament(tourney)
             return
 
+        if t_type == "tbecs":
+            # TBECS: NOTHING auto-advances - not Super 20, not QFs, not even the Final.
+            # Every stage is generated by the owner with `cvt tbecs_next`, which is what
+            # lets `cvt simall` stop dead at a stage boundary instead of rolling on.
+            assign_tournament_conditions(tourney)
+            save_tournament(tourney)
+            return
+
         if t_type == "t20_world_cup":
             # Super 8 complete -> auto-generate Semi-Finals
             self._try_generate_semis(tourney)
@@ -3725,6 +3963,29 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         if not tourney: return await interaction.followup.send("❌ No tournament exists.", ephemeral=True)
 
         t_type = tourney.get("tournament_type", "round_robin")
+
+        # TBECS: whichever stage is live decides the image(s).
+        #   group stage  -> one branded 28-team table per group (A then B)
+        #   Super 20     -> the 20-row table (top 8 tinted)
+        #   knockouts    -> the bracket, plus the final Super 20 table for reference
+        if t_type == "tbecs":
+            try:
+                sched = tourney.get("schedule", [])
+                has_s20 = any(m.get("stage") == TBECS_SUPER_STAGE for m in sched)
+                has_ko = any(m.get("stage") == "knockout" for m in sched)
+                files = []
+                if has_ko:
+                    files.append(discord.File(fp=generate_tbecs_bracket(tourney), filename="tbecs_bracket.png"))
+                    files.append(discord.File(fp=generate_tbecs_super20_table(tourney), filename="tbecs_super20.png"))
+                elif has_s20:
+                    files.append(discord.File(fp=generate_tbecs_super20_table(tourney), filename="tbecs_super20.png"))
+                else:
+                    for grp in ("A", "B"):
+                        files.append(discord.File(fp=generate_tbecs_group_table(tourney, grp),
+                                                  filename=f"tbecs_group_{grp}.png"))
+                return await interaction.followup.send(files=files)
+            except Exception as _e:
+                print(f"TBECS standings render failed, using text fallback: {_e}")
 
         # T20 World Cup standings
         if t_type == "t20_world_cup":

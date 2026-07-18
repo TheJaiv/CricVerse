@@ -3101,12 +3101,17 @@ def generate_ccodi_scorecard(match: CricketMatch) -> io.BytesIO:
 
 
 def generate_tournament_score_image(match: CricketMatch) -> io.BytesIO:
-    # CCODI has its own branded template rendered straight from the match object.
+    # CCODI / TBECS have their own branded templates rendered straight from the match.
     if getattr(match, "tournament_type", None) == "ccodi":
         try:
             return generate_ccodi_scorecard(match)
         except Exception as _e:
             print(f"CCODI scorecard render failed, using generic: {_e}")
+    if getattr(match, "tournament_type", None) == "tbecs":
+        try:
+            return generate_tbecs_scorecard(match)
+        except Exception as _e:
+            print(f"TBECS scorecard render failed, using generic: {_e}")
     return generate_scorecard_from_data(extract_scoreboard_data(match))
 
 
@@ -3149,6 +3154,304 @@ def generate_ccodi_scorecard_from_data(data: dict):
             target=t1["runs"] + 1, tiebreak_winner_name=tiebreak,
             _potm_name=data.get("potm"))
     return generate_ccodi_scorecard(m)
+
+# TBECS scorecard layout (measured on assets/tbecs_scorecard.png, 1535×1024,
+# v3 template: compressed panels + bottom result bar). Panel 1 fits 6 batter rows,
+# panel 2 fits 5; bowlers 9/8. Edit the numbers here to nudge alignment.
+_TBECS_SC = {
+    1: {"bat_rows": [271, 308, 347, 386, 424, 463],
+        "bowl_rows": [266, 300, 335, 371, 406, 441, 475, 510, 543],
+        "extras_y": 502, "rr_y": 537, "overs_cy": 537,
+        "logo_cy": 300, "name_cy": 390, "score_cy": 450},
+    2: {"bat_rows": [638, 675, 712, 750, 788],
+        "bowl_rows": [635, 667, 701, 735, 770, 805, 840, 874],
+        "extras_y": 835, "rr_y": 869, "overs_cy": 868,
+        "logo_cy": 672, "name_cy": 760, "score_cy": 820},
+}
+_TBECS_SC_LEFT_CX = 167          # left team-block centre
+_TBECS_SC_LOGO = 96
+_TBECS_SC_OVERS_RX = 225         # overs value, right-aligned before the OVERS label
+_TBECS_SC_EXTRAS_VX = 412        # value after the EXTRAS label
+_TBECS_SC_RR_VX = 370
+_TBECS_SC_BAT_COLS  = {"name": 322, "R": 636, "B": 694, "4s": 753, "6s": 810, "SR": 867}
+_TBECS_SC_BOWL_COLS = {"name": 950, "O": 1170, "M": 1236, "R": 1304, "W": 1370, "ECON": 1442}
+
+def _tbecs_chamf(x0, y0, x1, y1, c):
+    """Chamfered-rectangle polygon matching the template's cut-corner panels."""
+    return [(x0 + c, y0), (x1 - c, y0), (x1, y0 + c), (x1, y1 - c),
+            (x1 - c, y1), (x0 + c, y1), (x0, y1 - c), (x0, y0 + c)]
+
+
+# Bottom result bar: pointed-hexagon body + separate chevron arrows either side.
+# Winner declaration + POTM go centred on the body.
+_TBECS_SC_BAR = {
+    "poly": [(95, 912), (1443, 912), (1469, 956), (1443, 1000), (95, 1000), (78, 956)],
+    "chevrons": [(30, 908, 99, 1004), (1441, 908, 1502, 1004)],
+    "cx": 769, "res_cy": 948, "potm_cy": 980, "single_cy": 961,
+}
+
+# Panel background tint to each batting team's colour, CLIPPED to the template's
+# exact panel outlines (chamfered rects measured on the template, grown ~4px to
+# absorb the border glow) so no tint ever reaches the stadium backdrop:
+#   panel 1 is saturated blue -> hue-shift (same technique as CCODI)
+#   panel 2 is desaturated grey -> multiply-colorize the dark texture
+# The bottom bar (body + chevrons) tints to the WINNER's colour once decided.
+_TBECS_SC_TINT = {
+    1: {"poly": _tbecs_chamf(38, 197, 1487, 565, 12), "mode": "hue"},
+    2: {"poly": _tbecs_chamf(38, 574, 1487, 896, 12), "mode": "dark"},
+}
+# The template's blues run from the cyan border strokes (~hue 115) to deep navy
+# fills (~hue 195 in PIL's 0-255 hue scale) - the replace window must cover it all.
+_TBECS_HUE_LO, _TBECS_HUE_HI = 108, 200
+
+
+def _tbecs_tint_panel(img, spec, hex_color):
+    import colorsys
+    from PIL import ImageChops
+    try:
+        r, g, b = (int(hex_color.lstrip("#")[i:i+2], 16) for i in (0, 2, 4))
+    except Exception:
+        return
+    hh, ss, _vv = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+    if ss < 0.22:   # grey/default colour -> leave the template as-is
+        return
+    poly = spec.get("poly")
+    if poly:
+        xs = [p[0] for p in poly]; ys = [p[1] for p in poly]
+        box = (min(xs), min(ys), max(xs) + 1, max(ys) + 1)
+    else:
+        box = spec["box"]
+    region = img.crop(box)
+
+    if spec["mode"] == "dark":
+        # MULTIPLY-colorize the grey panel: each pixel's own brightness drives the
+        # colour (classic greyscale tinting), so brush texture, gradients and shadows
+        # keep their natural contrast instead of reading as a flat colour filter.
+        # Bright text/grid lines fade back to the untouched original and stay crisp.
+        grey = region.convert("L")
+        lifted = grey.point(lambda p: min(255, int(p * 1.30) + 12))   # keep shadows readable
+        mult = ImageChops.multiply(Image.merge("RGB", (lifted, lifted, lifted)),
+                                   Image.new("RGB", region.size, (r, g, b)))
+        mask = grey.point(lambda p: 255 if p < 130 else (0 if p > 185 else int(255 * (185 - p) / 55)))
+        region = Image.composite(mult, region, mask)
+
+    # Both panels: every SATURATED BLUE pixel (cyan border strokes through navy
+    # fills) swaps its hue for the team hue - texture/brightness untouched.
+    hsv = region.convert("HSV")
+    h, s, v = hsv.split()
+    satmask = s.point(lambda p: 255 if p > 55 else 0)
+    huemask = h.point(lambda p: 255 if _TBECS_HUE_LO <= p <= _TBECS_HUE_HI else 0)
+    mask = ImageChops.multiply(satmask, huemask)
+    h = Image.composite(Image.new("L", region.size, int(hh * 255)), h, mask)
+    out = Image.merge("HSV", (h, s, v)).convert("RGB")
+
+    if poly:
+        # Clip strictly to the template's panel outline - nothing outside it changes.
+        clip = Image.new("L", region.size, 0)
+        ImageDraw.Draw(clip).polygon([(x - box[0], y - box[1]) for x, y in poly], fill=255)
+        img.paste(out, (box[0], box[1]), clip)
+    else:
+        img.paste(out, (box[0], box[1]))
+
+
+def generate_tbecs_scorecard(match: CricketMatch) -> io.BytesIO:
+    """TBECS-branded scorecard onto assets/tbecs_scorecard.png from the live match."""
+    img = Image.open("assets/tbecs_scorecard.png").convert("RGB")
+    d = ImageDraw.Draw(img)
+    f_name = _ccodi_font(26); f_score = _ccodi_font(44); f_overs = _ccodi_font(22)
+    f_row = _ccodi_font(20, bold=False); f_rowb = _ccodi_font(21)
+    f_ext = _ccodi_font(19, bold=False)
+    WHITE = "#FFFFFF"; DIM = "#C9D4F0"
+
+    tourney = None
+    if getattr(match, "tournament_server_id", None):
+        tourney = next((t for t in DB_CACHE.get("tournaments", []) if t.get("server_id") == match.tournament_server_id), None)
+
+    def _team_meta(name):
+        if not tourney: return None, "#334155"
+        t = next((x for x in tourney.get("teams", []) if x["name"] == name), None)
+        if not t: return None, "#334155"
+        return (t.get("logo_match") or t.get("logo_standings")), t.get("color", "#334155")
+
+    def _fit(s, font, maxw):
+        if font.getbbox(s)[2] <= maxw:
+            return s
+        while s and font.getbbox(s + "…")[2] > maxw:
+            s = s[:-1]
+        return s + "…"
+
+    inns = [match.innings1]
+    if match.current_innings_num == 2 and match.innings2:
+        inns.append(match.innings2)
+
+    # Tint each panel's background to its batting team's colour BEFORE any text.
+    for idx, inn in enumerate(inns, 1):
+        _, _colr = _team_meta(inn.batting_team["name"])
+        _tbecs_tint_panel(img, _TBECS_SC_TINT[idx], _colr)
+
+    for idx, inn in enumerate(inns, 1):
+        P = _TBECS_SC[idx]
+        tname = inn.batting_team["name"]
+        logo, colr = _team_meta(tname)
+
+        # Left block: logo · name · score, OVERS value beside the template label.
+        sz = _TBECS_SC_LOGO
+        crest = None
+        try:
+            crest = _fetch_emoji_img(logo, sz) if logo else None
+        except Exception:
+            crest = None
+        x0, y0 = _TBECS_SC_LEFT_CX - sz // 2, P["logo_cy"] - sz // 2
+        if crest:
+            img.paste(crest, (x0, y0), crest)
+        else:
+            try: fill = tuple(int(colr.lstrip("#")[i:i+2], 16) for i in (0, 2, 4))
+            except Exception: fill = (51, 65, 85)
+            d.rounded_rectangle([(x0, y0), (x0 + sz, y0 + sz)], radius=12, fill=fill)
+            d.text((_TBECS_SC_LEFT_CX, P["logo_cy"]), tname[:3].upper(), font=f_name, fill=WHITE, anchor="mm")
+        # Full team name: shrink the font until it fits the block (no chopping).
+        _nm = tname.upper()
+        _nf = f_name
+        for _sz in range(26, 13, -1):
+            _nf = _ccodi_font(_sz)
+            if _nf.getbbox(_nm)[2] <= 220:
+                break
+        d.text((_TBECS_SC_LEFT_CX, P["name_cy"]), _nm, font=_nf, fill=WHITE, anchor="mm")
+        d.text((_TBECS_SC_LEFT_CX, P["score_cy"]), f"{inn.total_runs}/{inn.wickets}", font=f_score, fill=WHITE, anchor="mm")
+        overs = f"{inn.total_balls // 6}.{inn.total_balls % 6}"
+        # Overs value in a BRIGHT team colour so it matches the (tinted) OVERS label
+        # beside it - hard-coded blue would be the one blue left on a recoloured panel.
+        try:
+            import colorsys as _cs
+            _r, _g, _b = (int(colr.lstrip("#")[i:i+2], 16) for i in (0, 2, 4))
+            _h, _s, _v = _cs.rgb_to_hsv(_r / 255, _g / 255, _b / 255)
+            _r, _g, _b = _cs.hsv_to_rgb(_h, min(_s, 0.72), 1.0)
+            overs_fill = (int(_r * 255), int(_g * 255), int(_b * 255))
+        except Exception:
+            overs_fill = "#4D9FFF"
+        d.text((_TBECS_SC_OVERS_RX, P["overs_cy"]), overs, font=f_overs, fill=overs_fill, anchor="rm")
+
+        # EXTRAS breakdown + RR after the template labels.
+        extras = getattr(inn, "extras", 0)
+        ext_txt = (f"{extras}  (B {getattr(inn, 'byes', 0)}, LB {getattr(inn, 'legbyes', 0)}, "
+                   f"NB {getattr(inn, 'noballs', 0)}, WD {getattr(inn, 'wides', 0)})")
+        d.text((_TBECS_SC_EXTRAS_VX, P["extras_y"]), ext_txt, font=f_ext, fill=DIM, anchor="lm")
+        rr = (inn.total_runs / inn.total_balls * 6) if inn.total_balls else 0.0
+        d.text((_TBECS_SC_RR_VX, P["rr_y"]), f"{rr:.2f}", font=f_ext, fill=DIM, anchor="lm")
+
+        # Batters (top N by runs for this panel's row count).
+        bats = sorted([b for b in inn.batting_stats.values() if b.balls_faced > 0 or b.dismissal != "not out"],
+                      key=lambda x: x.runs_scored, reverse=True)[:len(P["bat_rows"])]
+        C = _TBECS_SC_BAT_COLS
+        for b, cy in zip(bats, P["bat_rows"]):
+            sr = (b.runs_scored / b.balls_faced * 100) if b.balls_faced else 0.0
+            star = "*" if b.dismissal == "not out" else ""
+            d.text((C["name"], cy), _fit(f"{b.profile['name']}{star}", f_row, 275), font=f_row, fill=WHITE, anchor="lm")
+            d.text((C["R"], cy), str(b.runs_scored), font=f_rowb, fill=WHITE, anchor="mm")
+            d.text((C["B"], cy), str(b.balls_faced), font=f_row, fill=DIM, anchor="mm")
+            d.text((C["4s"], cy), str(getattr(b, "fours", 0)), font=f_row, fill=DIM, anchor="mm")
+            d.text((C["6s"], cy), str(getattr(b, "sixes", 0)), font=f_row, fill=DIM, anchor="mm")
+            d.text((C["SR"], cy), f"{sr:.0f}", font=f_row, fill=DIM, anchor="mm")
+
+        # Bowlers (top N by wickets).
+        bowls = sorted([b for b in inn.bowling_stats.values() if b.balls_bowled > 0],
+                       key=lambda x: (x.wickets_taken, -x.runs_conceded), reverse=True)[:len(P["bowl_rows"])]
+        C = _TBECS_SC_BOWL_COLS
+        for b, cy in zip(bowls, P["bowl_rows"]):
+            ov = f"{b.balls_bowled // 6}.{b.balls_bowled % 6}"
+            econ = (b.runs_conceded / b.balls_bowled * 6) if b.balls_bowled else 0.0
+            d.text((C["name"], cy), _fit(b.profile["name"], f_row, 175), font=f_row, fill=WHITE, anchor="lm")
+            d.text((C["O"], cy), ov, font=f_row, fill=DIM, anchor="mm")
+            d.text((C["M"], cy), str(getattr(b, "maidens", 0)), font=f_row, fill=DIM, anchor="mm")
+            d.text((C["R"], cy), str(b.runs_conceded), font=f_row, fill=DIM, anchor="mm")
+            d.text((C["W"], cy), str(b.wickets_taken), font=f_rowb, fill=WHITE, anchor="mm")
+            d.text((C["ECON"], cy), f"{econ:.2f}", font=f_row, fill=DIM, anchor="mm")
+
+    # Bottom bar: winner declaration + POTM once the chase is done. The bar tints
+    # to the WINNER's colour, then the text goes on top.
+    if len(inns) == 2:
+        i1, i2 = match.innings1, match.innings2
+        target = getattr(match, "target", i1.total_runs + 1)
+        mw = _match_max_wickets(match)
+        if getattr(match, "tiebreak_winner_name", None):
+            winner_name = match.tiebreak_winner_name
+            res = f"{winner_name.upper()} WON (SUPER OVER)"
+        elif i2.total_runs >= target:
+            winner_name = i2.batting_team["name"]
+            res = f"{winner_name.upper()} WON BY {mw - i2.wickets} WICKETS"
+        elif i2.total_runs == target - 1:
+            winner_name = None
+            res = "MATCH TIED"
+        else:
+            winner_name = i1.batting_team["name"]
+            res = f"{winner_name.upper()} WON BY {(target - 1) - i2.total_runs} RUNS"
+        if getattr(match, "dls_active", False):
+            res += " (DLS)"
+
+        BAR = _TBECS_SC_BAR
+        if winner_name:
+            _, _wc = _team_meta(winner_name)
+            _tbecs_tint_panel(img, {"poly": BAR["poly"], "mode": "hue"}, _wc)
+            for _cb in BAR["chevrons"]:
+                _tbecs_tint_panel(img, {"box": _cb, "mode": "hue"}, _wc)
+
+        potm = getattr(match, "_potm_name", None)
+        if potm is None:
+            try:
+                potm = get_player_of_the_match(match)
+            except Exception:
+                potm = None
+        if potm:
+            d.text((BAR["cx"], BAR["res_cy"]), res, font=_ccodi_font(32), fill=WHITE, anchor="mm")
+            d.text((BAR["cx"], BAR["potm_cy"]), f"PLAYER OF THE MATCH  •  {str(potm).upper()}",
+                   font=_ccodi_font(19), fill=(240, 194, 66), anchor="mm")
+        else:
+            d.text((BAR["cx"], BAR["single_cy"]), res, font=_ccodi_font(36), fill=WHITE, anchor="mm")
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
+def generate_tbecs_scorecard_from_data(data: dict):
+    """Rebuild a match-like object from STORED scorecard data and render the TBECS
+    template — same bridge as generate_ccodi_scorecard_from_data."""
+    from types import SimpleNamespace as _NS
+    t1, t2 = data.get("t1"), data.get("t2")
+    if not t1 or not t2 or not t1.get("batters") or not t2.get("batters"):
+        return None
+    if all(b.get("fours") is None for b in t1["batters"] + t2["batters"]):
+        return None
+
+    def _inn(td):
+        bats = {}
+        for b in td.get("batters", []):
+            dis = b.get("dismissal") or ("not out" if b.get("not_out") else "c. Fielder")
+            bats[b["name"]] = _NS(runs_scored=b["runs"], balls_faced=b["balls"],
+                                  fours=b.get("fours") or 0, sixes=b.get("sixes") or 0,
+                                  dismissal=dis, profile={"name": b["name"]})
+        bowls = {}
+        for w in td.get("bowlers", []):
+            parts = str(w.get("overs", "0.0")).split(".")
+            balls = int(parts[0]) * 6 + (int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0)
+            bowls[w["name"]] = _NS(balls_bowled=balls, runs_conceded=w["runs"],
+                                   wickets_taken=w["wickets"], maidens=w.get("maidens") or 0,
+                                   profile={"name": w["name"]})
+        ex = td.get("extras") or [0, 0, 0, 0, 0]
+        return _NS(batting_team={"name": td.get("raw_name") or td["name"]},
+                   total_runs=td["runs"], wickets=td["wickets"], total_balls=td.get("balls") or 0,
+                   extras=ex[0], byes=ex[1], legbyes=ex[2], noballs=ex[3], wides=ex[4],
+                   batting_stats=bats, bowling_stats=bowls)
+
+    rs = data.get("result_str") or ""
+    tiebreak = rs.split(" WON")[0].strip() if "(SUPER OVER)" in rs else None
+    m = _NS(tournament_server_id=data.get("server_id"), tournament_type="tbecs",
+            innings1=_inn(t1), innings2=_inn(t2), current_innings_num=2,
+            target=t1["runs"] + 1, tiebreak_winner_name=tiebreak,
+            _potm_name=data.get("potm"))
+    return generate_tbecs_scorecard(m)
+
 
 # ---- Match progression & loops ----
 
@@ -11708,6 +12011,7 @@ class PrefixCog(commands.Cog):
             "ccodi": "ccodi",   # 10 teams · 2 groups of 5 · round-wise double RR · top-2 -> KO1/KO2 -> Q1/Eliminator -> Q2 -> Final
             "ipl": "ipl", "indian_premier_league": "ipl",   # 10 teams · 2 groups of 5 · 14 matches each · combined table · top-4 playoffs
             "custom": "custom",   # build-your-own format via the setup wizard
+            "tbecs": "tbecs",   # 56 teams (54 + 2 GOAT XIs) · 2 groups of 28 · Super 20 · seeded QFs — stages advance ONLY via `cvt tbecs_next`
         }
         cond_map = {"manual": "manual", "auto": "auto", "home": "home", "home_pitch": "home", "homepitch": "home"}
         order_map = {"random": "random", "any": "random",
@@ -11769,6 +12073,35 @@ class PrefixCog(commands.Cog):
             "stadium_mode": kwargs['stadium_mode'],
             "stadiums": default_stadium_pool(t_type),
         }
+
+        # TBECS: bot-owner only. Pre-seed the two GOAT XIs (they occupy 2 of the 56
+        # slots) and widen squads to 20. Everything else follows normal registration.
+        if t_type == "tbecs":
+            if ctx.author.id != ADMIN_DISCORD_ID:
+                return await ctx.send("❌ TBECS events can only be created by the bot owner.")
+            from league.tbecs_manager import TBECS_CONFIG, build_goat_teams
+            t_data["min_squad"] = TBECS_CONFIG["min_squad"]
+            t_data["max_squad"] = TBECS_CONFIG["max_squad"]
+            t_data["teams"] = build_goat_teams(ADMIN_DISCORD_ID)
+            # TBECS is always: any match anytime, home fixtures at the home team's
+            # linked ground on its fixed pitch.
+            t_data["match_order"] = "random"
+            t_data["stadium_mode"] = "linked"
+            t_data["conditions_mode"] = "home"
+            save_tournament(t_data)
+            return await ctx.send(
+                f"🐐 **TBECS Created:** `{name}` — {TBECS_CONFIG['display_name']}\n"
+                f"**{TBECS_CONFIG['addable_teams']} addable teams** + the 2 pre-seeded GOAT XIs "
+                f"(**{', '.join(g['name'] for g in t_data['teams'])}** — all 99/99, fun only, can NEVER qualify).\n"
+                f"📋 Two groups of {TBECS_CONFIG['group_size']} → top {TBECS_CONFIG['stage1_qualifiers']} each → "
+                f"Super 20 → seeded QFs (1v8…) → SFs → Final. Matches play in **any order**.\n"
+                f"🏟️ **Home stadiums with fixed home pitches** — owners: `cvt set_home_stadium \"<team>\" <ground> <pitch>`; "
+                f"managers fill everyone left with `cvt tbecs_assign_homes`.\n"
+                f"🎨 Teams without a submitted logo/colour get a default at start.\n"
+                f"`cvt add_team \"<team>\" @owner [A/B]` ×{TBECS_CONFIG['addable_teams']} (group optional — the rest are balanced at start), "
+                f"squads {TBECS_CONFIG['min_squad']}–{TBECS_CONFIG['max_squad']} players, then `cvt start`.\n"
+                f"⏭️ Stages NEVER auto-advance: after each stage completes, the owner runs `cvt tbecs_next`."
+            )
 
         # Custom: park in "configuring" and run the setup wizard - registration
         # only opens once the creator confirms their format.
@@ -11847,6 +12180,20 @@ class PrefixCog(commands.Cog):
                 return await ctx.send(f"❌ Group **{group_val}** already has {cap} teams.")
         elif t_type == "ipl" and len(tourney["teams"]) >= 10:
             return await ctx.send("❌ **IPL is full** — 10 teams already added.")
+        elif t_type == "tbecs":
+            # Group is OPTIONAL here (A/B); unassigned teams get balanced at start.
+            # Cap: 27 addable per group — the 28th slot in each is its GOAT XI.
+            from league.tbecs_manager import TBECS_CONFIG as _TBC
+            if sum(1 for t in tourney["teams"] if not t.get("goat")) >= _TBC["addable_teams"]:
+                return await ctx.send(f"❌ **TBECS is full** — all {_TBC['addable_teams']} addable slots taken (the other 2 are the GOAT XIs).")
+            gm = (re.search(r"(?:^|\s)group\s*[=:]?\s*([abAB])(?=\s|$)", txt)
+                  or re.search(r"(?:^|\s)([abAB])\s*$", txt))
+            if gm:
+                group_val = gm.group(1).upper()
+                txt = (txt[:gm.start()] + " " + txt[gm.end():]).strip()
+                cap = _TBC["group_size"] - 1
+                if sum(1 for t in tourney["teams"] if t.get("group") == group_val and not t.get("goat")) >= cap:
+                    return await ctx.send(f"❌ Group **{group_val}** already has {cap} addable teams.")
         elif t_type == "custom":
             cfg = tourney.get("custom_config") or {}
             st0 = (cfg.get("stages") or [{}])[0]
@@ -11872,7 +12219,8 @@ class PrefixCog(commands.Cog):
 
         if any(t["name"].lower() == team_name.lower() for t in tourney["teams"]):
             return await ctx.send("❌ Team name already exists.")
-        if any(t["owner_id"] == str(owner.id) for t in tourney["teams"]):
+        # GOAT XIs don't count against their caretaker's one-team-per-owner limit.
+        if any(t["owner_id"] == str(owner.id) for t in tourney["teams"] if not t.get("goat")):
             return await ctx.send(f"❌ {owner.mention} already owns a team.")
 
         tourney["teams"].append({"name": team_name, "owner_id": str(owner.id), "squad": [], "group": group_val})
@@ -12221,6 +12569,12 @@ class PrefixCog(commands.Cog):
         elif t_type == "acl":
             if len(tourney["teams"]) != 14:
                 return f"❌ **ACL requires exactly 14 teams** (currently {len(tourney['teams'])})."
+        elif t_type == "tbecs":
+            from league.tbecs_manager import TBECS_CONFIG as _TBC
+            n_add = sum(1 for t in tourney["teams"] if not t.get("goat"))
+            if n_add != _TBC["addable_teams"]:
+                return (f"❌ **TBECS requires exactly {_TBC['addable_teams']} addable teams** "
+                        f"(currently {n_add}) — plus the 2 pre-seeded GOAT XIs.")
         elif t_type == "custom":
             err = custom_start_error(tourney)
             if err:
@@ -12255,9 +12609,11 @@ class PrefixCog(commands.Cog):
             missing = [t["name"] for t in tourney["teams"]
                        if not t.get("home_stadium") or not canonical_pitch(t.get("home_pitch"))]
             if missing:
+                _shown = ", ".join(f"**{m}**" for m in missing[:15]) + (f" … +{len(missing) - 15} more" if len(missing) > 15 else "")
+                _hint = ("\n🎲 Or fill everyone left at once: `cvt tbecs_assign_homes`." if t_type == "tbecs" else "")
                 return ("❌ **Linked stadiums:** every team needs a home ground with its fixed pitch before starting.\n"
-                        "Missing: " + ", ".join(f"**{m}**" for m in missing) +
-                        "\nUse `cvt set_home_stadium \"<team>\" <stadium name> <pitch>` · `cvt home_stadiums` to review.")
+                        "Missing: " + _shown +
+                        "\nUse `cvt set_home_stadium \"<team>\" <stadium name> <pitch>` · `cvt home_stadiums` to review." + _hint)
         # Home-pitch mode: every team must have a home pitch set before starting.
         elif tourney.get("conditions_mode") == "home":
             missing = [t["name"] for t in tourney["teams"] if not canonical_pitch(t.get("home_pitch"))]
@@ -12309,6 +12665,32 @@ class PrefixCog(commands.Cog):
                 + f"{summary}\n"
                 + "Later stages & playoffs generate automatically as results come in. "
                   "`cv tournament status` for fixtures · `cv tournament standings` for the tables."
+            )
+
+        if t_type == "tbecs":
+            from league.tbecs_manager import (tbecs_split_groups, tbecs_generate_group_stage,
+                                              tbecs_fill_default_identity, TBECS_CONFIG as _TBC)
+            err = tbecs_split_groups(tourney)
+            if err:
+                return await channel.send(err)
+            # Teams that never submitted a colour/logo get distinct defaults now, so
+            # every scorecard/table/bracket renders complete from match one.
+            n_col, n_logo = tbecs_fill_default_identity(tourney)
+            tbecs_generate_group_stage(tourney)
+            tourney["status"] = "active"
+            tourney["current_match_idx"] = 0
+            assign_tournament_conditions(tourney)
+            save_tournament(tourney)
+            by_grp = {g: [t["name"] for t in tourney["teams"] if t.get("group") == g] for g in ("A", "B")}
+            groups_txt = "\n".join(f"**Group {g}** ({len(ns)}): {' · '.join(ns)}" for g, ns in by_grp.items())
+            return await channel.send(
+                f"🐐 **TBECS STARTED: {tourney['name']}!**\n{groups_txt}\n"
+                f"Generated **{len(tourney['schedule'])} group-stage matches** "
+                f"(28-team round robin per group) — play them in **any order**; "
+                f"home fixtures at the home side's ground on its fixed pitch.\n"
+                + (f"🎨 Defaults filled: {n_col} team colour(s), {n_logo} logo(s).\n" if (n_col or n_logo) else "")
+                + f"🏁 Top {_TBC['stage1_qualifiers']} per group qualify — the GOAT XIs cannot, whatever their position.\n"
+                f"⏭️ When the stage is done, the owner runs `cvt tbecs_next` for the Super 20 — nothing advances on its own."
             )
 
         if t_type == "t20_world_cup":
@@ -12876,6 +13258,50 @@ class PrefixCog(commands.Cog):
         if not embeds:
             return await ctx.send("ℹ️ No TBECS ads set. Add one with `cvt tbecs_ad`.")
         await ctx.send("👀 **Preview** — this is what shows at every innings end:", embeds=embeds[:10])
+
+    @tournament.command(name="tbecs_assign_homes", aliases=["assign_homes", "random_homes"],
+                        help="[MANAGER] Randomly assign a home stadium + fixed home pitch to every team that hasn't set one.\n"
+                             "Teams that already ran set_home_stadium keep their choice.\nUsage: tournament tbecs_assign_homes")
+    async def t_tbecs_assign_homes(self, ctx):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        from league.tbecs_manager import is_tbecs_tournament, tbecs_assign_random_homes
+        if not is_tbecs_tournament(tourney):
+            return await ctx.send("❌ No TBECS tournament in this server.")
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
+        if not is_mgr:
+            return await ctx.send("❌ Managers only.")
+        if tourney["status"] != "registration":
+            return await ctx.send("❌ Home grounds are locked once the tournament starts.")
+        n, lines = tbecs_assign_random_homes(tourney)
+        if not n:
+            return await ctx.send("✅ Every team already has a home stadium & pitch — nothing to assign.")
+        save_tournament(tourney)
+        buf = f"🏟️ **Assigned {n} random home ground(s)** (unique stadium, random fixed pitch):\n"
+        for ln in lines:
+            if len(buf) + len(ln) + 1 > 1990:
+                await ctx.send(buf); buf = ""
+            buf += ln + "\n"
+        if buf.strip():
+            await ctx.send(buf)
+
+    @tournament.command(name="tbecs_next", aliases=["next_stage", "next_round"],
+                        help="[OWNER] Generate the next TBECS stage (Super 20 → QFs → SFs → Final).\n"
+                             "Refuses while the current stage has pending matches. Stages NEVER advance on their own.\n"
+                             "Usage: tournament tbecs_next")
+    async def t_tbecs_next(self, ctx):
+        if ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("❌ Owner only.")
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        from league.tbecs_manager import is_tbecs_tournament, tbecs_generate_next
+        if not is_tbecs_tournament(tourney):
+            return await ctx.send("❌ No TBECS tournament in this server.")
+        ok, msg = tbecs_generate_next(tourney)
+        if ok:
+            assign_tournament_conditions(tourney)   # fill pitch/weather on the new fixtures
+            save_tournament(tourney)
+        await ctx.send(msg)
 
     @tournament.command(name="force_result", help="[MANAGER] Manually set match result.\nUsage: tournament force_result <id> <winner> <t1_r> <t1_w> <t1_b> <t2_r> <t2_w> <t2_b>")
     async def t_force_result(self, ctx, match_id: int, winner_team: str, t1_runs: int, t1_wkts: int, t1_balls: int, t2_runs: int, t2_wkts: int, t2_balls: int):
@@ -14762,7 +15188,9 @@ class PrefixCog(commands.Cog):
 
         # Knockout / bracket progression - same paths a played match triggers.
         t_type = tourney.get("tournament_type", "round_robin")
-        if t_type == "acl":
+        if t_type == "tbecs":
+            pass   # TBECS never auto-advances - owner runs `cvt tbecs_next`
+        elif t_type == "acl":
             _acl_try_advance(tourney)
         elif t_type == "ipl":
             ipl_try_advance(tourney)
@@ -14961,7 +15389,9 @@ class PrefixCog(commands.Cog):
             "t2_runs": t2_runs, "t2_wickets": t2_wickets, "t2_balls": t2_balls,
         }
         tourney["current_match_idx"] = tourney.get("current_match_idx", 0) + 1
-        if tourney.get("tournament_type") == "acl":
+        if tourney.get("tournament_type") == "tbecs":
+            pass   # TBECS never auto-advances - owner runs `cvt tbecs_next`
+        elif tourney.get("tournament_type") == "acl":
             _acl_try_advance(tourney)
         elif tourney.get("tournament_type") == "ipl":
             ipl_try_advance(tourney)
