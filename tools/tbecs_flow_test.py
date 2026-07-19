@@ -78,8 +78,14 @@ ok(is_tbecs_tournament(t), "type key recognised")
 ok(len(t["teams"]) == 56, "56 teams total (54 addable + 2 GOAT)")
 ok(len(goat_team_names(t)) == 2, "both GOAT XIs flagged")
 for g in GOAT_TEAMS:
-    ok(len(g["players"]) == 11 and all(p["bat"] == 99 and p["bowl"] == 99 and
-       p["archetype"] == "Vaibhav" for p in g["players"]), f"{g['name']}: 11 players, all 99/99 Vaibhav")
+    ok(len(g["players"]) == 15 and all(p["bat"] == 99 and p["bowl"] == 99 and
+       p["archetype"] == "Vaibhav" for p in g["players"]),
+       f"{g['name']}: 15 players (XI + bench), all 99/99 Vaibhav")
+    ok(sum(1 for p in g["players"] if p["role"] == "Batter_WK") == 2,
+       f"{g['name']}: has a backup keeper")
+for gt in build_goat_teams(1):
+    ok(gt["default_xi"] == [p["name"] for p in next(g for g in GOAT_TEAMS if g["name"] == gt["name"])["players"][:11]],
+       f"{gt['name']}: starting XI pinned as default (bench only on injury)")
 
 err = tbecs_split_groups(t, rng)
 ok(err is None, "group split accepted")

@@ -12683,7 +12683,10 @@ class PrefixCog(commands.Cog):
 
         if t_type == "tbecs":
             from league.tbecs_manager import (tbecs_split_groups, tbecs_generate_group_stage,
-                                              tbecs_fill_default_identity, TBECS_CONFIG as _TBC)
+                                              tbecs_fill_default_identity, tbecs_refresh_goat_teams,
+                                              TBECS_CONFIG as _TBC)
+            # Heal GOAT squads saved under an older roster (e.g. 11 before the bench).
+            tbecs_refresh_goat_teams(tourney)
             err = tbecs_split_groups(tourney)
             if err:
                 return await channel.send(err)

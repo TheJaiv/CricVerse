@@ -45,9 +45,10 @@ TBECS_CONFIG = {
     "max_squad": 20,                     # 20 players per team (per-match stats stored for all)
 }
 
-# The two GOAT XIs - pure fun sides. 1 WK, 2 batters, 7 all-rounders, 1 pacer,
-# 1 spinner; ALL 99/99 with the Vaibhav (fearless) archetype. Fictional names on
-# purpose - no real player implied. Squads are exactly 11, no bench.
+# The two GOAT XIs - pure fun sides. Starting XI: 1 WK, 2 batters, 7 all-rounders,
+# 1 pacer/spinner; plus a 4-man bench (backup WK, batter, AR, bowler) so injuries
+# never leave them short. ALL 99/99 with the Vaibhav (fearless) archetype.
+# Fictional names on purpose - no real player implied. First 11 = the default XI.
 def _goat(name, role):
     return {"name": name, "bat": 99, "bowl": 99, "role": role, "archetype": "Vaibhav"}
 
@@ -64,6 +65,11 @@ GOAT_TEAMS = [
         _goat("Match Winner",      "All-Rounder_Spin_Leg"),
         _goat("Momentum Shift",    "All-Rounder_Spin_Orthodox"),
         _goat("Speed Demon",       "Bowler_Pace"),
+        # bench
+        _goat("Safe Hands",        "Batter_WK"),
+        _goat("Crowd Silencer",    "Batter"),
+        _goat("The Sequel",        "All-Rounder_Pace"),
+        _goat("Aftershock",        "Bowler_Spin_Off"),
     ]},
     {"name": "GOAT XI Zenith", "players": [
         _goat("Run Tsunami",       "Batter"),
@@ -77,11 +83,13 @@ GOAT_TEAMS = [
         _goat("The Glitch",        "All-Rounder_Spin_Leg"),
         _goat("Server Admin",      "All-Rounder_Spin_Orthodox"),
         _goat("Web Weaver",        "Bowler_Spin_Leg"),
+        # bench
+        _goat("Vault Door",        "Batter_WK"),
+        _goat("Encore",            "Batter"),
+        _goat("Patch Update",      "All-Rounder_Spin_Off"),
+        _goat("Ricochet",          "Bowler_Pace"),
     ]},
 ]
-# Composition check: user spec is 1 WK / 2 bat / 7 AR / 1 pure bowler+1 more bowler.
-# Apex carries the pacer, Zenith the spinner as their 11th; both roles appear across
-# the event. (7 ARs all bowl anyway, so each XI always has a full attack.)
 
 # Every GOAT player name - core/global_stats.py uses this to keep GOAT performances
 # out of the all-time global stats (they're fun-only, same rule as the tournament
@@ -103,11 +111,28 @@ def goat_team_names(tourney):
     return {t["name"] for t in tourney.get("teams", []) if t.get("goat")}
 
 
+def tbecs_refresh_goat_teams(tourney):
+    """Re-sync each GOAT team's squad + default XI from the CURRENT definition,
+    keeping tournament-level fields (group, home ground, colour, logo). Heals
+    tournaments saved before a roster change - e.g. squads stored as 11 before
+    the bench was added. Run at start; safe any time before it."""
+    for t in tourney.get("teams", []):
+        if not t.get("goat"):
+            continue
+        g = next((x for x in GOAT_TEAMS if x["name"] == t["name"]), None)
+        if g:
+            t["squad"] = [dict(p) for p in g["players"]]
+            t["default_xi"] = [p["name"] for p in g["players"][:11]]
+
+
 def build_goat_teams(owner_id):
     """Fresh GOAT team dicts ready to append to tourney['teams'] at creation.
-    Owned by the bot owner so someone can drive them in interactive matches."""
+    Owned by the bot owner so someone can drive them in interactive matches.
+    The first 11 are pinned as the default XI - the bench only comes in when an
+    injury invalidates it (resolve_default_xi falls back to the best fit XI)."""
     return [{"name": g["name"], "owner_id": str(owner_id), "goat": True,
-             "squad": [dict(p) for p in g["players"]], "group": grp}
+             "squad": [dict(p) for p in g["players"]], "group": grp,
+             "default_xi": [p["name"] for p in g["players"][:11]]}
             for g, grp in zip(GOAT_TEAMS, ("A", "B"))]
 
 
@@ -229,16 +254,35 @@ def build_tbecs_status_embed(tourney):
     if tourney.get("status") == "registration":
         teams = [t for t in tourney.get("teams", []) if not t.get("goat")]
         want = TBECS_CONFIG["addable_teams"]
-        squads_ok = sum(1 for t in teams if len(t.get("squad", [])) >= TBECS_CONFIG["min_squad"])
+        min_s = tourney.get("min_squad", TBECS_CONFIG["min_squad"])
+        squads_ok = sum(1 for t in teams if len(t.get("squad", [])) >= min_s)
         homes_ok = sum(1 for t in tourney.get("teams", []) if t.get("home_stadium") and t.get("home_pitch"))
         e.title = f"🐐 {tourney['name']} — Registration"
         e.description = (
             f"**Teams:** {len(teams)}/{want}  {_bar(len(teams), want)}\n"
-            f"**Squads in:** {squads_ok}/{len(teams) or 1}\n"
-            f"**Home grounds:** {homes_ok}/{len(tourney.get('teams', []))} "
-            f"(`cvt tbecs_assign_homes` fills the rest)\n\n"
+            f"**Squads in:** {squads_ok}/{want} · **Home grounds:** {homes_ok}/{want + 2} "
+            f"(`cvt tbecs_assign_homes` fills the rest)\n"
             f"`cvt add_team \"<team>\" @owner [A/B]` · owners `cvt ss` · then `cvt start`"
         )
+        # Registered teams by name - ✅ squad in, 📝 squad pending, group tag if picked.
+        if teams:
+            entries = []
+            for t in sorted(teams, key=lambda x: x["name"].lower()):
+                tick = "✅" if len(t.get("squad", [])) >= min_s else "📝"
+                grp = f"·{t['group']}" if t.get("group") in ("A", "B") else ""
+                entries.append(f"{tick}{t['name']}{grp}")
+            chunks, cur = [], ""
+            for s in entries:
+                if len(cur) + len(s) + 3 > 1020:
+                    chunks.append(cur); cur = ""
+                cur += (" · " if cur else "") + s
+            if cur:
+                chunks.append(cur)
+            for i, ch in enumerate(chunks[:4]):
+                e.add_field(name=f"Registered ({len(teams)})" if i == 0 else "​", value=ch, inline=False)
+        goat_sizes = " · ".join(f"{t['name']}: {len(t.get('squad', []))}" for t in tourney.get("teams", []) if t.get("goat"))
+        if goat_sizes:
+            e.add_field(name="🐐 GOAT XIs (pre-seeded)", value=goat_sizes, inline=False)
         return e
 
     sched = tourney.get("schedule", [])
