@@ -8766,14 +8766,15 @@ def _batting_order(players: list) -> list:
     return sorted(players, key=_pos)
 
 def _build_playerlist_txt(players: list) -> str:
-    tiers = {"LEGENDS": [], "ELITE": [], "GOLD": [], "SILVER": [], "BRONZE": []}
+    tiers = {"LEGENDS": [], "ELITE": [], "GOLD": [], "SILVER": [], "BRONZE": [], "IRON": []}
     for p in players:
         ov = _player_overall(p)
         if   ov > 95: tiers["LEGENDS"].append(p)
         elif ov > 90: tiers["ELITE"].append(p)
         elif ov >= 85: tiers["GOLD"].append(p)
         elif ov >= 80: tiers["SILVER"].append(p)
-        else:          tiers["BRONZE"].append(p)
+        elif ov >= 70: tiers["BRONZE"].append(p)
+        else:          tiers["IRON"].append(p)
     for lst in tiers.values():
         random.shuffle(lst)
 
@@ -8789,6 +8790,7 @@ def _build_playerlist_txt(players: list) -> str:
         "GOLD":    "⭐⭐    GOLD",
         "SILVER":  "⭐      SILVER",
         "BRONZE":  "         BRONZE",
+        "IRON":    "         IRON",
     }
     for tier, label in tier_labels.items():
         grp = tiers[tier]
@@ -8808,14 +8810,15 @@ def _build_playerlist_txt(players: list) -> str:
 
 def _build_playerlist_csv_txt(players: list) -> str:
     """Same tier grouping as _build_playerlist_txt, but names are comma-separated per tier."""
-    tiers = {"LEGENDS": [], "ELITE": [], "GOLD": [], "SILVER": [], "BRONZE": []}
+    tiers = {"LEGENDS": [], "ELITE": [], "GOLD": [], "SILVER": [], "BRONZE": [], "IRON": []}
     for p in players:
         ov = _player_overall(p)
         if   ov > 95: tiers["LEGENDS"].append(p)
         elif ov > 90: tiers["ELITE"].append(p)
         elif ov >= 85: tiers["GOLD"].append(p)
         elif ov >= 80: tiers["SILVER"].append(p)
-        else:          tiers["BRONZE"].append(p)
+        elif ov >= 70: tiers["BRONZE"].append(p)
+        else:          tiers["IRON"].append(p)
     for lst in tiers.values():
         random.shuffle(lst)
 
@@ -8831,6 +8834,7 @@ def _build_playerlist_csv_txt(players: list) -> str:
         "GOLD":    "⭐⭐    GOLD",
         "SILVER":  "⭐      SILVER",
         "BRONZE":  "         BRONZE",
+        "IRON":    "         IRON",
     }
     for tier, label in tier_labels.items():
         grp = tiers[tier]
@@ -8880,7 +8884,7 @@ async def playerlist_cmd(interaction: discord.Interaction):
     buf = io.BytesIO(txt.encode("utf-8"))
     buf.seek(0)
     await interaction.followup.send(
-        f"📋 **Player Database** — {len(players)} players across 4 tiers.\nPlayers within each tier are shuffled.",
+        f"📋 **Player Database** — {len(players)} players across 6 tiers.\nPlayers within each tier are shuffled.",
         file=discord.File(fp=buf, filename="cricverse_players.txt")
     )
 
@@ -10089,7 +10093,7 @@ class PrefixCog(commands.Cog):
         buf = io.BytesIO(txt.encode("utf-8"))
         buf.seek(0)
         await ctx.send(
-            f"📋 **Player Database** — {len(players)} players across 4 tiers.\nPlayers within each tier are shuffled.",
+            f"📋 **Player Database** — {len(players)} players across 6 tiers.\nPlayers within each tier are shuffled.",
             file=discord.File(fp=buf, filename="cricverse_players.txt")
         )
 
@@ -10102,7 +10106,7 @@ class PrefixCog(commands.Cog):
         buf = io.BytesIO(txt.encode("utf-8"))
         buf.seek(0)
         await ctx.send(
-            f"📋 **Player Database (compact)** — {len(players)} players across 4 tiers.\nPlayers within each tier are shuffled, comma-separated.",
+            f"📋 **Player Database (compact)** — {len(players)} players across 6 tiers.\nPlayers within each tier are shuffled, comma-separated.",
             file=discord.File(fp=buf, filename="cricverse_players_compact.txt")
         )
 
@@ -12885,6 +12889,12 @@ class PrefixCog(commands.Cog):
         if not tourney:
             return await ctx.send("❌ No tournament exists in this server.")
 
+        # TBECS: 953 matches would mean hundreds of fixture pages - status is ONE
+        # dashboard embed instead (progress, leaders, latest results, knockouts).
+        if tourney.get("tournament_type") == "tbecs":
+            from league.tbecs_manager import build_tbecs_status_embed
+            return await ctx.send(embed=build_tbecs_status_embed(tourney))
+
         if tourney["status"] == "registration":
             t_type = tourney.get("tournament_type", "round_robin")
             type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League", "ipl": "Indian Premier League", "custom": "Custom Tournament"}.get(t_type, "Round Robin")
@@ -15097,6 +15107,12 @@ class PrefixCog(commands.Cog):
         # and _best_xi then puts the best of each squad into the XI that actually plays.
         num_teams = len(team_config)
         ranked = sorted(db_players, key=lambda p: _player_overall(p) + random.uniform(-2.5, 2.5), reverse=True)
+        # The pool lists some players once per league -> dedupe by name AFTER ranking
+        # (highest-rated copy survives) so no two teams draft "the same" player. With
+        # 54 TBECS teams the draft digs ~1080 deep, where the duplicates live.
+        _seen_names = set()
+        ranked = [p for p in ranked
+                  if p["name"].lower() not in _seen_names and not _seen_names.add(p["name"].lower())]
         squads = [[] for _ in range(num_teams)]
         _idx = 0
         for _rnd in range(max_s):
@@ -15703,6 +15719,31 @@ class PrefixCog(commands.Cog):
         if tourney.get("tournament_type") == "rating":
             from league.rating_league import rating_board_embed
             return await ctx.send(embed=rating_board_embed(tourney))
+
+        # TBECS: branded image per live stage - both group tables during the group
+        # stage, the Super 20 table after, the bracket once knockouts exist.
+        if tourney.get("tournament_type") == "tbecs":
+            from league.tournament_manager import (generate_tbecs_group_table,
+                                                   generate_tbecs_super20_table,
+                                                   generate_tbecs_bracket, TBECS_SUPER_STAGE)
+            try:
+                sched = tourney.get("schedule", [])
+                if not sched:
+                    return await ctx.send("❌ No schedule yet — `cvt start` first.")
+                files = []
+                if any(m.get("stage") == "knockout" for m in sched):
+                    files.append(discord.File(fp=generate_tbecs_bracket(tourney), filename="tbecs_bracket.png"))
+                    files.append(discord.File(fp=generate_tbecs_super20_table(tourney), filename="tbecs_super20.png"))
+                elif any(m.get("stage") == TBECS_SUPER_STAGE for m in sched):
+                    files.append(discord.File(fp=generate_tbecs_super20_table(tourney), filename="tbecs_super20.png"))
+                else:
+                    for grp in ("A", "B"):
+                        files.append(discord.File(fp=generate_tbecs_group_table(tourney, grp),
+                                                  filename=f"tbecs_group_{grp}.png"))
+                return await ctx.send(files=files)
+            except Exception as _e:
+                print(f"TBECS standings render failed: {_e}")
+                return await ctx.send("❌ TBECS standings image failed — check the bot logs.")
 
         # CCODI: custom points-table image (assets/ccodi_table.png) with logos; the
         # text embed below is the fallback if the render fails.

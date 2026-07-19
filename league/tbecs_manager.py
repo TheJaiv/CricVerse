@@ -83,6 +83,11 @@ GOAT_TEAMS = [
 # Apex carries the pacer, Zenith the spinner as their 11th; both roles appear across
 # the event. (7 ARs all bowl anyway, so each XI always has a full attack.)
 
+# Every GOAT player name - core/global_stats.py uses this to keep GOAT performances
+# out of the all-time global stats (they're fun-only, same rule as the tournament
+# leaderboards). Names are fictional, so name-matching can't hit a real player.
+GOAT_PLAYER_NAMES = frozenset(p["name"] for g in GOAT_TEAMS for p in g["players"])
+
 
 def is_tbecs_tournament(tourney):
     return bool(tourney) and tourney.get("tournament_type") == TBECS_CONFIG["type_key"]
@@ -204,6 +209,111 @@ def tbecs_fill_default_identity(tourney):
             except Exception as e:
                 print(f"TBECS default logo failed for {t['name']}: {e}")
     return n_col, n_logo
+
+
+# ---- Status dashboard ----
+# 953 matches makes a paged fixture list unusable, so TBECS status is ONE embed:
+# stage progress bars, table leaders, the latest results and the full knockout
+# picture. Per-team fixtures stay on `cvt fixtures <team>`.
+
+def _bar(done, total, width=12):
+    filled = int(width * done / total) if total else 0
+    return "▰" * filled + "▱" * (width - filled)
+
+
+def build_tbecs_status_embed(tourney):
+    from league.tournament_manager import get_group_standings
+    e = discord.Embed(color=0x2E6BE6)
+    goats = goat_team_names(tourney)
+
+    if tourney.get("status") == "registration":
+        teams = [t for t in tourney.get("teams", []) if not t.get("goat")]
+        want = TBECS_CONFIG["addable_teams"]
+        squads_ok = sum(1 for t in teams if len(t.get("squad", [])) >= TBECS_CONFIG["min_squad"])
+        homes_ok = sum(1 for t in tourney.get("teams", []) if t.get("home_stadium") and t.get("home_pitch"))
+        e.title = f"🐐 {tourney['name']} — Registration"
+        e.description = (
+            f"**Teams:** {len(teams)}/{want}  {_bar(len(teams), want)}\n"
+            f"**Squads in:** {squads_ok}/{len(teams) or 1}\n"
+            f"**Home grounds:** {homes_ok}/{len(tourney.get('teams', []))} "
+            f"(`cvt tbecs_assign_homes` fills the rest)\n\n"
+            f"`cvt add_team \"<team>\" @owner [A/B]` · owners `cvt ss` · then `cvt start`"
+        )
+        return e
+
+    sched = tourney.get("schedule", [])
+    stage, left = tbecs_stage_state(tourney)
+    stage_label = {"group": "GROUP STAGE", "super20": "SUPER 20", "quarters": "QUARTER-FINALS",
+                   "semis": "SEMI-FINALS", "final": "THE FINAL", "done": "COMPLETED"}[stage]
+    e.title = f"🐐 {tourney['name']} — {stage_label}"
+
+    lines = []
+    ga = [m for m in sched if m.get("stage") == "group" and m.get("group") == "A"]
+    gb = [m for m in sched if m.get("stage") == "group" and m.get("group") == "B"]
+    for grp, ms in (("A", ga), ("B", gb)):
+        done = sum(1 for m in ms if m["status"] == "completed")
+        lines.append(f"**Group {grp}**  {_bar(done, len(ms))}  {done}/{len(ms)}")
+    s20 = [m for m in sched if m.get("stage") == TBECS_CONFIG["super_stage"]]
+    if s20:
+        done = sum(1 for m in s20 if m["status"] == "completed")
+        lines.append(f"**Super 20** {_bar(done, len(s20))}  {done}/{len(s20)}")
+    e.description = "\n".join(lines)
+
+    # Leaders of whatever table is live (GOATs flagged - they can never qualify).
+    def _top(stage_key, group, n, cutoff):
+        rows = get_group_standings(tourney, stage_key, group)
+        out = []
+        for i, (nm, st) in enumerate(rows[:n], 1):
+            mark = " 🐐" if nm in goats else (" ✅" if i <= cutoff and nm not in goats else "")
+            out.append(f"`{i:>2}` **{nm}** {st['Pts']}pts ({st['NRR']:+.2f}){mark}")
+        return "\n".join(out) or "—"
+
+    if stage == "group":
+        q = TBECS_CONFIG["stage1_qualifiers"]
+        e.add_field(name="Group A leaders", value=_top("group", "A", 5, q), inline=True)
+        e.add_field(name="Group B leaders", value=_top("group", "B", 5, q), inline=True)
+    elif s20 and stage in ("super20", "quarters"):
+        e.add_field(name="Super 20 leaders",
+                    value=_top(TBECS_CONFIG["super_stage"], TBECS_CONFIG["super_group"], 8,
+                               TBECS_CONFIG["knockout_teams"]), inline=False)
+
+    # Latest completed results (completion-timestamped; falls back to match id).
+    completed = [m for m in sched if m["status"] == "completed" and m.get("result")]
+    completed.sort(key=lambda m: (m["result"].get("ts", 0), m.get("match_id", 0)))
+    recent = []
+    for m in completed[-5:][::-1]:
+        r = m["result"]
+        if r.get("winner") == "TIE":
+            recent.append(f"`M{m['match_id']}` {m['team1']} tied {m['team2']}")
+        else:
+            loser = m["team2"] if r["winner"] == m["team1"] else m["team1"]
+            recent.append(f"`M{m['match_id']}` **{r['winner']}** def. {loser}")
+    if recent:
+        e.add_field(name="Latest results", value="\n".join(recent), inline=False)
+
+    ko = [m for m in sched if m.get("stage") == "knockout"]
+    if ko:
+        kl = []
+        for m in sorted(ko, key=lambda x: x.get("match_id", 0)):
+            r = m.get("result")
+            tail = f" → 🏆 **{r['winner']}**" if r else " *(pending)*"
+            kl.append(f"**{m.get('round')}**: {m['team1']} vs {m['team2']}{tail}")
+        e.add_field(name="🔥 Knockouts", value="\n".join(kl), inline=False)
+
+    if stage == "done":
+        final = next((m for m in sched if m.get("round") == "Final"), None)
+        if final and final.get("result"):
+            e.description = f"👑 **Champions: {final['result']['winner']}**\n" + e.description
+
+    pending = sum(1 for m in sched if m["status"] == "pending")
+    if stage == "done":
+        hint = "Tournament complete 🎉"
+    elif left:
+        hint = f"{pending} pending · any match, any order · cvt fixtures <team> · owners: cvt nm"
+    else:
+        hint = "Stage complete — owner runs cvt tbecs_next for the next round"
+    e.set_footer(text=hint)
+    return e
 
 
 # ---- Stage generation (ALL manual - called only from `cvt tbecs_next`) ----

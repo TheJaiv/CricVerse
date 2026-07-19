@@ -76,10 +76,24 @@ def format_key(match):
     return "custom"
 
 
+def _goat_names():
+    """TBECS GOAT XI players: fun-only sides whose performances never enter the
+    global stats (mirrors the tournament-leaderboard rule). Lazy + guarded so a
+    league-module problem can never break stat recording."""
+    try:
+        from league.tbecs_manager import GOAT_PLAYER_NAMES
+        return GOAT_PLAYER_NAMES
+    except Exception:
+        return frozenset()
+
+
 def _apply_innings(innings, fmt, played):
     """Fold one innings' batting + bowling cards into the totals. `played` collects
     only players who actually batted or bowled - fielding-only XIs don't get a match."""
+    goats = _goat_names()
     for name, bs in innings.batting_stats.items():
+        if name in goats:
+            continue   # GOAT XI player - never recorded
         out = bs.dismissal != "not out"
         if bs.balls_faced == 0 and bs.runs_scored == 0 and not out:
             continue   # did not bat
@@ -106,6 +120,8 @@ def _apply_innings(innings, fmt, played):
             b["hs_not_out"] = not out
 
     for name, ws in innings.bowling_stats.items():
+        if name in goats:
+            continue   # GOAT XI player - never recorded
         if ws.balls_bowled == 0:
             continue
         played.add(name)

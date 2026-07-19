@@ -1,3 +1,4 @@
+import datetime
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -3073,6 +3074,12 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         if not tourney:
             return await interaction.response.send_message("❌ No tournament exists in this server.", ephemeral=True)
 
+        # TBECS: 953 matches would mean hundreds of fixture pages - status is ONE
+        # dashboard embed instead (progress, leaders, latest results, knockouts).
+        if tourney.get("tournament_type") == "tbecs":
+            from league.tbecs_manager import build_tbecs_status_embed
+            return await interaction.response.send_message(embed=build_tbecs_status_embed(tourney))
+
         # Registration phase - no schedule yet
         if tourney["status"] == "registration":
             t_type = tourney.get("tournament_type", "round_robin")
@@ -3674,6 +3681,9 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             "t1_runs": t1_inn.total_runs, "t1_wickets": t1_inn.wickets, "t1_balls": t1_inn.total_balls,
             "t2_runs": t2_inn.total_runs, "t2_wickets": t2_inn.wickets, "t2_balls": t2_inn.total_balls,
             "scorecard_players": getattr(match, "_scorecard_players", None),
+            # Completion timestamp: with any-order play (TBECS) it's the only way to
+            # know which results are the LATEST for the status dashboard.
+            "ts": int(datetime.datetime.now().timestamp()),
             # Context snapshot (all formats): who batted first + where/on what it was
             # played - feeds the DSL all-time venue stats and survives schedule edits.
             "batted_first": match.innings1.batting_team["name"],
