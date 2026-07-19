@@ -3322,19 +3322,19 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
 
     # NOTE: force_delete & set_theme are prefix-only (cvt force_delete / cvt set_theme) - 25-subcommand limit.
 
-    @app_commands.command(name="set_team_color", description="[MANAGER] Set a team's color for the scorecard. Works anytime, even mid-tournament.")
+    @app_commands.command(name="set_team_color", description="[MANAGER/OWNER] Set a team's color for the scorecard. Works anytime, even mid-tournament.")
     async def set_team_color(self, interaction: discord.Interaction, team_name: str, color: str):
         server_id = str(interaction.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney:
             return await interaction.response.send_message("❌ No tournament exists in this server.", ephemeral=True)
-        if not self.is_manager(interaction, tourney):
-            return await interaction.response.send_message("❌ You are not a Tournament Manager.", ephemeral=True)
-        if not re.match(r'^#[0-9A-Fa-f]{6}$', color):
-            return await interaction.response.send_message("❌ Invalid color format. Use a 6-digit hex code like `#FF0000` (red) or `#1DA1F2` (blue).", ephemeral=True)
         team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.lower()), None)
         if not team:
             return await interaction.response.send_message(f"❌ Team **{team_name}** not found.", ephemeral=True)
+        if not self.is_manager(interaction, tourney) and team.get("owner_id") != str(interaction.user.id):
+            return await interaction.response.send_message("❌ Only Managers or the Team Owner can set the colour.", ephemeral=True)
+        if not re.match(r'^#[0-9A-Fa-f]{6}$', color):
+            return await interaction.response.send_message("❌ Invalid color format. Use a 6-digit hex code like `#FF0000` (red) or `#1DA1F2` (blue).", ephemeral=True)
         team["color"] = color.upper()
         save_tournament(tourney)
         preview = discord.Embed(description=f"✅ **{team['name']}** color set to `{color.upper()}`.", color=int(color.lstrip('#'), 16))

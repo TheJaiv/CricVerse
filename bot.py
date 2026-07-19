@@ -14730,18 +14730,19 @@ class PrefixCog(commands.Cog):
         e.set_footer(text="All seasons combined (archives + current) · cvt season <n> " + rec["name"] + " for one season's full card")
         await ctx.send(embed=e)
 
-    @tournament.command(name="set_team_color", help="[MANAGER] Set a team's scorecard color.\nUsage: tournament set_team_color \"<team_name>\" #RRGGBB")
+    @tournament.command(name="set_team_color", help="[MANAGER/OWNER] Set a team's scorecard color.\nUsage: tournament set_team_color \"<team_name>\" #RRGGBB")
     async def t_set_team_color(self, ctx, team_name: str, color: str):
         import re as _re
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
-        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (tourney and str(ctx.author.id) in tourney.get("managers", []))
         if not tourney: return await ctx.send("❌ No tournament exists.")
-        if not is_mgr: return await ctx.send("❌ Managers only.")
-        if not _re.match(r'^#[0-9A-Fa-f]{6}$', color):
-            return await ctx.send("❌ Invalid color format. Use a 6-digit hex code like `#FF0000`.")
         team = self._team_by_ref(ctx, tourney, team_name)
         if not team: return await ctx.send(f"❌ Team **{team_name}** not found (use the team name or ping its @owner).")
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (str(ctx.author.id) in tourney.get("managers", []))
+        if not is_mgr and team.get("owner_id") != str(ctx.author.id):
+            return await ctx.send("❌ Only Managers or the Team Owner can set the colour.")
+        if not _re.match(r'^#[0-9A-Fa-f]{6}$', color):
+            return await ctx.send("❌ Invalid color format. Use a 6-digit hex code like `#FF0000`.")
         team["color"] = color.upper()
         save_tournament(tourney)
         await ctx.send(embed=discord.Embed(description=f"✅ **{team['name']}** color set to `{color.upper()}`.", color=int(color.lstrip('#'), 16)))
