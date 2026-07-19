@@ -13308,6 +13308,17 @@ class PrefixCog(commands.Cog):
         if buf.strip():
             await ctx.send(buf)
 
+    @tournament.command(name="tbecs_teams", aliases=["all_teams", "team_list", "tteams"],
+                        help="Page through every TBECS team: owner, group, squad state, and whether their home ground+pitch is registered.\nUsage: tournament tbecs_teams")
+    async def t_tbecs_teams(self, ctx):
+        tourney = get_server_tournament(str(ctx.guild.id))
+        from league.tbecs_manager import is_tbecs_tournament, build_tbecs_team_pages, TbecsTeamsView
+        if not is_tbecs_tournament(tourney):
+            return await ctx.send("❌ No TBECS tournament in this server.")
+        pages = build_tbecs_team_pages(tourney)
+        view = TbecsTeamsView(pages)
+        await ctx.send(embed=pages[0], view=view)
+
     @tournament.command(name="tbecs_next", aliases=["next_stage", "next_round"],
                         help="[OWNER] Generate the next TBECS stage (Super 20 → QFs → SFs → Final).\n"
                              "Refuses while the current stage has pending matches. Stages NEVER advance on their own.\n"

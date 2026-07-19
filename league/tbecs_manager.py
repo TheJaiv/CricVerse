@@ -360,6 +360,76 @@ def build_tbecs_status_embed(tourney):
     return e
 
 
+# ---- Team list (page-flip) ----
+# 56 teams don't fit one embed with owners+details, so `cvt tbecs_teams` pages
+# through them: squad state, owner, group, and the home ground/pitch registration
+# (mirroring what default tournaments show in registration status).
+
+_TEAMS_PER_PAGE = 14
+
+def build_tbecs_team_pages(tourney):
+    min_s = tourney.get("min_squad", TBECS_CONFIG["min_squad"])
+    teams = sorted(tourney.get("teams", []),
+                   key=lambda t: (t.get("group") or "Z", not t.get("goat"), t["name"].lower()))
+    lines = []
+    for t in teams:
+        if t.get("goat"):
+            tick = "🐐"
+        else:
+            tick = "✅" if len(t.get("squad", [])) >= min_s else "📝"
+        grp = f" · Group **{t['group']}**" if t.get("group") in ("A", "B") else ""
+        if t.get("home_stadium") and t.get("home_pitch"):
+            home = f" · 🏟️ {t['home_stadium']} ({t['home_pitch']})"
+        else:
+            home = " · 🏟️ ❌ *no home ground*"
+        lines.append(f"{tick} **{t['name']}** — <@{t['owner_id']}>{grp}{home}")
+
+    total = len(teams)
+    squads_ok = sum(1 for t in teams if t.get("goat") or len(t.get("squad", [])) >= min_s)
+    homes_ok = sum(1 for t in teams if t.get("home_stadium") and t.get("home_pitch"))
+    pages = []
+    for i in range(0, len(lines), _TEAMS_PER_PAGE):
+        e = discord.Embed(title=f"🐐 {tourney['name']} — Teams ({total})",
+                          description="\n".join(lines[i:i + _TEAMS_PER_PAGE]), color=0x2E6BE6)
+        e.set_footer(text=f"✅ squad in · 📝 squad pending · 🐐 GOAT XI  |  "
+                          f"squads {squads_ok}/{total} · home grounds {homes_ok}/{total}")
+        pages.append(e)
+    return pages or [discord.Embed(title=f"🐐 {tourney['name']} — Teams", description="No teams yet.", color=0x2E6BE6)]
+
+
+class TbecsTeamsView(discord.ui.View):
+    def __init__(self, pages):
+        super().__init__(timeout=180)
+        self.pages = pages
+        self.idx = 0
+        self._sync()
+
+    def _sync(self):
+        self.prev_btn.disabled = (self.idx == 0)
+        self.next_btn.disabled = (self.idx >= len(self.pages) - 1)
+        self.page_btn.label = f"{self.idx + 1} / {len(self.pages)}"
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary, row=0)
+    async def prev_btn(self, interaction, button):
+        self.idx = max(0, self.idx - 1)
+        self._sync()
+        await interaction.response.edit_message(embed=self.pages[self.idx], view=self)
+
+    @discord.ui.button(label="1 / 1", style=discord.ButtonStyle.primary, disabled=True, row=0)
+    async def page_btn(self, interaction, button):
+        pass
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary, row=0)
+    async def next_btn(self, interaction, button):
+        self.idx = min(len(self.pages) - 1, self.idx + 1)
+        self._sync()
+        await interaction.response.edit_message(embed=self.pages[self.idx], view=self)
+
+
 # ---- Stage generation (ALL manual - called only from `cvt tbecs_next`) ----
 
 def _next_mid(tourney):
