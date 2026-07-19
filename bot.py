@@ -3109,9 +3109,12 @@ def generate_tournament_score_image(match: CricketMatch) -> io.BytesIO:
             print(f"CCODI scorecard render failed, using generic: {_e}")
     if getattr(match, "tournament_type", None) == "tbecs":
         try:
-            return generate_tbecs_scorecard(match)
+            buf = generate_tbecs_scorecard(match)
+            match._tbecs_card_ok = True   # log/gallery channels post ONLY the branded card
+            return buf
         except Exception as _e:
             print(f"TBECS scorecard render failed, using generic: {_e}")
+            match._tbecs_card_ok = False
     return generate_scorecard_from_data(extract_scoreboard_data(match))
 
 
@@ -4038,8 +4041,12 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
         # TBECS second-innings (match end) ads - shown at every innings end per spec.
         await _maybe_send_tbecs_ads(channel, match_to_finalize)
 
-        # Send scorecard to match log channel if configured for this server
-        if channel.guild:
+        # Send scorecard to match log channel if configured for this server.
+        # TBECS log channels are branded-only: if the TBECS card failed to render
+        # (generic fallback went to the match channel), skip the log post entirely.
+        _log_ok = (getattr(match_to_finalize, "tournament_type", None) != "tbecs"
+                   or getattr(img_match, "_tbecs_card_ok", False))
+        if channel.guild and _log_ok:
             log_channel_id = get_match_log_channel(str(channel.guild.id))
             if log_channel_id:
                 try:
@@ -12088,10 +12095,13 @@ class PrefixCog(commands.Cog):
             t_data["max_squad"] = TBECS_CONFIG["max_squad"]
             t_data["teams"] = build_goat_teams(ADMIN_DISCORD_ID)
             # TBECS is always: any match anytime, home fixtures at the home team's
-            # linked ground on its fixed pitch.
+            # linked ground on its fixed pitch. Injuries default ON but an explicit
+            # injuries=false is honoured; impact_player comes straight from the option.
             t_data["match_order"] = "random"
             t_data["stadium_mode"] = "linked"
             t_data["conditions_mode"] = "home"
+            if not any(o.split("=", 1)[0].strip() == "injuries" for o in options if "=" in o):
+                t_data["injuries_enabled"] = True
             save_tournament(t_data)
             return await ctx.send(
                 f"🐐 **TBECS Created:** `{name}` — {TBECS_CONFIG['display_name']}\n"
@@ -14956,6 +14966,11 @@ class PrefixCog(commands.Cog):
                         img_buf = generate_ccodi_scorecard_from_data(full_data)
                     except Exception as _ce:
                         print(f"CCODI stored-card render failed, using generic: {_ce}")
+                elif tourney.get("tournament_type") == "tbecs":
+                    try:
+                        img_buf = generate_tbecs_scorecard_from_data(full_data)
+                    except Exception as _ce:
+                        print(f"TBECS stored-card render failed, using generic: {_ce}")
                 if img_buf is None:
                     img_buf = generate_scorecard_from_data(full_data)
                 file = discord.File(fp=img_buf, filename=f"scorecard_m{match_id}.png")

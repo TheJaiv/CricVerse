@@ -2815,6 +2815,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         app_commands.Choice(name="CCODI (2 Groups of 5 → Double RR → Qualifiers → Final)", value="ccodi"),
         app_commands.Choice(name="ACL (14 Teams → League → Playoffs → Super Cup)", value="acl"),
         app_commands.Choice(name="IPL (10 Teams → 14 Matches Each → Top 4 Playoffs)", value="ipl"),
+        app_commands.Choice(name="TBECS (54 Teams + 2 GOAT XIs → 2 Groups of 28 → Super 20 → Seeded KOs)", value="tbecs"),
         app_commands.Choice(name="Custom — build your own format (setup wizard)", value="custom"),
     ])
     @app_commands.choices(conditions=[
@@ -2831,9 +2832,16 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         app_commands.Choice(name="Random — venue labels assigned randomly (default)", value="random"),
         app_commands.Choice(name="Linked — each team sets a home stadium with a FIXED home pitch", value="linked"),
     ])
-    async def create(self, interaction: discord.Interaction, name: str, format: app_commands.Choice[str], event_type: app_commands.Choice[str] = None, min_squad: int = 11, max_squad: int = 15, impact_player: bool = False, injuries: bool = False, custom_overs: int = None, conditions: app_commands.Choice[str] = None, match_order: app_commands.Choice[str] = None, stadiums: app_commands.Choice[str] = None):
+    async def create(self, interaction: discord.Interaction, name: str, format: app_commands.Choice[str], event_type: app_commands.Choice[str] = None, min_squad: int = 11, max_squad: int = 15, impact_player: bool = None, injuries: bool = None, custom_overs: int = None, conditions: app_commands.Choice[str] = None, match_order: app_commands.Choice[str] = None, stadiums: app_commands.Choice[str] = None):
         if not interaction.user.guild_permissions.administrator and interaction.user.id != 1087369198801526836:
             return await interaction.response.send_message("❌ Only Server Admins can initialize a tournament.", ephemeral=True)
+
+        # impact_player / injuries left unset -> per-event defaults (TBECS: injuries ON).
+        _ev = event_type.value if event_type else "round_robin"
+        if injuries is None:
+            injuries = (_ev == "tbecs")
+        if impact_player is None:
+            impact_player = False
 
         server_id = str(interaction.guild.id)
 
@@ -2880,6 +2888,32 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             "stadium_mode": stadium_mode,
             "stadiums": default_stadium_pool(t_type),
         }
+
+        # TBECS: bot-owner only. Pre-seed the two GOAT XIs, force the event's fixed
+        # settings (any-order play, linked home grounds); impact_player/injuries stay
+        # whatever the command options said (injuries default ON for TBECS).
+        if t_type == "tbecs":
+            if interaction.user.id != 1087369198801526836:
+                return await interaction.response.send_message("❌ TBECS events can only be created by the bot owner.", ephemeral=True)
+            from league.tbecs_manager import TBECS_CONFIG, build_goat_teams
+            t_data["min_squad"] = max(min_squad, TBECS_CONFIG["min_squad"])
+            t_data["max_squad"] = max(max_squad, TBECS_CONFIG["max_squad"])
+            t_data["teams"] = build_goat_teams(1087369198801526836)
+            t_data["match_order"] = "random"
+            t_data["stadium_mode"] = "linked"
+            t_data["conditions_mode"] = "home"
+            save_tournament(t_data)
+            return await interaction.response.send_message(
+                f"🐐 **TBECS Created:** `{name}` — {TBECS_CONFIG['display_name']}\n"
+                f"**{TBECS_CONFIG['addable_teams']} addable teams** + the 2 pre-seeded GOAT XIs "
+                f"(all 99/99, fun only, can NEVER qualify).\n"
+                f"⚙️ Injuries: **{'ON' if injuries else 'OFF'}** · Impact Player: **{'ON' if impact_player else 'OFF'}** "
+                f"(set via the command options).\n"
+                f"📋 Two groups of {TBECS_CONFIG['group_size']} → top {TBECS_CONFIG['stage1_qualifiers']} each → "
+                f"Super 20 → seeded QFs (1v8…) → SFs → Final. Matches play in **any order**.\n"
+                f"🏟️ Home stadiums with fixed pitches — `cvt set_home_stadium` per team or `cvt tbecs_assign_homes` for the rest.\n"
+                f"⏭️ Stages NEVER auto-advance — the owner runs `cvt tbecs_next` after each stage."
+            )
 
         # Custom: park the tournament in "configuring" and run the setup wizard -
         # registration only opens once the creator confirms their format.
@@ -3780,11 +3814,15 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                             except Exception as _ce:
                                 print(f"CCODI gallery card failed, using generic: {_ce}")
                         elif tourney.get("tournament_type") == "tbecs":
+                            # Branded-only gallery: a failed TBECS render skips the post
+                            # rather than dropping a generic card into the channel.
                             try:
                                 from bot import generate_tbecs_scorecard_from_data
                                 _buf = generate_tbecs_scorecard_from_data(_full)
                             except Exception as _ce:
-                                print(f"TBECS gallery card failed, using generic: {_ce}")
+                                print(f"TBECS gallery card failed, skipping post: {_ce}")
+                            if _buf is None:
+                                raise RuntimeError("TBECS gallery card unavailable - post skipped")
                         if _buf is None:
                             _buf = generate_scorecard_from_data(_full)
                         _rl = _tm_round_label(m_data)
@@ -3812,8 +3850,8 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                     else:
                         _p["injury_matches_left"] = _left
 
-        # INJURY ROLL (group/super8/league only, needs injuries_enabled)
-        if tourney.get("injuries_enabled", False) and m_data.get("stage") in ("group", "super8", "league"):
+        # INJURY ROLL (league-format stages only, needs injuries_enabled)
+        if tourney.get("injuries_enabled", False) and m_data.get("stage") in ("group", "super8", "league", TBECS_SUPER_STAGE):
             import random as _rng
             # ACL injuries are more frequent and RATING-SCALED - a star (high bat/bowl)
             # gets hurt less than a journeyman - and allow one injury per TEAM per match
