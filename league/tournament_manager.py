@@ -230,6 +230,86 @@ def save_tournament(t_data):
     tourneys.append(t_data)
     async_save_tournament_to_bin()
 
+
+def _team_has_live_match(team_name):
+    """True if a match currently being played ball-by-ball involves this team name.
+    Renaming mid-match would desync the live match object (which snapshotted the
+    OLD name at start) from the schedule entry (which the rename updates to the
+    NEW name) - on_tournament_match_complete would then fail to match the live
+    winner name against m_data['team1']/['team2'], corrupting that result."""
+    try:
+        from bot import active_games
+    except Exception:
+        return False
+    for m in active_games.values():
+        if getattr(m, "team1", {}).get("name") == team_name or getattr(m, "team2", {}).get("name") == team_name:
+            return True
+    return False
+
+
+def rename_team(tourney, team_name, new_name):
+    """Rename a team, propagating the new name everywhere it's used as a join key:
+    every schedule entry (team1/team2/result winner/loser/batted_first + that
+    match's stats_delta), the tournament-wide player stats table, and the handful
+    of tournament-type trackers that reference teams by name (TBECS seeds, custom
+    group rosters, ACL/DSL/rating trophy + playoff-seed fields). Fields living ON
+    the team dict (rating, credits, colour, logo, squad, home ground...) need no
+    change - the same dict just gets relabelled.
+    Returns (ok, message)."""
+    new_name = (new_name or "").strip()[:30]
+    if not new_name:
+        return False, "❌ New name can't be empty."
+    team = next((t for t in tourney.get("teams", []) if t["name"].lower() == team_name.lower()), None)
+    if not team:
+        return False, f"❌ Team **{team_name}** not found."
+    old = team["name"]
+    if old == new_name:
+        return False, "❌ That's already this team's name."
+    if any(t is not team and t["name"].lower() == new_name.lower() for t in tourney["teams"]):
+        return False, f"❌ A team named **{new_name}** already exists."
+    if _team_has_live_match(old):
+        return False, f"❌ **{old}** has a match being played right now — rename after it finishes."
+
+    team["name"] = new_name
+
+    for m in tourney.get("schedule", []):
+        for f in ("team1", "team2"):
+            if m.get(f) == old:
+                m[f] = new_name
+        r = m.get("result")
+        if r:
+            for f in ("winner", "loser", "batted_first"):
+                if r.get(f) == old:
+                    r[f] = new_name
+            sd = r.get("stats_delta")
+            if sd and old in sd:
+                sd[new_name] = sd.pop(old)
+
+    stats = tourney.get("stats")
+    if stats and old in stats:
+        stats[new_name] = stats.pop(old)
+
+    seeds = tourney.get("tbecs_seeds")
+    if seeds and old in seeds:
+        seeds[new_name] = seeds.pop(old)
+
+    for grp_map in (tourney.get("custom_groups") or {}).values():
+        for letter, names in list(grp_map.items()):
+            grp_map[letter] = [new_name if n == old else n for n in names]
+
+    for f in ("league_shield", "acl_trophy_winner", "acl_runner_up", "acl_champion",
+              "dsl_champion", "dsl_runner_up", "rating_champion", "rating_runner_up",
+              "custom_champion", "custom_runner_up"):
+        if tourney.get(f) == old:
+            tourney[f] = new_name
+    pseeds = tourney.get("playoff_seeds")
+    if isinstance(pseeds, list) and old in pseeds:
+        tourney["playoff_seeds"] = [new_name if n == old else n for n in pseeds]
+
+    save_tournament(tourney)
+    return True, f"✅ **{old}** renamed to **{new_name}** — every fixture, result, and stat now reflects it."
+
+
 def generate_round_robin_schedule(team_names, *, double=False, stage=None, shuffle=True):
     """Circle-method fixtures for single/double round robin.
     Double mode mirrors leg 1 with home/away swapped and keeps round numbers ordered.
@@ -2916,7 +2996,11 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         app_commands.Choice(name="Random — venue labels assigned randomly (default)", value="random"),
         app_commands.Choice(name="Linked — each team sets a home stadium with a FIXED home pitch", value="linked"),
     ])
-    async def create(self, interaction: discord.Interaction, name: str, format: app_commands.Choice[str], event_type: app_commands.Choice[str] = None, min_squad: int = 11, max_squad: int = 15, impact_player: bool = None, injuries: bool = None, custom_overs: int = None, conditions: app_commands.Choice[str] = None, match_order: app_commands.Choice[str] = None, stadiums: app_commands.Choice[str] = None):
+    @app_commands.choices(injury_tier=[
+        app_commands.Choice(name="High — frequent, rating-scaled, up to one per team per match (ACL-style)", value="high"),
+        app_commands.Choice(name="Low — normal rate, one per match (default)", value="low"),
+    ])
+    async def create(self, interaction: discord.Interaction, name: str, format: app_commands.Choice[str], event_type: app_commands.Choice[str] = None, min_squad: int = 11, max_squad: int = 15, impact_player: bool = None, injuries: bool = None, injury_tier: app_commands.Choice[str] = None, custom_overs: int = None, conditions: app_commands.Choice[str] = None, match_order: app_commands.Choice[str] = None, stadiums: app_commands.Choice[str] = None):
         if not interaction.user.guild_permissions.administrator and interaction.user.id != 1087369198801526836:
             return await interaction.response.send_message("❌ Only Server Admins can initialize a tournament.", ephemeral=True)
 
@@ -2926,6 +3010,9 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             injuries = (_ev == "tbecs")
         if impact_player is None:
             impact_player = False
+        # injury_tier only matters when injuries is on; unset -> ACL keeps its old
+        # high rate by default, everything else keeps the normal low rate.
+        tier = injury_tier.value if injury_tier else ("high" if _ev == "acl" else "low")
 
         server_id = str(interaction.guild.id)
 
@@ -2966,6 +3053,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             "max_squad": max_squad,
             "impact_player": impact_player,
             "injuries_enabled": injuries,
+            "injury_tier": tier,
             "tournament_type": t_type,
             "conditions_mode": cond_mode,
             "match_order": (match_order.value if match_order else "random"),
@@ -2991,7 +3079,9 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                 f"🐐 **TBECS Created:** `{name}` — {TBECS_CONFIG['display_name']}\n"
                 f"**{TBECS_CONFIG['addable_teams']} addable teams** + the 2 pre-seeded GOAT XIs "
                 f"(all 99/99, fun only, can NEVER qualify).\n"
-                f"⚙️ Injuries: **{'ON' if injuries else 'OFF'}** · Impact Player: **{'ON' if impact_player else 'OFF'}** "
+                f"⚙️ Injuries: **{'ON' if injuries else 'OFF'}**"
+                + (f" ({'High' if tier == 'high' else 'Low'} chance)" if injuries else "") +
+                f" · Impact Player: **{'ON' if impact_player else 'OFF'}** "
                 f"(set via the command options).\n"
                 f"📋 Two groups of {TBECS_CONFIG['group_size']} → top {TBECS_CONFIG['stage1_qualifiers']} each → "
                 f"Super 20 → seeded QFs (1v8…) → SFs → Final. Matches play in **any order**.\n"
@@ -3034,6 +3124,8 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             extra += "\n🏟️ **Conditions: Home Pitch** — set each team's home pitch with `/tournament set_home_pitch` (or `cvt set_home_pitch`). The tournament can't start until **all** teams have one."
         if t_data["match_order"] != "random":
             extra += f"\n{MATCH_ORDER_LABELS[t_data['match_order']]}"
+        if injuries:
+            extra += f"\n🚑 **Injuries: ON** ({'High' if tier == 'high' else 'Low'} chance)"
         await interaction.response.send_message(
             f"🏆 **Tournament Created:** `{name}`  ·  {type_label}\nYou have been automatically assigned as a Manager.\nUse `/tournament add_manager` or `/tournament add_team` to get started!{extra}"
         )
@@ -3423,6 +3515,22 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         save_tournament(tourney)
         preview = discord.Embed(description=f"✅ **{team['name']}** color set to `{color.upper()}`.", color=int(color.lstrip('#'), 16))
         await interaction.response.send_message(embed=preview)
+
+    @app_commands.command(name="rename_team", description="[MANAGER/OWNER] Rename a team — updates every fixture, result, and stat table to match.")
+    async def rename_team_cmd(self, interaction: discord.Interaction, team_name: str, new_name: str):
+        server_id = str(interaction.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney:
+            return await interaction.response.send_message("❌ No tournament exists in this server.", ephemeral=True)
+        team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.lower()), None)
+        if not team:
+            return await interaction.response.send_message(f"❌ Team **{team_name}** not found.", ephemeral=True)
+        if not self.is_manager(interaction, tourney) and team.get("owner_id") != str(interaction.user.id):
+            return await interaction.response.send_message("❌ Only Managers or the Team Owner can rename this team.", ephemeral=True)
+        if team.get("goat"):
+            return await interaction.response.send_message("❌ GOAT XIs are fixed event teams and can't be renamed.", ephemeral=True)
+        ok, msg = rename_team(tourney, team["name"], new_name.strip())
+        await interaction.response.send_message(msg)
 
     @app_commands.command(name="set_team_logo", description="[MANAGER/OWNER] Set a team's logo. Choose standings (tables/bracket) or match (scorecard/banner).")
     @app_commands.describe(
@@ -3935,10 +4043,14 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         # INJURY ROLL (league-format stages only, needs injuries_enabled)
         if tourney.get("injuries_enabled", False) and m_data.get("stage") in ("group", "super8", "league", TBECS_SUPER_STAGE):
             import random as _rng
-            # ACL injuries are more frequent and RATING-SCALED - a star (high bat/bowl)
-            # gets hurt less than a journeyman - and allow one injury per TEAM per match
-            # (vs one per whole match for other formats), so the squad depth matters more.
-            _is_acl = tourney.get("tournament_type") == "acl"
+            # Injury tier is HIGH or LOW (tourney["injury_tier"], set at creation -
+            # legacy tournaments with no tier saved fall back to ACL's old hardcoded
+            # behaviour: acl=high, everything else=low). HIGH is more frequent and
+            # RATING-SCALED - a star (high bat/bowl) gets hurt less than a journeyman -
+            # and allows one injury per TEAM per match (vs one per whole match on LOW),
+            # so squad depth matters more.
+            _tier = tourney.get("injury_tier") or ("high" if tourney.get("tournament_type") == "acl" else "low")
+            _is_acl = _tier == "high"
             _match_injured = False
             _new_injuries = []
             for team_name, bat_inn, bowl_inn in [(t1_name, t1_inn, t2_inn), (t2_name, t2_inn, t1_inn)]:
@@ -3958,7 +4070,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                     heavy = (bat_stat and bat_stat.balls_faced >= 20) or \
                             (bowl_stat and bowl_stat.balls_bowled >= 12)
                     if _is_acl:
-                        base = 0.065 if heavy else 0.028          # ~2x the other-format rate
+                        base = 0.065 if heavy else 0.028          # ~2x the low-tier rate
                         _rt = max(player.get("bat", 50), player.get("bowl", 50))
                         # factor: 1.0 at "normal" (75) -> ~0.6 for a 95-rated star, ~1.3 for a 60-rated
                         _factor = max(0.55, min(1.35, 1.0 - (_rt - 75) * 0.02))

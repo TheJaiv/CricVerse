@@ -36,7 +36,7 @@ from engine.test_image import (
     generate_test_summary_image as _ti_summary,
     generate_test_scorecard_image as _ti_scorecard,
 )
-from league.tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_ccodi_round_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, revert_tournament_match, rebuild_tournament_stats, repair_tournament_schedule, _tm_next_mid, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS, SquadConfirmView, build_squad_confirm_text, build_squad_confirm_embed, match_order_gate, MATCH_ORDER_LABELS, build_tournament_summary_embeds, generate_round_robin_schedule, generate_ipl_schedule, ipl_try_advance, build_standings_message, compress_logo_bytes, sanitize_stored_logos
+from league.tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_ccodi_round_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, revert_tournament_match, rebuild_tournament_stats, repair_tournament_schedule, _tm_next_mid, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS, SquadConfirmView, build_squad_confirm_text, build_squad_confirm_embed, match_order_gate, MATCH_ORDER_LABELS, build_tournament_summary_embeds, generate_round_robin_schedule, generate_ipl_schedule, ipl_try_advance, build_standings_message, compress_logo_bytes, sanitize_stored_logos, rename_team
 from league.custom_tournament import (
     CustomSetupView, custom_try_advance, custom_start_error, custom_generate_first_stage,
     build_custom_standings_message, custom_config_summary_lines,
@@ -12010,9 +12010,9 @@ class PrefixCog(commands.Cog):
     async def tournament(self, ctx):
         await ctx.send_help(ctx.command)
 
-    @tournament.command(name="create", help="[ADMIN] Create a new tournament.\nUsage: tournament create \"<name>\" <format> [event=roundrobin/double_rr/t20wc/acl] [impact_player=true/false] [injuries=true/false] [order=random/schedule/round]")
+    @tournament.command(name="create", help="[ADMIN] Create a new tournament.\nUsage: tournament create \"<name>\" <format> [event=roundrobin/double_rr/t20wc/acl] [impact_player=true/false] [injuries=true/false] [injury_tier=high/low] [order=random/schedule/round]")
     async def t_create(self, ctx, name: str, format_str: str, *options: str):
-        kwargs = { 'impact_player': False, 'injuries': False, 'conditions': 'manual', 'match_order': 'random', 'stadium_mode': 'random' }
+        kwargs = { 'impact_player': False, 'injuries': False, 'injury_tier': None, 'conditions': 'manual', 'match_order': 'random', 'stadium_mode': 'random' }
         event_map = {
             "roundrobin": "round_robin", "round_robin": "round_robin", "rr": "round_robin",
             "double": "double_round_robin", "double_rr": "double_round_robin", "drr": "double_round_robin",
@@ -12034,6 +12034,11 @@ class PrefixCog(commands.Cog):
                 key, value = opt.split('=', 1)
                 if key == 'impact_player': kwargs['impact_player'] = to_bool(value)
                 elif key == 'injuries': kwargs['injuries'] = to_bool(value)
+                elif key == 'injury_tier':
+                    it = value.strip().lower()
+                    if it not in ('high', 'low'):
+                        return await ctx.send(f"❌ Invalid injury_tier `{value}`. Use `high` (ACL-style, frequent) or `low` (normal, default).")
+                    kwargs['injury_tier'] = it
                 elif key in ('conditions', 'cond'):
                     cm = cond_map.get(value.strip().lower())
                     if not cm:
@@ -12073,11 +12078,16 @@ class PrefixCog(commands.Cog):
         if not format_overs:
             return await ctx.send(f"❌ Invalid format '{format_str}'. Use one of: T20, ODI, Test.")
 
+        # injury_tier only matters when injuries=true; unset -> ACL keeps its old
+        # high rate by default, everything else keeps the normal low rate.
+        injury_tier = kwargs['injury_tier'] or ("high" if t_type == "acl" else "low")
+
         t_data = {
             "server_id": server_id, "name": name, "managers": [str(ctx.author.id)], "teams": [],
             "status": "registration", "schedule": [], "current_match_idx": 0, "stats": {},
             "format_overs": format_overs, "min_squad": 11, "max_squad": 15,
             "impact_player": kwargs['impact_player'], "injuries_enabled": kwargs['injuries'],
+            "injury_tier": injury_tier,
             "tournament_type": t_type,
             "conditions_mode": ("home" if kwargs['stadium_mode'] == "linked" else kwargs['conditions']),
             "match_order": kwargs['match_order'],
@@ -12112,6 +12122,8 @@ class PrefixCog(commands.Cog):
                 f"🏟️ **Home stadiums with fixed home pitches** — owners: `cvt set_home_stadium \"<team>\" <ground> <pitch>`; "
                 f"managers fill everyone left with `cvt tbecs_assign_homes`.\n"
                 f"🎨 Teams without a submitted logo/colour get a default at start.\n"
+                + (f"🚑 **Injuries: ON** ({'High' if t_data['injury_tier'] == 'high' else 'Low'} chance)\n" if t_data['injuries_enabled'] else "")
+                +
                 f"`cvt add_team \"<team>\" @owner [A/B]` ×{TBECS_CONFIG['addable_teams']} (group optional — the rest are balanced at start), "
                 f"squads {TBECS_CONFIG['min_squad']}–{TBECS_CONFIG['max_squad']} players, then `cvt start`.\n"
                 f"⏭️ Stages NEVER auto-advance: after each stage completes, the owner runs `cvt tbecs_next`."
@@ -12157,6 +12169,8 @@ class PrefixCog(commands.Cog):
             extra += "\n🏟️ **Conditions: Home Pitch** — set each team's home pitch with `cvt set_home_pitch \"<team>\" <pitch>`. Can't start until **all** teams have one (`cvt homepitch` to check)."
         if kwargs['match_order'] != "random":
             extra += f"\n{MATCH_ORDER_LABELS[kwargs['match_order']]}"
+        if kwargs['injuries']:
+            extra += f"\n🚑 **Injuries: ON** ({'High' if injury_tier == 'high' else 'Low'} chance)"
         await ctx.send(f"🏆 **Tournament Created:** `{name}`  ·  {type_label}\nUse `cv tournament add_team` to get started!{extra}")
 
     @tournament.command(name="add_team", help="[MANAGER] Add a team and assign an Owner.\nUsage: tournament add_team \"<team_name>\" <@owner> [group]\nGroup (A/B/C/D) required for T20 World Cup & CCODI. Order doesn't matter — the @owner and group are found anywhere in the line.")
@@ -14765,6 +14779,23 @@ class PrefixCog(commands.Cog):
         team["color"] = color.upper()
         save_tournament(tourney)
         await ctx.send(embed=discord.Embed(description=f"✅ **{team['name']}** color set to `{color.upper()}`.", color=int(color.lstrip('#'), 16)))
+
+    @tournament.command(name="rename_team", aliases=["team_rename", "renameteam"],
+                        help="[MANAGER/OWNER] Rename a team — updates every fixture, result, and stat table to match.\nUsage: tournament rename_team \"<old_name>\" \"<new_name>\"")
+    async def t_rename_team(self, ctx, team_name: str, *, new_name: str):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        team = self._team_by_ref(ctx, tourney, team_name)
+        if not team: return await ctx.send(f"❌ Team **{team_name}** not found (use the team name or ping its @owner).")
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (str(ctx.author.id) in tourney.get("managers", []))
+        if not is_mgr and team.get("owner_id") != str(ctx.author.id):
+            return await ctx.send("❌ Only Managers or the Team Owner can rename this team.")
+        if team.get("goat"):
+            return await ctx.send("❌ GOAT XIs are fixed event teams and can't be renamed.")
+        new_name = new_name.strip().strip('"').strip("'").strip()
+        ok, msg = rename_team(tourney, team["name"], new_name)
+        await ctx.send(msg)
 
     @tournament.command(name="set_team_logo", help="[MANAGER/OWNER] Set a team's logo.\nUsage: cvt set_team_logo <standings|match> \"<team_name>\" <emoji_or_url>  (or attach an image)")
     async def t_set_team_logo(self, ctx, logo_type: str, team_name: str, *, value: str = None):
