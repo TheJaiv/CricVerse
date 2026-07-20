@@ -134,9 +134,93 @@ def get_server_tournament(server_id: str):
         DB_CACHE["tournaments"] = []
     return next((t for t in DB_CACHE["tournaments"] if t.get("server_id") == server_id), None)
 
+
+# ── Logo upload compression ────────────────────────────────────────────────────
+# A directly-uploaded image (t_set_team_logo / set_team_logo / set_scoreboard_logo
+# attachment paths) is stored as a base64 data URI INSIDE the tournament document -
+# there's no separate file storage. An un-resized phone photo can be several MB,
+# and with dozens of teams (TBECS: 56) that's enough to blow Mongo's 16MB
+# per-document cap on a totally unrelated later save (e.g. a routine squad
+# submission becomes "the save that broke it"). Every logo, generated or
+# uploaded, gets compressed to the SAME small size the auto-generated ones use.
+# TBECS shares ONE Mongo document across every server running it, so the ceiling
+# is a HARD guarantee, not a soft target: even 100 teams x 2 logo fields x 5
+# CONCURRENT TBECS tournaments in that shared doc stays well under Mongo's 16MB
+# cap, with room to spare for schedules/stats (per-match data is sharded separately).
+_LOGO_MAX_SIDE = 96
+_LOGO_HARD_CAP = 18_000   # bytes of raw image data - realistic crests land far below this
+
+
+def compress_logo_bytes(img_bytes: bytes) -> str:
+    """Resize+recompress an uploaded image to a small data URI, shrinking
+    step-by-step until it's under _LOGO_HARD_CAP no matter how large/busy the
+    source was. Raises on decode failure so the caller can fall back to storing
+    the raw attachment URL instead (never raw bytes)."""
+    import base64 as _b64
+    img = Image.open(io.BytesIO(img_bytes)).convert("RGBA")
+    img.thumbnail((_LOGO_MAX_SIDE, _LOGO_MAX_SIDE), Image.LANCZOS)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    data, mime = buf.getvalue(), "image/png"
+
+    if len(data) > _LOGO_HARD_CAP:
+        rgb = img.convert("RGB")
+        for side, quality in ((96, 65), (72, 58), (56, 52), (40, 45)):
+            buf = io.BytesIO()
+            rgb.resize((side, side), Image.LANCZOS).save(buf, format="JPEG", quality=quality, optimize=True)
+            data = buf.getvalue()
+            mime = "image/jpeg"
+            if len(data) <= _LOGO_HARD_CAP:
+                break
+        # Even the smallest attempt can (very rarely) sit a little over the cap -
+        # sanitize_stored_logos re-runs this same ladder on every future save, so
+        # it keeps shrinking rather than ever blocking a save.
+    return f"data:{mime};base64," + _b64.b64encode(data).decode()
+
+
+# base64 inflates raw bytes by ~4/3 plus a short "data:image/xxx;base64," prefix -
+# this is the encoded-STRING-length threshold equivalent to _LOGO_HARD_CAP raw bytes.
+_LOGO_MAX_URI_LEN = int(_LOGO_HARD_CAP * 4 / 3) + 64
+
+
+def sanitize_stored_logos(t_data):
+    """Defensive cleanup run on every save: any data-URI logo still bigger than the
+    hard cap (stored before this fix, from a since-patched bug, or one that needed
+    more than one shrink pass) gets recompressed in place. Silently drops a field
+    it can't even decode, rather than let one bad value keep every future save
+    failing. No-op in the common case (nothing oversized) - just a handful of
+    cheap length checks. Returns (fixed, dropped) counts for a repair command."""
+    import base64 as _b64
+    fixed, dropped = 0, 0
+    fields = ("logo_standings", "logo_match")
+    for t in t_data.get("teams", []):
+        for f in fields:
+            v = t.get(f)
+            if isinstance(v, str) and v.startswith("data:") and len(v) > _LOGO_MAX_URI_LEN:
+                try:
+                    raw = v.split(",", 1)[1]
+                    t[f] = compress_logo_bytes(_b64.b64decode(raw))
+                    fixed += 1
+                except Exception:
+                    t.pop(f, None)   # unreadable + oversized - drop rather than resave broken
+                    dropped += 1
+    sb = t_data.get("scoreboard_logo")
+    if isinstance(sb, str) and sb.startswith("data:") and len(sb) > _LOGO_MAX_URI_LEN:
+        try:
+            raw = sb.split(",", 1)[1]
+            t_data["scoreboard_logo"] = compress_logo_bytes(_b64.b64decode(raw))
+            fixed += 1
+        except Exception:
+            t_data.pop("scoreboard_logo", None)
+            dropped += 1
+    return fixed, dropped
+
+
 def save_tournament(t_data):
     if "tournaments" not in DB_CACHE:
         DB_CACHE["tournaments"] = []
+    sanitize_stored_logos(t_data)
     tourneys = DB_CACHE["tournaments"]
     for i, t in enumerate(tourneys):
         if t.get("server_id") == t_data["server_id"]:
@@ -3373,9 +3457,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                 return await interaction.response.send_message("❌ Attachment must be an image file.", ephemeral=True)
             try:
                 img_bytes = await logo_image.read()
-                import base64 as _b64
-                mime = logo_image.content_type.split(";")[0]
-                team[field] = f"data:{mime};base64,{_b64.b64encode(img_bytes).decode()}"
+                team[field] = compress_logo_bytes(img_bytes)
             except Exception:
                 team[field] = logo_image.url
             save_tournament(tourney)

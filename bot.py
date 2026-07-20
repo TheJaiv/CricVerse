@@ -36,7 +36,7 @@ from engine.test_image import (
     generate_test_summary_image as _ti_summary,
     generate_test_scorecard_image as _ti_scorecard,
 )
-from league.tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_ccodi_round_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, revert_tournament_match, rebuild_tournament_stats, repair_tournament_schedule, _tm_next_mid, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS, SquadConfirmView, build_squad_confirm_text, build_squad_confirm_embed, match_order_gate, MATCH_ORDER_LABELS, build_tournament_summary_embeds, generate_round_robin_schedule, generate_ipl_schedule, ipl_try_advance, build_standings_message
+from league.tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_ccodi_round_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, revert_tournament_match, rebuild_tournament_stats, repair_tournament_schedule, _tm_next_mid, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS, SquadConfirmView, build_squad_confirm_text, build_squad_confirm_embed, match_order_gate, MATCH_ORDER_LABELS, build_tournament_summary_embeds, generate_round_robin_schedule, generate_ipl_schedule, ipl_try_advance, build_standings_message, compress_logo_bytes, sanitize_stored_logos
 from league.custom_tournament import (
     CustomSetupView, custom_try_advance, custom_start_error, custom_generate_first_stage,
     build_custom_standings_message, custom_config_summary_lines,
@@ -13271,6 +13271,25 @@ class PrefixCog(commands.Cog):
         _n, msg = clear_tbecs_ads(str(ctx.guild.id))
         await ctx.send(msg)
 
+    @tournament.command(name="fix_logos", aliases=["repair_logos", "shrink_logos"],
+                        help="[MANAGER] Shrink any oversized uploaded team/scoreboard logos and save immediately.\n"
+                             "Run this if the bot reports a MongoDB 'document too large' save error.\n"
+                             "Usage: tournament fix_logos")
+    async def t_fix_logos(self, ctx):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        fixed, dropped = sanitize_stored_logos(tourney)
+        save_tournament(tourney)
+        if not fixed and not dropped:
+            return await ctx.send("✅ No oversized logos found — every logo is already within the size cap. If saves are still failing, the oversized data may be a one-time-only large field elsewhere; contact the bot owner.")
+        parts = []
+        if fixed: parts.append(f"🖼️ shrank **{fixed}** logo(s)")
+        if dropped: parts.append(f"🗑️ dropped **{dropped}** unreadable oversized logo(s)")
+        await ctx.send(f"✅ Repair complete — {' · '.join(parts)}. Tournament saved successfully.")
+
     @tournament.command(name="tbecs_ad_preview", aliases=["ad_preview", "preview_ads"],
                         help="[MANAGER] Preview the ads exactly as they'll appear at an innings end.\nUsage: tournament tbecs_ad_preview")
     async def t_tbecs_ad_preview(self, ctx):
@@ -14772,9 +14791,10 @@ class PrefixCog(commands.Cog):
                 return await ctx.send("❌ Attachment must be an image file.")
             try:
                 img_bytes = await att.read()
-                import base64 as _b64
-                mime = att.content_type.split(";")[0]
-                team[field] = f"data:{mime};base64,{_b64.b64encode(img_bytes).decode()}"
+                # Compressed to a small fixed size - an un-resized upload stored raw
+                # is how a tournament with many teams (e.g. TBECS) blows Mongo's 16MB
+                # document cap on a LATER, unrelated save.
+                team[field] = compress_logo_bytes(img_bytes)
             except Exception:
                 team[field] = att.url
             save_tournament(tourney)
@@ -14819,9 +14839,7 @@ class PrefixCog(commands.Cog):
                 return await ctx.send("❌ Attachment must be an image file.")
             try:
                 img_bytes = await att.read()
-                import base64 as _b64
-                mime = att.content_type.split(";")[0]
-                tourney["scoreboard_logo"] = f"data:{mime};base64,{_b64.b64encode(img_bytes).decode()}"
+                tourney["scoreboard_logo"] = compress_logo_bytes(img_bytes)
             except Exception:
                 tourney["scoreboard_logo"] = att.url
             save_tournament(tourney)
