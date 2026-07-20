@@ -8690,12 +8690,12 @@ _ROLE_DISPLAY = {
 def _player_overall(p: dict) -> float:
     bat  = float(p.get("bat",  50))
     bowl = float(p.get("bowl", 50))
-    role = p.get("role", "")
-    if role.startswith("All-Rounder"):
-        return (bat + bowl) / 2
-    if role.startswith("Bowler"):
-        return bowl
-    return bat   # Batter / WK-Batter
+    ovr  = max(bat, bowl)   # judge every role by primary strength
+    if p.get("role", "").startswith("All-Rounder"):
+        # dual-threat bonus: second skill only counts once it's a real weapon (70+),
+        # capped at +2 so an AR never leapfrogs a clearly better specialist
+        ovr += min(2.0, 0.10 * max(0.0, min(bat, bowl) - 70.0))
+    return min(ovr, 99.0)
 
 def _best_xi(squad: list, n: int = 11, min_bowlers: int = 5) -> list:
     """Pick the strongest BALANCED XI from a squad: top players by overall rating, but
