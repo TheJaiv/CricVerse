@@ -9910,7 +9910,7 @@ class PrefixCog(commands.Cog):
         else:
             await ctx.send("⚠️ There is no active match or setup running in this channel.")
 
-    @commands.command(name="livematches", aliases=["live", "lm"], help="List every match/setup in progress with a link to its channel. Admins see all servers; everyone else sees this server only.\nUsage: livematches")
+    @commands.command(name="livematches", aliases=["live", "lms"], help="List every match/setup in progress with a link to its channel. Admins see all servers; everyone else sees this server only.\nUsage: livematches")
     async def livematches(self, ctx):
         is_admin = (ctx.author.id == ADMIN_DISCORD_ID or str(ctx.author.id) in get_auth_admins())
         my_guild = ctx.guild.id if ctx.guild else None
