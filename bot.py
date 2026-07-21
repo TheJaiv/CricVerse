@@ -888,13 +888,14 @@ def _ai_impact_complete_attack(match: CricketMatch, innings: InningsState, team_
     return _impact_add_bowler(match, team_num, out_name, best_sub)
 
 def try_ai_impact_player(match: CricketMatch, innings: InningsState):
-    """Let the AI use its Impact Player at an over boundary. Returns a list of
+    """Let the AI use each side's Impact Player at an over boundary. Returns a list of
     announcement lines for any swaps made this call, so the sim / verbose loops can
-    surface the move to the channel. Auto impact runs only in those loops (direct sims
-    and verbose) - interactive play leaves the impact to the manual button."""
+    surface the move to the channel. This is called ONLY from those loops (direct sims and
+    verbose over-by-over), so it fires for any auto-simmed match - whether vs the AI or a
+    human opponent (`cvm @user`). Interactive ball-by-ball play never calls it, leaving the
+    impact to the manual button there."""
     announcements = []
     if not getattr(match, "impact_player", False): return announcements
-    if not match.is_ai_game: return announcements
 
     for team_num in (1, 2):
         if getattr(match, f"t{team_num}_impact_used", False): continue
