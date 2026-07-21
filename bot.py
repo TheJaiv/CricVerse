@@ -12129,9 +12129,9 @@ class PrefixCog(commands.Cog):
         if not format_overs:
             return await ctx.send(f"❌ Invalid format '{format_str}'. Use one of: T20, ODI, Test.")
 
-        # injury_tier only matters when injuries=true; unset -> ACL keeps its old
-        # high rate by default, everything else keeps the normal low rate.
-        injury_tier = kwargs['injury_tier'] or ("high" if t_type == "acl" else "low")
+        # injury_tier only matters when injuries=true; unset -> low by default
+        # for every event type, including ACL. High must be picked explicitly.
+        injury_tier = kwargs['injury_tier'] or "low"
 
         t_data = {
             "server_id": server_id, "name": name, "managers": [str(ctx.author.id)], "teams": [],
@@ -14639,8 +14639,21 @@ class PrefixCog(commands.Cog):
                 if len(t.get("squad", [])) + len(plan[t["name"]]) < min_s:
                     plan[t["name"]].append(pool[idx]); idx += 1
 
+        # Keep the plan under Discord's 2000-char message limit (this text is reused in the
+        # confirm prompt and the completion edit): list names if they fit, else fall back to
+        # per-team counts, else trim with an "…and N more".
+        items = [(tn, ps) for tn, ps in plan.items() if ps]
         summary = "\n".join(f"• **{tn}** +{len(ps)}: " + ", ".join(p["name"] for p in ps)
-                            for tn, ps in plan.items() if ps)
+                            for tn, ps in items)
+        if len(summary) > 1700:
+            lines, used = [], 0
+            for i, (tn, ps) in enumerate(items):
+                ln = f"• **{tn}** +{len(ps)}"
+                if used + len(ln) + 1 > 1700:
+                    lines.append(f"…and **{len(items) - i}** more team(s)")
+                    break
+                lines.append(ln); used += len(ln) + 1
+            summary = "\n".join(lines)
         short = "" if idx >= need_total or all(len(t.get("squad", [])) + len(plan[t["name"]]) >= min_s for t in under) \
             else f"\n⚠️ Pool ran out — **{need_total - idx}** slot(s) stay unfilled (raise the cap and re-run)."
         view = SquadConfirmView(ctx.author.id)
@@ -14965,6 +14978,31 @@ class PrefixCog(commands.Cog):
         tourney["log_channel"] = str(ctx.channel.id)
         save_tournament(tourney)
         await ctx.send(f"📝 Tournament actions will now be logged in {ctx.channel.mention}.\n-# Use `cvt set_log_channel off` to stop.")
+
+    @tournament.command(name="injuries", aliases=["injury_status", "injury_list"],
+                        help="View who's currently injured and the tournament's injury chance tier (High/Low).\nUsage: tournament injuries")
+    async def t_injuries(self, ctx):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        enabled = tourney.get("injuries_enabled", False)
+        tier_label = "High" if tourney.get("injury_tier") == "high" else "Low"
+        if not enabled:
+            return await ctx.send("🚑 **Injuries: OFF** for this tournament.")
+        hurt = []
+        for team in tourney.get("teams", []):
+            for p in team.get("squad", []):
+                if p.get("injured"):
+                    left = p.get("injury_matches_left", p.get("injury_severity", 1))
+                    m_word = "team match" if left == 1 else "team matches"
+                    hurt.append(f"• **{p['name']}** ({team['name']}) — out for **{left}** more {m_word}")
+        header = f"🚑 **Injuries: ON** ({tier_label} chance)\n"
+        if not hurt:
+            return await ctx.send(header + "✅ No players currently injured.")
+        listing = "\n".join(hurt[:25])
+        if len(hurt) > 25:
+            listing += f"\n… and {len(hurt) - 25} more"
+        await ctx.send(header + listing)
 
     @tournament.command(name="remove_injury", help="[MANAGER] Manually clear a player's injury.\nUsage: cvt remove_injury \"<team_name>\" \"<player_name>\"")
     async def t_remove_injury(self, ctx, team_name: str, player_name: str):
@@ -15824,7 +15862,7 @@ class PrefixCog(commands.Cog):
                    "`scorecard_channel`/`scc #ch` — auto-post every match image\n"
                    "`post_scorecards`/`psc #ch` — slow-dump ALL scorecards (archive)\n"
                    "`set_log_channel [off]` — [MGR] audit-log every change\n"
-                   "`set_injury_channel #ch` · `add_injury` · `remove_injury` · `clear_injuries` (heal ALL)"),
+                   "`set_injury_channel #ch` · `injuries` (who's out + tier) · `add_injury` · `remove_injury` · `clear_injuries` (heal ALL)"),
             inline=False,
         )
         ref.add_field(

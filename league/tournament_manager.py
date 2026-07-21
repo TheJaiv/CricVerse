@@ -2997,7 +2997,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         app_commands.Choice(name="Linked — each team sets a home stadium with a FIXED home pitch", value="linked"),
     ])
     @app_commands.choices(injury_tier=[
-        app_commands.Choice(name="High — frequent, rating-scaled, up to one per team per match (ACL-style)", value="high"),
+        app_commands.Choice(name="High — 5%/3% chance, up to one per team per match (ACL-style)", value="high"),
         app_commands.Choice(name="Low — normal rate, one per match (default)", value="low"),
     ])
     async def create(self, interaction: discord.Interaction, name: str, format: app_commands.Choice[str], event_type: app_commands.Choice[str] = None, min_squad: int = 11, max_squad: int = 15, impact_player: bool = None, injuries: bool = None, injury_tier: app_commands.Choice[str] = None, custom_overs: int = None, conditions: app_commands.Choice[str] = None, match_order: app_commands.Choice[str] = None, stadiums: app_commands.Choice[str] = None):
@@ -3010,9 +3010,9 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             injuries = (_ev == "tbecs")
         if impact_player is None:
             impact_player = False
-        # injury_tier only matters when injuries is on; unset -> ACL keeps its old
-        # high rate by default, everything else keeps the normal low rate.
-        tier = injury_tier.value if injury_tier else ("high" if _ev == "acl" else "low")
+        # injury_tier only matters when injuries is on; unset -> low by default
+        # for every event type, including ACL. High must be picked explicitly.
+        tier = injury_tier.value if injury_tier else "low"
 
         server_id = str(interaction.guild.id)
 
@@ -4044,22 +4044,21 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         if tourney.get("injuries_enabled", False) and m_data.get("stage") in ("group", "super8", "league", TBECS_SUPER_STAGE):
             import random as _rng
             # Injury tier is HIGH or LOW (tourney["injury_tier"], set at creation -
-            # legacy tournaments with no tier saved fall back to ACL's old hardcoded
-            # behaviour: acl=high, everything else=low). HIGH is more frequent and
-            # RATING-SCALED - a star (high bat/bowl) gets hurt less than a journeyman -
-            # and allows one injury per TEAM per match (vs one per whole match on LOW),
-            # so squad depth matters more.
-            _tier = tourney.get("injury_tier") or ("high" if tourney.get("tournament_type") == "acl" else "low")
-            _is_acl = _tier == "high"
+            # tournaments started before this field existed have no tier saved and
+            # fall back to LOW). Both use the same flat chance model, HIGH just runs
+            # higher numbers - and HIGH allows one injury per TEAM per match (vs one
+            # per whole match on LOW), so squad depth matters more.
+            _tier = tourney.get("injury_tier") or "low"
+            _high_tier = _tier == "high"
             _match_injured = False
             _new_injuries = []
             for team_name, bat_inn, bowl_inn in [(t1_name, t1_inn, t2_inn), (t2_name, t2_inn, t1_inn)]:
-                if not _is_acl and _match_injured: break
+                if not _high_tier and _match_injured: break
                 team_obj = next((t for t in tourney["teams"] if t["name"] == team_name), None)
                 if not team_obj: continue
                 _team_injured = False
                 for player in team_obj["squad"]:
-                    if (_is_acl and _team_injured) or (not _is_acl and _match_injured): break
+                    if (_high_tier and _team_injured) or (not _high_tier and _match_injured): break
                     p_name = player["name"]
                     if player.get("injured"): continue
                     bat_stat  = bat_inn.batting_stats.get(p_name)
@@ -4069,12 +4068,8 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                     if not played: continue
                     heavy = (bat_stat and bat_stat.balls_faced >= 20) or \
                             (bowl_stat and bowl_stat.balls_bowled >= 12)
-                    if _is_acl:
-                        base = 0.065 if heavy else 0.028          # ~2x the low-tier rate
-                        _rt = max(player.get("bat", 50), player.get("bowl", 50))
-                        # factor: 1.0 at "normal" (75) -> ~0.6 for a 95-rated star, ~1.3 for a 60-rated
-                        _factor = max(0.55, min(1.35, 1.0 - (_rt - 75) * 0.02))
-                        chance = base * _factor
+                    if _high_tier:
+                        chance = 0.05 if heavy else 0.03
                     else:
                         chance = 0.03 if heavy else 0.01
                     if _rng.random() >= chance: continue
@@ -4095,7 +4090,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                     if channel is None:
                         # Sim path (no channel): queue for the consolidated sim report.
                         tourney.setdefault("pending_injury_news", []).append(_inj_entry)
-                    if _is_acl: _team_injured = True
+                    if _high_tier: _team_injured = True
                     else: _match_injured = True
 
             # Real match: report injuries to the injury/log channel immediately,
