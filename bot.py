@@ -9,6 +9,7 @@ import difflib
 import asyncio
 import io
 import os
+import time
 import json
 from PIL import Image, ImageDraw, ImageFont, ImageStat
 import math
@@ -354,6 +355,65 @@ setup_states = {}           # channel_id -> MatchSetupState, kept ALIVE through 
                             #  endmatch can mark state.cancelled and the setup views bail.
 draft_tasks = {}            # channel_id -> asyncio.Task for the running draft (cancellable)
 
+# ---- Idle-match reaper ----
+# Abandoned activities (a setup nobody finished, a match nobody kept playing) used to
+# sit in the dicts above forever, permanently blocking that channel ("a match or setup
+# is already in progress") and never cleaning up. channel_activity records the last time
+# each channel did something; reap_idle_matches() force-ends anything that has gone quiet.
+MATCH_IDLE_TIMEOUT = 600     # seconds of silence before a match/setup is auto-cancelled
+MATCH_MAX_LIFETIME = 5400    # hard ceiling (90 min): kill even a still-"active" activity that
+                             # never ends (a runaway sim loop) so it can't hammer the API
+                             # forever. Test matches are exempt - they legitimately run long.
+channel_activity = {}        # channel_id -> time.monotonic() of last activity
+channel_started = {}         # channel_id -> time.monotonic() when the activity began
+
+def _touch_channel(cid) -> None:
+    """Mark a channel as active right now, resetting its idle clock."""
+    channel_activity[cid] = time.monotonic()
+
+def _active_channel_ids() -> set:
+    """Every channel currently running any kind of activity (match/setup/test/draft)."""
+    return (set(active_games) | set(active_setups) | set(active_test_matches)
+            | set(setup_states) | set(active_drafts) | set(draft_tasks))
+
+def _channel_has_activity(cid) -> bool:
+    # Runs on every message, so use cheap short-circuiting membership tests.
+    return (cid in active_games or cid in active_setups or cid in active_test_matches
+            or cid in setup_states or cid in active_drafts or cid in draft_tasks)
+
+def _channel_link(cid) -> str:
+    """Masked link to a channel for the live-matches list (renders inside an embed)."""
+    ch = bot.get_channel(cid)
+    if ch is None:
+        return f"channel `{cid}`"
+    guild = getattr(ch, "guild", None)
+    if guild is not None:
+        return f"[#{ch.name} · {guild.name}](https://discord.com/channels/{guild.id}/{cid})"
+    return f"<#{cid}>"
+
+def _describe_match(m) -> str:
+    """One-line summary of a running CricketMatch (teams, format, current score)."""
+    try:
+        t1 = m.team1.get("name", "Team 1"); t2 = m.team2.get("name", "Team 2")
+    except Exception:
+        t1, t2 = "Team 1", "Team 2"
+    label = f"{t1} vs {t2} · {getattr(m, 'format_overs', '?')}ov"
+    inn = getattr(m, "current_innings", None)
+    if inn is not None:
+        try:
+            label += f" · {inn.batting_team.get('name', '?')} {inn.total_runs}/{inn.wickets} ({inn.total_balls // 6}.{inn.total_balls % 6})"
+        except Exception:
+            pass
+    if getattr(m, "tournament_server_id", None):
+        label = "🏆 " + label
+    return label
+
+def _describe_test(m) -> str:
+    try:
+        return f"{m.team1.get('name', 'Team 1')} vs {m.team2.get('name', 'Team 2')}"
+    except Exception:
+        return "Test match"
+
 # ---- Cloud database & security ----
 @tasks.loop(hours=1)
 async def auto_sync_db():
@@ -377,6 +437,42 @@ async def global_stats_backup():
         gstats.clear_dirty()
     except Exception as e:
         print(f"Periodic stats backup failed: {e}")
+
+@tasks.loop(seconds=60)
+async def reap_idle_matches():
+    """Safety net: force-cancel any match/setup/draft/test that has gone silent for
+    MATCH_IDLE_TIMEOUT so an abandoned activity can't clog its channel forever. Live
+    broadcasts touch their channel every over, so only genuinely idle ones get reaped.
+    The teardown itself is graceful - a running sim loop sees its active_games entry
+    vanish and stops cleanly on its next ball."""
+    now = time.monotonic()
+    for cid in _active_channel_ids():        # snapshot set - safe to mutate dicts inside
+        channel_started.setdefault(cid, now)  # remember when this activity first appeared
+        last = channel_activity.get(cid)
+        if last is None:
+            channel_activity[cid] = now      # first sighting: start its clock, don't reap yet
+            continue
+        idle = now - last >= MATCH_IDLE_TIMEOUT
+        # Hard ceiling catches a runaway that keeps itself "active" forever. Tests run long
+        # by design, so they are only ever reaped for idleness, never for age.
+        too_old = (cid not in active_test_matches
+                   and now - channel_started[cid] >= MATCH_MAX_LIFETIME)
+        if not (idle or too_old):
+            continue
+        if _force_end_channel(cid):
+            reason = "ran too long" if too_old else "no recent activity"
+            channel = bot.get_channel(cid)
+            if channel is not None:
+                try:
+                    await channel.send(f"⏱️ **Match cancelled** — {reason}. The channel is free again.")
+                except discord.HTTPException:
+                    pass
+    # Forget timestamps for channels that are no longer active (incl. just-reaped ones).
+    still_active = _active_channel_ids()
+    for cid in [c for c in channel_activity if c not in still_active]:
+        channel_activity.pop(cid, None)
+    for cid in [c for c in channel_started if c not in still_active]:
+        channel_started.pop(cid, None)
 
 async def _stats_shutdown_backup():
     """Render sends SIGTERM ~30s before killing the process (deploy/restart/spin-down).
@@ -405,7 +501,16 @@ async def on_ready():
         auto_sync_db.start()
     if not global_stats_backup.is_running():
         global_stats_backup.start()
+    if not reap_idle_matches.is_running():
+        reap_idle_matches.start()
     print("Memory Cache Loaded and Ready.")
+
+@bot.listen('on_interaction')
+async def _track_interaction_activity(interaction: discord.Interaction):
+    """Any button/select click in a live match or setup keeps its channel alive."""
+    cid = interaction.channel_id
+    if cid is not None and _channel_has_activity(cid):
+        _touch_channel(cid)
 # ---- Core data structures & fallbacks ----
 
 # Hardcoded fallback database to prevent crashes if the CSV is empty
@@ -3534,10 +3639,19 @@ async def loop_current_innings_simulation(interaction, match: CricketMatch):
     """Simulate the current innings only, then hand back to the Over Hub for the next innings."""
     channel = interaction.channel if hasattr(interaction, 'channel') else interaction
 
+    _safety_deliveries = 0
     while True:
         # /endmatch (or anything that tears the match down) must stop the sim INSTANTLY
         # the loop only holds a private reference, so re-check the registry every ball.
         if active_games.get(channel.id) is not match:
+            return
+        _touch_channel(channel.id)   # a running sim is activity - don't let the reaper kill it
+        # Runaway guard: abort a stuck innings (only ever bowling wides) instead of looping
+        # forever - see loop_entire_match_simulation for the full rationale.
+        _safety_deliveries += 1
+        if _safety_deliveries > match.max_balls + 200:
+            await channel.send("🚨 **Simulation aborted** — the innings got stuck. Match cancelled.")
+            _force_end_channel(channel.id)
             return
         innings = match.current_innings
         max_w = _match_max_wickets(match)
@@ -3604,11 +3718,13 @@ async def loop_current_innings_bbb(interaction, match: CricketMatch):
         return False
 
     match._bbb_active = True   # lets `cv verbose` know a bbb broadcast owns this match
+    _safety_deliveries = 0     # runaway guard - abort a stuck innings instead of editing forever
     while True:
         # /endmatch must stop a ball-by-ball broadcast INSTANTLY.
         if active_games.get(channel.id) is not match:
             match._bbb_active = False
             return
+        _touch_channel(channel.id)   # a live broadcast is activity - don't let the reaper kill it
         innings = match.current_innings
 
         if _innings_over(innings):
@@ -3654,6 +3770,12 @@ async def loop_current_innings_bbb(interaction, match: CricketMatch):
                 break   # outer loop renders the final state + ends the innings cleanly
             tb_before = innings.total_balls
             execute_ball_math(match)
+            _safety_deliveries += 1
+            if _safety_deliveries > match.max_balls + 200:
+                await channel.send("🚨 **Simulation aborted** — the innings got stuck. Match cancelled.")
+                match._bbb_active = False
+                _force_end_channel(channel.id)
+                return
             await asyncio.sleep(BALL_DELAY)
             if over_msg is not None:
                 try:
@@ -3686,12 +3808,26 @@ async def loop_current_innings_bbb(interaction, match: CricketMatch):
 
 async def loop_entire_match_simulation(interaction, match: CricketMatch):
     channel = interaction.channel if hasattr(interaction, 'channel') else interaction
-    
+
+    _safety_innings = match.current_innings_num
+    _safety_deliveries = 0
     while True:
         # /endmatch must stop a running whole-match sim INSTANTLY.
         if active_games.get(channel.id) is not match:
             return
+        _touch_channel(channel.id)   # a running sim is activity - don't let the reaper kill it
         innings = match.current_innings
+        # Runaway guard: an innings can't take many more deliveries than its legal-ball limit
+        # even with extras. If it does, the sim is stuck (e.g. only ever bowling wides) - abort
+        # instead of editing the scoreboard forever and hammering the API.
+        if match.current_innings_num != _safety_innings:
+            _safety_innings = match.current_innings_num
+            _safety_deliveries = 0
+        _safety_deliveries += 1
+        if _safety_deliveries > match.max_balls + 200:
+            await channel.send("🚨 **Simulation aborted** — the innings got stuck. Match cancelled.")
+            _force_end_channel(channel.id)
+            return
         max_w = _match_max_wickets(match)
         if innings.wickets >= max_w or innings.total_balls >= match.max_balls or (match.current_innings_num == 2 and innings.total_runs >= getattr(match, "target", match.innings1.total_runs + 1)):
             # Verbose: if the innings ended MID-over (winning run / last wicket on a non-6th
@@ -4096,7 +4232,7 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
             header = f"🤯 **SUPER OVER #{_son} — {match_to_finalize.tiebreak_winner_name} win it!** Super Over summary:"
         else:
             header = "🏆 **Match over! Here is the final detailed scorecard and broadcast graphic:**"
-        await channel.send(header, embed=embed_full, file=file)
+        scorecard_msg = await channel.send(header, embed=embed_full, file=file)
 
         # TBECS second-innings (match end) ads - shown at every innings end per spec.
         await _maybe_send_tbecs_ads(channel, match_to_finalize)
@@ -4117,7 +4253,8 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
                         t1 = match_to_finalize.innings1.batting_team["name"]
                         t2 = match_to_finalize.innings2.batting_team["name"]
                         await log_channel.send(
-                            f"📋 **Match Log** · {t1} vs {t2} · <#{channel.id}>",
+                            f"📋 **Match Log** · {t1} vs {t2} · <#{channel.id}>\n"
+                            f"🔗 Scorecard: {scorecard_msg.jump_url}",
                             file=log_file
                         )
                 except Exception as _log_err:
@@ -6721,6 +6858,9 @@ class TossDecisionView(discord.ui.View):
 async def on_message(message: discord.Message):
     if message.author.bot: return
 
+    if _channel_has_activity(message.channel.id):   # draft picks / typed team names keep it alive
+        _touch_channel(message.channel.id)
+
     content = message.content
     if content.startswith("cvt "):
         message.content = "cv tournament " + content[4:]
@@ -7449,7 +7589,7 @@ async def _test_finish_match(match: TestMatchObj, channel_id: int, channel):
     # Interactive per-innings scorecard navigator
     view  = TestScorecardView(match)
     embed = _render_test_innings_embed(match, 0)
-    await channel.send("📋 **Full Scorecard** — use the arrows to browse innings:", embed=embed, view=view)
+    scorecard_msg = await channel.send("📋 **Full Scorecard** — use the arrows to browse innings:", embed=embed, view=view)
 
     if channel.guild:
         log_channel_id = get_match_log_channel(str(channel.guild.id))
@@ -7461,7 +7601,8 @@ async def _test_finish_match(match: TestMatchObj, channel_id: int, channel):
                     t1 = match.team1["name"]
                     t2 = match.team2["name"]
                     await log_channel.send(
-                        f"📋 **Match Log** · {t1} vs {t2} · <#{channel.id}>",
+                        f"📋 **Match Log** · {t1} vs {t2} · <#{channel.id}>\n"
+                        f"🔗 Scorecard: {scorecard_msg.jump_url}",
                         file=log_file
                     )
             except Exception as _log_err:
@@ -8389,6 +8530,8 @@ def _force_end_channel(channel_id) -> bool:
     task = draft_tasks.pop(channel_id, None)
     if task is not None and not task.done():
         task.cancel(); cleared = True
+    channel_activity.pop(channel_id, None)
+    channel_started.pop(channel_id, None)
     return cleared
 
 
@@ -9693,13 +9836,29 @@ class PrefixCog(commands.Cog):
     async def on_command_error(self, ctx, error):
         if isinstance(error, commands.CommandNotFound):
             return
-        
+
+        orig = getattr(error, "original", error)
+
+        # If we're already being rate-limited / globally banned, don't try to
+        # reply: the send just 429s again and raises, piling more failed
+        # requests onto the ban that caused this. Log and bail.
+        if isinstance(orig, discord.HTTPException) and orig.status == 429:
+            print(f"Rate limited (429) in command '{ctx.command}'; suppressing error reply.")
+            return
+
+        # Best-effort reply. The error handler must never raise from its own
+        # send, or discord.py logs a second "Ignoring exception" cascade.
+        async def _safe_send(content, **kw):
+            try:
+                await ctx.send(content, **kw)
+            except discord.HTTPException as e:
+                print(f"on_command_error could not send reply: {e!r}")
+
         if isinstance(error, (commands.MissingRequiredArgument, commands.BadArgument, commands.TooManyArguments)):
             usage = ctx.command.help.split("Usage: ")[1] if ctx.command.help and "Usage: " in ctx.command.help else f"{ctx.command.name} [arguments...]"
-            await ctx.send(f"❌ **Invalid Usage!** {ctx.author.mention}, the correct format is:\n`{ctx.prefix}{usage}`")
+            await _safe_send(f"❌ **Invalid Usage!** {ctx.author.mention}, the correct format is:\n`{ctx.prefix}{usage}`")
         else:
             import traceback as _tb
-            orig = getattr(error, "original", error)
             print(f"An error occurred in a prefix command '{ctx.command}': {orig!r}")
             _tb.print_exception(type(orig), orig, orig.__traceback__)
             # Surface the real error to the owner/admins to speed up debugging.
@@ -9710,9 +9869,9 @@ class PrefixCog(commands.Cog):
             except Exception:
                 _is_admin = False
             if _is_admin:
-                await ctx.send(f"⚠️ `{type(orig).__name__}`: {str(orig)[:1800]}")
+                await _safe_send(f"⚠️ `{type(orig).__name__}`: {str(orig)[:1800]}")
             else:
-                await ctx.send("An unexpected error occurred while running that command.")
+                await _safe_send("An unexpected error occurred while running that command.")
 
     @commands.command(name="match", aliases=["m"], help="Start a new Cricket Match simulation.\nUsage: match [@opponent]")
     async def match(self, ctx, opponent: discord.Member = None):
@@ -9750,6 +9909,45 @@ class PrefixCog(commands.Cog):
             await ctx.send("🛑 **Match and setup forcefully terminated.** Memory cleared.")
         else:
             await ctx.send("⚠️ There is no active match or setup running in this channel.")
+
+    @commands.command(name="livematches", aliases=["live", "lm"], help="List every match/setup in progress with a link to its channel. Admins see all servers; everyone else sees this server only.\nUsage: livematches")
+    async def livematches(self, ctx):
+        is_admin = (ctx.author.id == ADMIN_DISCORD_ID or str(ctx.author.id) in get_auth_admins())
+        my_guild = ctx.guild.id if ctx.guild else None
+
+        def _in_scope(cid):
+            if is_admin:
+                return True
+            ch = bot.get_channel(cid)
+            return ch is not None and getattr(getattr(ch, "guild", None), "id", None) == my_guild
+
+        lines = []
+        for cid, m in list(active_games.items()):
+            if _in_scope(cid):
+                lines.append(f"🏏 {_describe_match(m)} — {_channel_link(cid)}")
+        for cid in list(active_test_matches):
+            if _in_scope(cid):
+                lines.append(f"🧪 Test · {_describe_test(active_test_matches[cid])} — {_channel_link(cid)}")
+        for cid, val in list(active_setups.items()):
+            if _in_scope(cid):
+                stage = val[0] if isinstance(val, tuple) else "setup"
+                lines.append(f"⏳ Setup ({stage}) — {_channel_link(cid)}")
+        for cid in list(active_drafts):
+            if _in_scope(cid):
+                lines.append(f"📝 Draft — {_channel_link(cid)}")
+
+        if not lines:
+            scope = "" if is_admin else " in this server"
+            return await ctx.send(f"💤 No matches or setups are currently in progress{scope}.")
+
+        e = discord.Embed(
+            title=f"🔴 Live now — {len(lines)} active",
+            description="\n".join(lines[:40]),
+            color=0x1D4ED8
+        )
+        e.set_footer(text=("across all servers" if is_admin else f"in {ctx.guild.name}")
+                     + (f"  ·  +{len(lines) - 40} more not shown" if len(lines) > 40 else ""))
+        await ctx.send(embed=e)
 
     # ---- Global player stats (local json - see core/global_stats.py) ----
 
