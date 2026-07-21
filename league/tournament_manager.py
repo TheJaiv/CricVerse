@@ -4040,8 +4040,16 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                     else:
                         _p["injury_matches_left"] = _left
 
-        # INJURY ROLL (league-format stages only, needs injuries_enabled)
-        if tourney.get("injuries_enabled", False) and m_data.get("stage") in ("group", "super8", "league", TBECS_SUPER_STAGE):
+        # INJURY ROLL (league-format stages only, needs injuries_enabled). Plain Round
+        # Robin schedules carry no "stage" key at all (generate_round_robin_schedule
+        # only stamps one if asked), so fall back to "round is an int" - the same
+        # league-stage test _match_bracket_rank uses - to catch it; knockout matches
+        # always use string round names ("Final", "Semi-Final 1", ...) so this can't
+        # misfire on a playoff.
+        if tourney.get("injuries_enabled", False) and (
+            m_data.get("stage") in ("group", "super8", "league", TBECS_SUPER_STAGE)
+            or isinstance(m_data.get("round"), int)
+        ):
             import random as _rng
             # Injury tier is HIGH or LOW (tourney["injury_tier"], set at creation -
             # tournaments started before this field existed have no tier saved and
