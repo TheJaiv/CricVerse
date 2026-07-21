@@ -771,10 +771,11 @@ def swap_impact_player(match: CricketMatch, team_id: int, out_name: str, in_play
 # ---- Auto Impact Player (AI tactic, runs in direct sims + verbose only) ----
 # The decision is driven by the team's SQUAD SHAPE, not the match situation:
 #   Rule 1 - attack already complete (5+ genuine bowling options, none tagged no-bowl
-#     'L') and a batter on the bench: spend the impact on batting. Bring the bench batter
-#     in for a tail bowler the moment that bowler is about to walk out to bat, so no
-#     bowler bats. Only when batting SECOND - batting first, every bowler is kept for the
-#     second-innings defence, so a bowler is never subbed out in the first innings.
+#     'L') and a batter on the bench: spend the impact on batting so no bowler has to bat.
+#     Fires the moment the next man due is a tail bowler. Batting SECOND, the bowler is
+#     swapped straight out (no bowling left to do). Batting FIRST, the bench batter is
+#     slotted in as the next man WITHOUT removing a bowler (every bowler is kept to defend
+#     in the second innings) - the player subbed out is a top-order batter already dismissed.
 #   Rule 2 - attack a bowler short (only 4 who can bowl) with a bowler on the bench: use
 #     the impact to complete the attack. Batting first, bring the bowler on once the
 #     team's batting is done (i.e. at their bowling innings). Bowling first, let the
@@ -807,6 +808,38 @@ def _impact_replace_batter(match: CricketMatch, team_num: int, idx: int, out_nam
     match.last_commentary_prefix = msg + "\n" + getattr(match, "last_commentary_prefix", "")
     return msg
 
+def _impact_insert_batter(match: CricketMatch, team_num: int, out_name: str, in_player: dict):
+    """Rule 1 swap when BATTING FIRST: slot a bench batter in as the next man to the crease
+    WITHOUT removing anyone from the XI - every bowler is kept to defend in the second
+    innings. The named out player is a top-order batter who is already out (subbing him has
+    no cost - he takes no further part either way), and the tail bowler he outranks is
+    pushed down the order so he never has to bat."""
+    team = match.team1 if team_num == 1 else match.team2
+    inn = match.current_innings
+    idx = inn.next_batter_idx
+    team["players"].insert(idx, in_player)   # becomes the next man in; nobody removed
+    inn.batting_stats[in_player["name"]] = BatterStats(in_player)
+    setattr(match, f"t{team_num}_impact_used", True)
+    setattr(match, f"t{team_num}_impact_sub_name", in_player["name"])
+    msg = (f"🔄 **AI TACTIC:** {team['name']} uses IMPACT PLAYER! "
+           f"**{in_player['name']}** IN for **{out_name}** - lengthening the batting.")
+    match.last_commentary_prefix = msg + "\n" + getattr(match, "last_commentary_prefix", "")
+    return msg
+
+def _dismissed_batter(innings: InningsState):
+    """The most recent specialist batter already dismissed - the man the impact batter comes
+    in for when batting first, so a bowler is never the one subbed out."""
+    seen = innings.batting_team["players"][:innings.next_batter_idx]
+    for p in reversed(seen):
+        st = innings.batting_stats.get(p["name"])
+        if st and st.dismissal not in ("not out", "Subbed Out", "Retired (Sub)") and not _is_pure_bowler(p):
+            return p["name"]
+    for p in reversed(seen):   # fall back to any dismissed man
+        st = innings.batting_stats.get(p["name"])
+        if st and st.dismissal not in ("not out", "Subbed Out", "Retired (Sub)"):
+            return p["name"]
+    return None
+
 def _impact_add_bowler(match: CricketMatch, team_num: int, out_name: str, in_player: dict):
     """Rule 2 swap: sacrifice a spare batter to bring an extra bowler on. The bowler joins
     the attack now and bats at the tail of the order in the batting innings."""
@@ -838,12 +871,11 @@ def _impact_spare_batter(match: CricketMatch, team_num: int):
 
 def _ai_impact_batting_boost(match: CricketMatch, innings: InningsState, team_num: int, subs, batting_now):
     """Rule 1: the attack is complete, so spend the impact on batting. Fire the moment the
-    next man due is a tail bowler - swap him for the best bench batter. Only when batting
-    second: batting first, the bowlers are needed to defend in the second innings, so a
-    bowler is never subbed out in the first innings."""
+    next man due is a tail bowler, so no bowler has to bat. Batting second, the bowler is
+    swapped straight out (no bowling left to do). Batting first, the bench batter is slotted
+    in as the next man in and a top-order batter already dismissed is the one subbed out, so
+    every bowler is kept for the second-innings defence."""
     if not batting_now:
-        return None
-    if match.current_innings_num == 1:
         return None
     bat_subs = [s for s in subs if not _is_pure_bowler(s)] or subs
     best_sub = max(bat_subs, key=lambda x: x["bat"])
@@ -854,9 +886,17 @@ def _ai_impact_batting_boost(match: CricketMatch, innings: InningsState, team_nu
     if not upcoming:
         return None
     next_up = upcoming[0]   # == players[idx]: the next man to walk out
-    if _is_pure_bowler(next_up) and best_sub["bat"] > next_up["bat"] + 8:
-        return _impact_replace_batter(match, team_num, idx, next_up["name"], best_sub)
-    return None
+    if not (_is_pure_bowler(next_up) and best_sub["bat"] > next_up["bat"] + 8):
+        return None
+    if match.current_innings_num == 1:
+        # Batting first: keep every bowler for the second innings - slot the batter in as the
+        # next man and sub out a top-order batter who is already out.
+        out_name = _dismissed_batter(innings)
+        if not out_name:
+            return None
+        return _impact_insert_batter(match, team_num, out_name, best_sub)
+    # Batting second: no bowling left, so the tail bowler goes straight out.
+    return _impact_replace_batter(match, team_num, idx, next_up["name"], best_sub)
 
 def _ai_impact_complete_attack(match: CricketMatch, innings: InningsState, team_num: int, subs, batting_now):
     """Rule 2: the attack is a bowler short. Bring the bench bowler on, timed by whether
