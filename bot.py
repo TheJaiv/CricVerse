@@ -11701,7 +11701,7 @@ class PrefixCog(commands.Cog):
         def _fmt(p, cat):
             style = p["role"].split("_", 1)[1].replace("_", " ") if "_" in p["role"] else ""
             if p.get("injured"):
-                sev = p.get("injury_severity", 1)
+                sev = p.get("injury_matches_left", p.get("injury_severity", 1))
                 inj = f" 🚑 *(misses next {sev} team match{'es' if sev > 1 else ''})*"
             else:
                 inj = ""
@@ -12801,7 +12801,7 @@ class PrefixCog(commands.Cog):
             arch = p["archetype"]
             style = p["role"].split("_", 1)[1].replace("_", " ") if "_" in p["role"] else ""
             if p.get("injured"):
-                sev = p.get("injury_severity", 1)
+                sev = p.get("injury_matches_left", p.get("injury_severity", 1))
                 inj = f" 🚑 *(misses next {sev} team match{'es' if sev > 1 else ''})*"
             else:
                 inj = ""
@@ -14137,11 +14137,17 @@ class PrefixCog(commands.Cog):
         injuries_log = []
         errored = set()
 
-        # Mirror the real match-start filter: leave injured players out of the XI,
-        # falling back to the full squad only if fewer than 11 are fit.
+        # Leave injured players out of the XI; only if fewer than 11 are fit does it
+        # backfill with the best injured players to make up the numbers.
         def _available(squad):
             fit = [p for p in squad if not p.get("injured")]
-            return fit if len(fit) >= 11 else squad
+            if len(fit) >= 11:
+                return fit
+            # Too few fit players to field 11: keep EVERY fit player, then backfill with the
+            # best-rated injured ones only as far as needed to reach 11 - so the picker never
+            # benches a fit player in favour of a higher-rated injured one.
+            hurt = sorted((p for p in squad if p.get("injured")), key=_player_overall, reverse=True)
+            return fit + hurt[:max(0, 11 - len(fit))]
 
         # Re-scan after every match so newly-unlocked knockout matches (ACL playoffs, T20WC semis/final) get played too
         def _next_pending():
@@ -14167,13 +14173,10 @@ class PrefixCog(commands.Cog):
                 results.append(f"M{m_data['match_id']} ({r_label}): ❌ Squad not set")
                 continue
 
-            # Injuries carry over between simmed matches exactly like real ones: first heal
-            # any that have now expired, then leave the still-injured out of THIS match's XI.
-            current_mid = m_data["match_id"]
-            for _td in (t1_data, t2_data):
-                for _p in _td.get("squad", []):
-                    if _p.get("injured") and _p.get("injury_until_match", 0) < current_mid:
-                        _p.pop("injured", None); _p.pop("injury_until_match", None); _p.pop("injury_severity", None)
+            # Injuries carry over between simmed matches exactly like real ones. Injured
+            # players sit out (filtered by _available below); their spell is counted down at
+            # match COMPLETION in on_tournament_match_complete - by matches actually played,
+            # not by match id - so an injured player is never fielded, even out of order.
 
             # XI priority: the team's saved DEFAULT XI (kept in its saved batting order,
             # when all 11 are fit) - otherwise the BEST balanced XI (top 11 by rating,
@@ -14325,13 +14328,17 @@ class PrefixCog(commands.Cog):
 
         def _available(squad):
             fit = [p for p in squad if not p.get("injured")]
-            return fit if len(fit) >= 11 else squad
+            if len(fit) >= 11:
+                return fit
+            # Too few fit players to field 11: keep EVERY fit player, then backfill with the
+            # best-rated injured ones only as far as needed to reach 11 - so the picker never
+            # benches a fit player in favour of a higher-rated injured one.
+            hurt = sorted((p for p in squad if p.get("injured")), key=_player_overall, reverse=True)
+            return fit + hurt[:max(0, 11 - len(fit))]
 
-        # Heal expired injuries exactly like simulate_all, then leave the rest out.
-        for _td in (t1_data, t2_data):
-            for _p in _td.get("squad", []):
-                if _p.get("injured") and _p.get("injury_until_match", 0) < match_id:
-                    _p.pop("injured", None); _p.pop("injury_until_match", None); _p.pop("injury_severity", None)
+        # Injured players sit out (filtered by _available below); their spell is counted
+        # down at match COMPLETION in on_tournament_match_complete - by matches actually
+        # played, not by match id - so the picker never fields a still-injured player.
 
         def _sim_roster(tdata):
             fit = _available(tdata.get("squad", []))

@@ -4062,24 +4062,27 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             except Exception as _sc_err:
                 print(f"Scorecard-channel post failed for match {m_data.get('match_id')}: {_sc_err}")
 
-        # INJURY COUNTDOWN (real matches only; count COMPLETED matches, not started ones)
-        # Players already injured coming into this match sat it out; now that it has actually
-        # FINISHED, burn one match off their spell. Doing this at completion (not at start)
-        # means starting a match that's then abandoned/incomplete won't consume the injury.
-        # Runs BEFORE the roll so freshly-injured players aren't decremented the same match.
-        # channel is None only on the sim path, which keeps its own expiry - leave it alone.
-        if channel is not None:
-            for _tn in (t1_name, t2_name):
-                _tobj = next((t for t in tourney["teams"] if t["name"] == _tn), None)
-                if not _tobj: continue
-                for _p in _tobj["squad"]:
-                    if not _p.get("injured"): continue
-                    _left = _p.get("injury_matches_left", _p.get("injury_severity", 1)) - 1
-                    if _left <= 0:
-                        _p.pop("injured", None); _p.pop("injury_until_match", None)
-                        _p.pop("injury_severity", None); _p.pop("injury_matches_left", None)
-                    else:
-                        _p["injury_matches_left"] = _left
+        # INJURY COUNTDOWN (real AND simulated matches; count COMPLETED matches, not
+        # started ones). Players already injured coming into this match sat it out; now
+        # that it has actually FINISHED, burn one match off their spell. Doing this at
+        # completion (not at start) means starting a match that's then abandoned won't
+        # consume the injury. Runs BEFORE the roll so freshly-injured players aren't
+        # decremented the same match. Sim matches (channel is None) count down here too,
+        # so `cvt sim` / `simall` retire injuries exactly like real games - by the matches
+        # a team actually plays, not by comparing match ids (which broke on out-of-order
+        # sims: a later match id would clear the injured flag and the picker would field a
+        # still-injured player).
+        for _tn in (t1_name, t2_name):
+            _tobj = next((t for t in tourney["teams"] if t["name"] == _tn), None)
+            if not _tobj: continue
+            for _p in _tobj["squad"]:
+                if not _p.get("injured"): continue
+                _left = _p.get("injury_matches_left", _p.get("injury_severity", 1)) - 1
+                if _left <= 0:
+                    _p.pop("injured", None); _p.pop("injury_until_match", None)
+                    _p.pop("injury_severity", None); _p.pop("injury_matches_left", None)
+                else:
+                    _p["injury_matches_left"] = _left
 
         # INJURY ROLL (league-format stages only, needs injuries_enabled). Plain Round
         # Robin schedules carry no "stage" key at all (generate_round_robin_schedule
@@ -4501,7 +4504,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         def format_player(p, cat):
             style = p["role"].split("_", 1)[1].replace("_", " ") if "_" in p["role"] else ""
             if p.get("injured"):
-                sev = p.get("injury_severity", 1)
+                sev = p.get("injury_matches_left", p.get("injury_severity", 1))
                 inj = f" 🚑 *(misses next {sev} team match{'es' if sev > 1 else ''})*"
             else:
                 inj = ""
