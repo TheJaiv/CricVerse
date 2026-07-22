@@ -4638,12 +4638,42 @@ async def prompt_bowler_then_hub(interaction, match: CricketMatch):
         msg += "\n💡 *(Need to sub someone in? Run `/impactplayer` first!)*"
     await channel.send(msg, view=view)
 
-async def prompt_over_pacing_hub(interaction, match: CricketMatch):
-    view = OverControlHubView(match)
+def _overcard_controller_id(match):
+    """Discord id of who drives the Over Hub: the human on the BOWLING side - they decide
+    how the over is played (interactive / sim / etc). Falls back to the host when the
+    bowling side is AI/bot/unknown (e.g. AI-bowling games where get_bowler_user_id() is
+    None), so the hub can never softlock waiting on a non-human."""
+    uid = match.get_bowler_user_id()
+    if uid is None or _is_bot_uid(uid):
+        return match.p1_id
+    return uid
+
+def _overcard_batter_id(match):
+    """The human on the BATTING side - who inherits the Over Hub when the bowling side goes
+    idle for 5 min. Falls back to whichever human player isn't the bowling controller (and
+    finally the host) so we always have someone real to hand control to."""
+    uid = match.get_striker_user_id()
+    if uid is not None and not _is_bot_uid(uid):
+        return uid
+    ctrl = _overcard_controller_id(match)
+    for cand in (match.p1_id, match.p2_id):
+        if cand and not _is_bot_uid(cand) and cand != ctrl:
+            return cand
+    return match.p1_id
+
+async def prompt_over_pacing_hub(interaction, match: CricketMatch, open_control=False):
+    view = OverControlHubView(match, open_control=open_control)
     embed = render_embed_scoreboard(match)
     channel = interaction.channel if hasattr(interaction, 'channel') else interaction
 
-    msg = f"⚡ <@{match.p1_id}> **Over Hub** - How to progress the next 6 deliveries?"
+    controller_id = _overcard_controller_id(match)
+    if open_control:
+        # 5-min escalation: the bowling side never picked, so hand control to the batter.
+        batter_id = _overcard_batter_id(match)
+        msg = (f"🏏 <@{batter_id}> **Over Hub (open)** - the bowling side didn't choose in time, "
+               f"so you (batting) can now pick how to progress the next 6 deliveries.")
+    else:
+        msg = f"⚡ <@{controller_id}> **Over Hub** (you're bowling) - How to progress the next 6 deliveries?"
     if getattr(match, "impact_player", False):
         msg += "\n💡 **TIP:** Any player can use the `🔄 Impact Player` button below to make a sub!"
 
@@ -4661,34 +4691,78 @@ async def prompt_over_pacing_hub(interaction, match: CricketMatch):
     if _logo_file:
         _fname = os.path.basename(_logo_file)
         embed.set_thumbnail(url=f"attachment://{_fname}")
-        await channel.send(msg, embed=embed, view=view, file=discord.File(_logo_file))
+        sent = await channel.send(msg, embed=embed, view=view, file=discord.File(_logo_file))
     else:
-        await channel.send(msg, embed=embed, view=view)
+        sent = await channel.send(msg, embed=embed, view=view)
+
+    # on_timeout needs the message to edit, and _active_hub tags THIS as the live hub so a
+    # stale view (already acted on, or replaced by a newer over's hub) never escalates.
+    view.message = sent
+    match._active_hub = view
 
 class OverControlHubView(discord.ui.View):
-    def __init__(self, match: CricketMatch):
+    def __init__(self, match: CricketMatch, open_control=False):
         super().__init__(timeout=300)
         self.match = match
-        
+        self.open_control = open_control                    # True once the 5-min lapse hands control to both players
+        self.controller_id = _overcard_controller_id(match) # the bowling side - only they pick, until it opens
+        self.message = None                                 # set by prompt_over_pacing_hub so on_timeout can edit it
+
         if getattr(match, "impact_player", False):
             btn = discord.ui.Button(label="🔄 Impact Player", style=discord.ButtonStyle.secondary, row=1, custom_id="impact_btn")
             btn.callback = self.impact_btn
             self.add_item(btn)
-        
+
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.channel.id not in active_games or active_games[interaction.channel.id] != self.match:
             await interaction.response.send_message("❌ This match has been ended.", ephemeral=True)
             return False
-            
+
         if interaction.data.get("custom_id") == "impact_btn":
             if interaction.user.id in [self.match.p1_id, self.match.p2_id]: return True
             await interaction.response.send_message("❌ You are not playing in this match.", ephemeral=True)
             return False
-            
-        if interaction.user.id != self.match.p1_id and interaction.user.id != getattr(self.match, "manager_id", None):
-            await interaction.response.send_message("❌ Host only.", ephemeral=True)
+
+        manager_id = getattr(self.match, "manager_id", None)
+        # Once opened (bowling side idle 5 min), either player or the manager may drive the hub.
+        if self.open_control:
+            if interaction.user.id in (self.match.p1_id, self.match.p2_id, manager_id):
+                return True
+            await interaction.response.send_message("❌ You are not playing in this match.", ephemeral=True)
             return False
-        return True
+
+        # Normal: only the bowling side (or the tournament manager) chooses how the over is played.
+        # This also fixes tournament matches where the home team isn't the match-starter/p1 -
+        # control follows who is actually bowling, not who opened the match.
+        if interaction.user.id == self.controller_id or interaction.user.id == manager_id:
+            return True
+        await interaction.response.send_message(
+            "❌ Only the bowling team picks how this over is played. (Opens to both players if they're idle 5 min.)",
+            ephemeral=True)
+        return False
+
+    async def on_timeout(self):
+        # Only the latest hub for this match may act. A view that was already clicked (each
+        # progression button calls self.stop(), which cancels this) or was superseded by a
+        # newer over's hub is stale - so guard on _active_hub and do nothing if it's not us.
+        if getattr(self.match, "_active_hub", None) is not self:
+            return
+        ch_id = self.message.channel.id if self.message else None
+        if ch_id is None or active_games.get(ch_id) is not self.match:
+            return   # match ended / moved on
+        try:
+            await self.message.edit(view=None)
+        except discord.HTTPException:
+            pass
+        if self.open_control:
+            return   # already open and still nobody acted - just retire the dead view
+        # First 5-min lapse: the bowling side never chose. Hand control to the batter.
+        channel = self.message.channel
+        batter_id = _overcard_batter_id(self.match)
+        await channel.send(
+            f"⏳ <@{self.controller_id}> (bowling) didn't pick within 5 minutes - "
+            f"<@{batter_id}> (batting), the Over Hub is now yours.")
+        await prompt_over_pacing_hub(channel, self.match, open_control=True)
 
     def _claim_sim(self) -> bool:
         """Atomically reserve this match's single sim slot. Race-free: there is no await
@@ -4705,6 +4779,7 @@ class OverControlHubView(discord.ui.View):
     async def play_over(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await interaction.message.edit(view=None)
+        self.stop()   # a pick happened - cancel the 5-min "bowler idle" escalation timer
         self.match.simulation_mode = "interactive"
         innings = self.match.current_innings
         pending = getattr(self.match, '_pending_bowler', None)
@@ -4723,6 +4798,7 @@ class OverControlHubView(discord.ui.View):
         try:
             await interaction.response.defer()
             await interaction.message.edit(view=None)
+            self.stop()   # a pick happened - cancel the 5-min "bowler idle" escalation timer
             innings = self.match.current_innings
             start_runs = innings.total_runs; start_wkts = innings.wickets
 
@@ -4773,6 +4849,7 @@ class OverControlHubView(discord.ui.View):
         try:
             await interaction.response.defer()
             await interaction.message.edit(view=None)
+            self.stop()   # a pick happened - cancel the 5-min "bowler idle" escalation timer
             self.match.simulation_mode = "whole_match"
             self.match.verbose = False
             # _pending_bowler is kept: the sim loop gives the hub-selected bowler the
@@ -4792,6 +4869,7 @@ class OverControlHubView(discord.ui.View):
         try:
             await interaction.response.defer()
             await interaction.message.edit(view=None)
+            self.stop()   # a pick happened - cancel the 5-min "bowler idle" escalation timer
             self.match.simulation_mode = "whole_match"
             self.match.verbose = True
             # _pending_bowler kept - the selected bowler opens the verbose sim.
@@ -4810,6 +4888,7 @@ class OverControlHubView(discord.ui.View):
         try:
             await interaction.response.defer()
             await interaction.message.edit(view=None)
+            self.stop()   # a pick happened - cancel the 5-min "bowler idle" escalation timer
             self.match.simulation_mode = "whole_match"
             self.match.verbose = False              # bbb does its own per-ball rendering
             # _pending_bowler kept - the selected bowler bowls the first broadcast over.
