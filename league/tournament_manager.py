@@ -3567,21 +3567,8 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         preview = discord.Embed(description=f"✅ **{team['name']}** color set to `{color.upper()}`.", color=int(color.lstrip('#'), 16))
         await interaction.response.send_message(embed=preview)
 
-    @app_commands.command(name="rename_team", description="[MANAGER/OWNER] Rename a team — updates every fixture, result, and stat table to match.")
-    async def rename_team_cmd(self, interaction: discord.Interaction, team_name: str, new_name: str):
-        server_id = str(interaction.guild.id)
-        tourney = get_server_tournament(server_id)
-        if not tourney:
-            return await interaction.response.send_message("❌ No tournament exists in this server.", ephemeral=True)
-        team = next((t for t in tourney["teams"] if t["name"].lower() == team_name.lower()), None)
-        if not team:
-            return await interaction.response.send_message(f"❌ Team **{team_name}** not found.", ephemeral=True)
-        if not self.is_manager(interaction, tourney) and team.get("owner_id") != str(interaction.user.id):
-            return await interaction.response.send_message("❌ Only Managers or the Team Owner can rename this team.", ephemeral=True)
-        if team.get("goat"):
-            return await interaction.response.send_message("❌ GOAT XIs are fixed event teams and can't be renamed.", ephemeral=True)
-        ok, msg = rename_team(tourney, team["name"], new_name.strip())
-        await interaction.response.send_message(msg)
+    # rename_team and h2h are cvt-prefix-only - the slash `tournament` group is
+    # capped at Discord's 25-subcommand limit, so new commands go prefix-first.
 
     @app_commands.command(name="set_team_logo", description="[MANAGER/OWNER] Set a team's logo. Choose standings (tables/bracket) or match (scorecard/banner).")
     @app_commands.describe(
@@ -3789,34 +3776,8 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         else:
             await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="h2h", description="Check the match(es) between two teams. Leave team_b empty to check against your own team.")
-    async def h2h(self, interaction: discord.Interaction, team_a: str, team_b: str = None):
-        server_id = str(interaction.guild.id)
-        tourney = get_server_tournament(server_id)
-        if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
-
-        def _resolve(name):
-            return next((t for t in tourney["teams"] if t["name"].lower() == name.strip().lower()), None)
-
-        if team_b is None:
-            opp = _resolve(team_a)
-            if not opp:
-                return await interaction.response.send_message(f"❌ Team **{team_a}** not found.", ephemeral=True)
-            mine = next((t for t in tourney["teams"] if t.get("owner_id") == str(interaction.user.id)), None)
-            if not mine:
-                return await interaction.response.send_message("❌ You don't own a team here — provide both team names.", ephemeral=True)
-            if mine["name"] == opp["name"]:
-                return await interaction.response.send_message("❌ That's your own team.", ephemeral=True)
-            t1, t2 = mine, opp
-        else:
-            t1 = _resolve(team_a)
-            if not t1: return await interaction.response.send_message(f"❌ Team **{team_a}** not found.", ephemeral=True)
-            t2 = _resolve(team_b)
-            if not t2: return await interaction.response.send_message(f"❌ Team **{team_b}** not found.", ephemeral=True)
-            if t1["name"] == t2["name"]:
-                return await interaction.response.send_message("❌ Pick two different teams.", ephemeral=True)
-
-        await interaction.response.send_message(embed=build_h2h_embed(tourney, t1["name"], t2["name"]))
+    # h2h is prefix-only (`cvt h2h`) - the slash `tournament` group is capped at
+    # Discord's 25-subcommand limit, so new commands go prefix-first.
 
     @app_commands.command(name="next_match", description="[OWNER] Automatically launch your team's next pending match.")
     async def next_match(self, interaction: discord.Interaction):
