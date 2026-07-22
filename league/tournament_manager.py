@@ -3789,8 +3789,8 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         else:
             await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="vs", description="Check the match(es) between two teams. Leave team_b empty to check against your own team.")
-    async def vs(self, interaction: discord.Interaction, team_a: str, team_b: str = None):
+    @app_commands.command(name="h2h", description="Check the match(es) between two teams. Leave team_b empty to check against your own team.")
+    async def h2h(self, interaction: discord.Interaction, team_a: str, team_b: str = None):
         server_id = str(interaction.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)

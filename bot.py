@@ -13513,12 +13513,13 @@ class PrefixCog(commands.Cog):
         else:
             await ctx.send(embed=embed)
 
-    @tournament.command(name="vs", aliases=["h2h", "versus", "matchup"],
+    @tournament.command(name="h2h", aliases=["versus", "matchup", "headtohead"],
                         help="Check the match(es) between two teams — status, score, both owners tagged.\n"
-                             "Usage: tournament vs \"<team>\"  → your team vs <team>\n"
-                             "       tournament vs \"<team1>\" \"<team2>\"  → any two teams\n"
-                             "@owner mentions work in place of either name too.")
-    async def t_vs(self, ctx, team_a: str, team_b: str = None):
+                             "Usage: tournament h2h \"<team>\"  → your team vs <team>\n"
+                             "       tournament h2h \"<team1>\" \"<team2>\"  → any two teams\n"
+                             "@owner mentions work in place of either name too.\n"
+                             "(Note: `vs` is taken by the Conquest League `challenge` command.)")
+    async def t_h2h(self, ctx, team_a: str, team_b: str = None):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney: return await ctx.send("❌ No tournament exists.")
