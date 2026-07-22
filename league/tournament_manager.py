@@ -2333,9 +2333,15 @@ def match_order_gate(tourney, match):
 
 
 def build_team_fixtures_embed(tourney, team_name):
-    """Embed of one team's fixtures: Upcoming (with launchable hint) + Results."""
+    """Embed of one team's fixtures: Upcoming (with launchable hint) + Results.
+    Each opponent is tagged with their owner's mention - inert inside an embed
+    (no notification ping), just a quick way to see who you're actually facing."""
     sched = tourney.get("schedule", [])
     mine = [m for m in sched if m.get("team1") == team_name or m.get("team2") == team_name]
+    owners = {t["name"]: t.get("owner_id") for t in tourney.get("teams", [])}
+    def _tag(nm):
+        oid = owners.get(nm)
+        return f" (<@{oid}>)" if oid else ""
     is_acl = tourney.get("tournament_type") == "acl"
     color = discord.Color.from_rgb(200, 30, 40) if is_acl else discord.Color.blurple()
     e = discord.Embed(title=f"📋 {team_name} — Fixtures", color=color)
@@ -2359,13 +2365,13 @@ def build_team_fixtures_embed(tourney, team_name):
             elif w == team_name: outcome = "✅ Won"; won += 1
             else: outcome = "❌ Lost"; lost += 1
             if r.get("walkover"):
-                results.append(f"`#{m['match_id']}` {rlabel} · vs **{opp}**  *(walkover)*  {outcome}")
+                results.append(f"`#{m['match_id']}` {rlabel} · vs **{opp}**{_tag(opp)}  *(walkover)*  {outcome}")
             else:
-                results.append(f"`#{m['match_id']}` {rlabel} · vs **{opp}**  {my_r}/{my_w} : {op_r}/{op_w}  {outcome}")
+                results.append(f"`#{m['match_id']}` {rlabel} · vs **{opp}**{_tag(opp)}  {my_r}/{my_w} : {op_r}/{op_w}  {outcome}")
         elif m["status"] == "locked":
             upcoming.append(f"`#{m['match_id']}` {rlabel} · vs *{opp_src or 'TBD'}*  🔒 awaiting earlier results\n     └ {_conditions_label(m)}")
         else:  # pending -> launchable
-            upcoming.append(f"`#{m['match_id']}` {rlabel} · vs **{opp}**  🟢 ready — `cvt play {m['match_id']}`\n     └ {_conditions_label(m)}")
+            upcoming.append(f"`#{m['match_id']}` {rlabel} · vs **{opp}**{_tag(opp)}  🟢 ready — `cvt play {m['match_id']}`\n     └ {_conditions_label(m)}")
 
     def _add(title, lines):
         if not lines:
@@ -2385,6 +2391,51 @@ def build_team_fixtures_embed(tourney, team_name):
     if not mine:
         e.description = "No fixtures yet for this team."
     e.set_footer(text="Owners can launch any of their own 🟢 matches with  cvt play <id>")
+    return e
+
+
+def build_h2h_embed(tourney, name_a, name_b):
+    """Every match between two SPECIFIC teams - status, score once decided, both
+    owners tagged (embed mention, no notification ping). The direct answer to
+    "do we have a match against them" without scrolling the full schedule/status -
+    built for large-field events (TBECS) where that search gets unmanageable, but
+    works for any tournament type since it only reads schedule + teams."""
+    ta = next((t for t in tourney.get("teams", []) if t["name"] == name_a), None)
+    tb = next((t for t in tourney.get("teams", []) if t["name"] == name_b), None)
+    owner_a = f"<@{ta['owner_id']}>" if ta and ta.get("owner_id") else "*no owner*"
+    owner_b = f"<@{tb['owner_id']}>" if tb and tb.get("owner_id") else "*no owner*"
+
+    matches = [m for m in tourney.get("schedule", [])
+               if {m.get("team1"), m.get("team2")} == {name_a, name_b}]
+
+    e = discord.Embed(title=f"⚔️ {name_a}  vs  {name_b}", color=discord.Color.blurple())
+    e.description = f"{owner_a}  🆚  {owner_b}"
+
+    if not matches:
+        reason = "No fixture between these two yet."
+        if ta and tb and ta.get("group") and tb.get("group") and ta["group"] != tb["group"]:
+            reason += f" They're in different groups this stage (**{ta['group']}** vs **{tb['group']}**)."
+        elif tourney.get("status") == "registration":
+            reason += " The tournament hasn't started."
+        e.add_field(name="Result", value=reason, inline=False)
+        return e
+
+    lines = []
+    for m in sorted(matches, key=lambda x: x.get("match_id", 0)):
+        rlabel = _tm_round_label(m)
+        if m["status"] == "completed" and m.get("result"):
+            r = m["result"]
+            is_a_t1 = (m["team1"] == name_a)
+            a_r, a_w = (r["t1_runs"], r["t1_wickets"]) if is_a_t1 else (r["t2_runs"], r["t2_wickets"])
+            b_r, b_w = (r["t2_runs"], r["t2_wickets"]) if is_a_t1 else (r["t1_runs"], r["t1_wickets"])
+            w = r.get("winner")
+            tail = "🟰 Tie" if w == "TIE" else f"🏆 **{w}**" + ("  *(walkover)*" if r.get("walkover") else "")
+            lines.append(f"`#{m['match_id']}` {rlabel} — **{name_a}** {a_r}/{a_w}  vs  **{name_b}** {b_r}/{b_w}  ({tail})")
+        elif m["status"] == "locked":
+            lines.append(f"`#{m['match_id']}` {rlabel} — 🔒 not unlocked yet")
+        else:
+            lines.append(f"`#{m['match_id']}` {rlabel} — 🟢 pending — `cvt play {m['match_id']}`")
+    e.add_field(name=f"Match{'es' if len(lines) > 1 else ''} ({len(lines)})", value="\n".join(lines), inline=False)
     return e
 
 
@@ -3737,6 +3788,35 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             await interaction.response.send_message(embed=embed, view=view)
         else:
             await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="vs", description="Check the match(es) between two teams. Leave team_b empty to check against your own team.")
+    async def vs(self, interaction: discord.Interaction, team_a: str, team_b: str = None):
+        server_id = str(interaction.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
+
+        def _resolve(name):
+            return next((t for t in tourney["teams"] if t["name"].lower() == name.strip().lower()), None)
+
+        if team_b is None:
+            opp = _resolve(team_a)
+            if not opp:
+                return await interaction.response.send_message(f"❌ Team **{team_a}** not found.", ephemeral=True)
+            mine = next((t for t in tourney["teams"] if t.get("owner_id") == str(interaction.user.id)), None)
+            if not mine:
+                return await interaction.response.send_message("❌ You don't own a team here — provide both team names.", ephemeral=True)
+            if mine["name"] == opp["name"]:
+                return await interaction.response.send_message("❌ That's your own team.", ephemeral=True)
+            t1, t2 = mine, opp
+        else:
+            t1 = _resolve(team_a)
+            if not t1: return await interaction.response.send_message(f"❌ Team **{team_a}** not found.", ephemeral=True)
+            t2 = _resolve(team_b)
+            if not t2: return await interaction.response.send_message(f"❌ Team **{team_b}** not found.", ephemeral=True)
+            if t1["name"] == t2["name"]:
+                return await interaction.response.send_message("❌ Pick two different teams.", ephemeral=True)
+
+        await interaction.response.send_message(embed=build_h2h_embed(tourney, t1["name"], t2["name"]))
 
     @app_commands.command(name="next_match", description="[OWNER] Automatically launch your team's next pending match.")
     async def next_match(self, interaction: discord.Interaction):

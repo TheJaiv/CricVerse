@@ -932,16 +932,15 @@ def _impact_insert_batter(match: CricketMatch, team_num: int, out_name: str, in_
     return msg
 
 def _dismissed_batter(innings: InningsState):
-    """The most recent specialist batter already dismissed - the man the impact batter comes
-    in for when batting first, so a bowler is never the one subbed out."""
+    """The most recent SPECIALIST batsman already dismissed - the only kind of player subbed
+    out when batting first. Never a bowler OR an all-rounder (both are bowling options kept
+    for the second-innings defence) and never the keeper. If no pure batsman is out yet,
+    returns None so the impact simply holds rather than sacrificing a bowling option."""
     seen = innings.batting_team["players"][:innings.next_batter_idx]
     for p in reversed(seen):
         st = innings.batting_stats.get(p["name"])
-        if st and st.dismissal not in ("not out", "Subbed Out", "Retired (Sub)") and not _is_pure_bowler(p):
-            return p["name"]
-    for p in reversed(seen):   # fall back to any dismissed man
-        st = innings.batting_stats.get(p["name"])
-        if st and st.dismissal not in ("not out", "Subbed Out", "Retired (Sub)"):
+        if (st and st.dismissal not in ("not out", "Subbed Out", "Retired (Sub)")
+                and not _can_bowl(p) and "WK" not in p.get("role", "")):
             return p["name"]
     return None
 
@@ -4134,11 +4133,17 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
         else:
             match.target = target
             
-        await channel.send(
-            f"🏁 **Innings 1 Complete!** Target set: **{match.innings1.total_runs + 1} runs** to win.{dls_msg}\nHere is the detailed scorecard and broadcast graphic:",
-            embed=embed_full,
-            file=file
-        )
+        # A failed innings-break post (e.g. a rate limit after a long verbose 1st innings) must
+        # NOT stop the 2nd innings from starting - otherwise the match is stranded mid-way in
+        # active_games (channel stuck, `cv livematches` keeps showing it).
+        try:
+            await channel.send(
+                f"🏁 **Innings 1 Complete!** Target set: **{match.innings1.total_runs + 1} runs** to win.{dls_msg}\nHere is the detailed scorecard and broadcast graphic:",
+                embed=embed_full,
+                file=file
+            )
+        except Exception as _inn1_err:
+            print(f"Innings 1 scorecard post failed (continuing to innings 2): {_inn1_err}")
 
         # TBECS innings-break ads (no-op for every other match type).
         await _maybe_send_tbecs_ads(channel, match)
@@ -4223,19 +4228,38 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
             embed_full = render_full_scorecard_embed(img_match, 2)
         except Exception as _img_err:
             print(f"Summary image failed ({'super over' if is_so_finish else 'match'}): {_img_err}")
-            img_buf = generate_final_score_image(match_to_finalize)
-            embed_full = render_full_scorecard_embed(match_to_finalize, 2)
+            try:
+                img_buf = generate_final_score_image(match_to_finalize)
+                embed_full = render_full_scorecard_embed(match_to_finalize, 2)
+            except Exception as _img_err2:
+                # Even the fallback render failed - keep going so the match is still cleaned up.
+                print(f"Fallback scorecard render also failed: {_img_err2}")
+                img_buf = None
+                embed_full = None
 
-        file = discord.File(fp=img_buf, filename="final_scoreboard.png")
         if is_so_finish:
             _son = getattr(match, "super_over_number", 1)
             header = f"🤯 **SUPER OVER #{_son} — {match_to_finalize.tiebreak_winner_name} win it!** Super Over summary:"
         else:
             header = "🏆 **Match over! Here is the final detailed scorecard and broadcast graphic:**"
-        scorecard_msg = await channel.send(header, embed=embed_full, file=file)
+        # A failed final post (e.g. a rate limit after a long verbose broadcast) must NOT abort
+        # finalisation - the match still has to be removed from active_games further down, or
+        # `cv livematches` / the channel stay stuck showing a finished match as live.
+        scorecard_msg = None
+        try:
+            if img_buf is not None:
+                file = discord.File(fp=img_buf, filename="final_scoreboard.png")
+                scorecard_msg = await channel.send(header, embed=embed_full, file=file)
+            else:
+                scorecard_msg = await channel.send(header, embed=embed_full)
+        except Exception as _send_err:
+            print(f"Final scorecard post failed (finalising anyway): {_send_err}")
 
         # TBECS second-innings (match end) ads - shown at every innings end per spec.
-        await _maybe_send_tbecs_ads(channel, match_to_finalize)
+        try:
+            await _maybe_send_tbecs_ads(channel, match_to_finalize)
+        except Exception as _ads_err:
+            print(f"TBECS end-of-match ads failed: {_ads_err}")
 
         # Send scorecard to match log channel if configured for this server.
         # TBECS log channels are branded-only: if the TBECS card failed to render
@@ -4252,9 +4276,9 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
                         log_file = discord.File(fp=img_buf, filename="final_scoreboard.png")
                         t1 = match_to_finalize.innings1.batting_team["name"]
                         t2 = match_to_finalize.innings2.batting_team["name"]
+                        _cardlink = f"\n🔗 Scorecard: {scorecard_msg.jump_url}" if scorecard_msg else ""
                         await log_channel.send(
-                            f"📋 **Match Log** · {t1} vs {t2} · <#{channel.id}>\n"
-                            f"🔗 Scorecard: {scorecard_msg.jump_url}",
+                            f"📋 **Match Log** · {t1} vs {t2} · <#{channel.id}>{_cardlink}",
                             file=log_file
                         )
                 except Exception as _log_err:
@@ -4665,7 +4689,18 @@ class OverControlHubView(discord.ui.View):
             await interaction.response.send_message("❌ Host only.", ephemeral=True)
             return False
         return True
-        
+
+    def _claim_sim(self) -> bool:
+        """Atomically reserve this match's single sim slot. Race-free: there is no await
+        between the read and the write, so two near-simultaneous clicks can't both win.
+        Returns False if a sim is already running - the caller must then refuse. Without
+        this, a double-click starts two sim loops on the same match that interleave their
+        balls (an over simmed twice) and one bleeds into the next innings."""
+        if getattr(self.match, "_sim_running", False):
+            return False
+        self.match._sim_running = True
+        return True
+
     @discord.ui.button(label="Play Interactive Over", style=discord.ButtonStyle.success)
     async def play_over(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
@@ -4683,88 +4718,108 @@ class OverControlHubView(discord.ui.View):
         
     @discord.ui.button(label="Simulate 1 Over", style=discord.ButtonStyle.primary)
     async def sim_over(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        await interaction.message.edit(view=None)
-        innings = self.match.current_innings
-        start_runs = innings.total_runs; start_wkts = innings.wickets
+        if not self._claim_sim():
+            return await interaction.response.send_message("⏳ A simulation is already running for this match — wait for it to finish.", ephemeral=True)
+        try:
+            await interaction.response.defer()
+            await interaction.message.edit(view=None)
+            innings = self.match.current_innings
+            start_runs = innings.total_runs; start_wkts = innings.wickets
 
-        prev_mode = self.match.simulation_mode
-        self.match.simulation_mode = "whole_match"
+            prev_mode = self.match.simulation_mode
+            self.match.simulation_mode = "whole_match"
 
-        # Apply the pre-selected bowler (set in prompt_bowler_then_hub); fall back to AI if missing
-        pending = getattr(self.match, '_pending_bowler', None)
-        if pending:
-            innings.current_bowler = pending
-            self.match._pending_bowler = None
-            innings.over_log.clear()
-            innings.bouncers_in_over = 0; innings.cutters_in_over = 0
-            innings.mystery_bowled_this_over = False
-        elif not innings.current_bowler:
-            new_bowler = get_smart_ai_bowler(innings, self.match.pitch, self.match.weather, self.match.format_overs)
-            if not new_bowler:
-                channel = interaction.channel if hasattr(interaction, 'channel') else interaction
-                await channel.send("🚨 **CRITICAL ERROR:** Could not find a valid bowler.")
-                return
-            innings.current_bowler = new_bowler
-            innings.over_log.clear()
-            innings.bouncers_in_over = 0; innings.cutters_in_over = 0
-            innings.mystery_bowled_this_over = False
-            
-        target_balls = (innings.total_balls // 6 + 1) * 6
-            
-        while True:
-            max_w = 2 if getattr(self.match, 'is_super_over', False) else 10
-            if innings.wickets >= max_w or innings.total_balls >= self.match.max_balls: break
-            if self.match.current_innings_num == 2 and innings.total_runs >= getattr(self.match, "target", self.match.innings1.total_runs + 1): break
-            if innings.total_balls >= target_balls: break
-            
-            execute_ball_math(self.match)
-                
-        self.match.simulation_mode = prev_mode
-        
-        events_str = ' '.join(innings.over_log) if innings.over_log else "Maiden"
-        await interaction.channel.send(f"⏩ **Simulated Over Complete!**\n**Timeline:** {events_str}\n**Yield:** {innings.total_runs - start_runs} Runs, {innings.wickets - start_wkts} Wickets")
-        await advance_match_loop(interaction, self.match)
+            # Apply the pre-selected bowler (set in prompt_bowler_then_hub); fall back to AI if missing
+            pending = getattr(self.match, '_pending_bowler', None)
+            if pending:
+                innings.current_bowler = pending
+                self.match._pending_bowler = None
+                innings.over_log.clear()
+                innings.bouncers_in_over = 0; innings.cutters_in_over = 0
+                innings.mystery_bowled_this_over = False
+            elif not innings.current_bowler:
+                new_bowler = get_smart_ai_bowler(innings, self.match.pitch, self.match.weather, self.match.format_overs)
+                if not new_bowler:
+                    channel = interaction.channel if hasattr(interaction, 'channel') else interaction
+                    await channel.send("🚨 **CRITICAL ERROR:** Could not find a valid bowler.")
+                    return
+                innings.current_bowler = new_bowler
+                innings.over_log.clear()
+                innings.bouncers_in_over = 0; innings.cutters_in_over = 0
+                innings.mystery_bowled_this_over = False
+
+            target_balls = (innings.total_balls // 6 + 1) * 6
+
+            while True:
+                max_w = 2 if getattr(self.match, 'is_super_over', False) else 10
+                if innings.wickets >= max_w or innings.total_balls >= self.match.max_balls: break
+                if self.match.current_innings_num == 2 and innings.total_runs >= getattr(self.match, "target", self.match.innings1.total_runs + 1): break
+                if innings.total_balls >= target_balls: break
+
+                execute_ball_math(self.match)
+
+            self.match.simulation_mode = prev_mode
+
+            events_str = ' '.join(innings.over_log) if innings.over_log else "Maiden"
+            await interaction.channel.send(f"⏩ **Simulated Over Complete!**\n**Timeline:** {events_str}\n**Yield:** {innings.total_runs - start_runs} Runs, {innings.wickets - start_wkts} Wickets")
+            await advance_match_loop(interaction, self.match)
+        finally:
+            self.match._sim_running = False
         
     @discord.ui.button(label="⏩ Sim Innings", style=discord.ButtonStyle.danger)
     async def sim_innings_fast(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        await interaction.message.edit(view=None)
-        self.match.simulation_mode = "whole_match"
-        self.match.verbose = False
-        # _pending_bowler is kept: the sim loop gives the hub-selected bowler the
-        # first over (it used to be discarded here, silently handing the over to AI).
-        innings = self.match.current_innings
-        innings.over_log.clear()
-        innings.bouncers_in_over = 0; innings.cutters_in_over = 0
-        innings.mystery_bowled_this_over = False
-        await loop_current_innings_simulation(interaction, self.match)
+        if not self._claim_sim():
+            return await interaction.response.send_message("⏳ A simulation is already running for this match — wait for it to finish.", ephemeral=True)
+        try:
+            await interaction.response.defer()
+            await interaction.message.edit(view=None)
+            self.match.simulation_mode = "whole_match"
+            self.match.verbose = False
+            # _pending_bowler is kept: the sim loop gives the hub-selected bowler the
+            # first over (it used to be discarded here, silently handing the over to AI).
+            innings = self.match.current_innings
+            innings.over_log.clear()
+            innings.bouncers_in_over = 0; innings.cutters_in_over = 0
+            innings.mystery_bowled_this_over = False
+            await loop_current_innings_simulation(interaction, self.match)
+        finally:
+            self.match._sim_running = False
 
     @discord.ui.button(label="📋 Sim Innings (Verbose)", style=discord.ButtonStyle.secondary)
     async def sim_innings_verbose(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        await interaction.message.edit(view=None)
-        self.match.simulation_mode = "whole_match"
-        self.match.verbose = True
-        # _pending_bowler kept - the selected bowler opens the verbose sim.
-        innings = self.match.current_innings
-        innings.over_log.clear()
-        innings.bouncers_in_over = 0; innings.cutters_in_over = 0
-        innings.mystery_bowled_this_over = False
-        await loop_current_innings_simulation(interaction, self.match)
+        if not self._claim_sim():
+            return await interaction.response.send_message("⏳ A simulation is already running for this match — wait for it to finish.", ephemeral=True)
+        try:
+            await interaction.response.defer()
+            await interaction.message.edit(view=None)
+            self.match.simulation_mode = "whole_match"
+            self.match.verbose = True
+            # _pending_bowler kept - the selected bowler opens the verbose sim.
+            innings = self.match.current_innings
+            innings.over_log.clear()
+            innings.bouncers_in_over = 0; innings.cutters_in_over = 0
+            innings.mystery_bowled_this_over = False
+            await loop_current_innings_simulation(interaction, self.match)
+        finally:
+            self.match._sim_running = False
 
     @discord.ui.button(label="🎬 Ball-by-Ball", style=discord.ButtonStyle.secondary, row=2)
     async def sim_innings_bbb(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        await interaction.message.edit(view=None)
-        self.match.simulation_mode = "whole_match"
-        self.match.verbose = False              # bbb does its own per-ball rendering
-        # _pending_bowler kept - the selected bowler bowls the first broadcast over.
-        innings = self.match.current_innings
-        innings.over_log.clear()
-        innings.bouncers_in_over = 0; innings.cutters_in_over = 0
-        innings.mystery_bowled_this_over = False
-        await loop_current_innings_bbb(interaction, self.match)
+        if not self._claim_sim():
+            return await interaction.response.send_message("⏳ A simulation is already running for this match — wait for it to finish.", ephemeral=True)
+        try:
+            await interaction.response.defer()
+            await interaction.message.edit(view=None)
+            self.match.simulation_mode = "whole_match"
+            self.match.verbose = False              # bbb does its own per-ball rendering
+            # _pending_bowler kept - the selected bowler bowls the first broadcast over.
+            innings = self.match.current_innings
+            innings.over_log.clear()
+            innings.bouncers_in_over = 0; innings.cutters_in_over = 0
+            innings.mystery_bowled_this_over = False
+            await loop_current_innings_bbb(interaction, self.match)
+        finally:
+            self.match._sim_running = False
 
     async def impact_btn(self, interaction: discord.Interaction):
         team_id = 1 if interaction.user.id == self.match.p1_id else (2 if interaction.user.id == self.match.p2_id else None)
@@ -7586,10 +7641,15 @@ async def _test_finish_match(match: TestMatchObj, channel_id: int, channel):
         print(f"Test summary image failed: {_e}")
         await channel.send(f"🏆 **Test Match Result:** {result_text}")
 
-    # Interactive per-innings scorecard navigator
-    view  = TestScorecardView(match)
-    embed = _render_test_innings_embed(match, 0)
-    scorecard_msg = await channel.send("📋 **Full Scorecard** — use the arrows to browse innings:", embed=embed, view=view)
+    # Interactive per-innings scorecard navigator. A failed post must NOT skip the pop below,
+    # or the finished Test stays stuck in active_test_matches (channel/`cv livematches` clogged).
+    scorecard_msg = None
+    try:
+        view  = TestScorecardView(match)
+        embed = _render_test_innings_embed(match, 0)
+        scorecard_msg = await channel.send("📋 **Full Scorecard** — use the arrows to browse innings:", embed=embed, view=view)
+    except Exception as _sc_err:
+        print(f"Test full-scorecard post failed (finalising anyway): {_sc_err}")
 
     if channel.guild:
         log_channel_id = get_match_log_channel(str(channel.guild.id))
@@ -7600,9 +7660,9 @@ async def _test_finish_match(match: TestMatchObj, channel_id: int, channel):
                     log_file = discord.File(fp=generate_test_summary_image(match), filename="test_summary.png")
                     t1 = match.team1["name"]
                     t2 = match.team2["name"]
+                    _cardlink = f"\n🔗 Scorecard: {scorecard_msg.jump_url}" if scorecard_msg else ""
                     await log_channel.send(
-                        f"📋 **Match Log** · {t1} vs {t2} · <#{channel.id}>\n"
-                        f"🔗 Scorecard: {scorecard_msg.jump_url}",
+                        f"📋 **Match Log** · {t1} vs {t2} · <#{channel.id}>{_cardlink}",
                         file=log_file
                     )
             except Exception as _log_err:
@@ -13452,6 +13512,48 @@ class PrefixCog(commands.Cog):
             await ctx.send(embed=embed, view=view)
         else:
             await ctx.send(embed=embed)
+
+    @tournament.command(name="vs", aliases=["h2h", "versus", "matchup"],
+                        help="Check the match(es) between two teams — status, score, both owners tagged.\n"
+                             "Usage: tournament vs \"<team>\"  → your team vs <team>\n"
+                             "       tournament vs \"<team1>\" \"<team2>\"  → any two teams\n"
+                             "@owner mentions work in place of either name too.")
+    async def t_vs(self, ctx, team_a: str, team_b: str = None):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+
+        def _resolve(token):
+            token = token.strip()
+            mm = re.fullmatch(r"<@!?(\d+)>", token)
+            if mm:
+                return next((t for t in tourney["teams"] if t.get("owner_id") == mm.group(1)), None)
+            team = next((t for t in tourney["teams"] if t["name"].lower() == token.lower()), None)
+            if team:
+                return team
+            close = difflib.get_close_matches(token, [t["name"] for t in tourney["teams"]], n=1, cutoff=0.5)
+            return next((t for t in tourney["teams"] if t["name"] == close[0]), None) if close else None
+
+        if team_b is None:
+            opp = _resolve(team_a)
+            if not opp:
+                return await ctx.send(f"❌ Team **{team_a}** not found.")
+            mine = next((t for t in tourney["teams"] if t.get("owner_id") == str(ctx.author.id)), None)
+            if not mine:
+                return await ctx.send("❌ You don't own a team here — check two specific teams: `cvt vs \"<team1>\" \"<team2>\"`.")
+            if mine["name"] == opp["name"]:
+                return await ctx.send("❌ That's your own team.")
+            t1, t2 = mine, opp
+        else:
+            t1 = _resolve(team_a)
+            if not t1: return await ctx.send(f"❌ Team **{team_a}** not found.")
+            t2 = _resolve(team_b)
+            if not t2: return await ctx.send(f"❌ Team **{team_b}** not found.")
+            if t1["name"] == t2["name"]:
+                return await ctx.send("❌ Pick two different teams.")
+
+        from league.tournament_manager import build_h2h_embed
+        await ctx.send(embed=build_h2h_embed(tourney, t1["name"], t2["name"]))
 
     # TBECS innings-break ads
     # Managed per server; shown at every innings end of a TBECS match (see
