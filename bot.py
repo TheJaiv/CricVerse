@@ -9054,12 +9054,16 @@ def resolve_default_xi(team_data: dict, fit_squad: list):
     names = team_data.get("default_xi") or []
     if len(names) != 11:
         return None
+    nobowl = {str(n).strip().lower() for n in team_data.get("default_nobowl", [])}
     by_name = {p["name"].lower(): p for p in fit_squad}
     xi, seen = [], set()
     for nm in names:
         p = by_name.get(str(nm).strip().lower())
         if not p or p["name"] in seen:
             return None
+        # Re-apply the saved no-bowl 'L' - copy first so the shared squad dict is untouched.
+        if p["name"].lower() in nobowl:
+            p = {**p, "avoid_bowl": True}
         xi.append(p)
         seen.add(p["name"])
     if not _has_wk(xi):
@@ -9072,12 +9076,15 @@ def resolve_default_subs(team_data: dict, fit_squad: list, xi: list):
     invalid entries (injured / left squad / already in the XI) are silently dropped
     rather than invalidating the whole default. Capped at 5, like the sub picker."""
     names = team_data.get("default_impact") or []
+    nobowl = {str(n).strip().lower() for n in team_data.get("default_nobowl", [])}
     xi_names = {p["name"] for p in xi}
     by_name = {p["name"].lower(): p for p in fit_squad}
     subs, seen = [], set()
     for nm in names:
         p = by_name.get(str(nm).strip().lower())
         if p and p["name"] not in xi_names and p["name"] not in seen:
+            if p["name"].lower() in nobowl:
+                p = {**p, "avoid_bowl": True}
             subs.append(p)
             seen.add(p["name"])
     return subs[:5]
@@ -14870,7 +14877,8 @@ class PrefixCog(commands.Cog):
         impact_hint = (" You can add up to **5 Impact Subs** on lines 12-16 — they'll auto-apply with the default XI."
                        if impact_on else "")
         await ctx.send(f"📋 Paste the **default XI for {team['name']}** — 11 names, one per line "
-                       f"(order = batting order, `(C)` after a name marks the captain).{impact_hint} "
+                       f"(order = batting order, `(C)` after a name marks the captain, `L` marks a "
+                       f"no-bowl player).{impact_hint} "
                        f"Type `clear` to remove the saved default. *3 minutes.*")
         def check(m): return m.author.id == ctx.author.id and m.channel.id == ctx.channel.id
         try:
@@ -14878,7 +14886,8 @@ class PrefixCog(commands.Cog):
         except asyncio.TimeoutError:
             return await ctx.send("⏳ Timed out — run `cvt set_default_xi` again.")
         if msg.content.strip().lower() == "clear":
-            team.pop("default_xi", None); team.pop("default_captain", None); team.pop("default_impact", None)
+            team.pop("default_xi", None); team.pop("default_captain", None)
+            team.pop("default_impact", None); team.pop("default_nobowl", None)
             save_tournament(tourney)
             return await msg.reply(f"🧹 Default XI cleared for **{team['name']}**.")
 
@@ -14902,6 +14911,13 @@ class PrefixCog(commands.Cog):
             team["default_impact"] = [p["name"] for p in subs]
         else:
             team.pop("default_impact", None)
+        # Persist the no-bowl 'L' tags (XI + any saved subs) so both real matches and sims
+        # re-apply them - resolve_default_xi / resolve_default_subs look this list up.
+        _nobowl = [p["name"] for p in found if p.get("avoid_bowl")]
+        if _nobowl:
+            team["default_nobowl"] = _nobowl
+        else:
+            team.pop("default_nobowl", None)
         if cap_name: team["default_captain"] = cap_name
         else: team.pop("default_captain", None)
         save_tournament(tourney)
@@ -14926,15 +14942,17 @@ class PrefixCog(commands.Cog):
         if not names:
             return await ctx.send(f"ℹ️ **{team['name']}** has no default XI saved. `cvt set_default_xi` to save one.")
         by_name = {p["name"].lower(): p for p in team.get("squad", [])}
+        nobowl = {n.lower() for n in team.get("default_nobowl", [])}
         lines = []
         for i, nm in enumerate(names, 1):
             p = by_name.get(nm.lower())
+            l_mark = " · 🚫L" if nm.lower() in nobowl else ""
             if p is None:
                 lines.append(f"`{i:>2}.` ~~{nm}~~ ❌ *no longer in squad*")
             elif p.get("injured"):
-                lines.append(f"`{i:>2}.` **{nm}** 🚑 *injured*")
+                lines.append(f"`{i:>2}.` **{nm}** 🚑 *injured*{l_mark}")
             else:
-                lines.append(f"`{i:>2}.` **{nm}**")
+                lines.append(f"`{i:>2}.` **{nm}**{l_mark}")
         fit = resolve_default_xi(team, [p for p in team.get("squad", []) if not p.get("injured")])
         status = "🟢 valid — will be offered at match start" if fit else "🔴 currently INVALID (injury/missing player) — the match will ask for a typed XI"
         cap = team.get("default_captain")
