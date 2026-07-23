@@ -1805,10 +1805,15 @@ def extract_scorecard_players(match: CricketMatch) -> dict:
 
     def _bat(inn):
         if not inn: return []
+        # 7th element = batting-order position (index in the lineup) so the detailed text
+        # scorecard can restore true batting order. The array itself stays runs-sorted so
+        # the image renderers (which take the top slots) are unaffected.
+        pos = {p["name"]: i for i, p in enumerate(inn.batting_team["players"])}
         active = [b for b in inn.batting_stats.values() if b.balls_faced > 0 or b.dismissal != "not out"]
         ordered = sorted(active, key=lambda x: x.runs_scored, reverse=True)
         return [[b.profile["name"], b.runs_scored, b.balls_faced, b.dismissal,
-                 getattr(b, "fours", 0), getattr(b, "sixes", 0)] for b in ordered]
+                 getattr(b, "fours", 0), getattr(b, "sixes", 0),
+                 pos.get(b.profile["name"], 99)] for b in ordered]
 
     def _bowl(inn):
         if not inn: return []
@@ -1894,7 +1899,8 @@ def reconstruct_scorecard_data(tourney: dict, m: dict) -> dict:
                 dismissal = d4 or "not out"
                 not_out = (dismissal == "not out")
             out.append({"name": a[0], "runs": a[1], "balls": a[2], "not_out": not_out, "dismissal": dismissal,
-                        "fours": a[4] if len(a) > 4 else None, "sixes": a[5] if len(a) > 5 else None})
+                        "fours": a[4] if len(a) > 4 else None, "sixes": a[5] if len(a) > 5 else None,
+                        "order": a[6] if len(a) > 6 else None})
         return out
     def _bowl(arrays):
         return [{"name": a[0], "wickets": a[1], "runs": a[2], "overs": a[3],
@@ -1958,9 +1964,9 @@ def build_stored_scorecard_embeds(data: dict) -> list:
     """Build the detailed text scorecard for a completed match - one embed per
     innings - from reconstructed match data. Mirrors the end-of-innings
     `render_full_scorecard_embed` so a stored match reads the same as it did live.
-    Note: batters are listed by runs scored (the order they're stored in), not
-    strict batting order. Old matches (stored before full data) lack dismissal
-    text - those lines render blank.
+    Note: batters are listed in true batting order (restored from the stored lineup
+    position), matching the live scorecard. Old matches (stored before the position
+    field) fall back to their stored runs order and lack dismissal text.
     """
     embeds = []
     potm = data.get("potm")
@@ -1983,7 +1989,11 @@ def build_stored_scorecard_embeds(data: dict) -> list:
         emb.description = desc
 
         b_text = "```text\nBATTER                  R    B    SR\n"
-        for b in side.get("batters", []):
+        # Restore true batting order (the stored array is runs-sorted for the image cards).
+        # Old matches lack the position field -> stable sort keeps their original order.
+        _bats = sorted(side.get("batters", []),
+                       key=lambda x: x["order"] if x.get("order") is not None else 999)
+        for b in _bats:
             bf = b.get("balls", 0)
             rs = b.get("runs", 0)
             sr = (rs / bf * 100) if bf else 0.0
@@ -14476,6 +14486,22 @@ class PrefixCog(commands.Cog):
         if _news:
             save_tournament(tourney)
             injury_suffix = "\n🚑 " + ", ".join(f"**{it['player']}** ({it['team']}, out {it['severity']}m)" for it in _news)
+            # Also announce in the injury channel (pings owners), exactly like real matches
+            # and simall - the result-message suffix alone doesn't reach that channel.
+            team_owners = {t["name"]: t.get("owner_id") for t in tourney.get("teams", [])}
+            rep, pings = ["🚑 **Injury Report:**"], []
+            for it in _news:
+                mw = "match" if it["severity"] == 1 else "matches"
+                rep.append(f"• **{it['player']}** ({it['team']}) — out **{it['severity']}** {mw}")
+                oid = team_owners.get(it["team"])
+                if oid and oid not in pings: pings.append(oid)
+            if pings: rep.append(" ".join(f"<@{u}>" for u in pings))
+            inj_ch_id = tourney.get("injury_channel_id")
+            inj_ch = (self.bot.get_channel(int(inj_ch_id)) if inj_ch_id else None) or ctx.channel
+            try:
+                await inj_ch.send("\n".join(rep))
+            except Exception as _e:
+                print(f"cvt sim injury report send failed M{match_id}: {_e}")
 
         inn1, inn2 = match.innings1, match.innings2
         if inn2.total_runs >= match.target:
