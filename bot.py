@@ -76,6 +76,7 @@ from core.subscription_manager import (
 )
 from league import draft_mode as dm
 from core import global_stats as gstats
+from core import conditions_stats as cstats
 # Career Mode (LIVE)
 # Launched for everyone after the 2026-07-06 hardcore verification pass (see
 # tools/career_flow_test.py). Career code still loads defensively: any failure
@@ -1125,6 +1126,10 @@ def _run_full_match_sync(match: CricketMatch):
         gstats.record_limited_overs_match(match)
     except Exception as _gs_err:
         print(f"Global stats record failed (sim): {_gs_err}")
+    try:
+        cstats.record_limited_overs_match(match)
+    except Exception as _cs_err:
+        print(f"Conditions stats record failed (sim): {_cs_err}")
 
 
 def _sim_super_over(match: CricketMatch):
@@ -4225,6 +4230,10 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
                 gstats.record_limited_overs_match(match_to_finalize)
             except Exception as _gs_err:
                 print(f"Global stats record failed: {_gs_err}")
+            try:
+                cstats.record_limited_overs_match(match_to_finalize)
+            except Exception as _cs_err:
+                print(f"Conditions stats record failed: {_cs_err}")
 
         # At a Super Over's end, show the SUPER OVER's own summary (the main-match scoreboard was
         # already shown when scores tied). A normal match shows itself. Result recording below
@@ -6733,6 +6742,8 @@ class PitchWeatherView(discord.ui.View):
         discord.SelectOption(label="Dry — Hard & Cracking", value="Dry", emoji="🏜️"),
         discord.SelectOption(label="Dusty — Spin Friendly", value="Dusty", emoji="🌾"),
         discord.SelectOption(label="Hard — Bounce & Pace", value="Hard", emoji="🪨"),
+        discord.SelectOption(label="Sporting — Even Contest", value="Sporting", emoji="🏏"),
+        discord.SelectOption(label="Balanced — Fair Fight", value="Balanced", emoji="🎯"),
         discord.SelectOption(label="Soft — Slow & Low", value="Soft", emoji="🧽"),
         discord.SelectOption(label="Cracked — Uneven Bounce", value="Cracked", emoji="🕸️"),
         discord.SelectOption(label="Damp — Early Seam", value="Damp", emoji="💧"),
@@ -9808,30 +9819,41 @@ class CSVSyncConfirmView(discord.ui.View):
 # ---- Global stats leaderboards (cv gs) ----
 
 # key -> (label, emoji, qualification note shown in the footer)
+# key -> (label, emoji, footer-note, kind). kind routes rendering:
+#   "counter" -> player-counter rows (_gs_board_rows)
+#   "rating"  -> ICC-style rating rows (gstats.rating_leaderboard, key after "rating_")
+#   "team"    -> team-total records (gstats.team_records; key is team_high / team_low)
 GS_BOARDS = {
-    "runs":       ("Most Runs", "🏏", None),
-    "wickets":    ("Most Wickets", "🎯", None),
-    "sixes":      ("Most Sixes", "💥", None),
-    "fours":      ("Most Fours", "🏹", None),
-    "hundreds":   ("Most 100s", "💯", None),
-    "fifties":    ("Most 50s", "🎖️", None),
-    "hs":         ("Highest Score", "🚀", None),
-    "bat_avg":    ("Best Batting Average", "📈", "min 30 balls faced + 1 dismissal"),
-    "sr":         ("Best Strike Rate", "⚡", "min 30 balls faced"),
-    "econ":       ("Best Economy", "🪙", "min 5 overs bowled"),
-    "bowl_avg":   ("Best Bowling Average", "📉", "min 3 wickets"),
-    "five_hauls": ("Most 5-Wicket Hauls", "🖐️", None),
-    "ducks":      ("Most Ducks", "🦆", None),
+    "runs":        ("Most Runs", "🏏", None, "counter"),
+    "wickets":     ("Most Wickets", "🎯", None, "counter"),
+    "matches":     ("Most Matches", "🏟️", None, "counter"),
+    "sixes":       ("Most Sixes", "💥", None, "counter"),
+    "fours":       ("Most Fours", "🏹", None, "counter"),
+    "hundreds":    ("Most 100s", "💯", None, "counter"),
+    "fifties":     ("Most 50s", "🎖️", None, "counter"),
+    "hs":          ("Highest Score", "🚀", None, "counter"),
+    "bbf":         ("Best Bowling Figures", "🎳", None, "counter"),
+    "bat_avg":     ("Best Batting Average", "📈", "min 30 balls faced + 1 dismissal", "counter"),
+    "sr":          ("Best Strike Rate", "⚡", "min 30 balls faced", "counter"),
+    "econ":        ("Best Economy", "🪙", "min 5 overs bowled", "counter"),
+    "bowl_avg":    ("Best Bowling Average", "📉", "min 3 wickets", "counter"),
+    "five_hauls":  ("Most 5-Wicket Hauls", "🖐️", None, "counter"),
+    "ducks":       ("Most Ducks", "🦆", None, "counter"),
+    "rating_bat":  ("Top Batting Ratings", "🏅", "ICC-style · min 5 innings", "rating"),
+    "rating_bowl": ("Top Bowling Ratings", "🎖️", "ICC-style · min 5 innings", "rating"),
+    "rating_ar":   ("Top All-Rounder Ratings", "🌟", "ICC-style · bat×bowl", "rating"),
+    "team_high":   ("Highest Team Totals", "🔺", None, "team"),
+    "team_low":    ("Lowest Team Totals", "🔻", "completed innings only", "team"),
 }
 
 def _gs_board_rows(cat_key, fmt=None, top=10):
-    """(sort_value, name, display) rows for one leaderboard, best first. fmt None means
-    all formats combined; otherwise only that format's numbers. Rate boards carry a
+    """(sort_value, name, display) rows for one counter leaderboard, best first. fmt None
+    means all formats combined; otherwise only that format's numbers. Rate boards carry a
     volume hint in the display so a 3-ball cameo is readable next to a career."""
     totals = gstats.format_totals(fmt) if fmt else gstats.combined_totals()
     rows = []
     for name, t in totals.items():
-        if cat_key in ("runs", "wickets", "sixes", "fours", "hundreds", "fifties", "five_hauls", "ducks"):
+        if cat_key in ("runs", "wickets", "matches", "sixes", "fours", "hundreds", "fifties", "five_hauls", "ducks"):
             if t[cat_key] > 0:
                 rows.append((t[cat_key], name, str(t[cat_key])))
         elif cat_key == "hs":
@@ -9839,6 +9861,11 @@ def _gs_board_rows(cat_key, fmt=None, top=10):
                 # +0.5 so 105* outranks 105 in the sort, matching the HS convention
                 rows.append((t["hs"] + (0.5 if t["hs_not_out"] else 0), name,
                              f"{t['hs']}{'*' if t['hs_not_out'] else ''}"))
+        elif cat_key == "bbf":
+            if t["best_runs"] >= 0:
+                # more wickets wins; fewer runs breaks ties (5/20 beats 5/44 beats 4/10)
+                rows.append((t["best_wkts"] * 1000 - t["best_runs"], name,
+                             f"{t['best_wkts']}/{t['best_runs']}"))
         elif cat_key == "bat_avg":
             if t["balls"] >= 30 and t["outs"] > 0:
                 v = t["runs"] / t["outs"]
@@ -9859,11 +9886,21 @@ def _gs_board_rows(cat_key, fmt=None, top=10):
     return rows[:top]
 
 def build_gs_board_embed(cat_key, fmt=None):
-    label, emoji, note = GS_BOARDS[cat_key]
-    rows = _gs_board_rows(cat_key, fmt)
-    desc = "\n".join(f"`{i + 1:>2}.` **{n}** — {disp}" for i, (_, n, disp) in enumerate(rows)) \
-        or "*Nobody qualifies for this board yet.*"
+    label, emoji, note, kind = GS_BOARDS[cat_key]
     fmt_label = _GS_FMT_LABELS[fmt].title() if fmt else "All Formats"
+    if kind == "team":
+        recs = gstats.team_records(fmt, high=(cat_key == "team_high"))
+        desc = "\n".join(
+            f"`{i + 1:>2}.` **{r['total']}/{r['wickets']}** — {r['team']} vs {r['opponent']}"
+            for i, r in enumerate(recs)) or "*No team totals recorded yet.*"
+    elif kind == "rating":
+        rows = gstats.rating_leaderboard(cat_key.split("_", 1)[1], fmt)
+        desc = "\n".join(f"`{i + 1:>2}.` **{n}** — **{v}** ({note2})"
+                         for i, (v, n, note2) in enumerate(rows)) or "*Nobody qualifies yet.*"
+    else:
+        rows = _gs_board_rows(cat_key, fmt)
+        desc = "\n".join(f"`{i + 1:>2}.` **{n}** — {disp}" for i, (_, n, disp) in enumerate(rows)) \
+            or "*Nobody qualifies for this board yet.*"
     embed = discord.Embed(title=f"🌍 {fmt_label} Leaderboard — {emoji} {label}",
                           description=desc, color=discord.Color.gold())
     foot = f"{gstats.player_count()} players tracked"
@@ -9909,12 +9946,27 @@ def build_gs_player_embed(name, p, fmt):
     width = max(len(s) for s in left) + 4
     sheet = "\n".join(f"{l:<{width}}{r}".rstrip() for l, r in zip(left, right))
 
+    # ICC-style ratings line for this format (only shows the disciplines the player has).
+    # A rank appears once the player clears the board's min-innings bar.
+    r = gstats.player_ratings(name).get(fmt, {})
+    def _rk(kind):
+        rr = gstats.rating_rank(name, kind, fmt)
+        return f" #{rr[0]}/{rr[1]}" if rr else ""
+    rating_bits = []
+    if r.get("bat_inns"):
+        rating_bits.append(f"🏅 Bat **{r['bat']}**{_rk('bat')}")
+    if r.get("bowl_inns"):
+        rating_bits.append(f"🎖️ Bowl **{r['bowl']}**{_rk('bowl')}")
+    if r.get("bat_inns") and r.get("bowl_inns"):
+        rating_bits.append(f"🌟 AR **{r['ar']}**{_rk('ar')}")
+    rating_line = ("\n" + " · ".join(rating_bits)) if rating_bits else ""
+
     embed = discord.Embed(
         title=f"🌍 Global Stats — {name}",
-        description=f"**{_GS_FMT_LABELS[fmt]}** · {f.get('matches', 0)} matches\n```\n{sheet}\n```",
+        description=f"**{_GS_FMT_LABELS[fmt]}** · {f.get('matches', 0)} matches\n```\n{sheet}\n```{rating_line}",
         color=discord.Color.blurple(),
     )
-    embed.set_footer(text="Matches count only games where they batted or bowled · cv gs for leaderboards")
+    embed.set_footer(text="Ratings are ICC-style (0-1000, form-weighted) · matches count only games batted/bowled")
     return embed
 
 class GlobalPlayerCardView(discord.ui.View):
@@ -9942,6 +9994,58 @@ class GlobalPlayerCardView(discord.ui.View):
 
 _GS_FMT_EMOJI = {"t20": "⚡", "odi": "🏟️", "test": "🔴", "custom": "🔧"}
 
+# ---- Pitch x Weather conditions embeds (data from core/conditions_stats.py) ----
+_COND_WEATHER_EMOJI = {
+    "Clear": "☀️", "Cloudy": "⛅", "Overcast": "☁️", "Humid": "🌫️", "Dry Heat": "🏜️",
+    "Windy": "🌬️", "Light Rain": "🌦️", "Drizzle": "🌧️", "Heavy Rain": "⛈️", "Thunderstorm": "🌩️",
+}
+
+
+def _cond_bowling_line(s):
+    """Pace-vs-spin damage line for a summary dict, or None if no bowling data."""
+    v = s["better_bowling"]
+    if v == "-":
+        return None
+    verdict = "Even contest — pace and spin share it" if v == "Even" else f"**{v}** does more of the damage"
+    return (f"Pace **{s['pace_wpm']:.1f}** wkts @ {s['pace_econ']:.1f} rpo · "
+            f"Spin **{s['spin_wpm']:.1f}** wkts @ {s['spin_econ']:.1f} rpo\n→ {verdict}")
+
+
+def _conditions_combo_embed(pitch, weather, s):
+    bat = max(0.0, 100.0 - s["chase_pct"] - s["tie_pct"])
+    e = discord.Embed(
+        title=f"🏏 {pitch}  ·  {_COND_WEATHER_EMOJI.get(weather, '')} {weather}",
+        description=f"Across **{s['matches']}** recorded match{'es' if s['matches'] != 1 else ''}.",
+        color=0x16A34A)
+    e.add_field(name="1st innings", value=f"avg **{s['i1_avg']:.0f}/{s['i1_wkts']:.1f}** · all out {s['i1_allout_pct']:.0f}%")
+    e.add_field(name="2nd innings", value=f"avg **{s['i2_avg']:.0f}/{s['i2_wkts']:.1f}** · all out {s['i2_allout_pct']:.0f}%")
+    result = f"bat first **{bat:.0f}%** · chase **{s['chase_pct']:.0f}%**"
+    if s["tie_pct"]:
+        result += f" · ties {s['tie_pct']:.0f}%"
+    e.add_field(name="Toss / result", value=result, inline=False)
+    e.add_field(name="Totals", value=f"highest **{s['hi_total']}** · lowest **{s['lo_total']}**", inline=False)
+    bowling = _cond_bowling_line(s)
+    if bowling:
+        e.add_field(name="Bowling", value=bowling, inline=False)
+    return e
+
+
+def _conditions_pitch_embed(pitch, overall, per_weather):
+    bat = max(0.0, 100.0 - overall["chase_pct"] - overall["tie_pct"])
+    e = discord.Embed(
+        title=f"🏟️ {pitch} — conditions report",
+        description=(f"**{overall['matches']}** matches · 1st inns avg **{overall['i1_avg']:.0f}/{overall['i1_wkts']:.1f}** · "
+                     f"2nd **{overall['i2_avg']:.0f}/{overall['i2_wkts']:.1f}** · bat first **{bat:.0f}%**"
+                     + (f" · bowling: **{overall['better_bowling']}**" if overall["better_bowling"] not in ("-", "Even") else "")),
+        color=0x1D4ED8)
+    for weather, s in per_weather:
+        val = f"1st **{s['i1_avg']:.0f}/{s['i1_wkts']:.1f}** · chase {s['chase_pct']:.0f}%"
+        if s["better_bowling"] not in ("-", "Even"):
+            val += f" · {s['better_bowling']}"
+        e.add_field(name=f"{_COND_WEATHER_EMOJI.get(weather, '')} {weather} ({s['matches']}m)", value=val)
+    e.set_footer(text="conditions <pitch> <weather> for the full combo breakdown")
+    return e
+
 class GlobalBoardView(discord.ui.View):
     """cv gs leaderboard - format filter on top, stat category dropdown below."""
     def __init__(self):
@@ -9960,7 +10064,7 @@ class GlobalBoardView(discord.ui.View):
         self.cat_select = discord.ui.Select(
             placeholder="📊 Pick a leaderboard…", row=1,
             options=[discord.SelectOption(label=lbl, value=key, emoji=em, default=(key == "runs"))
-                     for key, (lbl, em, _n) in GS_BOARDS.items()],
+                     for key, (lbl, em, _n, _k) in GS_BOARDS.items()],
         )
         self.cat_select.callback = self._pick_cat
         self.add_item(self.cat_select)
@@ -10131,6 +10235,57 @@ class PrefixCog(commands.Cog):
             return await ctx.send(f"❌ No global stats for **{target}** yet.")
         await ctx.send(embed=build_gs_player_embed(target, p, first),
                        view=GlobalPlayerCardView(target, p, first))
+
+    # ---- Pitch x Weather conditions tracker (MongoDB - see core/conditions_stats.py) ----
+
+    @commands.command(name="conditions", aliases=["cond", "pw"],
+                      help="What a pitch (and weather) actually plays like across every real match: avg 1st/2nd-innings score, wickets, chase-win %, and whether pace or spin does the damage.\nUsage: conditions — overview · conditions <pitch> · conditions <pitch> <weather>")
+    async def conditions(self, ctx, *, query: str = None):
+        # ---- no argument: the overview of every surface seen so far ----
+        if not query:
+            rows = cstats.overview()
+            if not rows:
+                return await ctx.send("📭 No conditions recorded yet — finish some limited-overs matches first!")
+            lines = [f"**{p}** — {m} match{'es' if m != 1 else ''} · avg 1st inns **{avg:.0f}**"
+                     for p, m, avg in rows]
+            e = discord.Embed(
+                title="🏟️ Pitch × Weather Tracker",
+                description="\n".join(lines[:40]),
+                color=0x1D4ED8)
+            e.set_footer(text="conditions <pitch> for a breakdown · conditions <pitch> <weather> for a combo")
+            return await ctx.send(embed=e)
+
+        # ---- parse "<pitch> [weather...]" (weather can be two words, e.g. Dry Heat) ----
+        parts = query.split()
+        pitch = canonical_pitch(parts[0])
+        if not pitch:
+            return await ctx.send(f"❌ Invalid pitch **{parts[0]}**.\nPitches: {', '.join(ALL_PITCHES)}")
+        weather = None
+        if len(parts) > 1:
+            weather = canonical_weather(" ".join(parts[1:]))
+            if not weather:
+                return await ctx.send(f"❌ Invalid weather **{' '.join(parts[1:])}**.\nWeather: {', '.join(ALL_WEATHER)}")
+
+        # ---- specific pitch + weather combo ----
+        if weather:
+            s = cstats.combo(pitch, weather)
+            if not s:
+                return await ctx.send(f"📭 No matches recorded on **{pitch}** in **{weather}** yet.")
+            return await ctx.send(embed=_conditions_combo_embed(pitch, weather, s))
+
+        # ---- one pitch, aggregated across every weather ----
+        overall, per_weather = cstats.pitch_summary(pitch)
+        if not overall:
+            return await ctx.send(f"📭 No matches recorded on **{pitch}** yet.")
+        await ctx.send(embed=_conditions_pitch_embed(pitch, overall, per_weather))
+
+    @commands.command(name="conditionsreset",
+                      help="[OWNER] Wipe every stored pitch/weather record.\nUsage: conditionsreset")
+    async def conditionsreset(self, ctx):
+        if ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("❌ Owner only.")
+        ok = cstats.reset()
+        await ctx.send("🧹 Conditions tracker wiped." if ok else "❌ Reset failed — check MONGO_URI / logs.")
 
     @commands.command(name="exportstats", aliases=["exps"],
                       help="[OWNER] DM yourself the global stats json backup.\nUsage: exportstats")

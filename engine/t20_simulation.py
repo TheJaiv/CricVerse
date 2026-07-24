@@ -90,6 +90,11 @@ T20_PITCH_DIFFICULTY = {
     "Flat": 0.00, "Dead": 0.00, "Hard": 0.15, "Bouncy": 0.4, "Two-Paced": 0.40,
     "Dry": 0.35, "Soft": 0.42, "Green": 0.52, "Damp": 0.42, "Worn": 0.46,
     "Dusty": 0.45, "Slow": 0.46, "Turning": 0.52, "Cracked": 0.62, "Sticky": 0.78,
+    # Even-contest decks: fill the empty gap between Hard (0.15) and Dry (0.35).
+    # Deliberately neutral - no TYPE_STRIKE entry, not in T20_BOWL_DECKS, not a
+    # Flat/Dead road - so bat and ball both have a say. Audited (pitch_audit): par
+    # ~178, ~6.2 wkts, low all-out, toss ~50/50 (the most neutral decks in the set).
+    "Sporting": 0.22, "Balanced": 0.31,
 }
 # Launch-timing model:
 T20_LAUNCH_ABPW      = 8.2    # balls a wicket survives attacking, on a road
@@ -154,6 +159,7 @@ WEAR_SUSCEPT = {
     "Dusty": 1.5, "Worn": 1.5, "Turning": 1.4, "Cracked": 1.4, "Dry": 1.3,
     "Slow": 1.2, "Two-Paced": 1.1, "Sticky": 0.9, "Soft": 0.8, "Hard": 0.7,
     "Green": 0.6, "Damp": 0.7, "Bouncy": 0.7, "Flat": 0.4, "Dead": 0.3,
+    "Sporting": 0.9, "Balanced": 0.9,   # even decks wear a little, not a dustbowl
 }
 # Run-out share of all dismissals (not credited to the bowler).
 T20_RUNOUT_SHARE = 0.07
@@ -210,11 +216,18 @@ T20_WIDE_RATE_DEATH = 0.060
 # wicket weight (post-compressor, so it isn't diluted) by a factor driven by
 # how steep the ask is relative to the pitch's par rate:
 # cruising (rrr ≪ par) -> up to ×HI (keeping tempo costs wickets)
-# par chase -> ≈ ×1.15
+# par chase -> slight relief (see A note)
 # steep (rrr ≫ par) -> down to ×LO (slight relief - not auto-collapse)
 # Net effect: below-par chases stay FAVOURED but contested, above-par chases
 # stay possible, match-level bat/bowl-first holds ~50/50 (toss stays minor).
-T20_CHASE_ATTR_A  = 2.90
+# A was 2.90 -> 2.75 to toss-balance the older decks: a systemic ~+2% bat-first
+# lean (up to +4% on bowling decks - Cracked/Sticky/Worn) came from the near-par
+# attrition tax, so lowering A relieves the near-par band only. _attr is capped
+# [LO,HI], and at deep-cruise/steep it already SAT on those caps for both A values,
+# so the cruise-finish + collapse realism is left untouched (measured: toss sweep
+# 52.2% -> 49.8% overall, par & all-out% unchanged; the deep-cruise tax that keeps
+# chases from finishing early stays pinned at HI regardless of A).
+T20_CHASE_ATTR_A  = 2.75
 T20_CHASE_ATTR_B  = 1.90
 T20_CHASE_ATTR_LO = 0.84
 T20_CHASE_ATTR_HI = 1.35

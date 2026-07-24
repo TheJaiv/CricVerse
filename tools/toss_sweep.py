@@ -11,7 +11,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 ALL_PITCHES = ["Flat", "Green", "Dry", "Dusty", "Hard", "Soft", "Cracked", "Damp",
-               "Dead", "Worn", "Turning", "Two-Paced", "Slow", "Bouncy", "Sticky"]
+               "Dead", "Worn", "Turning", "Two-Paced", "Slow", "Bouncy", "Sticky",
+               "Sporting", "Balanced"]
 
 
 def sweep_pitch(args):

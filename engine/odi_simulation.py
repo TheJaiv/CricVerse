@@ -57,6 +57,9 @@ ODI_PITCH_PAR_RATE = {
     "Flat": 6.8, "Dead": 6.9, "Hard": 5.7, "Green": 4.9, "Dry": 5.3,
     "Dusty": 4.85, "Soft": 4.65, "Cracked": 4.4, "Damp": 5.0, "Worn": 5.2,
     "Turning": 4.65, "Two-Paced": 4.5, "Slow": 4.55, "Bouncy": 4.85, "Sticky": 3.85,
+    # Even-contest decks - par rate between Hard (5.7) and Flat (6.8), neither in
+    # ODI_BOWL_DECKS nor ODI_TYPE_STRIKE (bat and ball share it).
+    "Sporting": 6.2, "Balanced": 5.9,
 }
 # Bowling-deck ceiling (mirror of T20_BOWL_PITCH_WKT_CAP): even a minefield
 # bottoms out. Caps the stacked env x slog x mismatch wicket spikes that the
@@ -73,6 +76,7 @@ WEAR_SUSCEPT = {
     "Dusty": 1.5, "Worn": 1.5, "Turning": 1.4, "Cracked": 1.4, "Dry": 1.3,
     "Slow": 1.2, "Two-Paced": 1.1, "Sticky": 0.9, "Soft": 0.8, "Hard": 0.7,
     "Green": 0.6, "Damp": 0.7, "Bouncy": 0.7, "Flat": 0.4, "Dead": 0.3,
+    "Sporting": 0.9, "Balanced": 0.9,   # even decks wear a little, not a dustbowl
 }
 # Run-out share of all dismissals (slightly higher than T20 - more running).
 ODI_RUNOUT_SHARE = 0.075

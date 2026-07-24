@@ -22,7 +22,8 @@ from tools.sim_harness import build_team, CricketMatch, run_full_match
 # Canonical pitch list (mirrors tournament_manager.ALL_PITCHES - kept inline to
 # avoid importing discord). Sticky is placed last so it prints at the bottom.
 ALL_PITCHES = ["Flat", "Green", "Dry", "Dusty", "Hard", "Soft", "Cracked", "Damp",
-               "Dead", "Worn", "Turning", "Two-Paced", "Slow", "Bouncy", "Sticky"]
+               "Dead", "Worn", "Turning", "Two-Paced", "Slow", "Bouncy", "Sticky",
+               "Sporting", "Balanced"]
 
 RATING = 85          # both teams: 85 bat / 85 bowl
 WEATHER = "Clear"

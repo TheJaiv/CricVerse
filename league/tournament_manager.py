@@ -24,11 +24,14 @@ from league.custom_tournament import (
 # Tournament pitch & weather conditions
 # Canonical engine lists (mirror the PitchWeatherView dropdowns in bot.py).
 ALL_PITCHES = ["Flat", "Green", "Dry", "Dusty", "Hard", "Soft", "Cracked", "Damp",
-               "Dead", "Worn", "Turning", "Two-Paced", "Slow", "Bouncy", "Sticky"]
+               "Dead", "Worn", "Turning", "Two-Paced", "Slow", "Bouncy", "Sticky",
+               "Sporting", "Balanced"]
 ALL_WEATHER = ["Clear", "Cloudy", "Overcast", "Humid", "Dry Heat", "Windy",
                "Light Rain", "Drizzle", "Heavy Rain", "Thunderstorm"]
 # "Nice"/standard pools - group stages draw from these 90% of the time, knockouts 100%.
-GROUP_PITCHES = ["Flat", "Dead", "Hard", "Green", "Dusty"]
+# Sporting/Balanced are the even-contest decks (neither bat nor ball dominates), so
+# they belong in the standard pool alongside the classic good tracks.
+GROUP_PITCHES = ["Flat", "Dead", "Hard", "Green", "Dusty", "Sporting", "Balanced"]
 GROUP_WEATHER = ["Clear", "Cloudy"]
 _OTHER_PITCHES = [p for p in ALL_PITCHES if p not in GROUP_PITCHES]
 _OTHER_WEATHER = [w for w in ALL_WEATHER if w not in GROUP_WEATHER]

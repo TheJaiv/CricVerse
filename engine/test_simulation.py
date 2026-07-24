@@ -30,6 +30,7 @@ PITCH_WEAR_RATE: Dict[str, float] = {
     "Sticky":  1.3, "Slow":    1.2, "Two-Paced": 1.1, "Hard":   1.0,
     "Bouncy":  0.9, "Soft":    0.9, "Green":     0.8, "Damp":   0.7,
     "Flat":    0.7, "Dead":    0.5, "Dry":       1.1,
+    "Sporting": 1.0, "Balanced": 1.0,
 }
 PITCH_TYPES   = list(PITCH_WEAR_RATE.keys())
 WEATHER_TYPES = ["Clear", "Cloudy", "Overcast", "Humid", "Windy", "Dry Heat",
@@ -1078,6 +1079,7 @@ _PITCH_SCORING_RATE: dict = {
     "Dead": 3.8, "Flat": 3.6, "Slow": 3.1, "Hard": 3.3, "Bouncy": 3.1,
     "Green": 2.7, "Damp": 2.7, "Turning": 2.6, "Cracked": 2.5, "Sticky": 2.5,
     "Dusty": 2.8, "Worn": 2.7, "Two-Paced": 3.0, "Soft": 2.8, "Dry": 3.1,
+    "Sporting": 3.1, "Balanced": 3.0,   # even decks - between Hard and the seamers
 }
 
 def _should_declare(match: TestMatch) -> bool:
