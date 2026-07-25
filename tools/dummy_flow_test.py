@@ -123,6 +123,21 @@ def main():
     short_w = {weathers[i % len(weathers)] for i in range(20)}
     check(len(short_p) >= 15 and len(short_w) == 10, f"even 20 matches span {len(short_p)} pitches / {len(short_w)} weathers")
 
+    # mixed T20+ODI: each format walks its OWN pitch=s%17 / weather=s%10 counter (as the
+    # worker does), so both formats still cover all 170 combos - a shared global index
+    # would only hit even weather slots per format.
+    seq = {20: 0, 50: 0}
+    cells = set()
+    for i in range(2 * len(pitches) * len(weathers)):   # 340 matches, 50/50 mix
+        overs = 20 if i % 2 == 0 else 50
+        s = seq[overs]
+        cells.add((pitches[s % len(pitches)], weathers[s % len(weathers)], overs))
+        seq[overs] += 1
+    t20_cells = {(p, w) for p, w, o in cells if o == 20}
+    odi_cells = {(p, w) for p, w, o in cells if o == 50}
+    check(len(t20_cells) == len(pitches) * len(weathers), f"mixed run covers all T20 combos ({len(t20_cells)})")
+    check(len(odi_cells) == len(pitches) * len(weathers), f"mixed run covers all ODI combos ({len(odi_cells)})")
+
     # --- lopsided pool still fields teams (fallback path) ---
     bat_heavy = [p for p in db if bucket_of(p["role"]) in ("BAT", "WK")][:40]
     lb = bucketize(bat_heavy)
