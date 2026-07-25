@@ -557,6 +557,20 @@ TEAMS_DATA = {
 }
 
 
+def _db_rated(players):
+    """Refresh a built-in / hardcoded roster (the 'default' + vs-AI XI and its impact
+    subs) with LIVE database ratings by name, so these players enter matches - and
+    global stats - with their real DB bat/bowl/role/archetype, not the equal-XI
+    template baked in at import. Names absent from the DB keep their template entry.
+    Always returns fresh dicts (mirrors _saved_team_lineup; done at use-time because
+    the DB isn't loaded yet when TEAMS_DATA is built at import)."""
+    try:
+        dbmap = {p["name"].lower(): p for p in get_all_players()}
+    except Exception:
+        dbmap = {}
+    return [dict(dbmap.get(p["name"].lower(), p)) for p in players]
+
+
 # Player-test helpers (cv testplayer) - build two balanced XIs whose OVR is scaled
 #    relative to the tested players, so a single player can be watched in a fair (or
 #    deliberately easy/hard) context. The balanced template above is recentred to a
@@ -7047,9 +7061,9 @@ async def on_message(message: discord.Message):
         _ct = get_custom_team(typed)
         cap_name, cap_err, cap_low = None, None, False
         if typed.lower() == "default":
-            players = list(TEAMS_DATA["Team 1"]["players"])
+            players = _db_rated(TEAMS_DATA["Team 1"]["players"])
             if state.impact_player:
-                state.t1_subs = [{"name": "Faf du Plessis", "bat": 85, "bowl": 10, "archetype": "Aggressor", "role": "Batter"}, {"name": "Lockie Ferguson", "bat": 10, "bowl": 85, "archetype": "Standard", "role": "Bowler_Pace"}]
+                state.t1_subs = _db_rated([{"name": "Faf du Plessis", "bat": 85, "bowl": 10, "archetype": "Aggressor", "role": "Batter"}, {"name": "Lockie Ferguson", "bat": 10, "bowl": 85, "archetype": "Standard", "role": "Bowler_Pace"}])
             else:
                 state.t1_subs = []
             missing = []
@@ -7096,9 +7110,9 @@ async def on_message(message: discord.Message):
         await message.channel.send(f"✅ Team 2 name set: **{state.t2_name}**")
         
         if state.p2_id is None and not getattr(state, 'sim_only', False):
-            state.t2_roster = TEAMS_DATA["Team 2"]["players"]
+            state.t2_roster = _db_rated(TEAMS_DATA["Team 2"]["players"])
             if getattr(state, "impact_player", False):
-                state.t2_subs = [{"name": "Devon Conway", "bat": 85, "bowl": 10, "archetype": "Aggressor", "role": "Batter"}, {"name": "Anrich Nortje", "bat": 10, "bowl": 85, "archetype": "Standard", "role": "Bowler_Pace"}]
+                state.t2_subs = _db_rated([{"name": "Devon Conway", "bat": 85, "bowl": 10, "archetype": "Aggressor", "role": "Batter"}, {"name": "Anrich Nortje", "bat": 10, "bowl": 85, "archetype": "Standard", "role": "Bowler_Pace"}])
             else:
                 state.t2_subs = []
             await message.channel.send(f"🤖 AI team **{state.t2_name}** will use the built-in roster.")
@@ -7115,9 +7129,9 @@ async def on_message(message: discord.Message):
         _ct = get_custom_team(typed)
         cap_name, cap_err, cap_low = None, None, False
         if typed.lower() == "default":
-            players = list(TEAMS_DATA["Team 2"]["players"])
+            players = _db_rated(TEAMS_DATA["Team 2"]["players"])
             if state.impact_player:
-                state.t2_subs = [{"name": "Devon Conway", "bat": 85, "bowl": 10, "archetype": "Aggressor", "role": "Batter"}, {"name": "Anrich Nortje", "bat": 10, "bowl": 85, "archetype": "Standard", "role": "Bowler_Pace"}]
+                state.t2_subs = _db_rated([{"name": "Devon Conway", "bat": 85, "bowl": 10, "archetype": "Aggressor", "role": "Batter"}, {"name": "Anrich Nortje", "bat": 10, "bowl": 85, "archetype": "Standard", "role": "Bowler_Pace"}])
             else:
                 state.t2_subs = []
             missing = []
@@ -7729,6 +7743,10 @@ async def _test_finish_match(match: TestMatchObj, channel_id: int, channel):
             gstats.record_test_match(match)
         except Exception as _gs_err:
             print(f"Global stats record failed (test): {_gs_err}")
+        try:
+            cstats.record_test_match(match)
+        except Exception as _cs_err:
+            print(f"Conditions stats record failed (test): {_cs_err}")
     result_text = match.result or "Match Drawn"
     try:
         file = discord.File(fp=generate_test_summary_image(match), filename="test_summary.png")
@@ -8977,6 +8995,23 @@ def _can_see_ratings(user_id: int, channel_id: int) -> bool:
         return is_ratings_channel(str(channel_id))
     return False
 
+
+def _is_server_pro(user, guild) -> bool:
+    """True for 'server pros' - the owner, server/auth admins, or Server Pro tier
+    users (same set that manages saved teams). Used to gate the toss/bat-first win%
+    in the conditions tracker; excluded for everyone else."""
+    try:
+        if user.id == ADMIN_DISCORD_ID:
+            return True
+        if guild and getattr(user, "guild_permissions", None) and user.guild_permissions.administrator:
+            return True
+        if str(user.id) in get_auth_admins():
+            return True
+        sid = str(guild.id) if guild else ""
+        return get_tier_status(str(user.id), sid)[0] == "Server Pro"
+    except Exception:
+        return False
+
 async def send_player_profile(interaction, player: dict, show_ratings: bool = True):
     if show_ratings:
         embed = discord.Embed(title=f"🏏 Player Profile: {player['name']}", color=0x1D4ED8)
@@ -10011,40 +10046,112 @@ def _cond_bowling_line(s):
             f"Spin **{s['spin_wpm']:.1f}** wkts @ {s['spin_econ']:.1f} rpo\n→ {verdict}")
 
 
-def _conditions_combo_embed(pitch, weather, s):
-    bat = max(0.0, 100.0 - s["chase_pct"] - s["tie_pct"])
+def _conditions_combo_embed(pitch, weather, fmt, s, show_toss=True):
+    head = f"{_GS_FMT_EMOJI[fmt]} {_GS_FMT_LABELS[fmt]}"
     e = discord.Embed(
         title=f"🏏 {pitch}  ·  {_COND_WEATHER_EMOJI.get(weather, '')} {weather}",
-        description=f"Across **{s['matches']}** recorded match{'es' if s['matches'] != 1 else ''}.",
+        description=f"{head} · across **{s['matches']}** recorded match{'es' if s['matches'] != 1 else ''}.",
         color=0x16A34A)
-    e.add_field(name="1st innings", value=f"avg **{s['i1_avg']:.0f}/{s['i1_wkts']:.1f}** · all out {s['i1_allout_pct']:.0f}%")
-    e.add_field(name="2nd innings", value=f"avg **{s['i2_avg']:.0f}/{s['i2_wkts']:.1f}** · all out {s['i2_allout_pct']:.0f}%")
-    result = f"bat first **{bat:.0f}%** · chase **{s['chase_pct']:.0f}%**"
-    if s["tie_pct"]:
-        result += f" · ties {s['tie_pct']:.0f}%"
-    e.add_field(name="Toss / result", value=result, inline=False)
-    e.add_field(name="Totals", value=f"highest **{s['hi_total']}** · lowest **{s['lo_total']}**", inline=False)
+    if s["is_test"]:
+        e.add_field(name="Per innings", value=f"avg **{s['avg_inns']:.0f}/{s['avg_wkts']:.1f}**")
+        e.add_field(name="Innings recorded", value=f"**{s['innings']}**")
+        e.add_field(name="Innings totals", value=f"highest **{s['hi_total']}** · lowest **{s['lo_total']}**", inline=False)
+    else:
+        e.add_field(name="1st innings", value=f"avg **{s['i1_avg']:.0f}/{s['i1_wkts']:.1f}** · all out {s['i1_allout_pct']:.0f}%")
+        e.add_field(name="2nd innings", value=f"avg **{s['i2_avg']:.0f}/{s['i2_wkts']:.1f}** · all out {s['i2_allout_pct']:.0f}%")
+        # Toss/bat-first win% is a Server-Pro-only insight - excluded for everyone else.
+        if show_toss:
+            bat = max(0.0, 100.0 - s["chase_pct"] - s["tie_pct"])
+            result = f"bat first **{bat:.0f}%** · chase **{s['chase_pct']:.0f}%**"
+            if s["tie_pct"]:
+                result += f" · ties {s['tie_pct']:.0f}%"
+            e.add_field(name="Toss / result", value=result, inline=False)
+        e.add_field(name="Totals", value=f"highest **{s['hi_total']}** · lowest **{s['lo_total']}**", inline=False)
     bowling = _cond_bowling_line(s)
     if bowling:
         e.add_field(name="Bowling", value=bowling, inline=False)
     return e
 
 
-def _conditions_pitch_embed(pitch, overall, per_weather):
-    bat = max(0.0, 100.0 - overall["chase_pct"] - overall["tie_pct"])
-    e = discord.Embed(
-        title=f"🏟️ {pitch} — conditions report",
-        description=(f"**{overall['matches']}** matches · 1st inns avg **{overall['i1_avg']:.0f}/{overall['i1_wkts']:.1f}** · "
-                     f"2nd **{overall['i2_avg']:.0f}/{overall['i2_wkts']:.1f}** · bat first **{bat:.0f}%**"
-                     + (f" · bowling: **{overall['better_bowling']}**" if overall["better_bowling"] not in ("-", "Even") else "")),
-        color=0x1D4ED8)
+def _conditions_pitch_embed(pitch, fmt, overall, per_weather, show_toss=True):
+    head = f"{_GS_FMT_EMOJI[fmt]} {_GS_FMT_LABELS[fmt]}"
+    verdict = (f" · bowling: **{overall['better_bowling']}**"
+               if overall["better_bowling"] not in ("-", "Even") else "")
+    if overall["is_test"]:
+        desc = (f"{head} · **{overall['matches']}** matches · avg innings "
+                f"**{overall['avg_inns']:.0f}/{overall['avg_wkts']:.1f}**" + verdict)
+    else:
+        # bat-first win% is Server-Pro-only; excluded otherwise.
+        toss = ""
+        if show_toss:
+            bat = max(0.0, 100.0 - overall["chase_pct"] - overall["tie_pct"])
+            toss = f" · bat first **{bat:.0f}%**"
+        desc = (f"{head} · **{overall['matches']}** matches · 1st inns avg **{overall['i1_avg']:.0f}/{overall['i1_wkts']:.1f}** · "
+                f"2nd **{overall['i2_avg']:.0f}/{overall['i2_wkts']:.1f}**" + toss + verdict)
+    e = discord.Embed(title=f"🏟️ {pitch} — conditions report", description=desc, color=0x1D4ED8)
     for weather, s in per_weather:
-        val = f"1st **{s['i1_avg']:.0f}/{s['i1_wkts']:.1f}** · chase {s['chase_pct']:.0f}%"
+        if s["is_test"]:
+            val = f"avg inns **{s['avg_inns']:.0f}/{s['avg_wkts']:.1f}**"
+        else:
+            val = f"1st **{s['i1_avg']:.0f}/{s['i1_wkts']:.1f}**"
+            if show_toss:   # chase% is toss/win% info - pros only
+                val += f" · chase {s['chase_pct']:.0f}%"
         if s["better_bowling"] not in ("-", "Even"):
             val += f" · {s['better_bowling']}"
         e.add_field(name=f"{_COND_WEATHER_EMOJI.get(weather, '')} {weather} ({s['matches']}m)", value=val)
-    e.set_footer(text="conditions <pitch> <weather> for the full combo breakdown")
+    e.set_footer(text="conditions <pitch> <weather> for the full combo · buttons switch format")
     return e
+
+
+def _conditions_overview_embed(fmt, rows):
+    head = f"{_GS_FMT_EMOJI[fmt]} {_GS_FMT_LABELS[fmt]}"
+    label = "avg inns" if fmt == "test" else "avg 1st inns"
+    lines = [f"**{p}** — {m} match{'es' if m != 1 else ''} · {label} **{avg:.0f}**" for p, m, avg in rows]
+    e = discord.Embed(
+        title="🏟️ Pitch × Weather Tracker",
+        description=f"{head}\n\n" + "\n".join(lines[:40]),
+        color=0x1D4ED8)
+    e.set_footer(text="conditions <pitch> for a breakdown · conditions <pitch> <weather> for a combo")
+    return e
+
+
+def _conditions_embed(pitch, weather, fmt, show_toss=True):
+    """The right embed for the query scope in one format, or None if it has no data.
+    show_toss gates the toss/bat-first win% (Server Pro only)."""
+    if pitch is None:
+        rows = cstats.overview(fmt)
+        return _conditions_overview_embed(fmt, rows) if rows else None
+    if weather is None:
+        overall, per = cstats.pitch_summary(pitch, fmt)
+        return _conditions_pitch_embed(pitch, fmt, overall, per, show_toss) if overall else None
+    s = cstats.combo(pitch, weather, fmt)
+    return _conditions_combo_embed(pitch, weather, fmt, s, show_toss) if s else None
+
+
+class ConditionsView(discord.ui.View):
+    """Format buttons under a cv conditions embed - flip between the formats that
+    have data for this scope (mirrors GlobalPlayerCardView). show_toss (the invoker's
+    Server-Pro status) is carried so re-renders keep the toss win% consistent."""
+    def __init__(self, pitch, weather, active, avail, show_toss=True):
+        super().__init__(timeout=600)
+        self.pitch, self.weather, self.avail, self.show_toss = pitch, weather, avail, show_toss
+        for fmt in avail:
+            self.add_item(self._fmt_button(fmt, fmt == active))
+
+    def _fmt_button(self, fmt, is_active):
+        btn = discord.ui.Button(
+            label=_GS_FMT_LABELS[fmt], emoji=_GS_FMT_EMOJI[fmt],
+            style=discord.ButtonStyle.primary if is_active else discord.ButtonStyle.secondary,
+            disabled=is_active)
+
+        async def _flip(interaction: discord.Interaction, _f=fmt):
+            emb = _conditions_embed(self.pitch, self.weather, _f, self.show_toss)
+            if emb is None:
+                return await interaction.response.send_message("No data for that format.", ephemeral=True)
+            await interaction.response.edit_message(
+                embed=emb, view=ConditionsView(self.pitch, self.weather, _f, self.avail, self.show_toss))
+        btn.callback = _flip
+        return btn
 
 class GlobalBoardView(discord.ui.View):
     """cv gs leaderboard - format filter on top, stat category dropdown below."""
@@ -10239,45 +10346,34 @@ class PrefixCog(commands.Cog):
     # ---- Pitch x Weather conditions tracker (MongoDB - see core/conditions_stats.py) ----
 
     @commands.command(name="conditions", aliases=["cond", "pw"],
-                      help="What a pitch (and weather) actually plays like across every real match: avg 1st/2nd-innings score, wickets, chase-win %, and whether pace or spin does the damage.\nUsage: conditions — overview · conditions <pitch> · conditions <pitch> <weather>")
+                      help="What a pitch (and weather) actually plays like across every real match, split by format (buttons switch T20/ODI/Test/Custom): avg innings scores, wickets, chase-win %, and whether pace or spin does the damage.\nUsage: conditions — overview · conditions <pitch> · conditions <pitch> <weather>")
     async def conditions(self, ctx, *, query: str = None):
-        # ---- no argument: the overview of every surface seen so far ----
-        if not query:
-            rows = cstats.overview()
-            if not rows:
-                return await ctx.send("📭 No conditions recorded yet — finish some limited-overs matches first!")
-            lines = [f"**{p}** — {m} match{'es' if m != 1 else ''} · avg 1st inns **{avg:.0f}**"
-                     for p, m, avg in rows]
-            e = discord.Embed(
-                title="🏟️ Pitch × Weather Tracker",
-                description="\n".join(lines[:40]),
-                color=0x1D4ED8)
-            e.set_footer(text="conditions <pitch> for a breakdown · conditions <pitch> <weather> for a combo")
-            return await ctx.send(embed=e)
-
         # ---- parse "<pitch> [weather...]" (weather can be two words, e.g. Dry Heat) ----
-        parts = query.split()
-        pitch = canonical_pitch(parts[0])
-        if not pitch:
-            return await ctx.send(f"❌ Invalid pitch **{parts[0]}**.\nPitches: {', '.join(ALL_PITCHES)}")
-        weather = None
-        if len(parts) > 1:
-            weather = canonical_weather(" ".join(parts[1:]))
-            if not weather:
-                return await ctx.send(f"❌ Invalid weather **{' '.join(parts[1:])}**.\nWeather: {', '.join(ALL_WEATHER)}")
+        pitch = weather = None
+        if query:
+            parts = query.split()
+            pitch = canonical_pitch(parts[0])
+            if not pitch:
+                return await ctx.send(f"❌ Invalid pitch **{parts[0]}**.\nPitches: {', '.join(ALL_PITCHES)}")
+            if len(parts) > 1:
+                weather = canonical_weather(" ".join(parts[1:]))
+                if not weather:
+                    return await ctx.send(f"❌ Invalid weather **{' '.join(parts[1:])}**.\nWeather: {', '.join(ALL_WEATHER)}")
 
-        # ---- specific pitch + weather combo ----
-        if weather:
-            s = cstats.combo(pitch, weather)
-            if not s:
+        # formats with data for this scope drive both the default view and the buttons
+        avail = cstats.available_formats(pitch, weather)
+        if not avail:
+            if weather:
                 return await ctx.send(f"📭 No matches recorded on **{pitch}** in **{weather}** yet.")
-            return await ctx.send(embed=_conditions_combo_embed(pitch, weather, s))
+            if pitch:
+                return await ctx.send(f"📭 No matches recorded on **{pitch}** yet.")
+            return await ctx.send("📭 No conditions recorded yet — finish some matches first!")
 
-        # ---- one pitch, aggregated across every weather ----
-        overall, per_weather = cstats.pitch_summary(pitch)
-        if not overall:
-            return await ctx.send(f"📭 No matches recorded on **{pitch}** yet.")
-        await ctx.send(embed=_conditions_pitch_embed(pitch, overall, per_weather))
+        fmt = "t20" if "t20" in avail else avail[0]
+        show_toss = _is_server_pro(ctx.author, ctx.guild)   # toss/bat-first win% = pros only
+        embed = _conditions_embed(pitch, weather, fmt, show_toss)
+        view = ConditionsView(pitch, weather, fmt, avail, show_toss) if len(avail) > 1 else None
+        await ctx.send(embed=embed, view=view)
 
     @commands.command(name="conditionsreset",
                       help="[OWNER] Wipe every stored pitch/weather record.\nUsage: conditionsreset")
