@@ -988,12 +988,14 @@ def _impact_spare_batter(match: CricketMatch, team_num: int):
         return None
     return min(cands, key=lambda x: x["bat"])["name"]
 
-def _ai_impact_batting_boost(match: CricketMatch, innings: InningsState, team_num: int, subs, batting_now):
+def _plan_impact_batting_boost(match: CricketMatch, innings: InningsState, team_num: int, subs, batting_now):
     """Rule 1: the attack is complete, so spend the impact on batting. Fire the moment the
     next man due is a tail bowler, so no bowler has to bat. Batting second, the bowler is
     swapped straight out (no bowling left to do). Batting first, the bench batter is slotted
     in as the next man in and a top-order batter already dismissed is the one subbed out, so
-    every bowler is kept for the second-innings defence."""
+    every bowler is kept for the second-innings defence.
+
+    Returns a PLAN, applies nothing - a human-managed side gets shown the plan first."""
     if not batting_now:
         return None
     bat_subs = [s for s in subs if not _is_pure_bowler(s)] or subs
@@ -1013,13 +1015,15 @@ def _ai_impact_batting_boost(match: CricketMatch, innings: InningsState, team_nu
         out_name = _dismissed_batter(innings)
         if not out_name:
             return None
-        return _impact_insert_batter(match, team_num, out_name, best_sub)
+        return {"team_num": team_num, "kind": "insert_batter", "out_name": out_name,
+                "in_player": best_sub, "reason": "lengthening the batting"}
     # Batting second: no bowling left, so the tail bowler goes straight out.
-    return _impact_replace_batter(match, team_num, idx, next_up["name"], best_sub)
+    return {"team_num": team_num, "kind": "replace_batter", "out_name": next_up["name"],
+            "in_player": best_sub, "reason": "lengthening the batting"}
 
-def _ai_impact_complete_attack(match: CricketMatch, innings: InningsState, team_num: int, subs, batting_now):
+def _plan_impact_complete_attack(match: CricketMatch, innings: InningsState, team_num: int, subs, batting_now):
     """Rule 2: the attack is a bowler short. Bring the bench bowler on, timed by whether
-    the team is batting or bowling first."""
+    the team is batting or bowling first. Returns a PLAN, applies nothing."""
     bowl_subs = [s for s in subs if _can_bowl(s)]
     if not bowl_subs:
         return None
@@ -1040,37 +1044,52 @@ def _ai_impact_complete_attack(match: CricketMatch, innings: InningsState, team_
             if bs is not None and bs.balls_bowled // 6 >= quota:
                 spell_done = True
                 break
-        if spell_done or innings.total_balls >= match.max_balls - 30:
-            return _impact_add_bowler(match, team_num, out_name, best_sub)
-        return None
+        if not (spell_done or innings.total_balls >= match.max_balls - 30):
+            return None
     # Batting first: the batting is done, bring the fifth bowler on straight away.
-    return _impact_add_bowler(match, team_num, out_name, best_sub)
+    return {"team_num": team_num, "kind": "add_bowler", "out_name": out_name,
+            "in_player": best_sub, "reason": "completing the attack"}
 
-def try_ai_impact_player(match: CricketMatch, innings: InningsState):
-    """Let the AI use each side's Impact Player at an over boundary. Returns a list of
-    announcement lines for any swaps made this call, so the sim / verbose loops can
-    surface the move to the channel. This is called ONLY from those loops (direct sims and
-    verbose over-by-over), so it fires for any auto-simmed match - whether vs the AI or a
-    human opponent (`cvm @user`). Interactive ball-by-ball play never calls it, leaving the
-    impact to the manual button there."""
-    announcements = []
-    if not getattr(match, "impact_player", False): return announcements
+def plan_ai_impact_swaps(match: CricketMatch, innings: InningsState):
+    """Work out each side's impact move at this over boundary WITHOUT applying any of them.
+    Returns a list of plan dicts (team_num / kind / out_name / in_player / reason).
+
+    Called only from the over-by-over sim loops (direct sims, verbose and ball-by-ball), so
+    it fires for any auto-simmed match - whether vs the AI or a human opponent (`cvm @user`).
+    Interactive ball-by-ball play never calls it, leaving the impact to the manual button.
+    A side that declined (or ignored) the offer is skipped for the rest of that innings: the
+    trigger is squad SHAPE, so it stays true every over and would otherwise re-prompt at
+    every single over break."""
+    plans = []
+    if not getattr(match, "impact_player", False): return plans
 
     for team_num in (1, 2):
         if getattr(match, f"t{team_num}_impact_used", False): continue
+        if getattr(match, f"t{team_num}_impact_declined_inn", None) == match.current_innings_num: continue
         team = match.team1 if team_num == 1 else match.team2
         subs = getattr(match, f"t{team_num}_subs", [])
         if not subs: continue
 
         batting_now = (innings.batting_team["name"] == team["name"])
         if _bowling_options(team["players"]) >= 5:
-            msg = _ai_impact_batting_boost(match, innings, team_num, subs, batting_now)
+            plan = _plan_impact_batting_boost(match, innings, team_num, subs, batting_now)
         else:
-            msg = _ai_impact_complete_attack(match, innings, team_num, subs, batting_now)
-        if msg:
-            announcements.append(msg)
+            plan = _plan_impact_complete_attack(match, innings, team_num, subs, batting_now)
+        if plan:
+            plans.append(plan)
 
-    return announcements
+    return plans
+
+def apply_impact_plan(match: CricketMatch, innings: InningsState, plan):
+    """Execute one planned impact swap and return its announcement line. `next_batter_idx`
+    is re-read here rather than taken from the plan: a plan can sit on screen for a few
+    seconds waiting on the manager, and the roster slot is what the swap writes into."""
+    team_num, out_name, in_player = plan["team_num"], plan["out_name"], plan["in_player"]
+    if plan["kind"] == "insert_batter":
+        return _impact_insert_batter(match, team_num, out_name, in_player)
+    if plan["kind"] == "replace_batter":
+        return _impact_replace_batter(match, team_num, innings.next_batter_idx, out_name, in_player)
+    return _impact_add_bowler(match, team_num, out_name, in_player)
 
 # Engine choice is by MATCH LENGTH, not an exact 50-over check: a DLS-reduced ODI
 # (e.g. 48 or 40 overs) must KEEP ODI pacing - only a genuinely short match plays
@@ -3723,6 +3742,56 @@ def generate_tbecs_scorecard_from_data(data: dict):
 
 # ---- Match progression & loops ----
 
+# `cv over` sits between verbose and ball-by-ball: the running sim finishes the over it is
+# already on, shows that over's card, then stops before the next one and hands control back
+# to the normal Over Hub - so the manager gets every usual option again (play the over
+# interactively, sim one over, go verbose, go ball-by-ball, impact sub) instead of watching
+# a whole innings run away. The loops only test the flag at a TRUE over boundary, so an
+# over is never cut in half.
+
+def _innings_finished(match: CricketMatch, innings: InningsState):
+    """The innings-end test the sim loops run at the top of every iteration."""
+    if innings.wickets >= _match_max_wickets(match) or innings.total_balls >= match.max_balls:
+        return True
+    return (match.current_innings_num == 2 and
+            innings.total_runs >= getattr(match, "target", match.innings1.total_runs + 1))
+
+def _step_over_stop_here(match: CricketMatch, innings: InningsState):
+    """Should the running sim break off at this over boundary? False when the over that just
+    finished also finished the INNINGS - the innings break owns the match from there, so the
+    request is consumed and the auto-sim is switched off instead, which lands the manager at
+    the hub for the next innings (rather than a pointless bowler pick for an over that will
+    never be bowled)."""
+    if not getattr(match, '_step_over', False):
+        return False
+    if not _innings_finished(match, innings):
+        return True
+    match._step_over = False
+    match.simulation_mode = "interactive"
+    match.verbose = False
+    match.sim_only = False
+    return False
+
+async def _step_over_handoff(interaction, match: CricketMatch, innings: InningsState, card_sent: bool):
+    """End the running auto-sim cleanly at an over boundary and re-open the Over Hub."""
+    channel = interaction.channel if hasattr(interaction, 'channel') else interaction
+    match._step_over = False
+    match._switch_to_verbose = False   # a queued `cv verbose` is superseded by stepping
+    match._bbb_active = False
+    if not card_sent:
+        # Card goes out BEFORE the per-over reset below, or the timeline is already wiped.
+        await channel.send(embed=render_embed_scoreboard(match))
+    innings.over_log.clear()
+    innings.bouncers_in_over = 0; innings.cutters_in_over = 0
+    innings.mystery_bowled_this_over = False
+    # Drop out of auto-sim, exactly as the innings break does. Without this the next hub
+    # pick inherits verbose/whole-match and runs away with the innings again.
+    match.simulation_mode = "interactive"
+    match.verbose = False
+    match.sim_only = False
+    await channel.send(f"⏸️ **Over {innings.total_balls // 6} complete** — paused before the next over.")
+    await prompt_bowler_then_hub(channel, match)
+
 async def advance_match_loop(interaction, match: CricketMatch):
     innings = match.current_innings
     
@@ -3735,8 +3804,26 @@ async def advance_match_loop(interaction, match: CricketMatch):
         elif match.simulation_mode == "interactive":
             await run_interactive_delivery_sequence(interaction, match)
 
+async def _auto_loop_guard(match: CricketMatch, coro):
+    """Mark a match as 'an auto sim is running right now' for as long as `coro` runs, so
+    `cv over` / `cv verbose` can tell whether there is anything to interrupt. Wrapping is
+    used rather than setting the flag inside the loops because each loop has half a dozen
+    exit paths (endmatch, runaway guard, bowler error, innings end, mode switch)."""
+    match._auto_loop = True
+    try:
+        return await coro
+    finally:
+        match._auto_loop = False
+        # A step request belongs to the sim it was typed at. If that sim ended on its own
+        # first (innings over mid-over, endmatch, an error), drop it - otherwise it would
+        # lie in wait and halt the NEXT sim after one over for no visible reason.
+        match._step_over = False
+
 async def loop_current_innings_simulation(interaction, match: CricketMatch):
     """Simulate the current innings only, then hand back to the Over Hub for the next innings."""
+    return await _auto_loop_guard(match, _loop_current_innings_simulation(interaction, match))
+
+async def _loop_current_innings_simulation(interaction, match: CricketMatch):
     channel = interaction.channel if hasattr(interaction, 'channel') else interaction
 
     _safety_deliveries = 0
@@ -3769,8 +3856,9 @@ async def loop_current_innings_simulation(interaction, match: CricketMatch):
             break
 
         if innings.total_balls % 6 == 0 and not innings.over_log:
-            for _ip_msg in try_ai_impact_player(match, innings):
-                await channel.send(_ip_msg)
+            await run_over_break_impact(channel, match, innings)
+            if active_games.get(channel.id) is not match:
+                return   # the impact offer paused us - /endmatch may have landed meanwhile
             # The bowler the user just picked at the hub bowls THIS over; the AI only
             # takes over from the following over onward.
             pending = getattr(match, '_pending_bowler', None)
@@ -3794,9 +3882,12 @@ async def loop_current_innings_simulation(interaction, match: CricketMatch):
         # the clear would wipe over_log mid-over and the next bowler-pick would re-select
         # a NEW bowler - the "verbose sim hands the over to a different bowler" bug.
         if innings.total_balls > tb_before and innings.total_balls % 6 == 0:
-            if getattr(match, 'verbose', False):
+            _carded = getattr(match, 'verbose', False)
+            if _carded:
                 await channel.send(embed=render_embed_scoreboard(match))
                 await asyncio.sleep(0.5)
+            if _step_over_stop_here(match, innings):
+                return await _step_over_handoff(interaction, match, innings, _carded)
             innings.over_log.clear()
             innings.bouncers_in_over = 0; innings.cutters_in_over = 0
             innings.mystery_bowled_this_over = False
@@ -3806,16 +3897,14 @@ async def loop_current_innings_bbb(interaction, match: CricketMatch):
     """Ball-by-ball verbose: post ONE live scoreboard per over and EDIT it after each
     delivery (at a readable pace), with a fresh card for every new over. Then hand back
     to the Over Hub for the next innings - same end-of-innings handling as the other sims."""
+    return await _auto_loop_guard(match, _loop_current_innings_bbb(interaction, match))
+
+async def _loop_current_innings_bbb(interaction, match: CricketMatch):
     channel = interaction.channel if hasattr(interaction, 'channel') else interaction
     BALL_DELAY = 1.3   # seconds between deliveries - fast enough to follow, slow enough to read
 
     def _innings_over(inn):
-        mw = _match_max_wickets(match)
-        if inn.wickets >= mw or inn.total_balls >= match.max_balls:
-            return True
-        if match.current_innings_num == 2 and inn.total_runs >= getattr(match, "target", match.innings1.total_runs + 1):
-            return True
-        return False
+        return _innings_finished(match, inn)
 
     match._bbb_active = True   # lets `cv verbose` know a bbb broadcast owns this match
     _safety_deliveries = 0     # runaway guard - abort a stuck innings instead of editing forever
@@ -3838,8 +3927,10 @@ async def loop_current_innings_bbb(interaction, match: CricketMatch):
 
         # Pick the over's bowler at a true over start (over_log empty so wides don't re-pick).
         if innings.total_balls % 6 == 0 and not innings.over_log:
-            for _ip_msg in try_ai_impact_player(match, innings):
-                await channel.send(_ip_msg)
+            await run_over_break_impact(channel, match, innings)
+            if active_games.get(channel.id) is not match:
+                match._bbb_active = False
+                return   # the impact offer paused us - /endmatch may have landed meanwhile
             # The hub-selected bowler gets THIS over; AI picks from the next over on.
             pending = getattr(match, '_pending_bowler', None)
             if pending:
@@ -3891,6 +3982,11 @@ async def loop_current_innings_bbb(interaction, match: CricketMatch):
         innings.bouncers_in_over = 0; innings.cutters_in_over = 0
         innings.mystery_bowled_this_over = False
 
+        # `cv over` was typed during this over: stop here (the live card above IS this
+        # over's card) and hand the next over back to the Over Hub.
+        if _step_over_stop_here(match, innings):
+            return await _step_over_handoff(interaction, match, innings, card_sent=True)
+
         # `cv verbose` was typed during this over: the over is now complete (or the
         # innings ended mid-over) - hand the REST of the match to the verbose sim.
         # sim_only=True keeps innings 2 auto-simming instead of returning to the hub;
@@ -3907,6 +4003,9 @@ async def loop_current_innings_bbb(interaction, match: CricketMatch):
 
 
 async def loop_entire_match_simulation(interaction, match: CricketMatch):
+    return await _auto_loop_guard(match, _loop_entire_match_simulation(interaction, match))
+
+async def _loop_entire_match_simulation(interaction, match: CricketMatch):
     channel = interaction.channel if hasattr(interaction, 'channel') else interaction
 
     _safety_innings = match.current_innings_num
@@ -3943,8 +4042,9 @@ async def loop_entire_match_simulation(interaction, match: CricketMatch):
         # deliveries yet this over, including wides). This prevents wides from triggering
         # a mid-over bowler swap when total_balls % 6 == 0.
         if innings.total_balls % 6 == 0 and not innings.over_log:
-            for _ip_msg in try_ai_impact_player(match, innings):
-                await channel.send(_ip_msg)
+            await run_over_break_impact(channel, match, innings)
+            if active_games.get(channel.id) is not match:
+                return   # the impact offer paused us - /endmatch may have landed meanwhile
             # A hub-selected bowler gets THIS over; AI picks from the next over on.
             pending = getattr(match, '_pending_bowler', None)
             if pending:
@@ -3968,9 +4068,12 @@ async def loop_entire_match_simulation(interaction, match: CricketMatch):
         # from wiping over_log mid-over (which re-picks a different bowler).
         if innings.total_balls > tb_before and innings.total_balls % 6 == 0:
             # Send verbose scoreboard BEFORE clearing over_log so the timeline is visible
-            if getattr(match, 'verbose', False):
+            _carded = getattr(match, 'verbose', False)
+            if _carded:
                 await channel.send(embed=render_embed_scoreboard(match))
                 await asyncio.sleep(0.5)
+            if _step_over_stop_here(match, innings):
+                return await _step_over_handoff(interaction, match, innings, _carded)
             innings.over_log.clear()
             innings.bouncers_in_over = 0; innings.cutters_in_over = 0
             innings.mystery_bowled_this_over = False
@@ -8830,6 +8933,7 @@ def _help_match_embed():
     e.add_field(name="TEST format in /match",                           value="Select 'TEST (90 overs)' in the format dropdown to play a 5-day Test with session/innings/full-match modes.", inline=False)
     e.add_field(name="/impactplayer",                                   value="During an active match, swap in your Impact Player (if rule is on).", inline=False)
     e.add_field(name="`cv verbose`  ·  `cv vb`",                       value="During a 🎬 Ball-by-Ball broadcast: finishes the current over ball-by-ball, then sims the **rest of the match** in verbose (one card per over). Tournament stats & results record as normal.", inline=False)
+    e.add_field(name="`cv over`  ·  `cv oc`",                          value="During a 📋 Verbose or 🎬 Ball-by-Ball sim: finishes the over being bowled, shows its **over card**, then stops before the next over and re-opens the **Over Hub** — so you can take back control mid-innings and pick how the next over is played.", inline=False)
     e.add_field(name="`cv resume`  ·  `cv forcehub`",                  value="Match stuck with no buttons (Discord hiccup ate the prompt)? Re-shows the lost over hub / bowler pick / next-batter prompt — no progress is lost.", inline=False)
     e.add_field(name="/endmatch  ·  `cv endmatch`  ·  `cv em`",       value="Force-cancel the current match or setup in this channel.", inline=False)
     e.add_field(name="/my_tier",                                        value="Check your subscription tier and remaining daily match limits.", inline=False)
@@ -9061,6 +9165,166 @@ async def impact_player_cmd(interaction: discord.Interaction):
     if not subs: return await interaction.response.send_message("❌ You have no subs available.", ephemeral=True)
         
     await interaction.response.send_message("🔄 **Select your Impact Player Swap:**", view=ImpactPlayerSelectView(match, team_id), ephemeral=True)
+
+
+# ---- Auto Impact Player: the over-break offer ----
+# The AI tactic works out the swap (plan_ai_impact_swaps); a side run by a real manager is
+# ASKED before it happens instead of having it done to them. The sim loop is paused while
+# the offer is up, so the answer lands before the next over is bowled.
+AI_IMPACT_DECIDE_SECS = 10   # no answer in this long = no swap
+AI_IMPACT_EDIT_SECS = 60     # extra grace once "Edit" is clicked and the picker is open
+
+class _AutoImpactEditView(ImpactPlayerSelectView):
+    """The normal manual swap picker, wired to release the paused sim loop the moment the
+    manager confirms their own choice."""
+    def __init__(self, match: CricketMatch, team_id: int, done_evt: asyncio.Event):
+        super().__init__(match, team_id)
+        self._done_evt = done_evt
+
+    async def confirm_cb(self, interaction: discord.Interaction):
+        try:
+            await super().confirm_cb(interaction)
+        finally:
+            self._done_evt.set()
+
+class AutoImpactPromptView(discord.ui.View):
+    """The 10-second offer itself. Timing is driven by the sim loop (asyncio.wait_for on
+    `decided`), not by the View's own timeout, because clicking Edit has to extend it."""
+    def __init__(self, match: CricketMatch, plan, uid: int):
+        super().__init__(timeout=None)
+        self.match = match
+        self.plan = plan
+        self.uid = uid
+        self.decision = None
+        self.decided = asyncio.Event()
+        self.edit_done = asyncio.Event()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.uid and interaction.user.id != getattr(self.match, "manager_id", None):
+            await interaction.response.send_message("❌ That's not your team's impact call.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Make the Swap", style=discord.ButtonStyle.success, emoji="✅")
+    async def confirm_swap(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        self.decision = "yes"
+        self.decided.set()
+        self.stop()
+
+    @discord.ui.button(label="Edit Swap", style=discord.ButtonStyle.primary, emoji="✏️")
+    async def edit_swap(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Don't stop() here - the loop stays paused until the picker is confirmed or the
+        # edit grace runs out.
+        self.decision = "edit"
+        self.decided.set()
+        try:
+            await interaction.response.send_message(
+                "🔄 **Pick your own swap** (the over is on hold):",
+                view=_AutoImpactEditView(self.match, self.plan["team_num"], self.edit_done),
+                ephemeral=True)
+        except Exception:
+            # Picker couldn't open (dead interaction token, no legal player to swap out).
+            # Release the over immediately instead of stalling it for the whole edit grace.
+            self.edit_done.set()
+
+    @discord.ui.button(label="Skip", style=discord.ButtonStyle.secondary, emoji="❌")
+    async def skip_swap(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        self.decision = "no"
+        self.decided.set()
+        self.stop()
+
+def _impact_manager_uid(match: CricketMatch, team_num: int):
+    """The real Discord manager of this side, or None when nobody is running it (vs-AI
+    opponent, tournament sims which use placeholder ids 0, club bots on negative ids).
+    A side with no manager keeps the old behaviour: the AI just makes the swap."""
+    uid = match.p1_id if team_num == 1 else match.p2_id
+    if not uid or uid <= 0 or _is_bot_uid(uid):
+        return None
+    return uid
+
+def _impact_plan_embed(match: CricketMatch, plan):
+    team = match.team1 if plan["team_num"] == 1 else match.team2
+    inp = plan["in_player"]
+    out_p = next((p for p in team["players"] if p["name"] == plan["out_name"]), None)
+    e = discord.Embed(
+        title="🤖 AI TACTIC — Impact Player?",
+        description=f"**{team['name']}** — the moment to use the Impact Player is now, {plan['reason']}.",
+        color=discord.Color.orange())
+
+    def _line(p):
+        if not p:
+            return "—"
+        role = str(p.get("role", "")).split("_")[0]
+        return f"{role} · BAT {p.get('bat', '?')} · BOWL {p.get('bowl', '?')}"
+
+    e.add_field(name="🚪 GOING OUT", value=f"**{plan['out_name']}**\n{_line(out_p)}", inline=True)
+    e.add_field(name="✅ COMING IN", value=f"**{inp['name']}**\n{_line(inp)}", inline=True)
+    e.set_footer(text=f"{AI_IMPACT_DECIDE_SECS}s to decide — no answer means no swap. The over waits.")
+    return e
+
+async def _offer_impact_plan(channel, match: CricketMatch, innings: InningsState, plan, uid: int):
+    """Put one planned swap to its manager and act on the answer. Blocks the calling sim
+    loop for at most AI_IMPACT_DECIDE_SECS (plus the edit grace if they choose to edit)."""
+    team_num = plan["team_num"]
+    view = AutoImpactPromptView(match, plan, uid)
+    try:
+        msg = await channel.send(f"<@{uid}>", embed=_impact_plan_embed(match, plan), view=view)
+    except Exception:
+        return   # can't ask - leave the impact unused rather than forcing it on them
+
+    async def _close():
+        try:
+            await msg.edit(view=None)
+        except Exception:
+            pass
+
+    def _decline():
+        setattr(match, f"t{team_num}_impact_declined_inn", match.current_innings_num)
+
+    try:
+        await asyncio.wait_for(view.decided.wait(), timeout=AI_IMPACT_DECIDE_SECS)
+    except asyncio.TimeoutError:
+        view.stop()
+        _decline()
+        await _close()
+        await channel.send("⏳ **No answer in time — Impact Player NOT used.** Play resumes. (`/impactplayer` still works whenever you want it.)")
+        return
+
+    await _close()
+
+    if view.decision == "yes":
+        line = apply_impact_plan(match, innings, plan)
+        if line:
+            await channel.send(line)
+        return
+
+    if view.decision == "no":
+        _decline()
+        await channel.send("❌ **Impact held back** — no swap this innings.")
+        return
+
+    # Edit: the picker is open, hold the over a little longer for their own choice.
+    try:
+        await asyncio.wait_for(view.edit_done.wait(), timeout=AI_IMPACT_EDIT_SECS)
+    except asyncio.TimeoutError:
+        _decline()
+        await channel.send("⏳ **Impact edit timed out** — play resumes. Use `/impactplayer` when you've decided.")
+    view.stop()
+
+async def run_over_break_impact(channel, match: CricketMatch, innings: InningsState):
+    """Over-boundary hook for the sim loops. AI-run sides swap silently exactly as before;
+    a side with a real manager is offered the swap first."""
+    for plan in plan_ai_impact_swaps(match, innings):
+        uid = _impact_manager_uid(match, plan["team_num"])
+        if uid is None:
+            line = apply_impact_plan(match, innings, plan)
+            if line:
+                await channel.send(line)
+            continue
+        await _offer_impact_plan(channel, match, innings, plan, uid)
+        _touch_channel(channel.id)   # the pause is deliberate - don't let the reaper count it as idle
 
 # ---- Public database search ----
 
@@ -10344,6 +10608,16 @@ class PrefixCog(commands.Cog):
             return await ctx.send("⏳ Already queued — the verbose sim takes over as soon as this over ends.")
         match._switch_to_verbose = True
         await ctx.send("📋 **Got it!** Finishing this over ball-by-ball, then simming the rest of the match in verbose.")
+
+    @commands.command(name="over", aliases=["oc", "overcard"], help="During a Verbose or Ball-by-Ball sim: finish the over being bowled, show its over card, then STOP before the next over and re-open the Over Hub with every option (interactive over, sim 1 over, verbose, ball-by-ball, impact sub).\nUsage: over")
+    async def over_step(self, ctx):
+        match = active_games.get(ctx.channel.id)
+        if not match or not getattr(match, '_auto_loop', False):
+            return await ctx.send("⚠️ No simulation is running in this channel — `cv over` only works while a 📋 Verbose or 🎬 Ball-by-Ball sim is live.")
+        if getattr(match, '_step_over', False):
+            return await ctx.send("⏳ Already queued — the Over Hub opens as soon as this over ends.")
+        match._step_over = True
+        await ctx.send("⏸️ **Got it!** Finishing this over, then pausing on the over card — you'll get the full Over Hub before the next over.")
 
     @commands.command(name="endmatch", aliases=["em"], help="Force cancel the current match or setup in this channel.\nUsage: endmatch")
     async def endmatch(self, ctx):
