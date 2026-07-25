@@ -1136,14 +1136,17 @@ def _run_full_match_sync(match: CricketMatch):
             print(f"Sim super over failed, leaving tie for fallback: {_so_err}")
 
     # Headless sims never reach handle_innings_end, so global stats are folded in here.
-    try:
-        gstats.record_limited_overs_match(match)
-    except Exception as _gs_err:
-        print(f"Global stats record failed (sim): {_gs_err}")
-    try:
-        cstats.record_limited_overs_match(match)
-    except Exception as _cs_err:
-        print(f"Conditions stats record failed (sim): {_cs_err}")
+    # A dummy data-farm match sets _defer_stats and records itself (batched) after the
+    # loop, so we skip the per-match recorders for those.
+    if not getattr(match, "_defer_stats", False):
+        try:
+            gstats.record_limited_overs_match(match)
+        except Exception as _gs_err:
+            print(f"Global stats record failed (sim): {_gs_err}")
+        try:
+            cstats.record_limited_overs_match(match)
+        except Exception as _cs_err:
+            print(f"Conditions stats record failed (sim): {_cs_err}")
 
 
 def _sim_super_over(match: CricketMatch):
@@ -1186,6 +1189,75 @@ def _sim_super_over(match: CricketMatch):
             match.tiebreak_winner_name = bat_team["name"] if r1 > r2 else bowl_team["name"]
             return
         bat_team, bowl_team = bowl_team, bat_team  # still tied - swap who bats first and replay
+
+
+# ---- Dummy data-farm run (owner-only `cv dummyrun`) ----
+# Balanced XIs drafted from the live player DB (league/dummy_run.py), played headless
+# across every pitch x weather combo ONLY to grow global_stats (GS) + conditions_stats
+# (PW). No tournament doc, no scorecard persistence - the two recorders fire inside
+# _run_full_match_sync and the match is discarded, which is what keeps it quick.
+_DUMMY_RUN = {"active": False}   # live progress; see PrefixCog.dummyrun
+_DUMMY_TEAM_NAMES = [
+    "Falcons", "Titans", "Rangers", "Vipers", "Chargers", "Nomads", "Sentinels",
+    "Cyclones", "Mavericks", "Wolves", "Corsairs", "Phantoms", "Outlaws", "Kestrels",
+    "Raptors", "Blazers",
+]
+
+def _simulate_dummy_match(a_players, b_players, pitch, weather, idx, rng):
+    """Play one headless T20 between two pre-drafted balanced XIs and return the finished
+    match. Stats are deferred (_defer_stats) so the caller records them - per match in
+    slow mode, or accumulated for a single bulk write in fast mode."""
+    n = _DUMMY_TEAM_NAMES
+    t1 = {"name": n[(idx * 2) % len(n)], "players": a_players, "subs": []}
+    t2 = {"name": n[(idx * 2 + 1) % len(n)], "players": b_players, "subs": []}
+    match = CricketMatch(t1["name"], t2["name"], 1, 2, t1, t2,
+                         format_overs=20, pitch=pitch, weather=weather)
+    match.sim_only = True
+    match.verbose = False
+    match.simulation_mode = "whole_match"
+    match._defer_stats = True   # caller owns recording (batched); skip the inline recorders
+    # Coin toss: randomise who bats first so home/away and bat/chase data stays unbiased.
+    if rng.random() < 0.5:
+        match.batting_first_id, match.bowling_first_id = 1, 2
+        bat, bowl = t1, t2
+    else:
+        match.batting_first_id, match.bowling_first_id = 2, 1
+        bat, bowl = t2, t1
+    match.innings1 = InningsState(bat, bowl)
+    match.current_innings = match.innings1
+    _run_full_match_sync(match)
+    return match
+
+
+def _dummy_embed(state, error=None):
+    """Live progress / final summary for a dummy run, built from _DUMMY_RUN."""
+    d = _DUMMY_RUN
+    done, total = d.get("done", 0), d.get("total", 0)
+    pct = (done / total) if total else 0
+    elapsed = max(time.time() - d.get("started", time.time()), 1e-6)
+    rate = done / elapsed
+    featured, pool, db = len(d.get("featured", ())), d.get("pool", 0), d.get("db", 0)
+    combos, cposs = len(d.get("combos", ())), d.get("combos_possible", 0)
+    colour = {"running": discord.Color.blurple(), "done": discord.Color.green(),
+              "cancelled": discord.Color.orange(), "error": discord.Color.red()}.get(state, discord.Color.blurple())
+    title = {"running": "⚙️ Dummy run — in progress", "done": "✅ Dummy run — complete",
+             "cancelled": "🛑 Dummy run — cancelled", "error": "❌ Dummy run — error"}.get(state, "Dummy run")
+    filled = int(pct * 20)
+    bar = "█" * filled + "░" * (20 - filled)
+    e = discord.Embed(title=title, color=colour)
+    e.add_field(name="Matches", value=f"`{bar}`\n**{done:,}/{total:,}**  ({pct:.0%})", inline=False)
+    e.add_field(name="Players featured", value=f"**{featured:,}** / {pool:,} pool\n-# {db:,} in DB", inline=True)
+    e.add_field(name="Conditions", value=f"**{combos}** / {cposs} pitch×weather", inline=True)
+    e.add_field(name="Speed", value=f"**{rate:.0f}**/s · {elapsed:.0f}s\n-# {d.get('mode', 'fast')} mode", inline=True)
+    if state == "running":
+        remaining = (total - done) / rate if rate > 0 else 0
+        e.set_footer(text=f"~{remaining:.0f}s left · cv dummyrun stop to cancel")
+    elif state == "error":
+        e.set_footer(text=f"{type(error).__name__}: {error}"[:200])
+    else:
+        e.set_footer(text="Fed into global stats + the conditions tracker · nothing saved to the tournament DB")
+    return e
+
 
 # ---- Embed scoreboards & pil graphics ----
 
@@ -11817,6 +11889,158 @@ class PrefixCog(commands.Cog):
             view.message = await ctx.send(embed=view.build_embed(), view=view)
         except Exception as e:
             await ctx.send(f"❌ Error during sync: {e}")
+
+    @commands.command(name="dummyrun", aliases=["datafarm", "dummytourney", "dfarm"],
+                      help="[OWNER] Farm GS + pitch/weather data fast.\nDrafts balanced XIs from ~70% of the player DB and plays N headless T20s across every pitch x weather - feeds global stats + the conditions tracker, saves NO scorecards.\nUsage: dummyrun <matches> [pool%] [fast|slow]  ·  dummyrun status  ·  dummyrun stop\nfast (default) batches the GS/PW writes into bulk flushes - best for large N. slow writes per match (crash-safe, identical to a live match).\nExamples: `dummyrun 500` · `dummyrun 5000 0.8` · `dummyrun 200 slow` · `dummyrun stop`")
+    async def dummyrun(self, ctx, *args):
+        if ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("❌ Owner only.")
+
+        sub = (args[0].lower() if args else "")
+        if sub in ("stop", "cancel"):
+            if _DUMMY_RUN.get("active"):
+                _DUMMY_RUN["cancel"] = True
+                return await ctx.send("🛑 Stopping the dummy run after the current batch…")
+            return await ctx.send("ℹ️ No dummy run is active.")
+        if sub in ("status", "info"):
+            if not _DUMMY_RUN.get("active"):
+                return await ctx.send("ℹ️ No dummy run is active.")
+            return await ctx.send(embed=_dummy_embed("running"))
+        if _DUMMY_RUN.get("active"):
+            return await ctx.send("⚠️ A dummy run is already in progress. Use `cv dummyrun status` or `cv dummyrun stop`.")
+
+        # Parse: <matches> [pool% as 0-1 or 0-100] [fast|slow], order-independent after matches.
+        total, frac, mode = None, 0.70, "fast"
+        for tok in args:
+            t = tok.lower()
+            if t in ("fast", "slow"):
+                mode = t
+            elif total is None and tok.isdigit():
+                total = int(tok)
+            else:
+                try:
+                    f = float(tok)
+                    frac = f / 100.0 if f > 1 else f      # accept 70 or 0.7
+                except ValueError:
+                    pass
+        if total is None:
+            return await ctx.send("Usage: `cv dummyrun <matches> [pool%] [fast|slow]` · `cv dummyrun status` · `cv dummyrun stop`")
+        if total <= 0:
+            return await ctx.send("❌ Number of matches must be a positive integer.")
+        frac = min(max(frac, 0.05), 1.0)
+
+        from league import dummy_run as dr
+        all_players = [dict(p) for p in get_all_players()]   # copy - never mutate the DB cache
+        if len(all_players) < 22:
+            return await ctx.send("❌ Need at least 22 players in the DB to field two teams.")
+
+        rng = random.Random()
+        pool = dr.select_pool(all_players, frac, rng)
+        feas = dr.feasibility(pool)
+        if not feas["ok"]:
+            return await ctx.send(f"❌ Pool too lopsided to field balanced XIs (short buckets: {feas['short']}). "
+                                  f"Try a larger pool%.")
+        buckets = dr.bucketize(pool)
+        pitches = list(ALL_PITCHES); rng.shuffle(pitches)
+        weathers = list(ALL_WEATHER); rng.shuffle(weathers)
+        combos_possible = len(pitches) * len(weathers)
+
+        _DUMMY_RUN.clear()
+        _DUMMY_RUN.update({
+            "active": True, "cancel": False, "done": 0, "total": total, "mode": mode,
+            "db": len(all_players), "pool": len(pool), "frac": frac,
+            "featured": set(), "combos": set(), "combos_possible": combos_possible,
+            "started": time.time(), "by": ctx.author.id,
+        })
+        note = ""
+        if total < combos_possible:
+            note = f"\n-# {total} < {combos_possible} combos — not every pitch×weather pair will be hit this run."
+        msg = await ctx.send(
+            f"⚙️ **Dummy run started** — {total:,} headless T20s (**{mode}** mode).\n"
+            f"-# pool {len(pool):,}/{len(all_players):,} players ({frac:.0%}) · balanced XIs · "
+            f"feeds GS + PW · no scorecards saved.{note}",
+            embed=_dummy_embed("running"))
+        # Background task (ref held in _DUMMY_RUN so it can't be GC'd): the loop yields
+        # the event loop between batches so the bot stays responsive.
+        _DUMMY_RUN["task"] = self.bot.loop.create_task(
+            self._dummy_worker(msg, buckets, pitches, weathers, total, rng, mode))
+
+    async def _dummy_worker(self, msg, buckets, pitches, weathers, total, rng, mode):
+        from league import dummy_run as dr
+        play_counts = {}
+        featured, combos = _DUMMY_RUN["featured"], _DUMMY_RUN["combos"]
+        fast = (mode == "fast")
+        # fast: bigger batches + deferred GS save + one bulk PW write per batch, so a
+        # few-thousand-match run costs a handful of Mongo round-trips, not thousands.
+        CHUNK = 250 if fast else 25
+        pw_batch = {}
+        done, error, last_edit = 0, None, 0.0
+        if fast:
+            gstats.set_defer_save(True)
+        try:
+            while done < total and not _DUMMY_RUN["cancel"]:
+                count = min(CHUNK, total - done)
+                start = done
+
+                def run_chunk():
+                    for k in range(count):
+                        idx = start + k
+                        a, b, _sa, _sb = dr.draft_match(buckets, play_counts, rng)
+                        pitch = pitches[idx % len(pitches)]
+                        weather = weathers[idx % len(weathers)]
+                        m = _simulate_dummy_match(a, b, pitch, weather, idx, rng)
+                        # Record (deferred inside the match, so we own it here).
+                        try:
+                            gstats.record_limited_overs_match(m)   # aggregates; disk write deferred if fast
+                        except Exception as _ge:
+                            print(f"[dummyrun] GS record failed: {_ge}")
+                        try:
+                            if fast:
+                                cstats.accumulate(m, pw_batch)      # in-memory; flushed per batch
+                            else:
+                                cstats.record_limited_overs_match(m)  # per-match Mongo upsert
+                        except Exception as _ce:
+                            print(f"[dummyrun] PW record failed: {_ce}")
+                        combos.add((pitch, weather))
+                        featured.update(p["name"] for p in a)
+                        featured.update(p["name"] for p in b)
+                    if fast:
+                        gstats.flush()                # one GS disk write per batch
+                        cstats.flush_batch(pw_batch)  # one bulk PW round-trip per batch
+
+                await asyncio.to_thread(run_chunk)
+                done += count
+                _DUMMY_RUN["done"] = done
+                now = time.time()
+                if now - last_edit >= 1.5:             # throttle edits so Discord won't 429
+                    last_edit = now
+                    try:
+                        await msg.edit(embed=_dummy_embed("running"))
+                    except Exception:
+                        pass
+        except Exception as e:
+            error = e
+            print(f"[dummyrun] aborted: {e}")
+        finally:
+            if fast:
+                # Persist anything left (cancel mid-batch, or a batch that didn't flush).
+                try:
+                    await asyncio.to_thread(cstats.flush_batch, pw_batch)
+                except Exception as _fe:
+                    print(f"[dummyrun] PW final flush failed: {_fe}")
+                gstats.set_defer_save(False)
+                try:
+                    gstats.flush()
+                except Exception as _fe:
+                    print(f"[dummyrun] GS final flush failed: {_fe}")
+            _DUMMY_RUN["active"] = False
+            state = "error" if error else ("cancelled" if _DUMMY_RUN.get("cancel") else "done")
+            try:
+                await msg.edit(embed=_dummy_embed(state, error))
+                if state in ("done", "cancelled"):
+                    await msg.reply(f"✅ Dummy run {state} — **{done:,}** matches folded into GS + PW.")
+            except Exception:
+                pass
 
     @commands.command(name="set_user_tier", aliases=["sut"], help="[OWNER] Assign subscription tier to a user (optional auto-expiry).\nUsage: set_user_tier @user <tier> [days]\nTiers: Basic, Standard, Single, Server Pro, Career Beta, None\n`days` optional — e.g. `sut @user Standard 30` auto-removes after 30 days.")
     async def set_user_tier(self, ctx, user: discord.Member, *, tier: str):

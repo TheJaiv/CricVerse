@@ -107,21 +107,20 @@ _TEST_FIELDS = (
 )
 
 
-def record_limited_overs_match(match):
-    """Fold a finished T20/ODI/custom CricketMatch into its pitch*weather*format
-    doc. Idempotent per match object; skips player tests, super overs, and
-    half-finished matches."""
+def _lo_contribution(match):
+    """(pitch, weather, fmt, acc, hi, lo) for a finished LO match, or None if it must
+    not be recorded (player test / super over / half-finished / no conditions). Same
+    numbers record_limited_overs_match would write - split out so a bulk run can
+    accumulate many matches in memory before touching Mongo (see accumulate)."""
     if getattr(match, "is_player_test", False) or getattr(match, "is_super_over", False):
-        return
-    if getattr(match, "_conditions_recorded", False):
-        return
+        return None
     i1 = getattr(match, "innings1", None)
     i2 = getattr(match, "innings2", None)
     if not i1 or not i2:
-        return
+        return None
     pitch, weather = getattr(match, "pitch", None), getattr(match, "weather", None)
     if not pitch or not weather:
-        return
+        return None
 
     acc = {k: 0 for k in _LO_FIELDS}
     acc["matches"] = 1
@@ -135,8 +134,74 @@ def record_limited_overs_match(match):
         acc["ties"] = 1
     _fold_bowling(i1, acc)
     _fold_bowling(i2, acc)
-    _write(pitch, weather, format_key(match), acc,
-           max(i1.total_runs, i2.total_runs), min(i1.total_runs, i2.total_runs), match)
+    return (pitch, weather, format_key(match), acc,
+            max(i1.total_runs, i2.total_runs), min(i1.total_runs, i2.total_runs))
+
+
+def record_limited_overs_match(match):
+    """Fold a finished T20/ODI/custom CricketMatch into its pitch*weather*format
+    doc. Idempotent per match object; skips player tests, super overs, and
+    half-finished matches."""
+    if getattr(match, "_conditions_recorded", False):
+        return
+    c = _lo_contribution(match)
+    if c is None:
+        return
+    pitch, weather, fmt, acc, hi, lo = c
+    _write(pitch, weather, fmt, acc, hi, lo, match)
+
+
+def accumulate(match, batch):
+    """Merge one match's conditions contribution into an in-memory `batch` dict (keyed
+    by combo id) instead of writing to Mongo now. The dummy data-farm collapses
+    thousands of matches this way, then flush_batch() writes them in ONE bulk round-trip.
+    Marks the match recorded so it can never be double-counted."""
+    if getattr(match, "_conditions_recorded", False):
+        return
+    c = _lo_contribution(match)
+    if c is None:
+        return
+    pitch, weather, fmt, acc, hi, lo = c
+    key = _combo_id(pitch, weather, fmt)
+    b = batch.get(key)
+    if b is None:
+        batch[key] = {"pitch": pitch, "weather": weather, "fmt": fmt,
+                      "inc": dict(acc), "hi": hi, "lo": lo}
+    else:
+        binc = b["inc"]
+        for k, v in acc.items():
+            binc[k] = binc.get(k, 0) + v
+        b["hi"] = max(b["hi"], hi)
+        b["lo"] = min(b["lo"], lo)
+    match._conditions_recorded = True
+
+
+def flush_batch(batch):
+    """Write an accumulated `batch` to Mongo in one bulk_write (falling back to
+    per-combo upserts if pymongo's UpdateOne is unavailable), then clear it. Returns
+    the number of pitch*weather*format docs touched. No-op on an empty batch."""
+    if not batch:
+        return 0
+    n = len(batch)
+    try:
+        from pymongo import UpdateOne
+    except Exception:
+        UpdateOne = None
+    col = _get_db()[COLLECTION]
+    ops = []
+    for key, b in batch.items():
+        upd = {"$inc": b["inc"],
+               "$max": {"hi_total": b["hi"]},
+               "$min": {"lo_total": b["lo"]},
+               "$setOnInsert": {"pitch": b["pitch"], "weather": b["weather"], "fmt": b["fmt"]}}
+        if UpdateOne is not None:
+            ops.append(UpdateOne({"_id": key}, upd, upsert=True))
+        else:
+            col.update_one({"_id": key}, upd, upsert=True)
+    if ops:
+        col.bulk_write(ops, ordered=False)
+    batch.clear()
+    return n
 
 
 def record_test_match(match):

@@ -30,6 +30,8 @@ _TEAM_RECORD_CAP = 10   # keep this many high + low team totals per format
 _lock = threading.Lock()   # recorders also run inside asyncio.to_thread (simulate_all)
 _stats = None              # the v2 wrapper dict (see module docstring)
 _dirty = False             # something recorded since the last owner backup DM
+_defer_save = False        # when True, recorders aggregate in memory but skip the
+                           # per-match disk write (bulk dummy runs flush() once)
 
 
 def _blank():
@@ -96,6 +98,22 @@ def _save():
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(_stats, f)
     os.replace(tmp, STATS_PATH)
+
+
+def set_defer_save(on):
+    """Turn the per-match disk write off (on=True) or back on. A bulk dummy run defers
+    saving so it isn't rewriting the whole JSON every match, then calls flush(). Live
+    recording leaves this False, so real matches persist immediately as before."""
+    global _defer_save
+    _defer_save = bool(on)
+
+
+def flush():
+    """Persist the in-memory stats to disk now. Used with set_defer_save during bulk
+    runs (safe to call any time; a no-op-ish full save otherwise)."""
+    with _lock:
+        if _stats is not None:
+            _save()
 
 
 def _bucket(name, fmt):
@@ -316,7 +334,8 @@ def _record(innings_list, team_innings, fmt, match):
             _bucket(name, fmt)["matches"] += 1
         _apply_team_totals(team_innings, fmt)
         _dirty = True
-        _save()
+        if not _defer_save:
+            _save()
     match._global_stats_recorded = True
 
 
