@@ -9253,11 +9253,9 @@ def _impact_plan_embed(match: CricketMatch, plan):
         description=f"**{team['name']}** — the moment to use the Impact Player is now, {plan['reason']}.",
         color=discord.Color.orange())
 
+    # Role only - player ratings stay hidden, same as the manual swap picker.
     def _line(p):
-        if not p:
-            return "—"
-        role = str(p.get("role", "")).split("_")[0]
-        return f"{role} · BAT {p.get('bat', '?')} · BOWL {p.get('bowl', '?')}"
+        return f"*{_role_short(p)}*" if p else "—"
 
     e.add_field(name="🚪 GOING OUT", value=f"**{plan['out_name']}**\n{_line(out_p)}", inline=True)
     e.add_field(name="✅ COMING IN", value=f"**{inp['name']}**\n{_line(inp)}", inline=True)

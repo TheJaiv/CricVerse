@@ -561,6 +561,37 @@ async def t_auto_loop_flag():
     del B.active_games[ch.id]
 
 
+async def t_offer_hides_ratings():
+    """Player ratings are hidden from managers - the offer must never print bat/bowl."""
+    ch = FakeChannel(1015)
+    m = register(build_match(p1_id=111, p2_id=222, bat_first=1), ch)
+    inn = m.current_innings
+    arm_rule1(inn)
+
+    plan = next(p for p in B.plan_ai_impact_swaps(m, inn) if p["team_num"] == 1)
+    e = B._impact_plan_embed(m, plan)
+    blob = " ".join([e.title or "", e.description or "", e.footer.text or ""] +
+                    [f"{f.name} {f.value}" for f in e.fields])
+
+    ratings = set()
+    for p in m.team1["players"] + m.t1_subs:
+        ratings.update({str(p["bat"]), str(p["bowl"])})
+    leaked = sorted(r for r in ratings if r in blob.split() or f" {r} " in blob or f"{r}\n" in blob)
+    check("hidden ratings: no bat/bowl value appears in the offer", not leaked, f"leaked={leaked} in {blob!r}")
+    check("hidden ratings: roles are still shown",
+          any("BWL" in f.value or "BAT" in f.value or "AR" in f.value for f in e.fields),
+          f"{[f.value for f in e.fields]}")
+    check("hidden ratings: both players are named",
+          plan["out_name"] in blob and plan["in_player"]["name"] in blob)
+
+    # The applied-swap announcement is rating-free too.
+    line = B.apply_impact_plan(m, inn, plan)
+    check("hidden ratings: swap announcement carries no ratings",
+          not any(str(r) in (line or "").replace(plan["out_name"], "").replace(plan["in_player"]["name"], "")
+                  for r in ratings), f"{line}")
+    B.active_games.pop(ch.id, None)
+
+
 async def t_step_on_last_over_of_innings():
     """`cv over` typed on the over that also ENDS the innings must not open a bowler pick
     for an over that will never be bowled - the innings break takes over instead."""
@@ -627,7 +658,8 @@ async def main():
               t_human_prompt_skip, t_human_prompt_timeout, t_human_prompt_edit,
               t_prompt_owner_only, t_manager_uid_resolution, t_rule2_plan,
               t_impact_off_and_used, t_endmatch_during_prompt, t_auto_loop_flag,
-              t_step_on_last_over_of_innings, t_step_then_hub_can_resim):
+              t_step_on_last_over_of_innings, t_step_then_hub_can_resim,
+              t_offer_hides_ratings):
         print(f"\n--- {t.__name__} ---")
         try:
             await t()
