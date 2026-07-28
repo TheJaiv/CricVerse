@@ -355,6 +355,9 @@ setup_states = {}           # channel_id -> MatchSetupState, kept ALIVE through 
                             # pre-match setup (format->impact->names->XI->verify->pitch) so
                             #  endmatch can mark state.cancelled and the setup views bail.
 draft_tasks = {}            # channel_id -> asyncio.Task for the running draft (cancellable)
+draft_players = {}          # channel_id -> (host_id, opp_id) - the pick phase has no match
+                            # or setup object yet, so this is the only record of who is in
+                            # it for _may_control_channel to check.
 
 # ---- Idle-match reaper ----
 # Abandoned activities (a setup nobody finished, a match nobody kept playing) used to
@@ -414,6 +417,105 @@ def _describe_test(m) -> str:
         return f"{m.team1.get('name', 'Team 1')} vs {m.team2.get('name', 'Team 2')}"
     except Exception:
         return "Test match"
+
+def _channel_busy_msg(cid):
+    """Refusal text naming whatever already occupies this channel, or None if it's free.
+    Every registry above is keyed by channel_id, so a second launch in the same channel
+    would silently overwrite the first - both matches then break (the live views guard on
+    `active_games[cid] is my_match` and start refusing every button)."""
+    if cid in active_games:
+        what = f"a match is in progress — {_describe_match(active_games[cid])}"
+    elif cid in active_test_matches:
+        what = f"a Test match is in progress — {_describe_test(active_test_matches[cid])}"
+    elif cid in active_drafts or cid in draft_tasks:
+        what = "a draft is in progress"
+    elif cid in active_setups or cid in setup_states:
+        what = "a match setup is in progress"
+    else:
+        return None
+    return (f"❌ Can't launch here — {what}.\n"
+            f"Finish it first, run `cv endmatch` to force-end it, or launch in another channel.")
+
+# ---- Who may interfere with a running match ----
+# endmatch / verbose / over all reach into someone else's live game. Left open, any
+# bystander could walk into a tournament final and cancel it or flip it to a verbose sim.
+# These resolve the people who actually have a stake in the channel's activity.
+CONTROL_DENIED = ("🔒 **Only the players in this match can do that** — plus the tournament's "
+                  "managers and the server admins. Ask one of them.")
+
+def _channel_setup_state(cid):
+    """The MatchSetupState driving this channel's pre-match setup, if there is one."""
+    st = setup_states.get(cid)
+    if st is not None:
+        return st
+    cur = active_setups.get(cid)
+    return cur[1] if isinstance(cur, tuple) and len(cur) > 1 else None
+
+def _channel_player_ids(cid) -> set:
+    """Discord ids of everyone actually playing whatever is live in this channel."""
+    ids = set()
+    def _add(*vals):
+        for v in vals:
+            if v is None:
+                continue
+            try:
+                ids.add(int(v))
+            except (TypeError, ValueError):
+                pass
+
+    m = active_games.get(cid) or active_test_matches.get(cid)
+    if m is not None:
+        _add(getattr(m, "p1_id", None), getattr(m, "p2_id", None),
+             getattr(m, "manager_id", None), getattr(m, "debut_user_id", None),
+             getattr(m, "draft_host_id", None), getattr(m, "draft_opp_id", None))
+        # Club matches have no "two players" - every squad member owns their own player.
+        for t in (getattr(m, "team1", None), getattr(m, "team2", None)):
+            if isinstance(t, dict):
+                for p in list(t.get("players", [])) + list(t.get("subs", [])):
+                    if isinstance(p, dict):
+                        _add(p.get("owner_id"))
+
+    st = _channel_setup_state(cid)
+    if st is not None:
+        _add(getattr(st, "p1_id", None), getattr(st, "p2_id", None),
+             getattr(st, "manager_id", None), getattr(st, "draft_host_id", None),
+             getattr(st, "draft_opp_id", None))
+
+    _add(*draft_players.get(cid, ()))
+    return ids
+
+def _channel_manager_ids(cid) -> set:
+    """Managers of the tournament this channel's match belongs to (empty if it isn't one)."""
+    m = active_games.get(cid) or active_test_matches.get(cid)
+    sid = getattr(m, "tournament_server_id", None) if m is not None else None
+    if sid is None:
+        st = _channel_setup_state(cid)
+        sid = getattr(st, "tournament_server_id", None) if st is not None else None
+    if sid is None:
+        return set()
+    try:
+        tourney = get_server_tournament(str(sid)) or {}
+    except Exception:
+        return set()
+    ids = set()
+    for mid in tourney.get("managers", []):
+        try:
+            ids.add(int(mid))
+        except (TypeError, ValueError):
+            pass
+    return ids
+
+def _may_control_channel(user, cid) -> bool:
+    """True if `user` may end or steer the activity running in this channel."""
+    uid = getattr(user, "id", user)
+    if uid == ADMIN_DISCORD_ID or str(uid) in get_auth_admins():
+        return True
+    # Server admins count as managers everywhere else in the bot (see the is_mgr checks
+    # in the tournament commands), and they're the escape hatch when a match is stuck
+    # and its players have left the server.
+    if getattr(getattr(user, "guild_permissions", None), "administrator", False):
+        return True
+    return uid in _channel_player_ids(cid) or uid in _channel_manager_ids(cid)
 
 # ---- Cloud database & security ----
 @tasks.loop(hours=1)
@@ -7073,6 +7175,13 @@ async def after_team1_xi(channel, state):
 # Final step: build the match object and start play (the toss already ran pre-XI)
 
 async def start_match(channel, state):
+    # The setup phase is over the moment we get here. The manual flow deletes its own
+    # active_setups entry at each stage, but the tournament flow's ("tournament_setup")
+    # entry is button-driven and had nothing to clear it - it survived the whole match and
+    # the reaper then posted a bogus "Match cancelled" 10 minutes after a completed game
+    # (and kept the channel marked busy until then). Clear it here for every flow.
+    active_setups.pop(channel.id, None)
+
     # Test format (90 overs) uses a completely different simulation engine
     if state.format_overs == 90:
         return await _begin_test_match(channel, state)
@@ -8779,6 +8888,15 @@ async def simulatematch_cmd(interaction: discord.Interaction):
 
 @bot.event
 async def on_start_tournament_match(channel, manager_id, tourney, match_data):
+    # Every launch path (cvt play / play_next / next_match / challenge, prefix + slash)
+    # funnels through this event, so one check here is the backstop that stops a second
+    # tournament match from taking over a channel that is already playing one. The
+    # commands themselves also check up-front, so this rarely fires - but it must run
+    # BEFORE any tournament state is touched below.
+    busy = _channel_busy_msg(channel.id)
+    if busy:
+        return await channel.send(busy)
+
     team1_name = match_data["team1"]
     team2_name = match_data["team2"]
     # Reload fresh tourney so injury data from the last match is current
@@ -8887,6 +9005,7 @@ def _force_end_channel(channel_id) -> bool:
     task = draft_tasks.pop(channel_id, None)
     if task is not None and not task.done():
         task.cancel(); cleared = True
+    draft_players.pop(channel_id, None)
     channel_activity.pop(channel_id, None)
     channel_started.pop(channel_id, None)
     return cleared
@@ -8895,6 +9014,12 @@ def _force_end_channel(channel_id) -> bool:
 @bot.tree.command(name="endmatch", description="Force cancel the current match or setup in this channel.")
 async def endmatch_cmd(interaction: discord.Interaction):
     channel_id = interaction.channel.id
+    if not _channel_has_activity(channel_id):
+        return await interaction.response.send_message("⚠️ There is no active match or setup running in this channel.", ephemeral=True)
+    # Permission is resolved from the LIVE activity, so it has to be checked before the
+    # teardown wipes the participants we'd check against.
+    if not _may_control_channel(interaction.user, channel_id):
+        return await interaction.response.send_message(CONTROL_DENIED, ephemeral=True)
     cleared = _force_end_channel(channel_id)
     if cleared:
         await interaction.response.send_message("🛑 **Match and setup forcefully terminated.** Memory cleared.")
@@ -10602,6 +10727,8 @@ class PrefixCog(commands.Cog):
         match = active_games.get(ctx.channel.id)
         if not match or not getattr(match, '_bbb_active', False):
             return await ctx.send("⚠️ No Ball-by-Ball broadcast is running in this channel — `cv verbose` only works while a 🎬 Ball-by-Ball sim is live.")
+        if not _may_control_channel(ctx.author, ctx.channel.id):
+            return await ctx.send(CONTROL_DENIED)
         if getattr(match, '_switch_to_verbose', False):
             return await ctx.send("⏳ Already queued — the verbose sim takes over as soon as this over ends.")
         match._switch_to_verbose = True
@@ -10612,6 +10739,8 @@ class PrefixCog(commands.Cog):
         match = active_games.get(ctx.channel.id)
         if not match or not getattr(match, '_auto_loop', False):
             return await ctx.send("⚠️ No simulation is running in this channel — `cv over` only works while a 📋 Verbose or 🎬 Ball-by-Ball sim is live.")
+        if not _may_control_channel(ctx.author, ctx.channel.id):
+            return await ctx.send(CONTROL_DENIED)
         if getattr(match, '_step_over', False):
             return await ctx.send("⏳ Already queued — the Over Hub opens as soon as this over ends.")
         match._step_over = True
@@ -10619,6 +10748,10 @@ class PrefixCog(commands.Cog):
 
     @commands.command(name="endmatch", aliases=["em"], help="Force cancel the current match or setup in this channel.\nUsage: endmatch")
     async def endmatch(self, ctx):
+        if not _channel_has_activity(ctx.channel.id):
+            return await ctx.send("⚠️ There is no active match or setup running in this channel.")
+        if not _may_control_channel(ctx.author, ctx.channel.id):
+            return await ctx.send(CONTROL_DENIED)
         cleared = _force_end_channel(ctx.channel.id)
         if cleared:
             await ctx.send("🛑 **Match and setup forcefully terminated.** Memory cleared.")
@@ -11006,6 +11139,7 @@ class PrefixCog(commands.Cog):
         channel = ctx.channel
         active_drafts.add(channel.id)
         draft_tasks[channel.id] = asyncio.current_task()
+        draft_players[channel.id] = (host.id, None if opponent is None else opponent.id)
         try:
             base_pool = apply_server_overrides(get_all_players(), str(ctx.guild.id))
             if len(base_pool) < 60:
@@ -11094,6 +11228,7 @@ class PrefixCog(commands.Cog):
         finally:
             active_drafts.discard(channel.id)
             draft_tasks.pop(channel.id, None)
+            draft_players.pop(channel.id, None)
 
     @commands.command(name="playerlist", aliases=["pl"], help="Download full player database grouped by tier.\nUsage: playerlist")
     async def playerlist(self, ctx):
@@ -14328,6 +14463,9 @@ class PrefixCog(commands.Cog):
         ok, gate_msg = match_order_gate(tourney, pending)
         if not ok:
             return await ctx.send(gate_msg)
+        busy = _channel_busy_msg(ctx.channel.id)
+        if busy:
+            return await ctx.send(busy)
 
         r_label = f"Round {current_round}" if isinstance(current_round, int) else current_round
         await ctx.send(f"🚀 **Launching {r_label} — Match {pending['match_id']}...**")
@@ -14355,6 +14493,9 @@ class PrefixCog(commands.Cog):
         ok, gate_msg = match_order_gate(tourney, match)
         if not ok:
             return await ctx.send(gate_msg)
+        busy = _channel_busy_msg(ctx.channel.id)
+        if busy:
+            return await ctx.send(busy)
 
         r_label = f"Round {match['round']}" if isinstance(match['round'], int) else match['round']
         await ctx.send(f"🚀 **Launching Match {match['match_id']} ({r_label})...**\n<@{ctx.author.id}> — make sure your opponent is here to pick their XI.")
@@ -14809,6 +14950,11 @@ class PrefixCog(commands.Cog):
         from league.rating_league import RATING_KO_STAGES
         if any(m.get("stage") in RATING_KO_STAGES for m in tourney.get("schedule", [])):
             return await ctx.send("❌ The ladder is closed — the playoffs have begun.")
+        # Check the channel BEFORE create_open_match - a refusal after it would leave a
+        # phantom pending fixture on the ladder that nobody asked for.
+        busy = _channel_busy_msg(ctx.channel.id)
+        if busy:
+            return await ctx.send(busy)
         m = create_open_match(tourney, my["name"], opp["name"])
         tourney.setdefault("schedule", []).append(m)
         save_tournament(tourney)
@@ -16554,6 +16700,9 @@ class PrefixCog(commands.Cog):
                 break
         if match is None:
             return await ctx.send(gate_msg)
+        busy = _channel_busy_msg(ctx.channel.id)
+        if busy:
+            return await ctx.send(busy)
         r_label = f"Round {match['round']}" if isinstance(match['round'], int) else match['round']
         await ctx.send(f"🚀 **Launching Match {match['match_id']} ({r_label})...**")
         self.bot.dispatch("start_tournament_match", ctx.channel, ctx.author.id, tourney, match)

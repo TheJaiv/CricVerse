@@ -250,6 +250,17 @@ def _team_has_live_match(team_name):
     return False
 
 
+def _channel_busy_msg(cid):
+    """Refusal text if a match/setup/draft already owns this channel, else None.
+    bot.py holds the activity registries; imported lazily because bot.py imports this
+    module (TournamentCog) at startup, so a top-level import would be circular."""
+    try:
+        from bot import _channel_busy_msg as _busy
+    except Exception:
+        return None
+    return _busy(cid)
+
+
 def rename_team(tourney, team_name, new_name):
     """Rename a team, propagating the new name everywhere it's used as a join key:
     every schedule entry (team1/team2/result winner/loser/batted_first + that
@@ -3732,6 +3743,9 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         ok, gate_msg = match_order_gate(tourney, pending)
         if not ok:
             return await interaction.response.send_message(gate_msg, ephemeral=True)
+        busy = _channel_busy_msg(interaction.channel.id)
+        if busy:
+            return await interaction.response.send_message(busy, ephemeral=True)
         r_label = f"Round {current_round}" if isinstance(current_round, int) else current_round
         await interaction.response.send_message(f"🚀 **Launching {r_label} — Match {pending['match_id']}...**")
         self.bot.dispatch("start_tournament_match", interaction.channel, interaction.user.id, tourney, pending)
@@ -3755,6 +3769,9 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         ok, gate_msg = match_order_gate(tourney, match)
         if not ok:
             return await interaction.response.send_message(gate_msg, ephemeral=True)
+        busy = _channel_busy_msg(interaction.channel.id)
+        if busy:
+            return await interaction.response.send_message(busy, ephemeral=True)
         r_label = _tm_round_label(match)
         await interaction.response.send_message(f"🚀 **Launching Match {match['match_id']} ({r_label})...**\n<@{interaction.user.id}> — make sure your opponent is here to pick their XI.")
         self.bot.dispatch("start_tournament_match", interaction.channel, interaction.user.id, tourney, match)
@@ -3804,6 +3821,9 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                 break
         if match is None:
             return await interaction.response.send_message(gate_msg, ephemeral=True)
+        busy = _channel_busy_msg(interaction.channel.id)
+        if busy:
+            return await interaction.response.send_message(busy, ephemeral=True)
         r_label = f"Round {match['round']}" if isinstance(match['round'], int) else match['round']
         await interaction.response.send_message(f"🚀 **Launching Next Match for {my_team_name}: Match {match['match_id']} ({r_label})...**")
         self.bot.dispatch("start_tournament_match", interaction.channel, interaction.user.id, tourney, match)
