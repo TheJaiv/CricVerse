@@ -87,9 +87,10 @@ def resolve_squad(names, table=None, cutoff=0.82):
                          + "\n   ".join(missing))
     return out
 
-# The 15 canonical pitches (must match tournament_manager.ALL_PITCHES).
+# The canonical pitches (must match tournament_manager.ALL_PITCHES).
 PITCHES = ["Flat", "Green", "Dry", "Dusty", "Hard", "Soft", "Cracked", "Damp",
-           "Dead", "Worn", "Turning", "Two-Paced", "Slow", "Bouncy", "Sticky"]
+           "Dead", "Worn", "Turning", "Two-Paced", "Slow", "Bouncy", "Sticky",
+           "Sporting", "Balanced"]
 # Stable global index per pitch -> used for common-random-number seeds so a pitch
 # gets the same seed whether it's evaluated alone or as part of the full set.
 PITCH_IX = {p: i for i, p in enumerate(PITCHES)}
@@ -199,13 +200,14 @@ def _impact_on(format_overs):
 
 
 def _my_bench(order, squad, format_overs=20):
-    """Impact bench = the best leftover SPECIALISTS not in this XI. Empty unless it's
-    a T20 (impact is a T20-only rule). All-rounders are excluded on purpose: an AR
-    already bats and bowls across both innings, so using one wastes the slot."""
+    """Impact bench = the best leftover BATTERS / all-rounders not in this XI. Empty
+    unless it's a T20 (impact is a T20-only rule). Specialist bowlers are excluded on
+    purpose: the impact sub comes in to BAT (a batting 12th man you send when chasing,
+    or hold back when defending), so a pure bowler wastes the slot."""
     if not (_impact_on(format_overs) and squad):
         return []
     names = {p["name"] for p in order}
-    rest = sorted((p for p in squad if p["name"] not in names and category(p) != "AR"),
+    rest = sorted((p for p in squad if p["name"] not in names and category(p) != "BWL"),
                   key=lambda p: -player_ovr(p))
     return [dict(p) for p in rest[:BENCH_SIZE]]
 
@@ -892,6 +894,41 @@ def optimize_order(xi, opp_specs, coarse_n, fine_n, fine_k, max_cand, format_ove
     return finalists[best_local_idx], best_overall, best_grid, fine, finalists
 
 
+def find_l_tags(order, opp_specs, format_overs, seed, procs, squad, pitch,
+                coarse_n, fine_n, l_eps=1.0, max_tags=2):
+    """Greedily 'L'-tag up to `max_tags` bowlers/all-rounders out of the AI's main
+    attack, but ONLY while a tag raises win% by >= `l_eps` on THIS pitch (common
+    random numbers vs the untagged baseline, so noise can't add one). Same rule the
+    bot's recommend_xi uses. Self-limiting: tagging a needed bowler lowers win%, so
+    the search stops on its own. Returns (tagged_order, sorted_l_names, grid) - the
+    grid is refreshed for the tagged XI so the printed tiers match what's shown."""
+    def _with_l(o, names):
+        return [{**p, "avoid_bowl": True} if p["name"] in names else p for p in o]
+
+    _i, base, grid = _run_stage([order], opp_specs, fine_n, format_overs, seed, procs,
+                                "  pp-L-base", pitches=[pitch], squad=squad)[0]
+    l_names = set()
+    l_cands = [p["name"] for p in order
+               if category(p) in ("AR", "BWL") and not p.get("avoid_bowl")]
+    for _ in range(max_tags):
+        if not l_cands:
+            break
+        variants = [_with_l(order, l_names | {nm}) for nm in l_cands]
+        coarse = _run_stage(variants, opp_specs, coarse_n, format_overs, seed, procs,
+                            "  pp-L-coarse", pitches=[pitch], squad=squad)
+        top = [i for i, _ov, _g in coarse[:2]]
+        fine = _run_stage([variants[i] for i in top], opp_specs, fine_n, format_overs,
+                          seed, procs, "  pp-L-fine", pitches=[pitch], squad=squad)
+        bi, w, g = fine[0]
+        if w < base + l_eps:                       # no tag clears the bar -> stop
+            break
+        base, grid = w, g
+        nm = l_cands[top[bi]]
+        l_names.add(nm)
+        l_cands.remove(nm)
+    return _with_l(order, l_names), sorted(l_names), grid
+
+
 def best_per_pitch(squad, xi, opp_specs, format_overs, procs, seed, rng, params):
     """For EACH of the 15 pitches, pick the best XI from the squad AND optimise its
     batting order on that pitch. Compute-only (printing happens after the varied-
@@ -915,9 +952,13 @@ def best_per_pitch(squad, xi, opp_specs, format_overs, procs, seed, rng, params)
             pxi, opp_specs, params["coarse_n"], params["fine_n"], params["fine_k"],
             params["max_cand"], format_overs, pseed, procs, rng, pitches=[pitch],
             verbose=False, squad=squad)
+        # 'L' (less bowling) tags for THIS deck, by simulation. The tagged order's
+        # grid replaces the untagged one so the printed tier line matches the XI.
+        order, _l, grid = find_l_tags(order, opp_specs, format_overs, pseed + 7, procs,
+                                      squad, pitch, params["coarse_n"], params["fine_n"])
         captain = _captain_of(order)
         bench = _my_bench(order, squad, format_overs)
-        # Per-pitch impact pick = the bench player best suited to THIS deck.
+        # Per-pitch impact pick = the bench batter/AR best suited to THIS deck.
         impact = max(bench, key=lambda p: pitch_value(p, pitch)) if bench else None
         out[pitch] = (order, grid, captain, impact)
     return out
@@ -930,13 +971,17 @@ def _print_one_pitch(pitch, order, grid, field, base_xi, captain, impact):
     print(f"\n  ── {pitch.upper()}  ──  win {favg:.1f}% vs the field   "
           f"[bal:{field['balanced']:.0f} vsSpin:{field['spin']:.0f} "
           f"vsPace:{field['pace']:.0f} vsBat:{field['bat']:.0f}]")
-    print("     " + "  ".join(f"{i}.{p['name']}" for i, p in enumerate(order, 1)))
+    print("     " + "  ".join(f"{i}.{p['name']}" + ("(L)" if p.get("avoid_bowl") else "")
+                              for i, p in enumerate(order, 1)))
     tiers = "  ".join(f"{t}:{grid[(pitch, t)]:.0f}" for t, _d in TIERS)
     print(f"     vs even side at ±OVR: [{tiers}]")
     cap = captain["name"] if captain else "-"
     # Impact player is T20-only, so it's None in ODIs -> omit the field entirely.
     imp = f"   |   IMPACT PLAYER: {impact['name']} ({category(impact)})" if impact else ""
     print(f"     CAPTAIN: {cap}{imp}")
+    l_names = [p["name"] for p in order if p.get("avoid_bowl")]
+    if l_names:
+        print(f"     L (less bowling): {', '.join(l_names)} -- out of the main attack")
     if ins:
         outs = [n for n in base if n not in {p["name"] for p in order}]
         print(f"     vs default XI:  IN {', '.join(ins)}   OUT {', '.join(outs)}")
@@ -1362,13 +1407,12 @@ def _report(best_order, best_overall, best_grid, fine, finalists, fine_n):
 
 
 # Your SQUAD - just names; ratings/roles are looked up from cricverse_players_ratings.txt
-# Give 11 OR MORE; if >11 the tool picks the best XI first.
 MY_SQUAD = [
-    "Sachin Tendulkar", "Virat Kohli", "Jasprit Bumrah", "Chris Gayle", "Vijay Merchant",
-    "Everton Weekes", "MS Dhoni", "Garfield Sobers", "Mike Procter", "Bob Appleyard",
-    "Tim Southee", "Bill O'Reilly", "Anil Kumble", "Jim Laker", "Richard Hadlee",
-    "Adam Zampa", "Ricky Ponting", "Quinton de Kock", "Sydney Barnes", "Michael Hussey",
-    "Michael Vaughan", "Hashim Amla", "Jonny Bairstow", "Eoin Morgan", "Graham Gooch"
+    "Michael Clarke", "Kane Williamson", "David Miller", "Mark Chapman", "Naman Dhir",
+    "Jake Weatherald", "Matthew Breetzke", "Rory Burns", "Brian Bennet", "Joe Burns",
+    "Nehal Wadhera", "Josh Philippe", "Lhuan-dre Pretorius", "Wiaan Mulder", "Rashid Khan",
+    "Joshua Little", "Deepak Chahar", "Sean Abbott", "Jaydev Unadkat", "Naveen Ul Haq",
+    "Ali Raza", "Anderson Phillip"
 ]
 def _cli():
     ap = argparse.ArgumentParser(description="CricVerse lineup optimizer")

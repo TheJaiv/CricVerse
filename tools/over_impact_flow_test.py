@@ -652,6 +652,82 @@ async def t_step_then_hub_can_resim():
     B.active_games.pop(ch.id, None)
 
 
+async def t_sub_bats_in_second_innings():
+    """A player impacted IN during the first innings must be in the XI when his side bats,
+    and the man he replaced must be out of the match (he used to bat on while the sub sat
+    at 12 and never got in)."""
+    ch = FakeChannel(1016)
+    # HOME bats first; AWAY spends its impact while bowling, then bats in innings 2.
+    m = register(build_match(p1_id=111, p2_id=222, bat_first=1), ch)
+    B.swap_impact_player(m, 2, "AWAY_T6", m.t2_subs[0])
+
+    m.current_innings_num = 2
+    m.innings2 = B.build_second_innings(m)
+    order = [p["name"] for p in m.innings2.batting_team["players"]]
+
+    check("2nd inn XI: eleven batters", len(order) == 11, f"order={order}")
+    check("2nd inn XI: the sub is in the order", "AWAY_SUB_BAT" in order, f"order={order}")
+    check("2nd inn XI: the sub takes the outgoing player's slot",
+          order.index("AWAY_SUB_BAT") == 10, f"order={order}")
+    check("2nd inn XI: the subbed-out player left the match", "AWAY_T6" not in order, f"order={order}")
+    check("2nd inn XI: the sub can bat (has a stats row)", "AWAY_SUB_BAT" in m.innings2.batting_stats)
+    check("2nd inn XI: the subbed-out player has no stats row", "AWAY_T6" not in m.innings2.batting_stats)
+
+    # The first innings keeps the XI it actually played with, so its card is unchanged.
+    inn1_bowl = [p["name"] for p in m.innings1.bowling_team["players"]]
+    check("2nd inn XI: innings 1 keeps its own roster", "AWAY_T6" in inn1_bowl, f"inn1={inn1_bowl}")
+    try:
+        B.render_full_scorecard_embed(m, 1)
+        check("2nd inn XI: innings-1 scorecard still renders", True)
+    except Exception as e:
+        check("2nd inn XI: innings-1 scorecard still renders", False, repr(e))
+    B.active_games.pop(ch.id, None)
+
+
+async def t_sub_bowls_in_second_innings():
+    """The mirror case: a side that spends its impact while BATTING first must not be able
+    to bowl the man it subbed out in the second innings."""
+    ch = FakeChannel(1017)
+    m = register(build_match(p1_id=111, p2_id=222, bat_first=1), ch)
+    inn = m.current_innings
+    arm_rule1(inn)
+    B.swap_impact_player(m, 1, "HOME_PB2", m.t1_subs[0])
+
+    m.current_innings_num = 2
+    m.innings2 = B.build_second_innings(m)
+    bowl_xi = [p["name"] for p in m.innings2.bowling_team["players"]]
+
+    check("2nd inn attack: eleven fielders", len(bowl_xi) == 11, f"xi={bowl_xi}")
+    check("2nd inn attack: the sub is available", "HOME_SUB_BAT" in bowl_xi, f"xi={bowl_xi}")
+    check("2nd inn attack: the subbed-out bowler cannot bowl", "HOME_PB2" not in bowl_xi, f"xi={bowl_xi}")
+    check("2nd inn attack: no stats row for the subbed-out bowler",
+          "HOME_PB2" not in m.innings2.bowling_stats)
+    B.active_games.pop(ch.id, None)
+
+
+async def t_ai_swap_roster_unchanged_by_fix():
+    """The AI swaps already replace the outgoing player in his slot - the innings-break fix
+    must leave those XIs exactly as the swap left them."""
+    ch = FakeChannel(1018)
+    m = register(build_match(p1_id=111, p2_id=None, bat_first=2, t2_shape="short"), ch)
+    inn = m.current_innings
+    # AWAY is a bowler short and is BATTING first, so Rule 2 brings the bench bowler on for
+    # the weakest batter: he leaves the XI, the bowler joins at the tail.
+    plan = {"team_num": 2, "kind": "add_bowler", "out_name": "AWAY_T7",
+            "in_player": m.t2_subs[0], "reason": "completing the attack"}
+    B.apply_impact_plan(m, inn, plan)
+    before = [p["name"] for p in m.team2["players"]]
+
+    m.current_innings_num = 2
+    m.innings2 = B.build_second_innings(m)
+    after = [p["name"] for p in m.team2["players"]]
+
+    check("ai swap: XI untouched by the innings-break fix", before == after, f"{before} -> {after}")
+    check("ai swap: still eleven", len(after) == 11, f"xi={after}")
+    check("ai swap: extra bowler kept at the tail", after[-1] == "AWAY_SUB_BOWL", f"xi={after}")
+    B.active_games.pop(ch.id, None)
+
+
 async def main():
     random.seed(7)
     for t in (t_step_verbose, t_step_bbb, t_ai_side_auto_swaps, t_human_prompt_confirm,
@@ -659,7 +735,8 @@ async def main():
               t_prompt_owner_only, t_manager_uid_resolution, t_rule2_plan,
               t_impact_off_and_used, t_endmatch_during_prompt, t_auto_loop_flag,
               t_step_on_last_over_of_innings, t_step_then_hub_can_resim,
-              t_offer_hides_ratings):
+              t_offer_hides_ratings, t_sub_bats_in_second_innings,
+              t_sub_bowls_in_second_innings, t_ai_swap_roster_unchanged_by_fix):
         print(f"\n--- {t.__name__} ---")
         try:
             await t()

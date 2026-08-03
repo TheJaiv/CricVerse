@@ -766,6 +766,31 @@ def clear_match_log_channel(server_id: str):
     DB_CACHE["match_log_channels"].pop(server_id, None)
     async_save_to_bin()
 
+
+# Public player-update feed: one channel per server, fed by every change to the GLOBAL
+# player DB (buffs / nerfs / new players), so a server's members see updates without
+# needing the admin log or rating visibility.
+def get_player_update_channel(server_id: str):
+    return DB_CACHE.get("player_update_channels", {}).get(server_id)
+
+def get_all_player_update_channels():
+    """{server_id: channel_id} for every server subscribed to the feed."""
+    return dict(DB_CACHE.get("player_update_channels", {}))
+
+def set_player_update_channel(server_id: str, channel_id: str):
+    global DB_CACHE
+    if "player_update_channels" not in DB_CACHE:
+        DB_CACHE["player_update_channels"] = {}
+    DB_CACHE["player_update_channels"][server_id] = channel_id
+    async_save_to_bin()
+
+def clear_player_update_channel(server_id: str):
+    global DB_CACHE
+    if "player_update_channels" not in DB_CACHE:
+        DB_CACHE["player_update_channels"] = {}
+    DB_CACHE["player_update_channels"].pop(server_id, None)
+    async_save_to_bin()
+
 def is_ratings_channel(channel_id: str) -> bool:
     return channel_id in DB_CACHE.get("ratings_channels", [])
 

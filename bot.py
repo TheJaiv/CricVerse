@@ -69,6 +69,8 @@ from core.subscription_manager import (
     get_tier_status, is_channel_restricted, toggle_restricted_channel,
     is_ratings_channel, toggle_ratings_channel,
     get_match_log_channel, set_match_log_channel, clear_match_log_channel, DB_CACHE,
+    get_player_update_channel, get_all_player_update_channels,
+    set_player_update_channel, clear_player_update_channel,
     get_match_counts, increment_match_count, set_match_count,
     apply_server_overrides, set_server_override, reset_server_override, get_server_overrides,
     record_draft_pvp, record_draft_ai, get_draft_stats,
@@ -956,10 +958,12 @@ def swap_impact_player(match: CricketMatch, team_id: int, out_name: str, in_play
     if team_id == 1:
         match.t1_impact_used = True
         match.t1_impact_sub_name = in_player["name"]
+        match.t1_impact_out_name = out_name
         team = match.team1
     else:
         match.t2_impact_used = True
         match.t2_impact_sub_name = in_player["name"]
+        match.t2_impact_out_name = out_name
         team = match.team2
 
     inn = match.current_innings
@@ -1025,6 +1029,7 @@ def _impact_replace_batter(match: CricketMatch, team_num: int, idx: int, out_nam
     inn.batting_stats[in_player["name"]] = BatterStats(in_player)
     setattr(match, f"t{team_num}_impact_used", True)
     setattr(match, f"t{team_num}_impact_sub_name", in_player["name"])
+    setattr(match, f"t{team_num}_impact_out_name", out_name)
     msg = (f"🔄 **AI TACTIC:** {team['name']} uses IMPACT PLAYER! "
            f"**{in_player['name']}** IN for **{out_name}** - lengthening the batting.")
     match.last_commentary_prefix = msg + "\n" + getattr(match, "last_commentary_prefix", "")
@@ -1043,6 +1048,7 @@ def _impact_insert_batter(match: CricketMatch, team_num: int, out_name: str, in_
     inn.batting_stats[in_player["name"]] = BatterStats(in_player)
     setattr(match, f"t{team_num}_impact_used", True)
     setattr(match, f"t{team_num}_impact_sub_name", in_player["name"])
+    setattr(match, f"t{team_num}_impact_out_name", out_name)
     msg = (f"🔄 **AI TACTIC:** {team['name']} uses IMPACT PLAYER! "
            f"**{in_player['name']}** IN for **{out_name}** - lengthening the batting.")
     match.last_commentary_prefix = msg + "\n" + getattr(match, "last_commentary_prefix", "")
@@ -1075,6 +1081,7 @@ def _impact_add_bowler(match: CricketMatch, team_num: int, out_name: str, in_pla
     inn.bowling_stats[in_player["name"]] = BowlerStats(in_player)
     setattr(match, f"t{team_num}_impact_used", True)
     setattr(match, f"t{team_num}_impact_sub_name", in_player["name"])
+    setattr(match, f"t{team_num}_impact_out_name", out_name)
     msg = (f"🔄 **AI TACTIC:** {team['name']} uses IMPACT PLAYER! "
            f"**{in_player['name']}** IN for **{out_name}** - completing the attack.")
     match.last_commentary_prefix = msg + "\n" + getattr(match, "last_commentary_prefix", "")
@@ -1182,6 +1189,72 @@ def plan_ai_impact_swaps(match: CricketMatch, innings: InningsState):
 
     return plans
 
+def prepare_second_innings_rosters(match: CricketMatch):
+    """Settle every first-innings impact swap into the XIs before the second innings is
+    built. Must run BEFORE innings 2 is constructed - that is where the batting order and
+    the bowling options are read off the roster.
+
+    A swap made during the first innings is left half-applied on purpose: the man going out
+    keeps his slot (and his figures) in the innings that is being played, and the sub is
+    simply added on the end. Carried into the second innings that list is wrong - the sub
+    sat at 12 and never batted, while the player he replaced batted on. Here the sub takes
+    the outgoing player's place in the order and the outgoing player leaves the match, so a
+    side that spent its impact while bowling gets the sub in its top 11 when it bats.
+
+    The first innings keeps a snapshot of the XI it actually played with, so its scorecard
+    is untouched by the correction - which is why the second innings has to be built off
+    `match.team1` / `match.team2` (the live XIs) rather than off the innings-1 teams."""
+    inn1 = match.innings1
+    if inn1 is not None:
+        for attr in ("batting_team", "bowling_team"):
+            t = getattr(inn1, attr, None)
+            if t:
+                snap = dict(t)
+                snap["players"] = list(t["players"])
+                setattr(inn1, attr, snap)
+
+    for team_num in (1, 2):
+        team = match.team1 if team_num == 1 else match.team2
+        out_name = getattr(match, f"t{team_num}_impact_out_name", None)
+        sub_name = getattr(match, f"t{team_num}_impact_sub_name", None)
+        if not (team and out_name and sub_name):
+            continue
+        players = team["players"]
+        names = [p["name"] for p in players]
+        if out_name not in names:
+            continue   # already fully applied (the swap replaced him in his slot)
+
+        slot = names.index(out_name)
+        sub = next((p for p in players if p["name"] == sub_name), None)
+        if sub is not None and names.index(sub_name) < slot:
+            slot -= 1   # the sub already sits above him, so the slot shifts up
+        if sub is None:
+            sub = next((p for p in getattr(match, f"t{team_num}_subs", [])
+                        if p["name"] == sub_name), None)
+
+        fixed = [p for p in players if p["name"] not in (out_name, sub_name)]
+        if sub is not None:
+            fixed.insert(min(slot, len(fixed)), sub)
+        players[:] = fixed
+
+
+def _live_team(match: CricketMatch, team):
+    """The current XI dict for a team the innings is holding by name. Innings 1 keeps a
+    snapshot of its rosters once the impact swaps are settled, so anything that starts a
+    LATER innings (innings 2, a super over) has to resolve back to the live XI."""
+    for t in (match.team1, match.team2):
+        if t and team and t["name"] == team["name"]:
+            return t
+    return team
+
+
+def build_second_innings(match: CricketMatch) -> InningsState:
+    """The second innings, with every first-innings impact swap settled into the XIs."""
+    prepare_second_innings_rosters(match)
+    return InningsState(_live_team(match, match.innings1.bowling_team),
+                        _live_team(match, match.innings1.batting_team))
+
+
 def apply_impact_plan(match: CricketMatch, innings: InningsState, plan):
     """Execute one planned impact swap and return its announcement line. `next_batter_idx`
     is re-read here rather than taken from the plan: a plan can sit on screen for a few
@@ -1240,7 +1313,7 @@ def _run_full_match_sync(match: CricketMatch):
     _sim_innings(match.innings1)
 
     match.target = match.innings1.total_runs + 1
-    match.innings2 = InningsState(match.innings1.bowling_team, match.innings1.batting_team)
+    match.innings2 = build_second_innings(match)
     match.current_innings = match.innings2
     match.current_innings_num = 2
     _sim_innings(match.innings2)
@@ -1273,8 +1346,8 @@ def _run_full_match_sync(match: CricketMatch):
 def _sim_super_over(match: CricketMatch):
     """Headless: break a tie via simulated super over(s); sets match.tiebreak_winner_name.
     Team that batted 2nd bats first; max 2 wickets / 6 balls; replays (swapping order) if tied again."""
-    bat_team = match.innings2.batting_team   # batted 2nd in the main match -> bats first in the SO
-    bowl_team = match.innings1.batting_team
+    bat_team = _live_team(match, match.innings2.batting_team)   # batted 2nd in the main match -> bats first in the SO
+    bowl_team = _live_team(match, match.innings1.batting_team)
     for _ in range(25):  # safety cap against pathological repeated ties
         so = CricketMatch(match.p1, match.p2, match.p1_id, match.p2_id,
                           match.team1, match.team2, format_overs=1,
@@ -4360,7 +4433,8 @@ async def trigger_super_over(channel, match: CricketMatch):
     so_match.verbose = getattr(match, 'verbose', True)
     so_match.batting_first_id = match.bowling_first_id
     so_match.bowling_first_id = match.batting_first_id
-    so_match.innings1 = InningsState(match.innings2.batting_team, match.innings1.batting_team)
+    so_match.innings1 = InningsState(_live_team(match, match.innings2.batting_team),
+                                     _live_team(match, match.innings1.batting_team))
     so_match.current_innings = so_match.innings1
     so_match.tournament_server_id = getattr(match, "tournament_server_id", None)
     so_match.tournament_match_id = getattr(match, "tournament_match_id", None)
@@ -4410,7 +4484,7 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
         embed_full = render_full_scorecard_embed(match, 1)
         
         match.current_innings_num = 2
-        match.innings2 = InningsState(match.innings1.bowling_team, match.innings1.batting_team)
+        match.innings2 = build_second_innings(match)
         match.current_innings = match.innings2
         
         # DLS INTERRUPT SYSTEM
@@ -9078,6 +9152,7 @@ def _help_players_embed(is_admin: bool):
         e.add_field(name="/updateplayer <name>  ·  `cv up`",  value="Edit an existing player — all fields pre-filled, change only what you need.", inline=False)
         e.add_field(name="`cv deleteplayer`  ·  `cv dp`",     value="Remove a player from the database.", inline=False)
         e.add_field(name="`cv cleanduplicates`  ·  `cv cd`",  value="Remove duplicate entries from the database.", inline=False)
+        e.add_field(name="`cv set_update_channel`  ·  `cv suc`", value="Set this channel as the public player-update feed — everyone sees buffs, nerfs and new players (no ratings).", inline=False)
     return e
 
 def _help_tournament_embed():
@@ -9112,6 +9187,7 @@ def _help_admin_embed():
     e.add_field(name="Channel Controls",
         value=("`cv toggle_channel_lock`  ·  `cv tcl` — lock/unlock matches in this channel\n"
                "`cv set_log_channel`  ·  `cv slc` — set/unset this channel as match log\n"
+               "`cv set_update_channel`  ·  `cv suc` — public buff/nerf feed for player updates\n"
                "`cv toggle_ratings_channel`  ·  `cv trc` — toggle rating visibility here"),
         inline=False)
     e.add_field(name="Tournament Admin",
@@ -9895,6 +9971,7 @@ class UpdatePlayerModal(discord.ui.Modal, title="Update Player"):
 
     def __init__(self, cur: dict):
         super().__init__()
+        self._before    = dict(cur)   # kept whole so the log can show what he WAS
         self._original  = cur["name"]
         self._cur_role  = cur["role"]
         self._cur_arch  = cur["archetype"]
@@ -9911,7 +9988,8 @@ class UpdatePlayerModal(discord.ui.Modal, title="Update Player"):
         if not (0 <= bat_v <= 100 and 0 <= bowl_v <= 100):
             return await interaction.response.send_message("❌ Bat/Bowl must be 0–100.", ephemeral=True)
         name_v = self.p_name.value.strip()
-        view = PlayerRoleView(interaction.user.id, name_v, bat_v, bowl_v, mode="update", original_name=self._original)
+        view = PlayerRoleView(interaction.user.id, name_v, bat_v, bowl_v, mode="update",
+                              original_name=self._original, before=self._before)
         view._role = self._cur_role
         view._arch = self._cur_arch
         await interaction.response.send_message(
@@ -9921,7 +9999,8 @@ class UpdatePlayerModal(discord.ui.Modal, title="Update Player"):
         )
 
 class PlayerRoleView(discord.ui.View):
-    def __init__(self, author_id: int, name: str, bat: int, bowl: int, mode: str, original_name: str = None):
+    def __init__(self, author_id: int, name: str, bat: int, bowl: int, mode: str,
+                 original_name: str = None, before: dict = None):
         super().__init__(timeout=120)
         self._author   = author_id
         self._name     = name
@@ -9929,6 +10008,7 @@ class PlayerRoleView(discord.ui.View):
         self._bowl     = bowl
         self._mode     = mode
         self._original = original_name
+        self._before   = before or {}
         self._role     = None
         self._arch     = None
 
@@ -9952,19 +10032,25 @@ class PlayerRoleView(discord.ui.View):
     async def confirm_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not self._role or not self._arch:
             return await interaction.response.send_message("⚠️ Select both Role and Archetype first.", ephemeral=True)
+        after = {"name": self._name, "bat": self._bat, "bowl": self._bowl,
+                 "role": self._role, "archetype": self._arch}
         if self._mode == "add":
-            success = add_player({"name": self._name, "bat": self._bat, "bowl": self._bowl, "role": self._role, "archetype": self._arch})
+            success = add_player(after)
             if not success:
                 return await interaction.response.send_message(f"❌ `{self._name}` already exists in the database!", ephemeral=True)
             await interaction.response.send_message(f"✅ Added **{self._name}** to the database!")
             await log_db_update("Player Added", self._name, interaction.user, f"Bat: {self._bat} | Bowl: {self._bowl}\nRole: {self._role}\nArchetype: {self._arch}")
+            await broadcast_player_update(build_player_added_embed(after))
         else:
             all_p = get_all_players()
             if self._name.lower() != self._original.lower() and any(p["name"].lower() == self._name.lower() for p in all_p):
                 return await interaction.response.send_message(f"❌ A player named `{self._name}` already exists!", ephemeral=True)
-            update_player(self._original, {"name": self._name, "bat": self._bat, "bowl": self._bowl, "role": self._role, "archetype": self._arch})
+            before = self._before or next((p for p in all_p if p["name"].lower() == self._original.lower()), after)
+            update_player(self._original, after)
             await interaction.response.send_message(f"✅ Updated **{self._name}** in the database!")
-            await log_db_update("Player Updated", self._name, interaction.user, f"Bat: {self._bat} | Bowl: {self._bowl}\nRole: {self._role}\nArchetype: {self._arch}")
+            await log_db_update("Player Updated", self._name, interaction.user,
+                                player_update_details(before, after))
+            await broadcast_player_update(build_player_update_embed(before, after))
         self.stop()
 
 @bot.tree.command(name="addplayer", description="[ADMIN] Add a new player to the Cloud DB.")
@@ -10031,6 +10117,95 @@ async def my_tier_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ---- Admin database controls ----
+
+_PLAYER_FIELDS = (("name", "Name"), ("bat", "Bat"), ("bowl", "Bowl"),
+                  ("role", "Role"), ("archetype", "Arch"))
+
+def player_update_details(before: dict, after: dict) -> str:
+    """The admin log body for an edit: every field as `was -> now`, so the previous
+    ratings are on the log next to the new ones instead of being lost. Untouched fields
+    are printed as a single value so the changes stand out."""
+    rows = []
+    for key, label in _PLAYER_FIELDS:
+        old, new = before.get(key), after.get(key)
+        if old == new:
+            rows.append(f"{label + ':':<6} {new}")
+        elif key in ("bat", "bowl"):
+            rows.append(f"{label + ':':<6} {old} -> {new}  ({new - old:+d})")
+        else:
+            rows.append(f"{label + ':':<6} {old} -> {new}")
+    return "\n".join(rows)
+
+def _rating_move(delta: int) -> str:
+    """How a rating change is described in the PUBLIC feed - size without the numbers,
+    which stay admin-only (see `_can_see_ratings`)."""
+    size = abs(delta)
+    if size <= 2:
+        step = "slight"
+    elif size <= 6:
+        step = "solid"
+    else:
+        step = "big"
+    return f"{'🔺' if delta > 0 else '🔻'} {step} {'buff' if delta > 0 else 'nerf'}"
+
+def build_player_update_embed(before: dict, after: dict):
+    """Public buff/nerf card, or None when nothing worth announcing changed. Carries NO
+    ratings - only the direction and rough size of each move."""
+    bat_d = (after.get("bat") or 0) - (before.get("bat") or 0)
+    bowl_d = (after.get("bowl") or 0) - (before.get("bowl") or 0)
+    lines = []
+    if bat_d:
+        lines.append(f"**Batting** — {_rating_move(bat_d)}")
+    if bowl_d:
+        lines.append(f"**Bowling** — {_rating_move(bowl_d)}")
+    if before.get("role") != after.get("role"):
+        old_r = _ROLE_DISPLAY.get(before.get("role", ""), before.get("role", "—"))
+        new_r = _ROLE_DISPLAY.get(after.get("role", ""), after.get("role", "—"))
+        lines.append(f"**Role** — {old_r} → {new_r}")
+    if before.get("archetype") != after.get("archetype"):
+        lines.append(f"**Archetype** — {before.get('archetype')} → {after.get('archetype')}")
+    if before.get("name") != after.get("name"):
+        lines.append(f"**Renamed** — {before.get('name')} → {after.get('name')}")
+    if not lines:
+        return None
+
+    if bat_d + bowl_d > 0:
+        title, color = "📈 Player Buff", discord.Color.green()
+    elif bat_d + bowl_d < 0:
+        title, color = "📉 Player Nerf", discord.Color.red()
+    else:
+        title, color = "🔄 Player Update", discord.Color.blurple()
+
+    embed = discord.Embed(title=title, color=color,
+                          description=f"### 🏏 {after.get('name')}\n" + "\n".join(lines))
+    embed.set_footer(text="Player database update")
+    embed.timestamp = discord.utils.utcnow()
+    return embed
+
+def build_player_added_embed(player: dict):
+    """Public card for a brand new player - role only, never the ratings."""
+    role = _ROLE_DISPLAY.get(player.get("role", ""), player.get("role", "Unknown"))
+    embed = discord.Embed(title="🆕 New Player", color=discord.Color.gold(),
+                          description=f"### 🏏 {player.get('name')}\n"
+                                      f"**Role** — {role}\n"
+                                      f"**Archetype** — {player.get('archetype')}")
+    embed.set_footer(text="Player database update")
+    embed.timestamp = discord.utils.utcnow()
+    return embed
+
+async def broadcast_player_update(embed):
+    """Push one public update card to every server that set a player-update channel.
+    A server that has since deleted the channel (or revoked perms) is skipped quietly."""
+    if embed is None:
+        return
+    for server_id, channel_id in get_all_player_update_channels().items():
+        try:
+            channel = bot.get_channel(int(channel_id))
+            if channel is None:
+                continue
+            await channel.send(embed=embed)
+        except Exception as e:
+            print(f"Player update broadcast failed for server {server_id}: {e}")
 
 async def log_db_update(action: str, player_name: str, user: discord.User, details: str):
     if not LOG_CHANNEL_ID: return
@@ -11902,11 +12077,13 @@ class PrefixCog(commands.Cog):
             return await ctx.send(f"❌ Invalid role. Choose from: {', '.join(valid_roles)}")
         if archetype not in valid_archs:
             return await ctx.send(f"❌ Invalid archetype. Choose from: {', '.join(valid_archs)}")
-        success = add_player({"name": name.strip(), "bat": bat, "bowl": bowl, "role": role, "archetype": archetype})
+        new_player = {"name": name.strip(), "bat": bat, "bowl": bowl, "role": role, "archetype": archetype}
+        success = add_player(new_player)
         if not success:
             return await ctx.send(f"❌ `{name}` already exists in the database!")
         await ctx.send(f"✅ Added `{name}` to the database!")
         await log_db_update("Player Added", name, ctx.author, f"Bat: {bat} | Bowl: {bowl}\nRole: {role}\nArchetype: {archetype}")
+        await broadcast_player_update(build_player_added_embed(new_player))
 
     @commands.command(name="updateplayer", aliases=["up"], help="[ADMIN] Update player in DB.\nUsage: updateplayer \"<name>\" <bat> <bowl> <role> <archetype> [\"<newname>\"]")
     async def updateplayer(self, ctx, name: str, bat: int, bowl: int, role: str, archetype: str, *, new_name: str = None):
@@ -11928,9 +12105,12 @@ class PrefixCog(commands.Cog):
         final_name = new_name.strip() if new_name else cur["name"]
         if final_name.lower() != cur["name"].lower() and any(p["name"].lower() == final_name.lower() for p in all_p):
             return await ctx.send(f"❌ A player named `{final_name}` already exists!")
-        update_player(cur["name"], {"name": final_name, "bat": bat, "bowl": bowl, "role": role, "archetype": archetype})
+        before = dict(cur)
+        after = {"name": final_name, "bat": bat, "bowl": bowl, "role": role, "archetype": archetype}
+        update_player(cur["name"], after)
         await ctx.send(f"✅ Updated `{final_name}` in the database!")
-        await log_db_update("Player Updated", final_name, ctx.author, f"Bat: {bat} | Bowl: {bowl}\nRole: {role}\nArchetype: {archetype}")
+        await log_db_update("Player Updated", final_name, ctx.author, player_update_details(before, after))
+        await broadcast_player_update(build_player_update_embed(before, after))
 
     # Per-server rating overrides (OWNER-only, separate from the global player DB)
     @commands.command(name="srating", aliases=["serverrating", "soverride"], help="[OWNER] Override a player's ratings for THIS server only (global DB untouched).\nUsage: srating \"<player>\" bat=86 bowl=20 [role=Batter] [arch=Anchor]   ·   srating \"<player>\" reset")
@@ -12669,6 +12849,21 @@ class PrefixCog(commands.Cog):
         else:
             set_match_log_channel(server_id, str(ctx.channel.id))
             await ctx.send(f"📋 **Match Log Enabled:** Final scorecards for all matches on this server will be sent here.")
+
+    @commands.command(name="set_update_channel", aliases=["suc", "playerlog"], help="[ADMIN] Set this channel as the public player-update feed (buffs / nerfs / new players). Run again to disable.\nUsage: set_update_channel")
+    async def set_update_channel_cmd(self, ctx):
+        if not ctx.author.guild_permissions.administrator and ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("❌ Server Admins only.")
+        if not ctx.guild:
+            return await ctx.send("❌ This command must be used in a server.")
+        server_id = str(ctx.guild.id)
+        existing = get_player_update_channel(server_id)
+        if existing and existing == str(ctx.channel.id):
+            clear_player_update_channel(server_id)
+            await ctx.send("🔕 **Player Updates Disabled:** buffs and nerfs will no longer be posted in this server.")
+        else:
+            set_player_update_channel(server_id, str(ctx.channel.id))
+            await ctx.send("📢 **Player Updates Enabled:** every buff, nerf and new player in the database will be posted here for everyone.\n-# Ratings stay hidden — the feed shows the direction of the change, not the numbers.")
 
     @commands.command(name="squad", aliases=["sq"], help="View a team's tournament squad.\nUsage: squad [team_name]")
     async def squad_shortcut(self, ctx, *, team_name: str = None):
