@@ -9149,6 +9149,7 @@ def _help_players_embed(is_admin: bool):
     if is_admin:
         e.add_field(name="​", value="─── **Admin — DB Management** ───", inline=False)
         e.add_field(name="/addplayer  ·  `cv ap`",            value="Add a player: name & ratings modal → then role & archetype dropdowns.", inline=False)
+        e.add_field(name="`cv importplayers`  ·  `cv bap`",   value="Bulk-add players from pasted or attached CSV (`Name,Bat,Bowl,Role,Archetype`) — preview & confirm before it commits.", inline=False)
         e.add_field(name="/updateplayer <name>  ·  `cv up`",  value="Edit an existing player — all fields pre-filled, change only what you need.", inline=False)
         e.add_field(name="`cv deleteplayer`  ·  `cv dp`",     value="Remove a player from the database.", inline=False)
         e.add_field(name="`cv cleanduplicates`  ·  `cv cd`",  value="Remove duplicate entries from the database.", inline=False)
@@ -10364,11 +10365,12 @@ async def _record_draft_result(channel, match):
 
 
 class CSVSyncConfirmView(discord.ui.View):
-    """Owner confirmation for `cv sync_csv` - previews the new players found in the
-    CSV and lets the owner toggle any of them off before committing the import."""
+    """Admin confirmation for CSV-based player imports (`cv sync_csv` and
+    `cv importplayers`) - previews the new players found in the CSV and lets the
+    admin toggle any of them off before committing the import."""
     PAGE = 25   # Discord select menus cap at 25 options
 
-    def __init__(self, ctx, new_players):
+    def __init__(self, ctx, new_players, title="📥 CSV Sync — Confirm Import", source="CSV Sync"):
         super().__init__(timeout=180)
         self.ctx = ctx
         self.players = new_players    # CSV order
@@ -10376,6 +10378,8 @@ class CSVSyncConfirmView(discord.ui.View):
         self.page = 0
         self.message = None
         self._done = False
+        self.title = title
+        self.source = source
         self.update_ui()
 
     @property
@@ -10392,7 +10396,7 @@ class CSVSyncConfirmView(discord.ui.View):
         for p in self._page_players():
             mark = "⛔" if p["name"] in self.skipped else "✅"
             lines.append(f"{mark} **{p['name']}** — {p['role']} · Bat {p['bat']} / Bowl {p['bowl']}")
-        e = discord.Embed(title="📥 CSV Sync — Confirm Import",
+        e = discord.Embed(title=self.title,
                           description="\n".join(lines),
                           color=discord.Color.orange())
         footer = f"Adding {adding} of {len(self.players)} new players · pick from the menu to toggle off/on"
@@ -10469,7 +10473,7 @@ class CSVSyncConfirmView(discord.ui.View):
             msg += f" Skipped **{skipped_n}** (deselected)."
         await interaction.response.edit_message(content=msg, embed=None, view=None)
         if added > 0:
-            await log_db_update("CSV Sync", "Batch Import", self.ctx.author,
+            await log_db_update(self.source, "Batch Import", self.ctx.author,
                                 f"Added {added} new players from CSV ({skipped_n} deselected).")
 
     async def cancel_cb(self, interaction: discord.Interaction):
@@ -10487,6 +10491,90 @@ class CSVSyncConfirmView(discord.ui.View):
             await self.message.edit(content="⏳ CSV sync confirmation timed out — no players added.", embed=None, view=None)
         except Exception:
             pass
+
+
+# ---- Bulk player import from user-supplied CSV (cv importplayers) ----
+
+_CSV_ROLE_ALIASES = {
+    "wk": "Batter_WK", "keeper": "Batter_WK", "wicketkeeper": "Batter_WK",
+    "pacebowler": "Bowler_Pace", "pace": "Bowler_Pace",
+    "offspinbowler": "Bowler_Spin_Off", "offspin": "Bowler_Spin_Off",
+    "legspinbowler": "Bowler_Spin_Leg", "legspin": "Bowler_Spin_Leg",
+    "paceallrounder": "All-Rounder_Pace",
+    "offspinallrounder": "All-Rounder_Spin_Off",
+    "legspinallrounder": "All-Rounder_Spin_Leg",
+}
+_CSV_HEADER_ALIASES = {
+    "name": "name", "player": "name", "player name": "name", "playername": "name",
+    "bat": "bat", "batting": "bat", "bat rating": "bat", "batrating": "bat",
+    "bowl": "bowl", "bowling": "bowl", "bowl rating": "bowl", "bowlrating": "bowl",
+    "role": "role",
+    "archetype": "archetype", "arch": "archetype",
+}
+
+def _normalize_csv_role(raw: str):
+    """Match a CSV role cell to a canonical role value - exact (case/space/hyphen
+    insensitive) match against the real values first, then a few friendly aliases."""
+    key = (raw or "").strip().lower().replace(" ", "").replace("-", "").replace("_", "")
+    for r in ("Batter", "Batter_WK", "Bowler_Pace", "Bowler_Spin_Off", "Bowler_Spin_Leg",
+              "All-Rounder_Pace", "All-Rounder_Spin_Off", "All-Rounder_Spin_Leg"):
+        if r.lower().replace("-", "").replace("_", "") == key:
+            return r
+    return _CSV_ROLE_ALIASES.get(key)
+
+def _parse_players_csv(raw_text: str):
+    """Parse pasted/attached CSV text (header: Name,Bat,Bowl,Role,Archetype - column
+    order/case doesn't matter) into (valid_players, errors). `valid_players` is
+    deduped within the file (case-insensitive, first occurrence wins); `errors` is a
+    list of human-readable "Row N: ..." strings for rows that couldn't be used."""
+    text = raw_text.lstrip("﻿").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return [], ["No CSV data found."]
+    reader = csv.DictReader(io.StringIO(text))
+    if not reader.fieldnames:
+        return [], ["Could not find a header row."]
+    colmap = {}
+    for fn in reader.fieldnames:
+        key = _CSV_HEADER_ALIASES.get((fn or "").strip().lower())
+        if key:
+            colmap[key] = fn
+    missing = [c for c in ("name", "bat", "bowl", "role", "archetype") if c not in colmap]
+    if missing:
+        return [], [f"Missing column(s): {', '.join(missing)}. "
+                     f"Header must include Name, Bat, Bowl, Role, Archetype."]
+
+    valid, errors, seen = [], [], set()
+    for i, row in enumerate(reader, start=2):   # header is row 1
+        name = (row.get(colmap["name"]) or "").strip()
+        if not name:
+            errors.append(f"Row {i}: missing name — skipped.")
+            continue
+        key = name.lower()
+        if key in seen:
+            errors.append(f"Row {i}: duplicate `{name}` in file — skipped.")
+            continue
+        try:
+            bat = int(str(row.get(colmap["bat"], "")).strip())
+            bowl = int(str(row.get(colmap["bowl"], "")).strip())
+        except (TypeError, ValueError):
+            errors.append(f"Row {i}: `{name}` — Bat/Bowl must be whole numbers.")
+            continue
+        if not (0 <= bat <= 100 and 0 <= bowl <= 100):
+            errors.append(f"Row {i}: `{name}` — Bat/Bowl must be 0-100.")
+            continue
+        role = _normalize_csv_role(row.get(colmap["role"]))
+        if not role:
+            errors.append(f"Row {i}: `{name}` — invalid role `{row.get(colmap['role'], '')}`.")
+            continue
+        arch_raw = (row.get(colmap["archetype"]) or "").strip()
+        arch = next((a for a in ("Aggressor", "Anchor", "Finisher", "Standard", "Vaibhav")
+                     if a.lower() == arch_raw.lower()), None)
+        if not arch:
+            errors.append(f"Row {i}: `{name}` — invalid archetype `{arch_raw}`.")
+            continue
+        seen.add(key)
+        valid.append({"name": name, "bat": bat, "bowl": bowl, "role": role, "archetype": arch})
+    return valid, errors
 
 
 # ---- Global stats leaderboards (cv gs) ----
@@ -12480,6 +12568,71 @@ class PrefixCog(commands.Cog):
             view.message = await ctx.send(embed=view.build_embed(), view=view)
         except Exception as e:
             await ctx.send(f"❌ Error during sync: {e}")
+
+    @commands.command(name="importplayers", aliases=["ipcsv", "bulkaddplayers", "bap"],
+                      help="[ADMIN] Bulk-add players from CSV data you paste or attach.\n"
+                           "Header row: Name,Bat,Bowl,Role,Archetype (column order doesn't matter).\n"
+                           "Usage: importplayers <paste CSV, ideally in a ```csv fenced block>\n"
+                           "  or: attach a .csv file with the command\n"
+                           "  or: reply to a message/file containing the CSV data with `importplayers`\n"
+                           "Example row: Virat Kohli,92,15,Batter,Anchor")
+    async def importplayers(self, ctx, *, data: str = ""):
+        admins = get_auth_admins()
+        if ctx.author.id != ADMIN_DISCORD_ID and str(ctx.author.id) not in admins:
+            return await ctx.send("❌ Access Denied: Admin only.")
+
+        raw = None
+        if ctx.message.attachments:
+            try:
+                raw = (await ctx.message.attachments[0].read()).decode("utf-8-sig")
+            except Exception as e:
+                return await ctx.send(f"❌ Could not read attachment: {e}")
+        elif ctx.message.reference and ctx.message.reference.message_id:
+            try:
+                ref = await ctx.channel.fetch_message(ctx.message.reference.message_id)
+                if ref.attachments:
+                    raw = (await ref.attachments[0].read()).decode("utf-8-sig")
+                elif ref.content:
+                    raw = ref.content
+            except Exception:
+                pass
+        if raw is None and data.strip():
+            raw = data.strip()
+        if raw is None:
+            return await ctx.send(
+                "❌ No CSV data found. Attach a `.csv` file, reply to a message/file containing it, "
+                "or paste it after the command (a ```csv fenced block works best).\n"
+                "Header row: `Name,Bat,Bowl,Role,Archetype` · Example: `Virat Kohli,92,15,Batter,Anchor`"
+            )
+        m = re.search(r"```(?:csv)?\s*\n?(.*?)```", raw, re.DOTALL)
+        if m:
+            raw = m.group(1)
+
+        valid, errors = _parse_players_csv(raw)
+
+        existing = {p["name"].lower() for p in get_all_players()}
+        already_have = [p["name"] for p in valid if p["name"].lower() in existing]
+        new_players = [p for p in valid if p["name"].lower() not in existing]
+
+        if errors:
+            err_text = "\n".join(errors)
+            if len(err_text) > 1500:
+                await ctx.send(f"⚠️ **{len(errors)} row(s) skipped** — details attached:",
+                               file=discord.File(io.BytesIO(err_text.encode()), filename="import_errors.txt"))
+            else:
+                await ctx.send(f"⚠️ **{len(errors)} row(s) skipped:**\n```\n{err_text}\n```")
+
+        if not new_players:
+            msg = "❌ No new players to import."
+            if already_have:
+                msg += f" **{len(already_have)}** already exist in the database."
+            return await ctx.send(msg)
+
+        note = f" (**{len(already_have)}** already in DB, skipped)" if already_have else ""
+        view = CSVSyncConfirmView(ctx, new_players,
+                                  title="📥 Bulk Player Import — Confirm", source="Bulk CSV Import")
+        view.message = await ctx.send(content=f"Found **{len(new_players)}** new player(s) to add{note}.",
+                                      embed=view.build_embed(), view=view)
 
     @commands.command(name="dummyrun", aliases=["datafarm", "dummytourney", "dfarm"],
                       help="[OWNER] Farm GS + pitch/weather data fast.\nDrafts balanced XIs from ~70% of the player DB and plays N headless matches across every pitch x weather - feeds global stats + the conditions tracker, saves NO scorecards.\nUsage: dummyrun <matches> [pool%] [t20|odi|both] [fast|slow]  ·  dummyrun status  ·  dummyrun stop\nformat (default t20): both = a 50/50 T20+ODI mix, each cycling conditions independently. fast (default) batches writes for large N; slow writes per match.\nExamples: `dummyrun 500` · `dummyrun 5000 0.8 odi` · `dummyrun 4000 both` · `dummyrun 200 slow` · `dummyrun stop`")
