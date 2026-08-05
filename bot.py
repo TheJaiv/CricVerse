@@ -10148,6 +10148,23 @@ def _rating_move(delta: int) -> str:
         step = "big"
     return f"{'🔺' if delta > 0 else '🔻'} {step} {'buff' if delta > 0 else 'nerf'}"
 
+# Archetypes ranked defensive -> aggressive. The public feed never names the archetype
+# (it's a rating-level detail); it only says which way the player moved on this scale.
+_ARCH_AGGRESSION = {"Anchor": 1, "Standard": 2, "Finisher": 3, "Aggressor": 4, "Vaibhav": 5}
+
+def _style_shift(old_arch: str, new_arch: str):
+    """'plays more aggressively' / 'more defensively' for the public feed, or None when
+    the archetype did not change."""
+    if old_arch == new_arch:
+        return None
+    old_rank = _ARCH_AGGRESSION.get(old_arch)
+    new_rank = _ARCH_AGGRESSION.get(new_arch)
+    if old_rank is None or new_rank is None or old_rank == new_rank:
+        return "🔄 playing style changed"
+    if new_rank > old_rank:
+        return "🔥 now plays more aggressively"
+    return "🛡️ now plays more defensively"
+
 def build_player_update_embed(before: dict, after: dict):
     """Public buff/nerf card, or None when nothing worth announcing changed. Carries NO
     ratings - only the direction and rough size of each move."""
@@ -10162,8 +10179,9 @@ def build_player_update_embed(before: dict, after: dict):
         old_r = _ROLE_DISPLAY.get(before.get("role", ""), before.get("role", "—"))
         new_r = _ROLE_DISPLAY.get(after.get("role", ""), after.get("role", "—"))
         lines.append(f"**Role** — {old_r} → {new_r}")
-    if before.get("archetype") != after.get("archetype"):
-        lines.append(f"**Archetype** — {before.get('archetype')} → {after.get('archetype')}")
+    style = _style_shift(before.get("archetype"), after.get("archetype"))
+    if style:
+        lines.append(f"**Style** — {style}")
     if before.get("name") != after.get("name"):
         lines.append(f"**Renamed** — {before.get('name')} → {after.get('name')}")
     if not lines:
@@ -10183,12 +10201,11 @@ def build_player_update_embed(before: dict, after: dict):
     return embed
 
 def build_player_added_embed(player: dict):
-    """Public card for a brand new player - role only, never the ratings."""
+    """Public card for a brand new player - role only, never the ratings or the archetype."""
     role = _ROLE_DISPLAY.get(player.get("role", ""), player.get("role", "Unknown"))
     embed = discord.Embed(title="🆕 New Player", color=discord.Color.gold(),
                           description=f"### 🏏 {player.get('name')}\n"
-                                      f"**Role** — {role}\n"
-                                      f"**Archetype** — {player.get('archetype')}")
+                                      f"**Role** — {role}")
     embed.set_footer(text="Player database update")
     embed.timestamp = discord.utils.utcnow()
     return embed

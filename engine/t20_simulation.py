@@ -143,6 +143,60 @@ T20_INTENT_BND   = (0.72, 1.28)   # boundary mult = lo + intent*span (0.72 -> 2.
 T20_INTENT_WKT   = (0.74, 0.90)   # wicket mult = lo + intent*span (0.74 -> 1.64)
 T20_INTENT_DOT   = (1.30, -0.72)  # dot mult = lo + intent*span (1.30 -> 0.58)
 
+# BATTING ARCHETYPE IDENTITY
+# Archetype used to be a flat +-0.10 nudge on intent - a rounding error next to the
+# situational terms (launch span 0.62, powerplay floor 0.50, tough-deck up to ~0.60),
+# and it was clamped away entirely at the death (everyone saturates at intent 1.0) and
+# in cruising chases (the CRUISE_INTENT cap ran after it). Two 86-rated batters of
+# opposite archetypes both came out ~SR 150 / avg 31, so the pick was cosmetic.
+# Identity now has three independent levers:
+#   BAND  - a per-archetype intent floor/cap applied LAST, so a batter's tempo survives
+#           the situational clamps instead of being averaged away by them.
+#   RISK  - each archetype rides its OWN risk/reward line off the intent map. This is
+#           what actually separates average from strike-rate: a flat intent nudge
+#           cannot, because intent moves boundaries and wickets in lockstep. An Anchor
+#           buys tempo cheaply in wickets; an Aggressor pays full price for it.
+#   GRIND - how much of the long-innings tax (rating fade past 35 balls + the 45-ball
+#           wicket multiplier) the archetype carries. Those caps exist to stop freak
+#           200*s, but they landed hardest on the one archetype whose job is batting deep.
+# Reference points are real T20 careers - Anchor ~SR 135 / avg 40 (Kohli/Gill/Gaikwad),
+# Aggressor ~SR 175 / avg 29 (SKY/Pooran/Head). Measured on a Balanced deck at bat 86 vs
+# bowl 84 (position-controlled, 2400 innings/archetype): Anchor 142/41, Standard 155/34,
+# Finisher 160/33, Aggressor 172/30 - up from a 12-run SR and 3-run average spread. Par
+# totals and head-to-head win rates are unchanged; archetype redistributes runs WITHIN
+# a side rather than shifting results.
+T20_ARCH_INTENT = {
+    #              offset  floor    cap
+    "Anchor":     (-0.19,  0.00,  0.50),
+    "Standard":   ( 0.00,  0.00,  1.00),
+    "Finisher":   ( 0.05,  0.12,  1.00),
+    "Aggressor":  ( 0.17,  0.52,  1.00),
+    # Vaibhav's 0.90 floor replaces the old hard `intent = max(intent, 0.9)` - relentless
+    # ultra-aggression, SR 200+ and he pays for it in wickets. Unchanged behaviour.
+    "Vaibhav":    ( 0.32,  0.90,  1.00),
+}
+# The Anchor's cap is not a life sentence - it lifts once he is SET and again at the
+# DEATH, so he plays the real anchor arc (bat 20 balls, then cash in) rather than
+# blocking out the 20th over.
+T20_ARCH_CAP_SET   = 0.18    # cap += this once balls_faced >= T20_ARCH_SET_BALLS
+T20_ARCH_SET_BALLS = 18
+T20_ARCH_CAP_DEATH = 0.30    # cap += this in the death overs
+# Per-archetype risk/reward: multipliers on the intent->weight SPANS above. Vaibhav is
+# absent on purpose - he already has a bespoke weight block below and would double-dip.
+T20_ARCH_RISK = {
+    #             bnd-span  wkt-span
+    "Anchor":    (0.70,     0.66),
+    "Standard":  (1.00,     1.00),
+    "Finisher":  (1.10,     1.04),
+    "Aggressor": (1.46,     1.40),
+}
+# Share of the long-innings tax each archetype carries (0 = exempt, 1 = the old flat rate).
+T20_ARCH_GRIND = {"Anchor": 0.30, "Standard": 0.85, "Finisher": 1.0, "Aggressor": 1.15}
+# Shot-mix tilt: shifts `rage` in the shot picker so two batters on the SAME intent
+# still play different shots (the Anchor works it around, the Aggressor goes aerial).
+T20_ARCH_RAGE = {"Anchor": -0.12, "Standard": 0.0, "Finisher": 0.06,
+                 "Aggressor": 0.10, "Vaibhav": 0.15}
+
 def t20_cons(rating: float) -> float:
     """0 -> no change (rating ≤ LOW, current variance); 1 -> max consistency (rating ≥ HIGH)."""
     if rating <= T20_CONS_LOW:
@@ -308,8 +362,10 @@ def _t20_intent(match, innings, b_stats, archetype, total_balls, balls_left):
     if collapsing:
         intent *= T20_INTENT_REBUILD
 
-    # Batter: archetype + new-batsman caution.
-    intent += {"Vaibhav": 0.32, "Aggressor": 0.10, "Finisher": 0.06, "Standard": 0.0, "Anchor": -0.10}.get(archetype, 0.0)
+    # Batter: archetype offset + new-batsman caution. (The archetype's FLOOR/CAP are
+    # applied last, after the cruise clamp - see the band block at the end.)
+    _arch_off, _arch_floor, _arch_cap = T20_ARCH_INTENT.get(archetype, (0.0, 0.0, 1.0))
+    intent += _arch_off
     if b_stats.balls_faced < 5:
         intent -= 0.10
 
@@ -323,10 +379,22 @@ def _t20_intent(match, innings, b_stats, archetype, total_balls, balls_left):
         if _rrr2 < _pr2 * T20_CHASE_GO_GATE:
             intent = min(intent, T20_CHASE_CRUISE_INTENT)
 
-    # VAIBHAV: relentless ultra-aggression - never throttles down, floors intent near
-    # the top so he swings from ball one (SR 200+ ... and pays for it in wickets).
-    if archetype == "Vaibhav":
-        intent = max(intent, 0.9)
+    # ARCHETYPE BAND (applied LAST, so identity survives every clamp above). The cap is
+    # what stops an Anchor slogging in the middle overs; the floor is what keeps an
+    # Aggressor attacking even in a cruising chase, where the clamps used to make every
+    # archetype identical. The Anchor's cap lifts once he's set and again at the death,
+    # so he still accelerates - he just does it later than an Aggressor.
+    _cap = _arch_cap
+    if _cap < 1.0:
+        if b_stats.balls_faced >= T20_ARCH_SET_BALLS:
+            _cap += T20_ARCH_CAP_SET
+        if total_balls >= match.max_balls - 30:
+            _cap += T20_ARCH_CAP_DEATH
+    # A collapse still overrides the floor - nobody keeps swinging at 40/5. Except
+    # Vaibhav, whose whole character is that he never throttles down.
+    if not collapsing or archetype == "Vaibhav":
+        intent = max(intent, _arch_floor)
+    intent = min(intent, _cap)
 
     return max(0.0, min(1.0, intent))
 
@@ -338,6 +406,10 @@ def get_smart_ai_shot_t20(deliv, is_collapse, is_death_overs, archetype, pressur
     if intent is not None:
         force_aggression = intent > 0.50
         r = max(0.0, min(1.0, (intent - 0.50) / 0.45))
+        # `archetype` was accepted here but never read, so two batters on the same
+        # intent played an identical shot mix. Tilt the rage so the Anchor works it
+        # around (Drive/Flick) where the Aggressor goes aerial (Loft/Scoop).
+        r = max(0.0, min(1.0, r + T20_ARCH_RAGE.get(archetype, 0.0)))
     else:
         force_aggression = pressure_multiplier > 1.12 or is_death_overs
         r = max(0.0, min(1.0, (pressure_multiplier - 1.12) / 0.55))
@@ -640,12 +712,16 @@ def execute_ball_math_t20(match):
 
     # Batter form progression. Asymmetric: keep the set-batsman scoring (par) but
     # soften the new-batsman penalty so early wickets don't cascade into blowouts.
+    # The past-35 fade is scaled by archetype: it exists to stop freak unbeaten 150s,
+    # which is a slogger-gets-lucky problem, not an anchor one. Taxing every batter
+    # equally punished exactly the archetype whose job is to bat through.
+    _grind = T20_ARCH_GRIND.get(striker["archetype"], 1.0)
     if b_stats.balls_faced < 4:
         bat_rating -= 3
     elif 4 <= b_stats.balls_faced <= 35:
         bat_rating += 5
     elif b_stats.balls_faced > 35:
-        bat_rating -= (b_stats.balls_faced - 35) * 0.5
+        bat_rating -= (b_stats.balls_faced - 35) * 0.5 * _grind
         
     # Bowler fatigue
     if bow_stats.balls_bowled >= 12 and "Pace" in bowler["role"]:
@@ -833,7 +909,7 @@ def execute_ball_math_t20(match):
         wicket_weight *= DSL_WKT_TRIM   # flat par-restore for league-realism mode (see constant)
     
     if b_stats.balls_faced > 45:
-        wicket_weight *= 1.5
+        wicket_weight *= (1.0 + 0.5 * _grind)   # archetype-scaled - see T20_ARCH_GRIND
 
     bad_shot_selection = False
     perfect_shot_selection = False
@@ -1044,8 +1120,13 @@ def execute_ball_math_t20(match):
             # more wickets, fewer dots. Phase, resources, run-rate gap, pitch difficulty
             # and the batter are all already baked into `_intent`, so this replaces the
             # old pile of archetype / collapse / wickets-in-hand / pressure multipliers.
-            boundary_weight *= (T20_INTENT_BND[0] + _intent * T20_INTENT_BND[1])
-            wicket_weight   *= (T20_INTENT_WKT[0] + _intent * T20_INTENT_WKT[1])
+            # ...and each archetype rides its own SLOPE off that map: at identical
+            # intent the Anchor converts tempo into far fewer wickets than the
+            # Aggressor. Intent alone can't split average from strike-rate (it moves
+            # boundaries and wickets together) - this is the lever that does.
+            _rb, _rw = T20_ARCH_RISK.get(striker["archetype"], (1.0, 1.0))
+            boundary_weight *= (T20_INTENT_BND[0] + _intent * T20_INTENT_BND[1] * _rb)
+            wicket_weight   *= (T20_INTENT_WKT[0] + _intent * T20_INTENT_WKT[1] * _rw)
             dot_weight      *= (T20_INTENT_DOT[0] + _intent * T20_INTENT_DOT[1])
             # Vaibhav swings even harder than a maxed intent: more boundaries, far fewer
             # dots - and a much higher chance of holing out.

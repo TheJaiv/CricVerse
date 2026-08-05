@@ -56,6 +56,8 @@ DB_CACHE = {
     "restricted_channels": [],
     "ratings_channels": [],
     "match_log_channels": {},
+    # Public player-update feed channel per server: { server_id: channel_id }
+    "player_update_channels": {},
     "tournaments": [],
     "match_counts": {"t20": 0, "odi": 0, "test": 0},
     # Per-server player rating overrides (owner-only, separate from the global `players` DB):
@@ -116,6 +118,7 @@ def load_data_from_bin():
             DB_CACHE["restricted_channels"] = doc.get("restricted_channels", [])
             DB_CACHE["ratings_channels"]    = doc.get("ratings_channels", [])
             DB_CACHE["match_log_channels"]  = doc.get("match_log_channels", {})
+            DB_CACHE["player_update_channels"] = doc.get("player_update_channels", {})
             DB_CACHE["server_overrides"]    = doc.get("server_overrides", {})
             DB_CACHE["draft_stats"]         = doc.get("draft_stats", {})
             DB_CACHE["custom_teams"]        = doc.get("custom_teams", {})
