@@ -128,6 +128,27 @@ python3 tools/dsl_flow_test.py       # 34 checks
 python3 tools/rating_league_test.py  # 21 checks
 ```
 
+## Built with AI
+
+CricVerse is built with AI assistance - most of the code here was written by
+Claude Code, working from specs and reviews by me. The cricket knowledge, the
+design calls, and the decision about what "right" looks like are mine; a lot of
+the typing is not.
+
+That is also why the section above exists. A simulation is the worst possible
+place to trust generated code on sight, because wrong output still looks like
+cricket - a bowling average of 12 or a par score 40 runs light reads as a
+plausible scorecard until you run a thousand of them and check the
+distribution. So nothing in the engine is accepted because it compiles. Outcome
+weights are Monte-Carlo tuned against real-world par scores and upset rates,
+and the flow tests drive the actual bot code end to end rather than mocking it.
+Those harnesses are the review layer, and they caught more than they should
+have needed to.
+
+Worth stating plainly for anyone reading the code: the balance work, the format
+rules, and the calibration targets are deliberate choices, not defaults someone
+generated and shipped.
+
 ## Contributing
 
 Want to run your own instance? [SETUP.md](SETUP.md) has everything - fork or

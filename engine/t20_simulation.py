@@ -1,6 +1,8 @@
 import random
 import math
 
+from engine.ball_record import record_ball
+
 # CALIBRATION CONSTANTS (tuned via Monte Carlo - see sim_harness.py)
 # Neutral 85v85 target: par ~165, ~6-7 wkts, ~50/50. Big rating gaps separate
 # teams decisively (≤1% upset at 14pt gap, ~0.1% at 24pt gap).
@@ -613,6 +615,10 @@ def execute_ball_math_t20(match):
     striker = innings.batting_team["players"][innings.current_striker_idx]
     bowler = innings.current_bowler
 
+    # Ball position snapshotted BEFORE anything increments total_balls, so the
+    # over/ball numbering on the record is the same for a legal ball and a wide.
+    _ball_index = innings.total_balls
+
     b_stats = innings.batting_stats[striker["name"]]
     bow_stats = innings.bowling_stats[bowler["name"]]
 
@@ -871,6 +877,14 @@ def execute_ball_math_t20(match):
             )
             match.wide_extra_msg = match.last_commentary
             if free_hit_active: match.last_commentary_prefix = "🛡️ *(Free Hit continues)*\n"
+            record_ball(match, innings, _ball_index,
+                        bowler=bowler["name"], bowler_role=bowler["role"],
+                        striker=striker["name"], striker_archetype=striker["archetype"],
+                        delivery=deliv, shot=None, outcome="wide", legal=False,
+                        runs_off_bat=0, extras=1, is_wide=True, is_no_ball=False,
+                        is_bye=False, is_cutter=True, free_hit=free_hit_active,
+                        bad_shot=False, dismissal=None, dismissal_desc=None,
+                        bowler_credited=False, wide_reason="cutter grip")
             return
     else:
         is_cutter = False
@@ -885,6 +899,14 @@ def execute_ball_math_t20(match):
         innings.over_log.append("<:wide:1520143046900191344>")
         match.last_commentary = prefix + f"**{bowler['name']}** bowled a **Wide!**\n💥 **Result:** 1 Extra Run"
         if free_hit_active: match.last_commentary_prefix = "🛡️ *(Free Hit continues)*\n"
+        record_ball(match, innings, _ball_index,
+                    bowler=bowler["name"], bowler_role=bowler["role"],
+                    striker=striker["name"], striker_archetype=striker["archetype"],
+                    delivery=deliv, shot=None, outcome="wide", legal=False,
+                    runs_off_bat=0, extras=1, is_wide=True, is_no_ball=False,
+                    is_bye=False, is_cutter=is_cutter, free_hit=free_hit_active,
+                    bad_shot=False, dismissal=None, dismissal_desc=None,
+                    bowler_credited=False, wide_reason="line")
         return
         
     if not is_no_ball and random.random() < T20_NOBALL_RATE:
@@ -1311,6 +1333,11 @@ def execute_ball_math_t20(match):
     b_stats.balls_faced += 1
     innings.last_ball_boundary = False
     outcome_text = ""
+    # Defaults so the ball record can be built from one place below - each of
+    # these is only assigned inside one of the two outcome branches.
+    runs = 0
+    is_bye = False
+    dismissal_type = None
 
     # hat-trick bookkeeping: the streak only survives this ball if it's a
     # bowler-credited wicket (run outs and denied no-ball wickets break it)
@@ -1441,3 +1468,17 @@ def execute_ball_math_t20(match):
                 innings.current_striker_idx, innings.current_non_striker_idx = innings.current_non_striker_idx, innings.current_striker_idx
         
     match.last_commentary = prefix + f"**{bowler['name']}** bowled a **{deliv}**\n**{striker['name']}** played: **{shot}**\n💥 **Result:** {outcome_text}"
+
+    record_ball(match, innings, _ball_index,
+                bowler=bowler["name"], bowler_role=bowler["role"],
+                striker=striker["name"], striker_archetype=striker["archetype"],
+                delivery=deliv, shot=shot, outcome=outcome, legal=not is_no_ball,
+                runs_off_bat=(0 if (is_bye or outcome == "wicket") else runs),
+                extras=(1 if is_no_ball else 0) + (runs if is_bye else 0),
+                is_wide=False, is_no_ball=is_no_ball, is_bye=is_bye,
+                is_cutter=is_cutter, free_hit=free_hit_active,
+                bad_shot=bad_shot_selection, dismissal=dismissal_type,
+                dismissal_desc=(b_stats.dismissal if dismissal_type else None),
+                bowler_credited=bool(dismissal_type) and dismissal_type != "Run Out",
+                batter_runs=b_stats.runs_scored, batter_balls=b_stats.balls_faced,
+                outcome_text=outcome_text)

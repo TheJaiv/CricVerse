@@ -14,12 +14,17 @@ Exits non-zero if any check fails.
 """
 import os
 import sys
+import time
 import random
 import asyncio
 import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["CAREER_MODE"] = "1"
+# The live card's rate-limit window is real-Discord pacing; with fake channels it
+# would just add ~1.5s of sleep per delivery. Part 6 raises it back to assert the
+# throttle actually works.
+os.environ.setdefault("CAREER_GUI_EDIT_INTERVAL", "0")
 
 # Fake Mongo layer (installed BEFORE career_manager import)
 class FakeCollection:
@@ -285,11 +290,16 @@ class FUser:
         self.bot = False
 
 class FMessage:
-    def __init__(self, channel, content=None, view=None, embed=None):
+    def __init__(self, channel, content=None, view=None, embed=None, file=None):
         self.channel, self.content, self.view, self.embed = channel, content, view, embed
+        self.file = file
+        self.edits = 0            # broadcast card is EDITED per ball, not re-sent
     async def edit(self, **kw):
         if "view" in kw: self.view = kw["view"]
         if "content" in kw: self.content = kw["content"]
+        if "attachments" in kw and kw["attachments"]:
+            self.file = kw["attachments"][0]
+            self.edits += 1
         return self
 
 class FChannel:
@@ -298,9 +308,14 @@ class FChannel:
         self.guild = None
         self.log = []
     async def send(self, content=None, *, embed=None, embeds=None, view=None, file=None, files=None, **kw):
-        m = FMessage(self, content, view, embed)
+        m = FMessage(self, content, view, embed, file or (files[0] if files else None))
         self.log.append(m)
         return m
+    def files(self, suffix=None):
+        out = [m.file for m in self.log if m.file is not None]
+        if suffix:
+            out = [f for f in out if str(getattr(f, "filename", "")).endswith(suffix)]
+        return out
     def text(self):
         parts = []
         for m in self.log:
@@ -707,12 +722,262 @@ async def part5_stress(n=8):
               ch.text()[-300:])
 
 
+async def part6_broadcast():
+    """Broadcast GUI: ball records, snapshot, live card, replay clips."""
+    section("PART 6 · broadcast GUI (live card · replays · ball feed)")
+    from career import snapshot as SNAP
+    from career import ballfeed as BF
+    from career import live as CLIVE
+    from career.ui import theme as TH
+    from career.ui import broadcast as BC
+    from career.ui import motion as MO
+
+    check("fonts are vendored", TH.fonts_are_vendored())
+
+    u1 = fresh(601, name="BcastA", coins=0)
+    fresh(602, name="BcastB", coins=0)
+    lob = CMATCH.ClubLobby(9600, 601, "BcastA", overs=3)
+    lob.add(602, "BcastB")
+    lob.add_bot(); lob.add_bot()
+    force_human_caps(lob)
+    ch = FChannel(9600)
+    host, p2 = FUser(601, "BcastA"), FUser(602, "BcastB")
+    await B.start_club_match(ch, lob, host)
+    match = B.active_games[9600]
+
+    # snapshot must survive being called before a single ball is bowled
+    st = SNAP.build_broadcast_state(match)
+    check("snapshot builds pre-first-ball", isinstance(st, dict) and "batting" in st)
+
+    await drive_match(ch, [host, p2], seed=606)
+
+    cards = ch.files("live.png")
+    check("live card posted", len(cards) >= 1, f"got {len(cards)}")
+    card_msgs = [m for m in ch.log if m.file is not None and getattr(m.file, "filename", "") == "live.png"]
+    check("card is edited in place, not re-sent per ball",
+          any(m.edits > 2 for m in card_msgs), f"edits={[m.edits for m in card_msgs]}")
+    check("one card per innings (2 innings -> <=2 cards)",
+          len(card_msgs) <= 2, f"got {len(card_msgs)}")
+
+    hist = (match.innings1.ball_history or []) + (getattr(match.innings2, "ball_history", None) or [])
+    check("ball history captured for the match", len(hist) > 10, f"{len(hist)} balls")
+    check("every record carries an outcome", all(r.get("outcome") for r in hist))
+
+    gifs = ch.files("replay.gif")
+    highlights = [r for r in hist if BF.is_highlight(r)]
+    check("replays only when a highlight happened",
+          len(gifs) <= len(highlights), f"{len(gifs)} gifs vs {len(highlights)} highlights")
+    check("replay budget respected", len(gifs) <= CLIVE.MAX_GIFS_PER_MATCH)
+
+    # renderers produce real, decodable images
+    import io
+    from PIL import Image
+    png = BC.render_live_card(SNAP.build_broadcast_state(match))
+    im = Image.open(io.BytesIO(png.getvalue()))
+    check("live card is a valid PNG of the right size", im.size == (BC.W, BC.H), str(im.size))
+
+    if hist:
+        rec = next((r for r in hist if r.get("dismissal")), hist[-1])
+        gif = MO.build_replay_gif(rec)
+        g = Image.open(io.BytesIO(gif.getvalue()))
+        check("replay gif is animated", getattr(g, "n_frames", 1) > 5, f"{getattr(g,'n_frames',1)} frames")
+        check("replay gif stays under 400 KB", len(gif.getvalue()) < 400_000,
+              f"{len(gif.getvalue())//1024} KB")
+        verdict = {"decision": "OUT", "pitching_call": "IN LINE", "impact_call": "IN LINE",
+                   "hitting_call": "HITTING", "summary": "three reds"}
+        drs = MO.build_drs_gif(rec, verdict)
+        check("drs gif renders", len(drs.getvalue()) > 1000)
+        geo = BF.geometry(rec)
+        check("geometry is deterministic", geo == BF.geometry(rec))
+        check("geometry stays in range",
+              -1 <= geo["line"] <= 1 and 0 <= geo["pitch_frac"] <= 1)
+
+    # forced updates must still honour the edit window (a per-ball edit storm
+    # during bot-vs-bot stretches is what earns a 429)
+    sess = CLIVE.session_for(ch)
+    _saved = CLIVE.EDIT_INTERVAL
+    CLIVE.EDIT_INTERVAL = 0.4
+    await sess.push(match)          # establish the card - only an EDIT is throttled
+    check("session holds a card message after the first push", sess.message is not None)
+    sess.last_edit = time.time()
+    t0 = time.time()
+    await sess.push(match, force=True)
+    waited = time.time() - t0
+    CLIVE.EDIT_INTERVAL = _saved
+    check("forced card update waits out the edit window", waited >= 0.3, f"{waited:.2f}s")
+
+    # a failing renderer must fall back to the text embed, not kill the match
+    ch2 = FChannel(9601)
+    sess = CLIVE.session_for(ch2)
+    sess.failed = True
+    ok = await sess.push(match)
+    check("dead session reports failure so the caller falls back", ok is False)
+    CLIVE.end(9601)
+
+
+async def part7_access_and_admin():
+    """Access gate (career mode is admin-only during the rebuild) + owner tools."""
+    section("PART 7 · access gate · owner ratings dump")
+
+    class FAuthor:
+        def __init__(self, uid, admin=False):
+            self.id = uid
+            self.name = f"u{uid}"
+            self.display_name = f"u{uid}"
+
+            class P: administrator = admin
+            self.guild_permissions = P()
+
+    class FGuild:
+        id = 4242
+
+    class FCtx:
+        def __init__(self, uid, admin=False, guild=True):
+            self.author = FAuthor(uid, admin)
+            self.guild = FGuild() if guild else None
+            self.channel = FChannel(9700)
+            self.sent = []
+            self.bot = None
+        async def send(self, content=None, **kw):
+            self.sent.append((content, kw))
+            return FMessage(self.channel, content)
+
+    owner = FCtx(B.ADMIN_DISCORD_ID)
+    rando = FCtx(500123)
+    guild_admin = FCtx(500124, admin=True)
+
+    check("public flag is off (career is admin-only)", B.CAREER_PUBLIC is False)
+    check("owner passes the gate", B._can_use_career(owner) is True)
+    check("guild admin passes the gate", B._can_use_career(guild_admin) is True)
+    check("ordinary user is BLOCKED", B._can_use_career(rando) is False)
+
+    # the gate must not be dead code: flipping the public flag reopens it
+    _saved = B.CAREER_PUBLIC
+    B.CAREER_PUBLIC = True
+    check("public flag reopens the mode", B._can_use_career(rando) is True)
+    B.CAREER_PUBLIC = _saved
+    check("flag restored", B._can_use_career(rando) is False)
+
+    # kill switch still wins over everything
+    _mode = B.CAREER_MODE_ENABLED
+    B.CAREER_MODE_ENABLED = False
+    check("CAREER_MODE=0 blocks even the owner", B._can_use_career(owner) is False)
+    B.CAREER_MODE_ENABLED = _mode
+
+    # every career command must be behind the gate
+    import inspect
+    cog = None
+    for c in (B.PrefixCog,):
+        cog = c
+    src = inspect.getsource(cog)
+    career_cmds = ["start_career", "profile", "stats", "debut", "daily", "quests", "scenario",
+                   "balance", "upgrade", "create_match", "joinmatch", "startmatch"]
+    missing = [n for n in career_cmds
+               if f"async def {n}" in src
+               and "_can_use_career" not in src.split(f"async def {n}", 1)[1][:900]]
+    check("every sampled career command calls the gate", not missing, f"ungated: {missing}")
+
+    # owner ratings dump
+    fresh(701, name="DumpA", coins=500)
+    c2 = fresh(702, name="DumpB", coins=90)
+    c2["attributes"]["power"] = 95
+    CM.refresh_ovr(c2); CM.async_save_career(c2)
+
+    class FBot:
+        def get_user(self, uid): return None
+
+    cog_inst = B.PrefixCog(FBot())
+    owner.bot = FBot()
+    await B.PrefixCog.all_ratings.callback(cog_inst, owner)
+    blob = "\n".join(str(c) for c, _ in owner.sent if c)
+    check("dump lists the careers", "DumpA" in blob and "DumpB" in blob, blob[:200])
+    check("dump reports a summary", "careers" in blob and "avg OVR" in blob)
+    files = [kw.get("file") for _, kw in owner.sent if kw.get("file")]
+    check("dump attaches a CSV", any(getattr(f, "filename", "") == "career_ratings.csv" for f in files))
+
+    denied = FCtx(500125)
+    denied.bot = FBot()
+    await B.PrefixCog.all_ratings.callback(cog_inst, denied)
+    check("dump is owner-only", any("Owner-only" in str(c) for c, _ in denied.sent))
+
+
+def part8_engine_isolation():
+    """The ball feed must be observation only, and career-only.
+
+    Guards two promises: (1) recording consumes no randomness, so a match plays
+    out identically with it on or off - the engine's simulation logic is
+    untouched; (2) nothing outside career mode pays for it.
+    """
+    section("PART 8 · engine isolation (ball feed changes nothing)")
+
+    def _team(name, seed):
+        rng = random.Random(seed)
+        roles = ["Batter"] * 5 + ["All-Rounder_Pace", "All-Rounder_Spin"] + \
+                ["Bowler_Pace", "Bowler_Pace", "Bowler_Spin_Off", "Bowler_Spin_Leg"]
+        return {"name": name, "subs": [], "players": [
+            {"name": f"{name}{i}", "bat": rng.randint(55, 92), "bowl": rng.randint(40, 88),
+             "role": roles[i], "archetype": rng.choice(["Aggressor", "Anchor", "Standard"])}
+            for i in range(11)]}
+
+    def _run(seed, record, overs=20):
+        random.seed(seed)
+        t1, t2 = _team("A", 1), _team("B", 2)
+        m = B.CricketMatch("A", "B", 1, 2, t1, t2, format_overs=overs,
+                           pitch="Hard", weather="Clear")
+        m.sim_only = True; m.verbose = False
+        m.simulation_mode = "whole_match"; m._defer_stats = True
+        if record:
+            m.record_balls = True
+        m.batting_first_id, m.bowling_first_id = 1, 2
+        m.innings1 = B.InningsState(t1, t2)
+        m.current_innings = m.innings1
+        B._run_full_match_sync(m)
+        return m
+
+    def _card(i):
+        return (i.total_runs, i.wickets, i.total_balls, getattr(i, "extras", 0),
+                tuple(sorted((n, s.runs_scored, s.balls_faced, s.dismissal)
+                             for n, s in i.batting_stats.items())),
+                tuple(sorted((n, s.runs_conceded, s.balls_bowled, s.wickets_taken)
+                             for n, s in i.bowling_stats.items())))
+
+    mismatches = []
+    for seed in range(12):
+        off, on = _run(seed, False), _run(seed, True)
+        if (_card(off.innings1), _card(off.innings2)) != (_card(on.innings1), _card(on.innings2)):
+            mismatches.append(seed)
+    check("recording never changes the simulation (12 seeds, T20)",
+          not mismatches, f"differed at seeds {mismatches}")
+
+    odi_off, odi_on = _run(101, False, overs=50), _run(101, True, overs=50)
+    check("recording never changes the simulation (ODI)",
+          (_card(odi_off.innings1), _card(odi_off.innings2))
+          == (_card(odi_on.innings1), _card(odi_on.innings2)))
+
+    plain = _run(5, False)
+    check("non-career match stores no ball history",
+          not hasattr(plain.innings1, "ball_history"))
+    check("non-career match stores no last_ball",
+          getattr(plain, "last_ball", None) is None)
+
+    for attr in ("is_club", "is_debut", "is_scenario"):
+        m = _run(6, False)
+        setattr(m, attr, True)
+        from engine.ball_record import wants_records
+        check(f"{attr} matches opt into the feed", wants_records(m) is True)
+    check("a plain match does not opt in",
+          __import__("engine.ball_record", fromlist=["x"]).wants_records(plain) is False)
+
+
 def main():
     random.seed(42)
     part1()
     part2()
     part3()
     asyncio.run(part4())
+    asyncio.run(part6_broadcast())
+    asyncio.run(part7_access_and_admin())
+    part8_engine_isolation()
     if os.environ.get("STRESS", "1") == "1":
         asyncio.run(part5_stress(int(os.environ.get("STRESS_N", "8"))))
 

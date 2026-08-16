@@ -78,6 +78,22 @@ def _ctext(d, cx, y, text, font, fill):
 
 
 def render_career_card(career: dict) -> io.BytesIO:
+    """Player card for `cv profile`, creation and a passed debut.
+
+    Delegates to the broadcast card in career/ui/broadcast.py. The original
+    760x420 drawing is kept below as _render_legacy_card and is used if the new
+    renderer fails for any reason - a card is not worth breaking `cv profile` over.
+    """
+    try:
+        from career import snapshot as SNAP
+        from career.ui import broadcast as BC
+        return BC.render_player_card(SNAP.build_player_state(career))
+    except Exception as e:
+        print(f"broadcast player card failed, using legacy card: {e}")
+        return _render_legacy_card(career)
+
+
+def _render_legacy_card(career: dict) -> io.BytesIO:
     W, H = 760, 420
     PW = 280                     # left identity panel width
     tier = career.get("tier", "Bronze")

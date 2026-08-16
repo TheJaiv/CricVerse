@@ -90,10 +90,22 @@ try:
     from career import career_match
     from career.career_manager import load_careers
     _CAREER_OK = True
+    # Broadcast GUI: the live card + replay clips. Loaded separately so a Pillow
+    # or font problem degrades career mode to the old text embeds instead of
+    # taking the whole mode down. CAREER_GUI=0 forces the text embeds back.
+    try:
+        from career import live as career_live
+        CAREER_GUI_ENABLED = os.environ.get("CAREER_GUI", "1") == "1"
+    except Exception as _gui_err:
+        print(f"Career broadcast GUI not loaded ({_gui_err}); using text scoreboards.")
+        career_live = None
+        CAREER_GUI_ENABLED = False
 except Exception as _career_err:
     print(f"Career module not loaded ({_career_err}); Career Mode disabled.")
     CAREER_MODE_ENABLED = False
     _CAREER_OK = False
+    career_live = None
+    CAREER_GUI_ENABLED = False
     def load_careers():  # no-op fallback
         pass
 
@@ -103,14 +115,26 @@ _log_env = os.environ.get("LOG_CHANNEL_ID")
 LOG_CHANNEL_ID = int(_log_env) if _log_env and _log_env.isdigit() else 0
 
 # Career Mode gating helpers
-_CAREER_SOON = "🚧 **Career Mode is coming soon!** It's still in development."
+_CAREER_SOON = "🚧 **Career Mode is being rebuilt.** It's admin-only right now — back soon."
+
+# Career Mode is CLOSED to the public while the 2.0 rebuild lands (broadcast GUI,
+# DRS, condition, seasons). Admins, authorised admins and Career Beta tier keep
+# access so the new work can be tested on the live bot. Set CAREER_PUBLIC=1 to
+# reopen it to everyone; CAREER_MODE=0 still kill-switches the whole mode.
+CAREER_PUBLIC = os.environ.get("CAREER_PUBLIC", "0") == "1"
+
 
 def _can_use_career(ctx):
-    """During development Career Mode is owner/admin-only; everyone else sees
-    'coming soon'. When CAREER_MODE_ENABLED is flipped on, it opens to all."""
-    if not _CAREER_OK:
+    """True if this user may use Career Mode.
+
+    Order matters: the module has to have loaded, the mode has to be enabled, and
+    then either it is public or the user is staff/beta. The final `return False`
+    is the point of the gate - it used to be `return True`, which quietly made
+    every check above dead code and left the mode open to everyone.
+    """
+    if not _CAREER_OK or not CAREER_MODE_ENABLED:
         return False
-    if CAREER_MODE_ENABLED:
+    if CAREER_PUBLIC:
         return True
     try:
         if ctx.author.id == ADMIN_DISCORD_ID:
@@ -119,13 +143,13 @@ def _can_use_career(ctx):
             return True
         if str(ctx.author.id) in get_auth_admins():
             return True
-        # Career Beta testers get in before the global launch.
+        # Career Beta testers get in before the mode reopens.
         sid = str(ctx.guild.id) if ctx.guild else ""
         if get_tier_status(str(ctx.author.id), sid)[0] == "Career Beta":
             return True
     except Exception:
         pass
-    return True
+    return False
 
 def _is_premium(ctx):
     """Weekly/monthly perks: bot-granted premium pass, Nitro boosters, paid sub tiers, or owner."""
@@ -4046,6 +4070,7 @@ async def _loop_current_innings_simulation(interaction, match: CricketMatch):
                     await channel.send("🚨 **CRITICAL ERROR:** Could not find a valid bowler.")
                     if channel.id in active_games:
                         del active_games[channel.id]
+                        _end_career_broadcast(channel.id)
                     return
                 innings.current_bowler = new_bowler
 
@@ -4475,14 +4500,23 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
     channel = interaction_context if isinstance(interaction_context, discord.TextChannel) else interaction_context.channel
 
     if match.current_innings_num == 1:
-        img_buf = generate_final_score_image(match)
-        if getattr(match, "tournament_server_id", None):
-            img_buf = generate_tournament_score_image(match)
-        else:
-            img_buf = generate_final_score_image(match)
+        img_buf = _career_summary_image(match)
+        if img_buf is None:
+            if getattr(match, "tournament_server_id", None):
+                img_buf = generate_tournament_score_image(match)
+            else:
+                img_buf = generate_final_score_image(match)
         file = discord.File(fp=img_buf, filename="innings1_score.png")
         embed_full = render_full_scorecard_embed(match, 1)
-        
+
+        # Career matches also get the innings charts (runs per over + the top
+        # scorer's wagon wheel), both read off the recorded ball history.
+        if career_live is not None and CAREER_GUI_ENABLED and _is_career_match(match):
+            try:
+                await career_live.post_innings_charts(channel, match.innings1)
+            except Exception as _chart_err:
+                print(f"career innings charts failed: {_chart_err}")
+
         match.current_innings_num = 2
         match.innings2 = build_second_innings(match)
         match.current_innings = match.innings2
@@ -4605,10 +4639,12 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
         # always uses match_to_finalize (the main match) so stats/standings/bracket stay correct.
         img_match = match if is_so_finish else match_to_finalize
         try:
-            if getattr(img_match, "tournament_server_id", None):
-                img_buf = generate_tournament_score_image(img_match)
-            else:
-                img_buf = generate_final_score_image(img_match)
+            img_buf = _career_summary_image(img_match, final=True)
+            if img_buf is None:
+                if getattr(img_match, "tournament_server_id", None):
+                    img_buf = generate_tournament_score_image(img_match)
+                else:
+                    img_buf = generate_final_score_image(img_match)
             embed_full = render_full_scorecard_embed(img_match, 2)
         except Exception as _img_err:
             print(f"Summary image failed ({'super over' if is_so_finish else 'match'}): {_img_err}")
@@ -4689,6 +4725,7 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
 
         if channel.id in active_games:
             del active_games[channel.id]
+        _end_career_broadcast(channel.id)
 
         if getattr(match_to_finalize, "tournament_server_id", None):
             bot.dispatch("tournament_match_complete", match_to_finalize, channel)
@@ -5359,7 +5396,7 @@ class PaceBowlingView(discord.ui.View):
             self.match.current_shot_selection = ""  # simulation auto-picks
             await interaction.response.edit_message(view=None)
             execute_ball_math(self.match)
-            await interaction.channel.send(embed=render_embed_scoreboard(self.match))
+            await _send_scoreboard(interaction.channel, self.match, force=True)
             class _D: pass
             d = _D(); d.channel = interaction.channel
             await run_interactive_delivery_sequence(d, self.match)
@@ -5407,7 +5444,7 @@ class SpinBowlingView(discord.ui.View):
             self.match.current_shot_selection = ""
             await interaction.response.edit_message(view=None)
             execute_ball_math(self.match)
-            await interaction.channel.send(embed=render_embed_scoreboard(self.match))
+            await _send_scoreboard(interaction.channel, self.match, force=True)
             class _D: pass
             d = _D(); d.channel = interaction.channel
             await run_interactive_delivery_sequence(d, self.match)
@@ -5469,12 +5506,12 @@ class BattingView(discord.ui.View):
             
         if getattr(self.match, "pending_next_batter", False):
             self.match.pending_next_batter = False
-            await interaction.channel.send(embed=render_embed_scoreboard(self.match))
+            await _send_scoreboard(interaction.channel, self.match, force=True)
             await interaction.channel.send(embed=render_wicket_summary(self.match))
             await prompt_next_batter(interaction, self.match)
             return
             
-        await interaction.channel.send(embed=render_embed_scoreboard(self.match))
+        await _send_scoreboard(interaction.channel, self.match, force=True)
         await run_interactive_delivery_sequence(interaction, self.match)
 
 class DRSView(discord.ui.View):
@@ -5492,11 +5529,11 @@ class DRSView(discord.ui.View):
             await self.message.channel.send("⏱️ **DRS Timer Expired.** The batter accepts the decision and walks.")
             if getattr(self.match, "pending_next_batter", False):
                 self.match.pending_next_batter = False
-                await self.message.channel.send(embed=render_embed_scoreboard(self.match))
+                await _send_scoreboard(self.message.channel, self.match, force=True)
                 await self.message.channel.send(embed=render_wicket_summary(self.match))
                 await prompt_next_batter(self.origin_inter, self.match)
                 return
-            await self.message.channel.send(embed=render_embed_scoreboard(self.match))
+            await _send_scoreboard(self.message.channel, self.match, force=True)
             await run_interactive_delivery_sequence(self.origin_inter, self.match)
         except: pass
 
@@ -5554,11 +5591,11 @@ class DRSView(discord.ui.View):
             self.match.last_commentary += "\n📺 **DRS:** Decision Upheld (Out)."
             if getattr(self.match, "pending_next_batter", False):
                 self.match.pending_next_batter = False
-                await interaction.channel.send(embed=render_embed_scoreboard(self.match))
+                await _send_scoreboard(interaction.channel, self.match, force=True)
                 await interaction.channel.send(embed=render_wicket_summary(self.match))
                 await prompt_next_batter(interaction, self.match)
                 return
-        await interaction.channel.send(embed=render_embed_scoreboard(self.match))
+        await _send_scoreboard(interaction.channel, self.match, force=True)
         await run_interactive_delivery_sequence(self.origin_inter, self.match)
         
     @discord.ui.button(label="Walk Away", style=discord.ButtonStyle.secondary)
@@ -5570,12 +5607,83 @@ class DRSView(discord.ui.View):
         await interaction.channel.send("🚶 Batter accepts the decision and walks off.")
         if getattr(self.match, "pending_next_batter", False):
             self.match.pending_next_batter = False
-            await interaction.channel.send(embed=render_embed_scoreboard(self.match))
+            await _send_scoreboard(interaction.channel, self.match, force=True)
             await interaction.channel.send(embed=render_wicket_summary(self.match))
             await prompt_next_batter(interaction, self.match)
             return
-        await interaction.channel.send(embed=render_embed_scoreboard(self.match))
+        await _send_scoreboard(interaction.channel, self.match, force=True)
         await run_interactive_delivery_sequence(self.origin_inter, self.match)
+
+def _end_career_broadcast(channel_id):
+    """Drop the live-card session for a channel: frees the pinned-message handle and
+    resets the per-match replay budget so the next match starts clean."""
+    if career_live is not None and channel_id is not None:
+        try:
+            career_live.end(channel_id)
+        except Exception:
+            pass
+
+
+def _career_result_line(match):
+    """Plain result sentence for the career result graphic."""
+    i1, i2 = match.innings1, match.innings2
+    if not (i1 and i2):
+        return None
+    tb = getattr(match, "tiebreak_winner_name", None)
+    if tb:
+        return f"{tb} won the Super Over"
+    if i2.total_runs > i1.total_runs:
+        return f"{i2.batting_team['name']} won by {_match_max_wickets(match) - i2.wickets} wickets"
+    if i1.total_runs > i2.total_runs:
+        return f"{i1.batting_team['name']} won by {i1.total_runs - i2.total_runs} runs"
+    return "Match tied"
+
+
+def _career_summary_image(match, final=False):
+    """Broadcast innings-break / full-time graphic for career matches.
+
+    Returns None for every other match, so tournaments keep their own themed
+    scorecards and this stays a career-only change.
+    """
+    if career_live is None or not CAREER_GUI_ENABLED or not _is_career_match(match):
+        return None
+    try:
+        from career import snapshot as _snap
+        from career.ui import broadcast as _bc
+        if final:
+            potm = None
+            try:
+                potm = get_player_of_the_match(match)
+            except Exception:
+                pass
+            state = _snap.build_scorecard_state(match, result=_career_result_line(match), potm=potm)
+            return _bc.render_result(state)
+        state = _snap.build_scorecard_state(match)
+        state["innings"] = state["innings"][:1]
+        state["target"] = match.innings1.total_runs + 1
+        return _bc.render_innings_break(state)
+    except Exception as e:
+        print(f"career summary image failed, using the standard scoreboard: {e}")
+        return None
+
+
+async def _send_scoreboard(channel, match, force=False):
+    """Post the scoreboard for a match.
+
+    Career matches get the broadcast card - one pinned image per innings, edited
+    in place every ball, with a replay clip on the big moments. Every other match
+    keeps the classic text embed, unchanged. If the render or the upload fails for
+    any reason the text embed is sent instead, so the graphics can never be the
+    thing that stalls a live match.
+    """
+    if career_live is not None and CAREER_GUI_ENABLED and _is_career_match(match):
+        try:
+            if await career_live.push(channel, match, force=force):
+                return
+        except Exception as e:
+            print(f"career scoreboard fell back to embed: {e}")
+    await _send_scoreboard(channel, match, force=True)
+
 
 async def _send_career_commentary(channel, match):
     """Career matches: post the last ball's commentary as a plain line, just above
@@ -5685,7 +5793,7 @@ async def prompt_batter_shot(channel, match: CricketMatch, prev=None):
             else:
                 await channel.send("🚶 AI Batter accepts the decision and walks off.")
             
-        await channel.send(embed=render_embed_scoreboard(match))
+        await _send_scoreboard(channel, match, force=True)
 
         class Dummy: pass
         d = Dummy()
@@ -5778,6 +5886,7 @@ async def start_debut_match(channel, author, career):
 async def handle_debut_end(interaction_context, match: CricketMatch):
     channel = interaction_context.channel if hasattr(interaction_context, "channel") else interaction_context
     active_games.pop(getattr(channel, "id", None), None)
+    _end_career_broadcast(getattr(channel, "id", None))
 
     innings = match.current_innings
     bs = innings.batting_stats.get(match.debut_player_name)
@@ -5933,6 +6042,7 @@ async def start_scenario_match(channel, author, career, mode="bat", difficulty="
 async def handle_scenario_end(interaction_context, match: CricketMatch):
     channel = interaction_context.channel if hasattr(interaction_context, "channel") else interaction_context
     active_games.pop(getattr(channel, "id", None), None)
+    _end_career_broadcast(getattr(channel, "id", None))
     innings = match.current_innings
     career = CM.get_career(match.scenario_user_id)
     if not career:
@@ -9065,6 +9175,7 @@ def _force_end_channel(channel_id) -> bool:
     cleared = False
     if channel_id in active_games:
         del active_games[channel_id]; cleared = True
+    _end_career_broadcast(channel_id)
     if channel_id in active_setups:
         del active_setups[channel_id]; cleared = True
     if channel_id in active_test_matches:
@@ -13466,6 +13577,86 @@ class PrefixCog(commands.Cog):
         await ctx.send(
             f"⭐ **Premium granted** to {member.mention} (**+{days} days**, ~{total_days}d total remaining).\n"
             f"They can now claim `cv weekly` & `cv monthly`.")
+
+    @commands.command(name="allratings", aliases=["allcareers", "careerlist", "ratingsdump"],
+                      help="[OWNER] Every career and its current ratings.\nUsage: allratings [min_ovr]")
+    async def all_ratings(self, ctx, min_ovr: int = 0):
+        """Owner-only audit of every career on the bot.
+
+        Reads the whole `careers` collection (not the cache) so it is accurate
+        even for careers created since the last restart. Posts a ranked table in
+        chunks plus a CSV of the full data - the table is for reading, the CSV is
+        for balancing the economy in a spreadsheet.
+        """
+        if ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("❌ Owner-only command.")
+        if not _CAREER_OK:
+            return await ctx.send("❌ Career module is not loaded.")
+
+        try:
+            careers = CM.all_careers()
+        except Exception as e:
+            return await ctx.send(f"❌ Could not read careers: `{e}`")
+        if not careers:
+            return await ctx.send("📭 No careers exist yet.")
+
+        careers = [c for c in careers if int(c.get("ovr", 0)) >= min_ovr]
+        careers.sort(key=lambda c: (-int(c.get("ovr", 0)), -int(c.get("coins", 0))))
+
+        def who(uid):
+            u = self.bot.get_user(int(uid)) if str(uid).isdigit() else None
+            return (u.name if u else str(uid))[:16]
+
+        header = (f"{'#':>3} {'PLAYER':<17}{'USER':<17}{'OVR':>4} {'TIER':<9}"
+                  f"{'POW':>4}{'CON':>4}{'BWL':>4}{'STA':>4}{'COINS':>9}{'M':>4}")
+        lines = [header, "-" * len(header)]
+        rows = []
+        for i, c in enumerate(careers, 1):
+            a = c.get("attributes", {})
+            bat = (c.get("stats") or {}).get("bat", {})
+            uname = who(c.get("_id", "?"))
+            lines.append(
+                f"{i:>3} {str(c.get('username', '?'))[:16]:<17}{uname:<17}"
+                f"{int(c.get('ovr', 0)):>4} {str(c.get('tier', '?')):<9}"
+                f"{int(a.get('power', 0)):>4}{int(a.get('control', 0)):>4}"
+                f"{int(a.get('bowling', 0)):>4}{int(a.get('stamina', 0)):>4}"
+                f"{int(c.get('coins', 0)):>9,}{int(bat.get('matches', 0)):>4}")
+            rows.append([i, c.get("username", ""), c.get("_id", ""), c.get("ovr", 0),
+                         c.get("tier", ""), a.get("power", 0), a.get("control", 0),
+                         a.get("bowling", 0), a.get("stamina", 0), c.get("coins", 0),
+                         bat.get("matches", 0), bat.get("runs", 0),
+                         (c.get("stats") or {}).get("bowl", {}).get("wickets", 0),
+                         int(bool(c.get("debut_done")))])
+
+        tiers = {}
+        for c in careers:
+            tiers[c.get("tier", "?")] = tiers.get(c.get("tier", "?"), 0) + 1
+        avg = sum(int(c.get("ovr", 0)) for c in careers) / len(careers)
+        coins = sum(int(c.get("coins", 0)) for c in careers)
+        summary = (f"**{len(careers)} careers** · avg OVR **{avg:.1f}** · total coins **{coins:,}**\n"
+                   + " · ".join(f"{k} {v}" for k, v in sorted(tiers.items(), key=lambda kv: -kv[1])))
+
+        # Chunk into messages that stay under Discord's 2000-char limit
+        buf, sent = [], 0
+        for line in lines:
+            if sum(len(x) + 1 for x in buf) + len(line) > 1900:
+                await ctx.send(f"```{chr(10).join(buf)}```")
+                sent += 1
+                buf = [header, "-" * len(header)]
+                if sent >= 8:      # stop flooding; the CSV carries the rest
+                    buf = []
+                    break
+            buf.append(line)
+        if buf:
+            await ctx.send(f"```{chr(10).join(buf)}```")
+
+        csv_buf = io.StringIO()
+        w = csv.writer(csv_buf)
+        w.writerow(["rank", "username", "user_id", "ovr", "tier", "power", "control",
+                    "bowling", "stamina", "coins", "matches", "runs", "wickets", "debut_done"])
+        w.writerows(rows)
+        data = io.BytesIO(csv_buf.getvalue().encode("utf-8"))
+        await ctx.send(summary, file=discord.File(data, filename="career_ratings.csv"))
 
     # ===================== CAREER CLUB MATCHES (Phase 4) =====================
     @commands.command(name="create_match", aliases=["creatematch", "cmatch", "hostmatch", "cm"],
