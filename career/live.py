@@ -44,11 +44,13 @@ class Session:
         self.channel = channel
         self.message = None
         self.innings_num = None
+        self.card_over = None       # (innings, over) the live card belongs to
         self.last_edit = 0.0
         self.gifs_sent = 0
-        self.last_gif_ball = -99
-        self.shown_ball = None      # ball_index already replayed
-        self.failed = False         # one hard failure disables the card for the match
+        self.last_gif_ball = (0, -99)   # (innings, ball_index) of the last replay
+        self.shown_ball = None          # (innings, ball_index) already replayed
+        self.logged_ball = None         # (innings, ball_index) already written to the log
+        self.failed = False             # one hard failure disables the card for the match
 
     async def _render(self, state):
         return await asyncio.to_thread(BC.render_live_card, state)
@@ -88,25 +90,37 @@ class Session:
             self.failed = True
             return False
 
+    @staticmethod
+    def _key(rec):
+        """Ball identity across the whole match.
+
+        ball_index restarts at 0 every innings, so keying on it alone made the
+        innings-2 gap check compare against an innings-1 index - a negative gap
+        that silently suppressed every replay for the entire second innings.
+        """
+        return (rec.get("innings", 1), rec.get("ball_index", 0))
+
     async def highlight(self, match):
         """Post a replay clip if the last ball earned one."""
         if self.failed:
             return
         rec = getattr(match, "last_ball", None)
-        if not rec or rec.get("ball_index") == self.shown_ball:
+        if not rec or self._key(rec) == self.shown_ball:
             return
         if not BF.is_highlight(rec):
             return
         if self.gifs_sent >= MAX_GIFS_PER_MATCH:
             return
-        if rec.get("ball_index", 0) - self.last_gif_ball < GIF_MIN_BALL_GAP:
+        inn, idx = self._key(rec)
+        last_inn, last_idx = self.last_gif_ball
+        if inn == last_inn and idx - last_idx < GIF_MIN_BALL_GAP:
             return
-        self.shown_ball = rec.get("ball_index")
+        self.shown_ball = self._key(rec)
         try:
             buf = await asyncio.to_thread(MO.build_replay_gif, rec)
             await self.channel.send(file=discord.File(buf, filename="replay.gif"))
             self.gifs_sent += 1
-            self.last_gif_ball = rec.get("ball_index", 0)
+            self.last_gif_ball = self._key(rec)
         except Exception as e:
             print(f"career replay failed: {e}")
 
@@ -125,6 +139,13 @@ class Session:
             print(f"career drs clip failed: {e}")
 
 
+def is_degraded(channel):
+    """True when this channel's graphics have failed and the caller should fall
+    back to the text scoreboard."""
+    s = _SESSIONS.get(getattr(channel, "id", None))
+    return bool(s and s.failed)
+
+
 def session_for(channel):
     s = _SESSIONS.get(channel.id)
     if s is None:
@@ -134,6 +155,113 @@ def session_for(channel):
 
 def end(channel_id):
     _SESSIONS.pop(channel_id, None)
+
+
+_TONE_ICON = {"wicket": "🔴", "six": "🟣", "four": "🔵", "wide": "🟠",
+              "noball": "🟠", "dot": "⚪"}
+
+
+def result_line(rec):
+    """One-line summary of a delivery.
+
+    Replaces the three-line commentary block that used to be posted per ball. At
+    four-plus messages a ball, the prompts and results buried each other - see
+    the playtest. One dense line per ball reads as a scorecard log instead.
+    """
+    if not rec:
+        return None
+    tone = SNAP.ball_tone(rec)
+    icon = _TONE_ICON.get(tone, "⚫")
+    over = f"{rec.get('over', 0)}.{rec.get('ball', 1)}"
+    bits = [f"{icon} `{over}`  **{rec.get('bowler','')}** to **{rec.get('striker','')}**"]
+    deliv = rec.get("delivery")
+    shot = rec.get("shot")
+    detail = " · ".join(x for x in (deliv, shot) if x)
+    if detail:
+        bits.append(detail)
+
+    if rec.get("dismissal"):
+        bits.append(f"**WICKET** — {rec.get('dismissal_desc') or rec['dismissal']}")
+    elif rec.get("is_wide"):
+        bits.append("**WIDE** +1")
+    else:
+        runs = rec.get("runs_off_bat", 0)
+        word = {0: "dot", 1: "1 run", 2: "2 runs", 3: "3 runs",
+                4: "**FOUR**", 6: "**SIX**"}.get(runs, f"{runs} runs")
+        if rec.get("is_bye"):
+            word = f"{rec.get('extras', 0)} leg byes"
+        if rec.get("is_no_ball"):
+            word = f"NO BALL · {word}"
+        bits.append(word)
+    if rec.get("free_hit"):
+        bits.append("🛡️ free hit")
+    return "  ·  ".join(bits)
+
+
+async def turn(channel, match, prompt, view=None, career=None):
+    """Post one turn: the ball that just happened, then the card + the prompt.
+
+    The card is DELETED and re-posted rather than edited in place. Editing kept
+    the graphic pinned wherever it was first sent, so after a few balls of
+    prompts it had scrolled far above the action and players were looking at a
+    scoreboard they had to hunt for. Re-posting keeps it as the newest message,
+    directly above the buttons the player is about to press.
+
+    Returns the new message (views that need `.message` can hold onto it).
+    """
+    s = session_for(channel)
+
+    # 1. The ball that just resolved is drawn ON the card (see the last-ball
+    #    banner in career/ui/broadcast.py), not posted as its own chat line - the
+    #    feed is meant to read as a run of images with nothing between them.
+    #    Draining wide_extra_msg here stops the old text notice being posted.
+    rec = getattr(match, "last_ball", None)
+    if rec:
+        s.logged_ball = s._key(rec)
+    if getattr(match, "wide_extra_msg", ""):
+        match.wide_extra_msg = ""
+
+    # 2. replay clip for the big moments, before the card so the card stays last
+    if not s.failed:
+        await s.highlight(match)
+
+    # 3. a fresh card for this ball
+    old = s.message
+    old_over = s.card_over
+    state = None
+    msg = None
+    if not s.failed:
+        try:
+            state = SNAP.build_broadcast_state(match, career)
+            buf = await asyncio.to_thread(BC.render_live_card, state)
+            msg = await channel.send(content=prompt,
+                                     file=discord.File(buf, filename="live.png"),
+                                     view=view)
+            s.message = msg
+            s.card_over = (match.current_innings_num, state.get("over_no", 0))
+            s.innings_num = match.current_innings_num
+            s.last_edit = time.time()
+        except Exception as e:
+            print(f"career turn card failed: {e}")
+            s.failed = True
+            msg = None
+
+    if msg is None:      # card unavailable - still send the prompt so play continues
+        msg = await channel.send(content=prompt, view=view)
+        s.message = msg
+
+    # A CARD PER BALL, all kept.
+    # Every ball posts its own image and none are deleted, so the channel reads as
+    # a continuous run of graphics and scrolling back through them IS the match
+    # history - which is what was lost when a single card was edited in place.
+    # Only the previous message's BUTTONS are stripped, so old cards can't be
+    # clicked and the only live controls are the ones on the newest image.
+    if old is not None and old.id != msg.id:
+        try:
+            await old.edit(view=None)
+        except Exception:
+            pass
+    return msg
 
 
 async def push(channel, match, career=None, force=False):

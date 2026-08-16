@@ -52,22 +52,53 @@ def ball_tone(rec):
     return {0: "dot", 1: "single", 2: "two", 3: "three", 4: "four", 6: "six"}.get(r, "single")
 
 
-def this_over(innings):
-    """The deliveries bowled in the current over, oldest first.
-
-    Read off ball_history rather than over_log: over_log holds Discord emoji ids
-    (useless to a renderer) and the match loops clear it at every over break.
-    """
-    hist = getattr(innings, "ball_history", None) or []
-    if not hist:
-        return []
+def _current_over_no(innings):
     over_no = innings.total_balls // 6
     # A completed over has total_balls landing exactly on the boundary; the strip
     # should then still show the over that was just bowled, not an empty next one.
     if innings.total_balls and innings.total_balls % 6 == 0:
         over_no -= 1
+    return max(0, over_no)
+
+
+def over_balls(innings, over_no):
+    """The deliveries bowled in one over, oldest first.
+
+    Read off ball_history rather than over_log: over_log holds Discord emoji ids
+    (useless to a renderer) and the match loops clear it at every over break -
+    which is exactly why the card could never show a previous over.
+    """
+    hist = getattr(innings, "ball_history", None) or []
     return [{"label": ball_label(r), "tone": ball_tone(r), "legal": r.get("legal", True)}
             for r in hist if r.get("over") == over_no]
+
+
+def this_over(innings):
+    return over_balls(innings, _current_over_no(innings))
+
+
+def last_over(innings):
+    """The over before the current one - players lose the thread of a match when
+    the card only ever shows six balls of context."""
+    n = _current_over_no(innings)
+    return over_balls(innings, n - 1) if n > 0 else []
+
+
+def recent_overs(innings, count=6):
+    """[(over_number, runs, wickets)] for the last `count` completed overs."""
+    hist = getattr(innings, "ball_history", None) or []
+    if not hist:
+        return []
+    agg = {}
+    for r in hist:
+        o = r.get("over", 0)
+        runs, wkts = agg.get(o, (0, 0))
+        agg[o] = (runs + r.get("runs_off_bat", 0) + r.get("extras", 0)
+                  + (1 if r.get("is_wide") else 0),
+                  wkts + (1 if r.get("dismissal") else 0))
+    cur = _current_over_no(innings)
+    done = [(o, v[0], v[1]) for o, v in sorted(agg.items()) if o < cur]
+    return done[-count:]
 
 
 def _batter_rows(innings):
@@ -161,6 +192,7 @@ def _pregame_state(match):
         "bowling": {"name": t2["name"], "color": _team_color(t2, 1)},
         "max_wickets": getattr(match, "max_wickets", 10),
         "crr": 0.0, "partnership": 0, "batters": [], "bowler": None, "this_over": [],
+        "last_over": [], "recent_overs": [], "over_no": 0,
         "balls_left": getattr(match, "max_balls", 0), "free_hit": False,
         "reviews": dict(getattr(match, "drs_reviews", {}) or {}), "last_ball": None,
         "objective": None, "target": None, "need": None, "rrr": None, "proj": 0,
@@ -305,6 +337,9 @@ def build_broadcast_state(match, career=None):
         "batters": _batter_rows(innings),
         "bowler": _bowler_row(innings),
         "this_over": this_over(innings),
+        "last_over": last_over(innings),
+        "recent_overs": recent_overs(innings),
+        "over_no": _current_over_no(innings),
         "balls_left": balls_left,
         "free_hit": bool(getattr(match, "free_hit", False)),
         "reviews": dict(getattr(match, "drs_reviews", {}) or {}),

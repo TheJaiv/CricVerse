@@ -294,6 +294,8 @@ class FMessage:
         self.channel, self.content, self.view, self.embed = channel, content, view, embed
         self.file = file
         self.edits = 0            # broadcast card is EDITED per ball, not re-sent
+        self.id = id(self)
+        self.deleted = False
     async def edit(self, **kw):
         if "view" in kw: self.view = kw["view"]
         if "content" in kw: self.content = kw["content"]
@@ -301,6 +303,8 @@ class FMessage:
             self.file = kw["attachments"][0]
             self.edits += 1
         return self
+    async def delete(self):
+        self.deleted = True
 
 class FChannel:
     def __init__(self, cid):
@@ -754,14 +758,39 @@ async def part6_broadcast():
     cards = ch.files("live.png")
     check("live card posted", len(cards) >= 1, f"got {len(cards)}")
     card_msgs = [m for m in ch.log if m.file is not None and getattr(m.file, "filename", "") == "live.png"]
-    check("card is edited in place, not re-sent per ball",
-          any(m.edits > 2 for m in card_msgs), f"edits={[m.edits for m in card_msgs]}")
-    check("one card per innings (2 innings -> <=2 cards)",
-          len(card_msgs) <= 2, f"got {len(card_msgs)}")
+
+    # A card per ball, all kept: scrolling back through the images IS the match
+    # history. Nothing is deleted; only the previous message's buttons are stripped
+    # so the sole live controls are on the newest image.
+    kept = [m for m in card_msgs if not m.deleted]
+    check("every card is kept (the image feed is the history)",
+          len(kept) == len(card_msgs), f"{len(card_msgs) - len(kept)} deleted")
+    check("more than one card per over (a card per ball)",
+          len(card_msgs) > max(1, match.innings1.total_balls // 6), f"got {len(card_msgs)}")
+    check("superseded cards have their buttons stripped",
+          all(m.view is None for m in card_msgs[:-1]),
+          f"{sum(1 for m in card_msgs[:-1] if m.view is not None)} still clickable")
+    check("every card message carries its prompt text",
+          all(m.content for m in card_msgs))
+
+    # The feed must read as images, not text: every ball prompt rides on a card,
+    # and the old per-ball commentary lines are gone.
+    prompts = [m for m in ch.log if m.content and "pick your" in str(m.content)]
+    check("every ball prompt is posted on a card image",
+          prompts and all(m.file is not None for m in prompts),
+          f"{sum(1 for m in prompts if m.file is None)} bare prompts of {len(prompts)}")
+    txt = ch.text()
+    check("no per-ball commentary lines are posted", "🎙️" not in txt)
+    check("no 'Select your shot' text prompts remain", "Select your shot" not in txt)
 
     hist = (match.innings1.ball_history or []) + (getattr(match.innings2, "ball_history", None) or [])
     check("ball history captured for the match", len(hist) > 10, f"{len(hist)} balls")
     check("every record carries an outcome", all(r.get("outcome") for r in hist))
+
+    # charts must appear for BOTH innings, not just the innings-1 break
+    charts = ch.files("manhattan.png")
+    check("runs-per-over chart posted for both innings", len(charts) >= 2,
+          f"got {len(charts)}")
 
     gifs = ch.files("replay.gif")
     highlights = [r for r in hist if BF.is_highlight(r)]
@@ -791,6 +820,66 @@ async def part6_broadcast():
         check("geometry is deterministic", geo == BF.geometry(rec))
         check("geometry stays in range",
               -1 <= geo["line"] <= 1 and 0 <= geo["pitch_frac"] <= 1)
+
+    # PLAYTEST REGRESSIONS
+    # 1. a NON-career match must still get the plain text scoreboard, and must not
+    #    recurse (the fallback line inside _send_scoreboard was once rewritten to
+    #    call itself, which would blow the stack on every casual match)
+    plain_ch = FChannel(9610)
+    plain = B.CricketMatch("A", "B", 1, 2,
+                           {"name": "A", "players": [], "subs": []},
+                           {"name": "B", "players": [], "subs": []},
+                           format_overs=5, pitch="Hard", weather="Clear")
+    plain.innings1 = B.InningsState(plain.team1, plain.team2)
+    plain.current_innings = plain.innings1
+    try:
+        await B._send_scoreboard(plain_ch, plain)
+        ok = any(m.embed is not None for m in plain_ch.log)
+    except RecursionError:
+        ok = False
+    check("non-career match still gets the text scoreboard (no recursion)", ok)
+
+    # 2. career matches must NOT get a second card from _send_scoreboard
+    card_ch = FChannel(9611)
+    before = len(card_ch.log)
+    await B._send_scoreboard(card_ch, match)
+    check("career _send_scoreboard does not duplicate the card",
+          len(card_ch.log) == before)
+
+    # 3. replays must fire in BOTH innings - the gap check used to compare an
+    #    innings-2 ball index against an innings-1 one and suppress every clip
+    i2_hist = getattr(match.innings2, "ball_history", None) or []
+    i2_high = [r for r in i2_hist if BF.is_highlight(r)]
+    if i2_high:
+        s2 = CLIVE.Session(FChannel(9612))
+        s2.last_gif_ball = (1, 40)          # as if innings 1 ended at ball 40
+        rec = dict(i2_high[0]); rec["innings"] = 2; rec["ball_index"] = 3
+        match.last_ball = rec
+        await s2.highlight(match)
+        check("innings-2 replay is not suppressed by innings-1 state",
+              len(s2.channel.files("replay.gif")) == 1,
+              f"gifs={len(s2.channel.files('replay.gif'))}")
+
+    # 4. a turn posts ONE prompt message carrying the card, and the result line
+    turn_ch = FChannel(9613)
+    match.last_ball = dict((match.innings1.ball_history or [{}])[-1])
+    msg = await CLIVE.turn(turn_ch, match, "pick your shot", None)
+    check("turn posts the card with the prompt",
+          msg.file is not None and msg.content == "pick your shot")
+    check("turn posts no text-only message (result is on the card)",
+          all(m.file is not None for m in turn_ch.log),
+          f"{sum(1 for m in turn_ch.log if m.file is None)} text-only of {len(turn_ch.log)}")
+    check("the ball result is drawn on the card, not sent as chat",
+          CLIVE.SNAP.build_broadcast_state(match).get("last_ball") is not None)
+    CLIVE.end(9613)
+
+    # 5. consecutive balls: both cards survive, only the newest keeps its buttons
+    ov_ch = FChannel(9614)
+    m1 = await CLIVE.turn(ov_ch, match, "a", None)
+    m2 = await CLIVE.turn(ov_ch, match, "b", None)
+    check("previous ball's card is not deleted", not m1.deleted)
+    check("a fresh card is posted for the next ball", m2 is not m1)
+    CLIVE.end(9614)
 
     # forced updates must still honour the edit window (a per-ball edit storm
     # during bot-vs-bot stretches is what earns a 429)
@@ -969,6 +1058,327 @@ def part8_engine_isolation():
           __import__("engine.ball_record", fromlist=["x"]).wants_records(plain) is False)
 
 
+async def part9b_drs_live():
+    """The bot.py wiring: a career review end to end, budget charged, clip posted."""
+    from career import drs as DRS
+    from career import live as CLIVE
+
+    # A real career match played out headlessly, so last_ball is a genuine record
+    # written by the engine rather than a hand-built dict.
+    def _t(name, seed):
+        rng = random.Random(seed)
+        roles = ["Batter"] * 5 + ["All-Rounder_Pace", "All-Rounder_Spin"] + \
+                ["Bowler_Pace", "Bowler_Pace", "Bowler_Spin_Off", "Bowler_Spin_Leg"]
+        return {"name": name, "subs": [], "color": "#2E6BE6", "players": [
+            {"name": f"{name}{i}", "bat": rng.randint(55, 92), "bowl": rng.randint(40, 88),
+             "role": roles[i], "archetype": "Standard"} for i in range(11)]}
+
+    random.seed(4242)
+    t1, t2 = _t("Alpha", 1), _t("Bravo", 2)
+    m = B.ClubMatch("A", "B", 1, 2, t1, t2, format_overs=5, pitch="Hard", weather="Clear")
+    m.is_club = True
+    m.sim_only = True
+    m.simulation_mode = "whole_match"
+    m._defer_stats = True
+    m.batting_first_id, m.bowling_first_id = 1, 2
+    m.innings1 = B.InningsState(t1, t2)
+    m.current_innings = m.innings1
+    B._run_full_match_sync(m)
+    m.current_innings = m.innings1
+    m.prev_striker_idx = m.innings1.current_striker_idx
+
+    ch = FChannel(9900)
+    rec = getattr(m, "last_ball", None)
+    check("a ball record exists to review", rec is not None)
+
+    m.drs_dismissal = "LBW"
+    before = DRS.reviews_left(m, "batting")
+    verdict = await B._run_career_review(ch, m, "batting")
+    check("career review returns a verdict", isinstance(verdict, dict) and "decision" in verdict)
+    after = DRS.reviews_left(m, "batting")
+    check("a review is charged only when it fails",
+          after == (before if verdict.get("retained") else before - 1),
+          f"{before} -> {after}, retained={verdict.get('retained')}")
+    check("the verdict is announced in the channel",
+          "DRS" in ch.text() and verdict["decision"] in ch.text())
+    check("a ball-tracking clip is posted", len(ch.files("drs.gif")) == 1,
+          f"{len(ch.files('drs.gif'))} clips")
+
+    # exhausting the budget must actually lock further reviews out
+    m.drs_reviews = {"batting": 0, "bowling": 2}
+    check("an exhausted side cannot review", DRS.can_review(m, "batting") is False)
+    check("the other side still can", DRS.can_review(m, "bowling") is True)
+
+    CLIVE.end(9900)
+
+
+def part9_drs():
+    """Phase 2: review budgets, real adjudication, one shared rewind."""
+    section("PART 9 · DRS (budget · adjudication · rewind)")
+    from career import drs as DRS
+
+    class M:
+        current_innings_num = 1
+        max_wickets = 10
+
+    m = M()
+    b = DRS.ensure_budget(m)
+    check("both sides start with 2 reviews",
+          b == {"batting": 2, "bowling": 2}, str(b))
+
+    # a failed review is spent, a successful one and an umpire's call are kept
+    DRS._spend(m, "batting", retained=False)
+    check("a failed review is spent", DRS.reviews_left(m, "batting") == 1)
+    DRS._spend(m, "batting", retained=True)
+    check("a retained review is not spent", DRS.reviews_left(m, "batting") == 1)
+    DRS._spend(m, "batting", retained=False)
+    check("budget can be exhausted", DRS.reviews_left(m, "batting") == 0)
+    check("can_review is false when exhausted", DRS.can_review(m, "batting") is False)
+    check("the other side is unaffected", DRS.reviews_left(m, "bowling") == 2)
+
+    m.current_innings_num = 2
+    check("budget resets at the innings change",
+          DRS.ensure_budget(m) == {"batting": 2, "bowling": 2})
+
+    # adjudication is driven by the delivery, not a coin flip
+    def rec(**kw):
+        base = {"innings": 1, "ball_index": 12, "over": 2, "ball": 1,
+                "bowler": "Khan", "striker": "Patel", "delivery": "Inswing Full",
+                "shot": "Flick", "runs_off_bat": 0, "extras": 0, "is_wide": False,
+                "is_no_ball": False, "is_bye": False, "dismissal": "LBW",
+                "dismissal_desc": "lbw b. Khan", "bad_shot": False}
+        base.update(kw)
+        return base
+
+    # Sample across delivery types: a full inswinger is genuinely almost always
+    # hitting, so one delivery cannot produce the whole range of verdicts.
+    delivs = ["Inswing Full", "Outswing Good", "Fast Bouncer", "Off spin",
+              "Leg spin", "Slow Good", "Fast Yorker"]
+    seen = set()
+    for i in range(210):
+        v = DRS.adjudicate(rec(ball_index=i, delivery=delivs[i % len(delivs)]),
+                           "LBW", "batting")
+        seen.add(v["decision"])
+        check_once = None
+        if v["decision"] == "UMPIRE'S CALL":
+            check_once = v["retained"] and not v["overturned"]
+            if not check_once:
+                check("umpire's call retains the review and stands", False, str(v))
+                break
+    check("LBW reviews produce more than one outcome", len(seen) > 1, str(seen))
+    check("umpire's call band is reachable", "UMPIRE'S CALL" in seen, str(seen))
+    check("both OUT and NOT OUT are reachable",
+          {"OUT", "NOT OUT"} <= seen, str(seen))
+
+    v = DRS.adjudicate(rec(), "Caught Behind", "batting")
+    check("caught-behind reviews report an edge verdict",
+          v["hitting_call"] in ("SPIKE DETECTED", "NO SPIKE"), v["hitting_call"])
+    check("a verdict always carries what the clip needs",
+          all(k in v for k in ("decision", "summary", "zones", "pitching_call",
+                               "impact_call", "hitting_call")))
+
+    # verdicts must be internally consistent: never overturn AND uphold
+    for i in range(60):
+        v = DRS.adjudicate(rec(ball_index=500 + i), "LBW", "bowling")
+        if v["overturned"] and v["decision"] == "NOT OUT":
+            check("a bowling overturn never reports NOT OUT", False, str(v))
+            break
+    else:
+        check("bowling-side verdicts are self-consistent", True)
+
+    # the rewind: a dismissal is undone cleanly, including the end-change case
+    class Stats:
+        def __init__(self):
+            self.dismissal = "lbw b. Khan"
+            self.wickets_taken = 3
+            self.runs_scored = 10
+            self.balls_faced = 8
+
+    class Inn:
+        pass
+
+    inn = Inn()
+    inn.wickets = 3
+    inn.next_batter_idx = 4
+    inn.current_striker_idx = 3
+    inn.current_non_striker_idx = 1
+    inn.batting_team = {"players": [{"name": f"P{i}"} for i in range(6)]}
+    inn.batting_stats = {f"P{i}": Stats() for i in range(6)}
+    inn.current_bowler = {"name": "Khan"}
+    inn.bowling_stats = {"Khan": Stats()}
+    inn.over_log = ["<:wicket:1520143043683156051>"]
+    inn.ball_history = [rec()]
+
+    class M2:
+        pass
+
+    m2 = M2()
+    m2.current_innings = inn
+    m2.prev_striker_idx = 2
+    m2.pending_next_batter = False
+    m2.last_ball = inn.ball_history[-1]
+
+    DRS.undo_wicket(m2)
+    check("rewind decrements the wicket", inn.wickets == 2)
+    check("rewind un-promotes the replacement", inn.next_batter_idx == 3)
+    check("rewind restores the reprieved batter to the crease",
+          inn.current_striker_idx == 2)
+    check("rewind marks him not out", inn.batting_stats["P2"].dismissal == "not out")
+    check("rewind takes the wicket off the bowler", inn.bowling_stats["Khan"].wickets_taken == 2)
+    check("rewind fixes the timeline emoji",
+          inn.over_log[-1] == "<:0run:1520141253604544633>")
+    check("rewind clears the dismissal from the ball feed",
+          m2.last_ball["dismissal"] is None)
+
+    # end-change case: replacement parked at the NON-striker end
+    inn.wickets = 3
+    inn.next_batter_idx = 4
+    inn.current_striker_idx = 1
+    inn.current_non_striker_idx = 3
+    inn.batting_stats["P2"].dismissal = "lbw b. Khan"
+    DRS.undo_wicket(m2)
+    check("rewind handles the end-change (wicket on the last ball of an over)",
+          inn.current_non_striker_idx == 2 and inn.current_striker_idx == 1,
+          f"striker={inn.current_striker_idx} non={inn.current_non_striker_idx}")
+
+    # AI review decision respects the budget
+    m3 = M()
+    DRS.ensure_budget(m3)
+    m3.drs_reviews = {"batting": 0, "bowling": 0}
+    m3.current_innings = inn
+    check("AI never reviews with an empty budget",
+          DRS.ai_should_review(m3, rec(), "LBW", "batting") is False)
+
+
+def part10_condition():
+    """Phase 3: form, fitness, injuries - and the bound on what they can move."""
+    section("PART 10 · condition (form · fitness · injury)")
+    from career import condition as CD
+
+    legacy = {"_id": "900", "username": "Legacy", "bowling_type": "pace",
+              "mindset": "standard", "attributes": dict(CM.BASE_ATTRS),
+              "coins": 0, "stats": CM._blank_stats()}
+    CD.ensure(legacy)
+    check("legacy career gains condition fields",
+          all(k in legacy for k in ("form", "fitness", "workload")))
+    check("legacy career starts neutral",
+          CD.form(legacy) == CD.FORM_BASE and CD.fitness(legacy) == 100)
+    check("neutral condition barely moves ratings", abs(CD.rating_modifier(legacy)) < 0.6,
+          str(CD.rating_modifier(legacy)))
+
+    # form responds to performance, in the right direction
+    hot = dict(legacy, form={"rating": 50, "recent": []})
+    CD.ensure(hot)
+    for _ in range(5):
+        CD.record_innings(hot, runs=70, balls=40, wickets=2, balls_bowled=24, out=True)
+    cold = dict(legacy, form={"rating": 50, "recent": []})
+    CD.ensure(cold)
+    for _ in range(5):
+        CD.record_innings(cold, runs=1, balls=5, wickets=0, balls_bowled=24, out=True)
+    check("good returns raise form", CD.form(hot) > 60, f"form={CD.form(hot)}")
+    check("failures lower form", CD.form(cold) < 40, f"form={CD.form(cold)}")
+    check("form is recorded per innings", len(hot["form"]["recent"]) == 5)
+    check("in-form player gets a positive modifier", CD.rating_modifier(hot) > 0)
+    check("out-of-form player gets a negative modifier", CD.rating_modifier(cold) < 0)
+
+    # THE BOUND: condition must never move a rating more than +/-3
+    worst = dict(legacy, form={"rating": 0, "recent": []},
+                 fitness={"value": 0, "injury": None, "updated": int(time.time())})
+    best = dict(legacy, form={"rating": 100, "recent": []},
+                fitness={"value": 100, "injury": None, "updated": int(time.time())})
+    for c in (worst, best):
+        CD.ensure(c)
+    check("modifier is bounded at the extremes",
+          abs(CD.rating_modifier(worst)) <= CD.MAX_RATING_SWING
+          and abs(CD.rating_modifier(best)) <= CD.MAX_RATING_SWING,
+          f"worst={CD.rating_modifier(worst)} best={CD.rating_modifier(best)}")
+
+    # fitness drains with work and recovers with rest
+    tired = dict(legacy)
+    CD.ensure(tired)
+    tired["fitness"] = {"value": 100, "injury": None, "updated": int(time.time())}
+    CD.record_workload(tired, balls_faced=30, balls_bowled=24)
+    drained = CD.fitness(tired)
+    check("workload drains fitness", drained < 100, f"fitness={drained}")
+    CD.rest(tired)
+    check("rest restores fitness", CD.fitness(tired) > drained)
+    check("rest clears the matches-since-rest counter",
+          tired["workload"]["matches_since_rest"] == 0)
+
+    # stamina buys resilience
+    weak = dict(legacy); CD.ensure(weak)
+    weak["attributes"] = dict(CM.BASE_ATTRS, stamina=10)
+    weak["fitness"] = {"value": 100, "injury": None, "updated": int(time.time())}
+    strong = dict(legacy); CD.ensure(strong)
+    strong["attributes"] = dict(CM.BASE_ATTRS, stamina=99)
+    strong["fitness"] = {"value": 100, "injury": None, "updated": int(time.time())}
+    CD.record_workload(weak, balls_faced=30, balls_bowled=24)
+    CD.record_workload(strong, balls_faced=30, balls_bowled=24)
+    check("high stamina drains less", CD.fitness(strong) > CD.fitness(weak),
+          f"strong={CD.fitness(strong)} weak={CD.fitness(weak)}")
+
+    # injuries do eventually happen when a player is run into the ground
+    random.seed(11)
+    injured = None
+    grind = dict(legacy); CD.ensure(grind)
+    grind["fitness"] = {"value": 100, "injury": None, "updated": int(time.time())}
+    for _ in range(40):
+        inj = CD.record_workload(grind, balls_faced=24, balls_bowled=24)
+        if inj:
+            injured = inj
+            break
+    check("heavy unrested workload eventually causes an injury", injured is not None)
+    if injured:
+        check("an injury has a type and a length",
+              injured.get("type") and injured.get("matches_left", 0) > 0, str(injured))
+        check("an injured player is flagged", CD.is_injured(grind) is True)
+        check("injury forces a rating penalty", CD.rating_modifier(grind) <= -1.0)
+        check("injury label reads for the UI", bool(CD.injury_label(grind)))
+        for _ in range(6):
+            CD.rest(grind)
+        check("rest eventually clears an injury", CD.is_injured(grind) is False)
+
+    # a fresh player is not injured out of nowhere
+    random.seed(3)
+    fresh_p = dict(legacy); CD.ensure(fresh_p)
+    fresh_p["fitness"] = {"value": 100, "injury": None, "updated": int(time.time())}
+    hits = sum(1 for _ in range(20)
+               if CD.record_workload(dict(fresh_p, fitness=dict(fresh_p["fitness"]),
+                                          workload={"balls_bowled": 0, "balls_faced": 0,
+                                                    "matches_since_rest": 0}),
+                                     balls_faced=12, balls_bowled=6))
+    check("a fresh, rested player is never injured", hits == 0, f"{hits} injuries")
+
+    # the engine conversion applies the modifier, stays in range, and never raises
+    eng_hot = CM.career_to_engine(hot)
+    eng_cold = CM.career_to_engine(cold)
+    check("condition reaches the engine ratings", eng_hot["bat"] > eng_cold["bat"],
+          f"{eng_hot['bat']} vs {eng_cold['bat']}")
+    base_bat = CM.bat_skill(hot["attributes"])
+    check("engine rating stays within the bound of the base rating",
+          abs(eng_hot["bat"] - base_bat) <= CD.MAX_RATING_SWING + 1)
+    check("engine ratings stay in 0-99",
+          0 <= eng_hot["bat"] <= 99 and 0 <= eng_cold["bowl"] <= 99)
+
+    # Condition must move only what the ENGINE sees. The stored rating, OVR and
+    # tier are the player's earned progress and must not drift with form.
+    ovr_probe = CM.new_career("902", "Probe", "pace", "standard")
+    CD.ensure(ovr_probe)
+    before = (ovr_probe["ovr"], ovr_probe["tier"], dict(ovr_probe["attributes"]))
+    ovr_probe["form"] = {"rating": 100, "recent": []}
+    ovr_probe["fitness"] = {"value": 20, "injury": None, "updated": int(time.time())}
+    CM.career_to_engine(ovr_probe)
+    CM.refresh_ovr(ovr_probe)
+    after = (ovr_probe["ovr"], ovr_probe["tier"], dict(ovr_probe["attributes"]))
+    check("condition never changes stored OVR, tier or attributes",
+          before == after, f"{before} -> {after}")
+
+    plain = {"_id": "901", "username": "NoCondition", "bowling_type": "offspin",
+             "mindset": "anchor", "attributes": dict(CM.BASE_ATTRS)}
+    e = CM.career_to_engine(plain)
+    check("a career with no condition fields still converts", e["bat"] > 0 and e["bowl"] > 0)
+
+
 def main():
     random.seed(42)
     part1()
@@ -978,6 +1388,9 @@ def main():
     asyncio.run(part6_broadcast())
     asyncio.run(part7_access_and_admin())
     part8_engine_isolation()
+    part9_drs()
+    asyncio.run(part9b_drs_live())
+    part10_condition()
     if os.environ.get("STRESS", "1") == "1":
         asyncio.run(part5_stress(int(os.environ.get("STRESS_N", "8"))))
 

@@ -95,16 +95,22 @@ try:
     # taking the whole mode down. CAREER_GUI=0 forces the text embeds back.
     try:
         from career import live as career_live
+        from career import drs as career_drs
+        from career import condition as career_condition
         CAREER_GUI_ENABLED = os.environ.get("CAREER_GUI", "1") == "1"
     except Exception as _gui_err:
         print(f"Career broadcast GUI not loaded ({_gui_err}); using text scoreboards.")
         career_live = None
+        career_drs = None
+        career_condition = None
         CAREER_GUI_ENABLED = False
 except Exception as _career_err:
     print(f"Career module not loaded ({_career_err}); Career Mode disabled.")
     CAREER_MODE_ENABLED = False
     _CAREER_OK = False
     career_live = None
+    career_drs = None
+    career_condition = None
     CAREER_GUI_ENABLED = False
     def load_careers():  # no-op fallback
         pass
@@ -4675,6 +4681,15 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
         except Exception as _send_err:
             print(f"Final scorecard post failed (finalising anyway): {_send_err}")
 
+        # Career: the second innings gets its charts here. They were only ever
+        # posted at the innings-1 break, so a chase never produced one.
+        if career_live is not None and CAREER_GUI_ENABLED and _is_career_match(match_to_finalize):
+            try:
+                _chart_inn = getattr(match_to_finalize, "innings2", None) or match_to_finalize.innings1
+                await career_live.post_innings_charts(channel, _chart_inn)
+            except Exception as _chart_err:
+                print(f"career innings-2 charts failed: {_chart_err}")
+
         # TBECS second-innings (match end) ads - shown at every innings end per spec.
         try:
             await _maybe_send_tbecs_ads(channel, match_to_finalize)
@@ -5057,7 +5072,12 @@ async def prompt_bowler_then_hub(interaction, match: CricketMatch):
     msg = f"🎳 <@{bowler_uid}>, pick your bowler for **Over {innings.total_balls // 6 + 1}**:"
     if getattr(match, "impact_player", False):
         msg += "\n💡 *(Need to sub someone in? Run `/impactplayer` first!)*"
-    await channel.send(msg, view=view)
+    # Career: the over break is exactly where a player needs to see the state of
+    # the match, so this prompt carries the card like every other career turn.
+    if _is_career_match(match):
+        await _career_turn(channel, match, msg, view)
+    else:
+        await channel.send(msg, view=view)
 
 def _overcard_controller_id(match):
     """Discord id of who drives the Over Hub: the human on the BOWLING side - they decide
@@ -5498,7 +5518,25 @@ class BattingView(discord.ui.View):
 
         if getattr(self.match, "pending_drs", False):
             self.match.pending_drs = False
-            msg = await interaction.channel.send(f"🚨 **{self.match.drs_dismissal.upper()} GIVEN!**\n<@{self.uid}>, you have 20 seconds to take a review.", view=None)
+            # Career: no budget left means no review to offer - the batter walks.
+            if _is_career_match(self.match) and career_drs is not None:
+                if not career_drs.can_review(self.match, "batting"):
+                    await interaction.channel.send(
+                        f"🚨 **{self.match.drs_dismissal.upper()} GIVEN!** — no reviews left, the batter has to walk.")
+                    if getattr(self.match, "pending_next_batter", False):
+                        self.match.pending_next_batter = False
+                        await _send_wicket_summary(interaction.channel, self.match)
+                        await prompt_next_batter(interaction, self.match)
+                        return
+                    await run_interactive_delivery_sequence(interaction, self.match)
+                    return
+                left = career_drs.reviews_left(self.match, "batting")
+                prompt = (f"🚨 **{self.match.drs_dismissal.upper()} GIVEN!**\n"
+                          f"<@{self.uid}> — 20 seconds to review  ·  **{left}** review(s) left")
+            else:
+                prompt = (f"🚨 **{self.match.drs_dismissal.upper()} GIVEN!**\n"
+                          f"<@{self.uid}>, you have 20 seconds to take a review.")
+            msg = await interaction.channel.send(prompt, view=None)
             view = DRSView(self.match, interaction)
             view.message = msg
             await msg.edit(view=view)
@@ -5507,7 +5545,7 @@ class BattingView(discord.ui.View):
         if getattr(self.match, "pending_next_batter", False):
             self.match.pending_next_batter = False
             await _send_scoreboard(interaction.channel, self.match, force=True)
-            await interaction.channel.send(embed=render_wicket_summary(self.match))
+            await _send_wicket_summary(interaction.channel, self.match)
             await prompt_next_batter(interaction, self.match)
             return
             
@@ -5530,7 +5568,7 @@ class DRSView(discord.ui.View):
             if getattr(self.match, "pending_next_batter", False):
                 self.match.pending_next_batter = False
                 await _send_scoreboard(self.message.channel, self.match, force=True)
-                await self.message.channel.send(embed=render_wicket_summary(self.match))
+                await _send_wicket_summary(self.message.channel, self.match)
                 await prompt_next_batter(self.origin_inter, self.match)
                 return
             await _send_scoreboard(self.message.channel, self.match, force=True)
@@ -5554,6 +5592,20 @@ class DRSView(discord.ui.View):
         await interaction.response.defer()
         await self.message.edit(view=None)
         is_caught_behind = getattr(self.match, "drs_dismissal", "") == "Caught Behind"
+
+        # Career matches use the real adjudication: budget, ball tracking, an
+        # umpire's-call band and a clip. Every other match keeps the old flat roll.
+        if _is_career_match(self.match) and career_drs is not None:
+            await _run_career_review(interaction.channel, self.match, "batting")
+            if getattr(self.match, "pending_next_batter", False):
+                self.match.pending_next_batter = False
+                await _send_scoreboard(interaction.channel, self.match, force=True)
+                await _send_wicket_summary(interaction.channel, self.match)
+                await prompt_next_batter(interaction, self.match)
+                return
+            await run_interactive_delivery_sequence(self.origin_inter, self.match)
+            return
+
         if random.random() < 0.35:
             if is_caught_behind:
                 await interaction.channel.send("📺 **DRS REVIEW:** Hot Spot check... Snickometer flat! **NO EDGE — DECISION OVERTURNED!** 🟢")
@@ -5592,7 +5644,7 @@ class DRSView(discord.ui.View):
             if getattr(self.match, "pending_next_batter", False):
                 self.match.pending_next_batter = False
                 await _send_scoreboard(interaction.channel, self.match, force=True)
-                await interaction.channel.send(embed=render_wicket_summary(self.match))
+                await _send_wicket_summary(interaction.channel, self.match)
                 await prompt_next_batter(interaction, self.match)
                 return
         await _send_scoreboard(interaction.channel, self.match, force=True)
@@ -5608,7 +5660,7 @@ class DRSView(discord.ui.View):
         if getattr(self.match, "pending_next_batter", False):
             self.match.pending_next_batter = False
             await _send_scoreboard(interaction.channel, self.match, force=True)
-            await interaction.channel.send(embed=render_wicket_summary(self.match))
+            await _send_wicket_summary(interaction.channel, self.match)
             await prompt_next_batter(interaction, self.match)
             return
         await _send_scoreboard(interaction.channel, self.match, force=True)
@@ -5670,19 +5722,77 @@ def _career_summary_image(match, final=False):
 async def _send_scoreboard(channel, match, force=False):
     """Post the scoreboard for a match.
 
-    Career matches get the broadcast card - one pinned image per innings, edited
-    in place every ball, with a replay clip on the big moments. Every other match
-    keeps the classic text embed, unchanged. If the render or the upload fails for
-    any reason the text embed is sent instead, so the graphics can never be the
-    thing that stalls a live match.
+    Career matches carry the broadcast card on the next prompt message instead
+    (see _career_turn), so this is a no-op for them unless the graphics layer has
+    degraded. Every other match keeps the classic text embed, unchanged.
     """
     if career_live is not None and CAREER_GUI_ENABLED and _is_career_match(match):
+        # Posting a card here as well as on the prompt is what produced the wall
+        # of stacked scoreboards players had to scroll past.
+        if not career_live.is_degraded(channel):
+            return
+    await channel.send(embed=render_embed_scoreboard(match))
+
+
+async def _send_wicket_summary(channel, match):
+    """Wicket card. Suppressed for career matches - the dismissal already shows in
+    the last-ball banner on the live graphic, and an extra embed here is exactly
+    the interstitial text the broadcast feed is meant to avoid."""
+    if career_live is not None and CAREER_GUI_ENABLED and _is_career_match(match):
+        if not career_live.is_degraded(channel):
+            return
+    await channel.send(embed=render_wicket_summary(match))
+
+
+async def _run_career_review(channel, match, side):
+    """Adjudicate one career review: verdict, ball-tracking clip, state rewind.
+
+    Shared by the human view and the AI path, which previously carried two copies
+    of the rewind logic that had to be kept in step by hand.
+    """
+    rec = getattr(match, "last_ball", None) or {}
+    dismissal = getattr(match, "drs_dismissal", "") or rec.get("dismissal") or "LBW"
+    verdict = career_drs.adjudicate(rec, dismissal, side)
+    overturned = career_drs.settle(match, verdict, side)
+
+    if career_live is not None and CAREER_GUI_ENABLED:
         try:
-            if await career_live.push(channel, match, force=force):
-                return
+            await career_live.drs_clip(channel, match, verdict)
         except Exception as e:
-            print(f"career scoreboard fell back to embed: {e}")
-    await _send_scoreboard(channel, match, force=True)
+            print(f"career drs clip failed: {e}")
+
+    left = career_drs.reviews_left(match, side)
+    icon = "🟢" if overturned else ("🟡" if verdict["decision"] == "UMPIRE'S CALL" else "🔴")
+    await channel.send(
+        f"📺 **DRS — {verdict['decision']}** {icon}\n"
+        f"{verdict['summary']}  ·  *{side} reviews left: {left}*")
+
+    match.last_commentary = (getattr(match, "last_commentary", "") or "") + \
+        f"\n📺 **DRS:** {verdict['decision']}."
+    return verdict
+
+
+async def _career_turn(channel, match, prompt, view):
+    """One message per turn: the ball that just happened, the live card, the buttons.
+
+    Career matches used to emit up to five messages a ball (commentary, wide
+    notice, scoreboard, prompt), which buried the card and made the channel
+    unreadable. This collapses a turn into a single prompt message carrying the
+    graphic, and leaves each completed over's card behind as that over's record.
+    """
+    if career_drs is not None and _is_career_match(match):
+        # Keeps match.drs_reviews live (and reset at each innings) so the review
+        # pips on the card are always accurate.
+        try:
+            career_drs.ensure_budget(match)
+        except Exception:
+            pass
+    if career_live is not None and CAREER_GUI_ENABLED and _is_career_match(match):
+        try:
+            return await career_live.turn(channel, match, prompt, view)
+        except Exception as e:
+            print(f"career turn failed, using a plain prompt: {e}")
+    return await channel.send(prompt, view=view)
 
 
 async def _send_career_commentary(channel, match):
@@ -5740,15 +5850,23 @@ async def run_interactive_delivery_sequence(interaction, match: CricketMatch):
         await prompt_batter_shot(channel, match)
     else:
         role = innings.current_bowler["role"]
-        free_hit_notice = "\n🛡️ **FREE HIT BALL!** Batter cannot be dismissed (except run out)!" if getattr(match, "free_hit", False) else ""
-
-        await _send_career_commentary(channel, match)
         if "Spin" in role:
             spin_type = "off" if "Off" in role else "leg"
             title = "Off-Spin" if spin_type == "off" else "Leg-Spin"
-            await channel.send(f"🔮 <@{match.get_bowler_user_id()}> (**{innings.current_bowler['name']}**), select your {title} Variation:{free_hit_notice}", view=SpinBowlingView(match, spin_type))
+            view = SpinBowlingView(match, spin_type)
         else:
-            await channel.send(f"🔮 <@{match.get_bowler_user_id()}> (**{innings.current_bowler['name']}**), select your Pace Variation:{free_hit_notice}", view=PaceBowlingView(match))
+            title, view = "Pace", PaceBowlingView(match)
+
+        if _is_career_match(match):
+            fh = "  ·  🛡️ **FREE HIT**" if getattr(match, "free_hit", False) else ""
+            await _career_turn(
+                channel, match,
+                f"🎯 <@{match.get_bowler_user_id()}> **{innings.current_bowler['name']}** — "
+                f"pick your {title.lower()} variation{fh}", view)
+        else:
+            free_hit_notice = "\n🛡️ **FREE HIT BALL!** Batter cannot be dismissed (except run out)!" if getattr(match, "free_hit", False) else ""
+            await _send_career_commentary(channel, match)
+            await channel.send(f"🔮 <@{match.get_bowler_user_id()}> (**{innings.current_bowler['name']}**), select your {title} Variation:{free_hit_notice}", view=view)
 
 async def prompt_batter_shot(channel, match: CricketMatch, prev=None):
     if (match.is_ai_game and match.get_striker_user_id() == match.p2_id) or _striker_is_bot(match):
@@ -5756,7 +5874,17 @@ async def prompt_batter_shot(channel, match: CricketMatch, prev=None):
             
         if getattr(match, "pending_drs", False):
             match.pending_drs = False
-            if random.random() < 0.4:
+            # Career: one shared adjudication path, and the AI decides on the
+            # tracking data plus its remaining budget rather than a flat roll.
+            if _is_career_match(match) and career_drs is not None:
+                _rec = getattr(match, "last_ball", None) or {}
+                _dis = getattr(match, "drs_dismissal", "") or "LBW"
+                if career_drs.ai_should_review(match, _rec, _dis, "batting"):
+                    await channel.send("📺 **Review!** The batting side goes upstairs.")
+                    await _run_career_review(channel, match, "batting")
+                else:
+                    await channel.send("🚶 No review — the batter walks off.")
+            elif random.random() < 0.4:
                 await channel.send("📺 **AI has opted for a DRS Review!**")
                 await asyncio.sleep(2)
                 is_caught_behind = getattr(match, "drs_dismissal", "") == "Caught Behind"
@@ -5805,7 +5933,7 @@ async def prompt_batter_shot(channel, match: CricketMatch, prev=None):
         # captain is never asked to send a replacement.
         if getattr(match, "pending_next_batter", False):
             match.pending_next_batter = False
-            await channel.send(embed=render_wicket_summary(match))
+            await _send_wicket_summary(channel, match)
             await prompt_next_batter(d, match)
             return
 
@@ -5816,9 +5944,17 @@ async def prompt_batter_shot(channel, match: CricketMatch, prev=None):
             match.current_innings.current_striker_idx = len(match.current_innings.batting_team["players"]) - 1
             
         sn = match.current_innings.batting_team["players"][match.current_innings.current_striker_idx]["name"]
-        free_hit_notice = "\n🛡️ **FREE HIT!** You cannot be dismissed (except run out)!" if getattr(match, "free_hit", False) else ""
-        await _send_career_commentary(channel, match)
-        await channel.send(f"⚔️ <@{match.get_striker_user_id()}> (**{sn}**)\n🚨 The bowler bowled a **{match.current_delivery_selection}**!{free_hit_notice}\nSelect your shot:", view=BattingView(match))
+        view = BattingView(match)
+        if _is_career_match(match):
+            fh = "  ·  🛡️ **FREE HIT** (only a run out can dismiss you)" if getattr(match, "free_hit", False) else ""
+            await _career_turn(
+                channel, match,
+                f"🏏 <@{match.get_striker_user_id()}> **{sn}** — "
+                f"**{match.current_delivery_selection}** incoming, pick your shot{fh}", view)
+        else:
+            free_hit_notice = "\n🛡️ **FREE HIT!** You cannot be dismissed (except run out)!" if getattr(match, "free_hit", False) else ""
+            await _send_career_commentary(channel, match)
+            await channel.send(f"⚔️ <@{match.get_striker_user_id()}> (**{sn}**)\n🚨 The bowler bowled a **{match.current_delivery_selection}**!{free_hit_notice}\nSelect your shot:", view=view)
 
 
 # ---- CAREER MODE - INTERACTIVE DEBUT (reuses the real engine + BattingView) ----
@@ -6243,6 +6379,21 @@ async def _club_match_payout(channel, match):
                     club["won"] += 1
             except Exception:
                 pass
+
+            # Player condition: this match's work feeds form, drains fitness and
+            # may leave a knock. Never allowed to break the payout.
+            if career_condition is not None:
+                try:
+                    career_condition.record_innings(career, runs=runs, balls=balls,
+                                                    wickets=wkts, balls_bowled=b_balls,
+                                                    out=out)
+                    injury = career_condition.record_workload(career, balls_faced=balls,
+                                                              balls_bowled=b_balls)
+                    if injury:
+                        lines.append(f"🩹 **{career.get('username','')}** picked up a "
+                                     f"**{injury['type']}** — out for {injury['matches_left']} match(es).")
+                except Exception as _cond_err:
+                    print(f"condition update failed: {_cond_err}")
             # Daily-quest progress (claimed later via `cv quests`)
             CM.quest_progress(career, "matches", 1)
             if runs:           CM.quest_progress(career, "runs", runs)
@@ -6468,7 +6619,8 @@ async def prompt_club_openers(interaction, match):
         return True
     view.interaction_check = icheck
 
-    await channel.send(f"🧢 <@{cap_id}> (batting captain) — pick your **2 opening batsmen**:", view=view)
+    await _career_turn(channel, match,
+                       f"🧢 <@{cap_id}> (batting captain) — pick your **2 opening batsmen**:", view)
 
 
 # ---- New step-by-step match setup flow ----
@@ -13577,6 +13729,57 @@ class PrefixCog(commands.Cog):
         await ctx.send(
             f"⭐ **Premium granted** to {member.mention} (**+{days} days**, ~{total_days}d total remaining).\n"
             f"They can now claim `cv weekly` & `cv monthly`.")
+
+    @commands.command(name="fitness", aliases=["form", "condition", "fit"],
+                      help="Your form, fitness and any injury.\nUsage: fitness [@user]")
+    async def fitness_cmd(self, ctx, member: discord.Member = None):
+        if not _can_use_career(ctx):
+            return await ctx.send(_CAREER_SOON)
+        if career_condition is None:
+            return await ctx.send("❌ Condition tracking is not available.")
+        target = member or ctx.author
+        career = CM.get_career(target.id)
+        if not career:
+            return await ctx.send(f"❌ {target.display_name} has no career yet.")
+
+        s = career_condition.summary(career)
+        e = discord.Embed(title=f"🩺 {career.get('username','')} — Condition",
+                          color=_tier_embed_color(career.get("tier", "Bronze")))
+        e.add_field(name="Form", value=f"**{s['form']}**/100  {s['form_arrow']}", inline=True)
+        e.add_field(name="Fitness", value=f"**{s['fitness']}**/100", inline=True)
+        mod = s["modifier"]
+        e.add_field(name="Rating effect",
+                    value=f"**{mod:+.2f}** to bat & bowl" if mod else "none", inline=True)
+        e.add_field(name="Fitness bar", value=f"`{_attr_bar(s['fitness'], 16)}`", inline=False)
+        if s["recent"]:
+            e.add_field(name="Last innings (form score)",
+                        value="`" + "  ".join(str(x) for x in s["recent"]) + "`", inline=False)
+        if s["injury"]:
+            e.add_field(name="🩹 Injury", value=f"**{s['injury']}**", inline=False)
+            e.set_footer(text="Injured players still play, at reduced ratings. cv rest to recover.")
+        else:
+            e.set_footer(text=f"{s['matches_since_rest']} match(es) since your last rest · cv rest")
+        await ctx.send(embed=e)
+
+    @commands.command(name="rest", help="Take a day off to recover fitness.\nUsage: rest")
+    async def rest_cmd(self, ctx):
+        if not _can_use_career(ctx):
+            return await ctx.send(_CAREER_SOON)
+        if career_condition is None:
+            return await ctx.send("❌ Condition tracking is not available.")
+        career = CM.get_career(ctx.author.id)
+        if not career:
+            return await ctx.send("❌ You have no career yet — `cv start_career`.")
+        before = career_condition.fitness(career)
+        after = career_condition.rest(career)
+        CM.async_save_career(career)
+        inj = career_condition.injury_label(career)
+        msg = f"😴 **Rested.** Fitness **{before} → {after}**."
+        if inj:
+            msg += f"  Still carrying a **{inj}**."
+        elif before < after:
+            msg += "  Fully recovered." if after >= 100 else ""
+        await ctx.send(msg)
 
     @commands.command(name="allratings", aliases=["allcareers", "careerlist", "ratingsdump"],
                       help="[OWNER] Every career and its current ratings.\nUsage: allratings [min_ovr]")

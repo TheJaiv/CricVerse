@@ -137,29 +137,95 @@ def _crease(img, d, state):
         T.rtext(d, W - M - 24, top + 100, f"ECON {bw['econ']:.2f}", f_ov, T.INK_SOFT)
 
 
-def _over_strip(img, d, state):
-    """This over's deliveries as coloured pills - the broadcast ticker."""
-    top = 476
-    f_h = T.font(17, "cond")
-    d.text((M, top), "THIS OVER", font=f_h, fill=T.INK_DIM)
+def _last_ball_banner(img, d, state, y):
+    """What just happened, drawn ON the card.
 
-    balls = state.get("this_over", [])
-    x, y, size = M, top + 26, 52
-    f_b = T.font(22, "bold")
+    This used to be a chat line per ball. Players wanted the feed to read as a
+    run of images with nothing between them, so the result lives on the graphic
+    instead - the card is then self-contained and each ball's image is a complete
+    record of that ball.
+    """
+    rec = state.get("last_ball")
+    over_no = state.get("over_no", 0)
+    if not rec:
+        d.text((M, y), f"OVER {over_no + 1}  ·  THIS OVER", font=T.font(17, "cond"), fill=T.INK_DIM)
+        return
+
+    if rec.get("dismissal"):
+        tone, word = "wicket", "WICKET"
+    elif rec.get("is_wide"):
+        tone, word = "wide", "WIDE"
+    else:
+        runs = rec.get("runs_off_bat", 0)
+        tone = {0: "dot", 4: "four", 6: "six"}.get(runs, "single")
+        word = {0: "DOT", 1: "1 RUN", 4: "FOUR", 6: "SIX"}.get(runs, f"{runs} RUNS")
+        if rec.get("is_no_ball"):
+            tone, word = "noball", f"NO BALL · {word}"
+        elif rec.get("is_bye"):
+            word = f"{rec.get('extras', 0)} LEG BYES"
+    col = T.OUTCOME_COLOR.get(tone, T.INK_SOFT)
+
+    f_w = T.font(21, "bold")
+    pill_w = int(T.tw(d, word, f_w)) + 30
+    T.chip(d, [M, y - 4, M + pill_w, y + 28], word, f_w, col)
+
+    detail = f"{rec.get('over', 0)}.{rec.get('ball', 1)}  {rec.get('bowler','')} to {rec.get('striker','')}"
+    extra = " · ".join(x for x in (rec.get("delivery"), rec.get("shot")) if x)
+    if extra:
+        detail += f"  ·  {extra}"
+    if rec.get("dismissal_desc"):
+        detail += f"  ·  {rec['dismissal_desc']}"
+    f_d = T.fit_text(d, detail, lambda s: T.font(s, "cond"), W - 2 * M - pill_w - 220, 18, 12)
+    d.text((M + pill_w + 16, y + 2), detail, font=f_d, fill=T.INK_SOFT)
+
+
+def _ball_pills(d, balls, x, y, size, dim=False):
+    """Row of coloured ball pills. Returns the x it ended at."""
+    f_b = T.font(int(size * 0.42), "bold")
     for b in balls[:12]:
         col = T.OUTCOME_COLOR.get(b["tone"], T.INK_DIM)
-        wide = len(b["label"]) > 2
-        w = size + (22 if wide else 0)
+        if dim:
+            col = T.mix(col, T.BG, 0.42)
+        w = size + (int(size * 0.42) if len(b["label"]) > 2 else 0)
         T.rrect(d, [x, y, x + w, y + size], size // 2, fill=T.mix(col, T.BG, 0.62))
         T.rrect(d, [x + 2, y + 2, x + w - 2, y + size - 2], (size - 4) // 2,
                 fill=T.mix(col, T.PANEL, 0.25) if b["tone"] == "dot" else col)
         ink = T.text_on(col if b["tone"] != "dot" else T.PANEL)
         T.ctext(d, x + w / 2, y + (size - f_b.size) / 2 - 2, b["label"], f_b, ink)
-        x += w + 12
-    if not balls:
-        d.text((M, y + 14), "over starting…", font=T.font(20, "cond"), fill=T.INK_DIM)
+        x += w + (12 if not dim else 8)
+    return x
 
-    # Review pips, right-aligned on the same row. Laid out right-to-left but each
+
+def _over_strip(img, d, state):
+    """Ball-by-ball ticker: this over, the over before it, and the recent-overs run.
+
+    The previous over matters more than it looks. The card is a single image that
+    keeps being replaced, so anything not drawn on it is gone - players reported
+    losing the thread of the match because only six balls were ever visible.
+    """
+    top = 466
+    over_no = state.get("over_no", 0)
+    _last_ball_banner(img, d, state, top)
+
+    balls = state.get("this_over", [])
+    y = top + 34
+    x_end = M
+    if balls:
+        x_end = _ball_pills(d, balls, M, y, 46)
+    else:
+        d.text((M, y + 12), "over starting…", font=T.font(19, "cond"), fill=T.INK_DIM)
+        x_end = M + 160
+
+    # Previous over as ONE short trailing label, on the pills row so it cannot
+    # collide with the DRS block above it. Drawing every over onto the card was
+    # tried and rejected in playtest - it crowds the graphic and gets hard to read.
+    recent = state.get("recent_overs", [])
+    if recent:
+        o, runs, wkts = recent[-1]
+        summ = f"last over {runs}" + (f" · {wkts}w" if wkts else "")
+        d.text((x_end + 10, y + 14), summ, font=T.font(16, "cond"), fill=T.INK_DIM)
+
+    # Review pips, right-aligned on the top row. Laid out right-to-left but each
     # side's pips fill left-to-right, so remaining reviews are always the left ones.
     rev = state.get("reviews") or {}
     if rev:
@@ -174,8 +240,8 @@ def _over_strip(img, d, state):
             for i in range(2):
                 col = T.GOOD if i < left else T.mix(T.BAD, T.BG, 0.55)
                 cx = x0 + i * 24
-                d.ellipse([cx, y + 14, cx + 16, y + 30], fill=col)
-            T.rtext(d, x0 - 10, y + 12, label, f_r, T.INK_DIM)
+                d.ellipse([cx, y + 12, cx + 16, y + 28], fill=col)
+            T.rtext(d, x0 - 10, y + 10, label, f_r, T.INK_DIM)
             edge = x0 - 10 - int(T.tw(d, label, f_r)) - 26
 
 

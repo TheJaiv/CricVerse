@@ -143,10 +143,11 @@ def milestone(rec, prev_runs):
 
 def is_highlight(rec):
     """Should this ball get an animated replay? Kept in one place so the live loop
-    and the highlights command agree."""
+    and the highlights command agree. Wickets, sixes and fours - the three things
+    players actually want to see again."""
     if rec.get("dismissal"):
         return True
-    if rec.get("runs_off_bat") == 6:
+    if rec.get("runs_off_bat") in (4, 6):
         return True
     return False
 

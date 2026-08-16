@@ -92,12 +92,28 @@ def compute_ovr(career: dict) -> int:
 
 
 def career_to_engine(career: dict) -> dict:
-    """Convert a career into the sim engine's {name,bat,bowl,role,archetype} shape."""
+    """Convert a career into the sim engine's {name,bat,bowl,role,archetype} shape.
+
+    This is the ONLY place player condition reaches the simulation: form and
+    fitness shift the ratings by at most +/-3 points here, and the engine is left
+    completely unaware that either exists. The cap is not cosmetic - the sim is
+    calibrated, and an unbounded modifier would move CricVerse's run-rate and
+    wicket targets without anyone noticing.
+    """
     a = career["attributes"]
+    bat, bowl = bat_skill(a), bowl_skill(a)
+    try:
+        from career import condition as CD
+        delta = CD.rating_modifier(career)
+        bat = _clamp(bat + delta)
+        bowl = _clamp(bowl + delta)
+    except Exception as e:
+        # Condition must never be able to stop a match starting.
+        print(f"condition modifier skipped: {e}")
     return {
         "name": career.get("username", "Rookie"),
-        "bat": bat_skill(a),
-        "bowl": bowl_skill(a),
+        "bat": bat,
+        "bowl": bowl,
         "role": BOWLING_TYPES[career["bowling_type"]]["engine_role"],
         "archetype": MINDSETS[career["mindset"]]["engine_arch"],
     }
