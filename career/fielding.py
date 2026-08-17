@@ -73,18 +73,30 @@ def setup(match, enabled, assignments=None):
     return match.fielding_enabled, None
 
 
-def auto_assign(match):
-    """Pick three fielders a side: the best fielders available.
+def is_human(player):
+    """A real player, as opposed to a bot or engine filler."""
+    if not player or player.get("is_bot"):
+        return False
+    oid = player.get("owner_id")
+    return oid is not None and oid > 0
 
-    Career players are ranked on their fielding rating; engine-only players (bots
-    and filler) fall back to a neutral rating so they can still be assigned.
+
+def auto_assign(match):
+    """Pick three fielders a side - HUMANS FIRST, then the best bots.
+
+    Ranking purely on fielding rating handed the slots to whichever players were
+    rated highest, which in practice meant bots: they out-rate a rookie, and in a
+    solo fixture most of the side IS bots. The result was that you could turn
+    fielding on and never once be asked to take a catch, which defeats the point
+    of the feature. Humans are therefore always assigned first, and bots only fill
+    whatever slots are left over.
     """
     out = {}
     for team in (getattr(match, "team1", None), getattr(match, "team2", None)):
         if not team:
             continue
         ranked = sorted(team.get("players", []),
-                        key=lambda p: -_player_field_rating(p))
+                        key=lambda p: (0 if is_human(p) else 1, -_player_field_rating(p)))
         out[team["name"]] = [p["name"] for p in ranked[:FIELDERS_PER_SIDE]]
     return out
 
@@ -117,6 +129,22 @@ def fielders_for(match, team_name):
     return list((getattr(match, "fielders", {}) or {}).get(team_name, []))
 
 
+def _rotation(match, names):
+    """Order chances fall in, with humans appearing twice.
+
+    A flat rotation gave each of the three fielders a third of the chances, and a
+    short match only produces two or three - so you could be an assigned fielder
+    all game and never actually be asked to take one. Humans get two slots in the
+    rotation so the chances land on the people who can enjoy them.
+    """
+    rot = []
+    for n in names:
+        rot.append(n)
+        if is_human(find_player(match, n)):
+            rot.append(n)
+    return rot or list(names)
+
+
 def pick_fielder(match, rec=None):
     """Who is under this chance? One of the bowling side's assigned fielders.
 
@@ -129,8 +157,9 @@ def pick_fielder(match, rec=None):
     names = fielders_for(match, innings.bowling_team["name"])
     if not names:
         return None
-    idx = (rec or {}).get("ball_index", 0) if rec else random.randrange(len(names))
-    return names[idx % len(names)]
+    rot = _rotation(match, names)
+    idx = (rec or {}).get("ball_index", 0) if rec else random.randrange(len(rot))
+    return rot[idx % len(rot)]
 
 
 def find_player(match, name):
@@ -181,6 +210,24 @@ def run_out_chance(player, rec, action="keeper"):
     base = 0.30 + (throw / 99.0) * 0.45
     p = base + act["bonus"] - act["risk"] * (1.0 - throw / 150.0)
     return max(0.05, min(0.94, p))
+
+
+def ai_action(kind, player, rec):
+    """What a bot fielder does with the chance.
+
+    Picks whichever option actually has the best odds for this chance and this
+    fielder - so bots dive at the hard ones and take the regulation ones cleanly,
+    the same judgement a human is being asked to make - with a little noise so it
+    is not perfectly optimal.
+    """
+    actions = CATCH_ACTIONS if kind == "catch" else THROW_ACTIONS
+    score = (catch_chance if kind == "catch" else run_out_chance)
+    best, best_p = None, -1.0
+    for key in actions:
+        p = score(player, rec, key) + random.uniform(-0.05, 0.05)
+        if p > best_p:
+            best, best_p = key, p
+    return best
 
 
 def resolve(kind, player, rec, action):

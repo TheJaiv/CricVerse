@@ -1,29 +1,27 @@
 """
-Career life sim: seasons, clubs, contracts, transfers, awards, history, ageing.
+The career storyline: an Indian cricketer's pathway.
 
-Before this, a career was a bag of lifetime totals with no arc - nothing to play
-FOR beyond a bigger number. This adds the shape of a playing career: you sign for
-a club, play a season of fixtures for a wage, get judged on it, and either move
-up the ladder or get moved down it. Eventually you get old and retire.
+This is a SELECTION LADDER, not a transfer market. You do not shop for a club and
+negotiate a wage - you play the tournament you are currently in, and selectors
+move you up or drop you back down on the strength of your season:
 
-THE SEASON IS A SEPARATE STORYLINE. It has its OWN rating (`story.rating`), and
-it never reads or writes the real career's attributes, OVR or tier. Clubs judge
-you on the story rating; ageing erodes the story rating; a bad season drops it.
-What crosses back over is COINS - wages and awards - which are spent upgrading
-the real career through the normal upgrade curve. That way the storyline can be
-as brutal as it likes without ever undoing progress the player paid for.
+    Club Cricket -> Cooch Behar Trophy (U19) -> Syed Mushtaq Ali Trophy ->
+    Vijay Hazare Trophy -> Ranji Trophy -> Duleep Trophy -> IPL ->
+    India A -> India T20I -> India ODI -> Test -> World Cup
 
-Design notes:
-  * Everything is lazily defaulted, so career documents written before this
-    existed keep loading and simply start Season 1 on their next match.
-  * The season rolls over on FIXTURES PLAYED, not on a real-world date. Players
-    play at wildly different rates and a calendar season would punish the casual
-    ones.
-  * Match history is capped: careers are one Mongo document each, which is
-    exactly why they were split out of the main blob in the first place.
-  * Wages are per match and deliberately modest - see the economy note in
-    add_wage(). The upgrade curve is the grind that gives tiers meaning, and a
-    salary big enough to short-circuit it would delete that.
+The ladder itself lives in data/career_ladder.json: real tournaments, their real
+formats, the match fee each pays, and the reputation a selector wants before
+picking you.
+
+Two things carry across a season:
+  * REPUTATION (`story.rating`) - what selectors judge. Earned by playing well,
+    lost by failing or by ageing out. Nothing to do with your career OVR.
+  * COINS - match fees, central-contract retainers and IPL money, which you spend
+    upgrading the real career.
+
+THE STORYLINE NEVER TOUCHES YOUR REAL RATINGS. It cannot read or write your
+attributes, OVR or tier. Being dropped costs you standing, never the progress you
+paid coins for.
 """
 import json
 import os
@@ -31,65 +29,84 @@ import random
 import time
 
 _DATA = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                     "data", "career_clubs.json")
+                     "data", "career_ladder.json")
 
-SEASON_FIXTURES = 14          # matches in a season before it rolls over
-HISTORY_CAP = 100             # per-career match log entries kept
-START_AGE = 18
+HISTORY_CAP = 100
+START_AGE = 17
 PEAK_AGE = 28
 DECLINE_AGE = 33
 RETIREMENT_AGE = 38
 
-_CLUBS = None
+STORY_START_RATING = 55
+STORY_MIN, STORY_MAX = 40, 99
+
+_LADDER = None
 
 
-def clubs():
-    """The club ladder, loaded once from data/career_clubs.json."""
-    global _CLUBS
-    if _CLUBS is None:
+def _load():
+    global _LADDER
+    if _LADDER is None:
         try:
             with open(_DATA, "r", encoding="utf-8") as fh:
-                _CLUBS = json.load(fh)["clubs"]
+                _LADDER = json.load(fh)
         except Exception as e:
-            print(f"career clubs data missing ({e}); using a single fallback club.")
-            _CLUBS = [{"id": "riverside", "name": "Riverside CC", "tier": "Bronze",
-                       "min_ovr": 0, "wage": 22, "prestige": 1, "city": "Riverside"}]
-    return _CLUBS
+            print(f"career ladder data missing ({e}); falling back to club cricket only.")
+            _LADDER = {"levels": [{
+                "id": "club", "name": "Club Cricket", "tournament": "Local League",
+                "format": "T20", "overs": 5, "per_side": 4, "fixtures": 8,
+                "match_fee": 35, "min_rep": 0, "promote_grade": 52, "relegate_grade": -1,
+                "squad": "Club XI", "opponents": ["Rivals CC"]}], "contract_grades": {}}
+    return _LADDER
 
 
-def club_by_id(cid):
-    return next((c for c in clubs() if c["id"] == cid), None)
+def levels():
+    return _load()["levels"]
 
 
-STORY_START_RATING = 60
-STORY_MIN, STORY_MAX = 40, 99
+def level_by_id(lid):
+    return next((l for l in levels() if l["id"] == lid), None)
+
+
+def level_index(lid):
+    for i, l in enumerate(levels()):
+        if l["id"] == lid:
+            return i
+    return 0
+
+
+def contract_grades():
+    return _load().get("contract_grades", {})
 
 
 def ensure(career):
-    """Add the season fields to a career that predates them."""
+    """Add the storyline fields to a career that predates them."""
     career.setdefault("season_no", 1)
     career.setdefault("retired", False)
     career.setdefault("trophies", [])
     career.setdefault("history", [])
-    career.setdefault("offers", [])
     if not isinstance(career.get("season_stats"), dict):
         career["season_stats"] = blank_season()
-    if "contract" not in career:
-        career["contract"] = None
-    # The storyline's own rating and age. Kept in its own sub-document so it is
-    # obvious at a glance that none of this is the real career's rating.
     if not isinstance(career.get("story"), dict):
-        career["story"] = {"rating": STORY_START_RATING, "peak": STORY_START_RATING,
-                           "age": START_AGE}
+        career["story"] = {}
     st = career["story"]
     st.setdefault("rating", STORY_START_RATING)
     st.setdefault("peak", st["rating"])
     st.setdefault("age", START_AGE)
+    st.setdefault("level", levels()[0]["id"])
+    st.setdefault("squad", levels()[0].get("squad", ""))
+    st.setdefault("peak_level", st["level"])
+    # Old club-contract shape from the earlier design - not used any more.
+    career.pop("offers", None)
     return career
 
 
+def blank_season():
+    return {"played": 0, "won": 0, "runs": 0, "balls": 0, "wickets": 0,
+            "fifties": 0, "hundreds": 0, "hs": 0, "wages": 0, "best_w": 0}
+
+
 def story_rating(career):
-    """The rating clubs judge you on. NOT the career OVR."""
+    """Your standing with selectors. NOT your career OVR."""
     ensure(career)
     return int(round(career["story"]["rating"]))
 
@@ -99,83 +116,91 @@ def story_age(career):
     return int(career["story"]["age"])
 
 
-def _set_story_rating(career, value):
+def current_level(career):
+    ensure(career)
+    return level_by_id(career["story"]["level"]) or levels()[0]
+
+
+def squad_name(career):
+    ensure(career)
+    return career["story"].get("squad") or current_level(career).get("squad", "")
+
+
+def _set_rating(career, value):
     st = career["story"]
     st["rating"] = max(STORY_MIN, min(STORY_MAX, round(value, 1)))
     st["peak"] = max(st.get("peak", st["rating"]), st["rating"])
     return st["rating"]
 
 
-def blank_season():
-    return {"played": 0, "won": 0, "runs": 0, "balls": 0, "wickets": 0,
-            "fifties": 0, "hundreds": 0, "hs": 0, "wages": 0, "best_w": 0}
+def contract_retainer(career):
+    """Annual retainer for a centrally contracted player, 0 below that level."""
+    lvl = current_level(career)
+    grade = lvl.get("contract_grade")
+    return contract_grades().get(grade, 0) if grade else 0
 
 
-# Contracts
-def eligible_clubs(career):
-    r = story_rating(career)
-    return [c for c in clubs() if c["min_ovr"] <= r]
+# Fixtures
+def fixtures(career):
+    """This season's schedule for the tournament you are currently in.
 
-
-def sign(career, club_id, matches=SEASON_FIXTURES):
-    """Sign for a club. Returns (contract, error)."""
-    ensure(career)
-    club = club_by_id(club_id)
-    if not club:
-        return None, "No such club."
-    rating = story_rating(career)
-    if rating < club["min_ovr"]:
-        return None, (f"**{club['name']}** want a **{club['min_ovr']}** reputation — "
-                      f"yours is **{rating}**. Play seasons to build it.")
-    cur = career.get("contract")
-    if cur and cur.get("matches_left", 0) > 0 and cur.get("club_id") != club_id:
-        return None, (f"You're under contract at **{cur['club']}** for "
-                      f"{cur['matches_left']} more match(es).")
-    career["contract"] = {
-        "club_id": club["id"], "club": club["name"], "wage": club["wage"],
-        "matches_left": matches, "signed_season": career.get("season_no", 1),
-        "prestige": club.get("prestige", 1),
-    }
-    career["offers"] = []
-    return career["contract"], None
-
-
-def current_club(career):
-    ensure(career)
-    c = career.get("contract")
-    return c["club"] if c else None
-
-
-def add_wage(career):
-    """Pay the match wage and burn one contract match.
-
-    Wages are the season's steady income; match performance pay and the daily
-    remain the variable part. Kept per-match and modest on purpose: a full
-    Bronze season is worth a few hundred coins against an upgrade curve where a
-    single point at OVR 90 costs ~2,400. Wages should make a season feel like a
-    job, not shortcut the grind.
+    Deterministic per player, season and level, so the list does not reshuffle
+    between commands.
     """
     ensure(career)
-    c = career.get("contract")
-    if not c or c.get("matches_left", 0) <= 0:
-        return 0
-    wage = int(c.get("wage", 0))
-    career["coins"] = career.get("coins", 0) + wage
-    c["matches_left"] -= 1
-    career["season_stats"]["wages"] = career["season_stats"].get("wages", 0) + wage
-    if c["matches_left"] <= 0:
-        c["expired"] = True
-    return wage
+    lvl = current_level(career)
+    season = career.get("season_no", 1)
+    rng = random.Random(f"{career.get('_id', '?')}:{lvl['id']}:s{season}")
+    base = max(45, story_rating(career) - 4 + level_index(lvl["id"]))
+
+    opponents = list(lvl.get("opponents") or ["Rivals"])
+    rng.shuffle(opponents)
+    sched = []
+    for i in range(int(lvl.get("fixtures", 8))):
+        sched.append({
+            "round": i + 1,
+            "opponent": opponents[i % len(opponents)],
+            "strength": max(45, min(96, int(base + rng.randint(-6, 10)))),
+            "home": i % 2 == 0,
+            "level": lvl["id"],
+            "tournament": lvl["tournament"],
+            "format": lvl.get("format", "T20"),
+            "overs": int(lvl.get("overs", 5)),
+            "per_side": int(lvl.get("per_side", 4)),
+            "fee": int(lvl.get("match_fee", 35)),
+        })
+    return sched
+
+
+def next_fixture(career):
+    ensure(career)
+    played = career["season_stats"].get("played", 0)
+    sched = fixtures(career)
+    return sched[played] if played < len(sched) else None
+
+
+def season_length(career):
+    return len(fixtures(career))
 
 
 # Match results
+def match_fee(career):
+    """Fee for one appearance at the current level, plus a slice of any retainer.
+
+    A centrally contracted player is paid a retainer across the season rather than
+    per game, so it is spread over the fixtures instead of landing in one lump.
+    """
+    lvl = current_level(career)
+    fee = int(lvl.get("match_fee", 35))
+    retainer = contract_retainer(career)
+    if retainer:
+        fee += int(retainer / max(1, int(lvl.get("fixtures", 8))))
+    return fee
+
+
 def record_match(career, *, runs=0, balls=0, wickets=0, balls_bowled=0, won=False,
                  opponent="", fifties=0, hundreds=0, coins=0, when=None):
-    """Fold a finished match into the season, the history and the wage.
-
-    Returns a dict describing anything the player should be told about
-    (wage paid, season completed, awards won).
-    """
+    """Fold a finished appearance into the season, the history and the fee."""
     ensure(career)
     ss = career["season_stats"]
     ss["played"] = ss.get("played", 0) + 1
@@ -188,28 +213,31 @@ def record_match(career, *, runs=0, balls=0, wickets=0, balls_bowled=0, won=Fals
     ss["hs"] = max(ss.get("hs", 0), runs)
     ss["best_w"] = max(ss.get("best_w", 0), wickets)
 
+    lvl = current_level(career)
     entry = {
-        "s": career.get("season_no", 1),
-        "t": int(when or time.time()),
-        "o": str(opponent)[:24],
-        "r": runs, "b": balls, "w": wickets, "bb": balls_bowled,
+        "s": career.get("season_no", 1), "t": int(when or time.time()),
+        "o": str(opponent)[:24], "r": runs, "b": balls, "w": wickets, "bb": balls_bowled,
         "won": 1 if won else 0, "c": coins,
-        "club": (career.get("contract") or {}).get("club", ""),
+        "lvl": lvl["id"], "tour": lvl["tournament"],
     }
     hist = career.setdefault("history", [])
     hist.append(entry)
     if len(hist) > HISTORY_CAP:
         del hist[:len(hist) - HISTORY_CAP]
 
-    out = {"wage": add_wage(career), "season_done": False, "awards": [], "offers": []}
-    if ss["played"] >= SEASON_FIXTURES:
+    fee = match_fee(career)
+    career["coins"] = career.get("coins", 0) + fee
+    ss["wages"] = ss.get("wages", 0) + fee
+
+    out = {"fee": fee, "season_done": False, "awards": [], "level": lvl}
+    if ss["played"] >= season_length(career):
         out.update(end_season(career))
     return out
 
 
-# Season rollover
+# Season rollover and selection
 def _season_grade(career):
-    """0..100 rating of the season just played, used for awards and offers."""
+    """0..100 rating of the season just played. This is what selectors read."""
     ss = career["season_stats"]
     played = max(1, ss.get("played", 0))
     runs_pm = ss.get("runs", 0) / played
@@ -222,70 +250,76 @@ def _season_grade(career):
 def _season_awards(career, grade):
     awards = []
     ss = career["season_stats"]
+    lvl = current_level(career)
     season = career.get("season_no", 1)
     if grade >= 62:
-        awards.append("Player of the Season")
-    if ss.get("runs", 0) >= 400:
-        awards.append("Leading Run-Scorer")
-    if ss.get("wickets", 0) >= 20:
-        awards.append("Leading Wicket-Taker")
+        awards.append(f"{lvl['tournament']} Player of the Tournament")
+    if ss.get("runs", 0) >= 350:
+        awards.append(f"{lvl['tournament']} Leading Run-Scorer")
+    if ss.get("wickets", 0) >= 18:
+        awards.append(f"{lvl['tournament']} Leading Wicket-Taker")
     if ss.get("hundreds", 0) >= 2:
         awards.append("Century Maker")
-    if season == 1 and grade >= 45:
-        awards.append("Breakthrough Player")
     for a in awards:
         career.setdefault("trophies", []).append({"name": a, "season": season})
     return awards
 
 
-def make_offers(career, grade):
-    """Generate end-of-season contract offers.
+def _apply_progression(career, grade):
+    """A season's showing moves your standing with selectors."""
+    delta = max(-4.0, min(5.0, (grade - 45.0) / 10.0))
+    return _set_rating(career, career["story"]["rating"] + delta)
 
-    A strong season opens clubs one rung above; a poor one at a big club gets you
-    pushed back down the ladder. Judged on the STORY rating, not the career OVR.
+
+def _apply_ageing(career):
+    """Past the decline age your standing erodes - selectors look at younger men.
+
+    Explicitly NOT your attributes: the storyline can end your career without ever
+    taking away what you bought with coins.
+    """
+    age = story_age(career)
+    if age < DECLINE_AGE:
+        return 0
+    steps = 1 + (age - DECLINE_AGE) // 3
+    before = career["story"]["rating"]
+    _set_rating(career, before - steps)
+    return round(before - career["story"]["rating"], 1)
+
+
+def selection_verdict(career, grade):
+    """Do the selectors promote you, keep you, or drop you?
+
+    Promotion needs BOTH a good enough season at this level AND the reputation the
+    next tournament expects - a great Ranji season does not put you in the Test
+    side if nobody rates you yet.
     """
     ensure(career)
-    ovr = story_rating(career)
-    cur = career.get("contract") or {}
-    cur_prestige = cur.get("prestige", 0)
+    lvl = current_level(career)
+    idx = level_index(lvl["id"])
+    rep = story_rating(career)
 
-    reach = 0
-    if grade >= 70:
-        reach = 2
-    elif grade >= 50:
-        reach = 1
-    elif grade < 30:
-        reach = -1
-
-    offers = []
-    for c in clubs():
-        if c["min_ovr"] > ovr:
-            continue
-        gap = c.get("prestige", 1) - cur_prestige
-        if gap > reach:
-            continue
-        if gap < -2:
-            continue
-        wage = int(round(c["wage"] * (0.9 + grade / 200.0)))
-        offers.append({"club_id": c["id"], "club": c["name"], "tier": c["tier"],
-                       "wage": wage, "prestige": c.get("prestige", 1),
-                       "matches": SEASON_FIXTURES})
-    offers.sort(key=lambda o: (-o["prestige"], -o["wage"]))
-    offers = offers[:5]
-    career["offers"] = offers
-    return offers
+    if grade <= lvl.get("relegate_grade", -1) and idx > 0:
+        return "dropped", levels()[idx - 1]
+    if idx + 1 < len(levels()):
+        nxt = levels()[idx + 1]
+        if grade >= lvl.get("promote_grade", 999) and rep >= nxt.get("min_rep", 0):
+            return "promoted", nxt
+        if grade >= lvl.get("promote_grade", 999):
+            return "knocking", nxt          # good enough, not yet rated enough
+    return "retained", lvl
 
 
 def end_season(career):
-    """Close the season: grade it, hand out awards, age the player, make offers."""
+    """Close the season: grade it, award it, age the player, then selection."""
     ensure(career)
     grade = _season_grade(career)
     awards = _season_awards(career, grade)
     season = career.get("season_no", 1)
+    lvl = current_level(career)
 
     career.setdefault("season_log", []).append({
         "season": season, "grade": round(grade, 1),
-        "club": (career.get("contract") or {}).get("club", ""),
+        "level": lvl["id"], "tournament": lvl["tournament"],
         **{k: career["season_stats"].get(k, 0)
            for k in ("played", "won", "runs", "wickets", "hs", "wages")},
     })
@@ -294,73 +328,48 @@ def end_season(career):
     career["season_stats"] = blank_season()
     career["story"]["age"] = story_age(career) + 1
 
-    before = story_rating(career)
+    before_rep = story_rating(career)
     _apply_progression(career, grade)
     decline = _apply_ageing(career)
-    after = story_rating(career)
-    offers = make_offers(career, grade)
 
-    contract = career.get("contract")
-    if contract and contract.get("matches_left", 0) <= 0:
-        career["contract"] = None
+    verdict, target = selection_verdict(career, grade)
+    if verdict in ("promoted", "dropped"):
+        career["story"]["level"] = target["id"]
+        career["story"]["squad"] = target.get("squad", "")
+        if verdict == "promoted":
+            career["story"]["peak_level"] = target["id"]
+            career.setdefault("trophies", []).append(
+                {"name": f"Selected: {target['tournament']}", "season": season})
 
     return {"season_done": True, "season": season, "grade": round(grade, 1),
-            "awards": awards, "offers": offers, "decline": decline,
-            "rating_before": before, "rating_after": after,
+            "awards": awards, "decline": decline,
+            "verdict": verdict, "from_level": lvl, "to_level": target,
+            "rating_before": before_rep, "rating_after": story_rating(career),
             "retire_due": story_age(career) >= RETIREMENT_AGE}
 
 
-def _apply_progression(career, grade):
-    """A season's showing moves the STORY rating up or down.
-
-    This is the storyline's own ladder: play well for a mid-table club and better
-    clubs come calling; have a bad season and you slide back down. It touches
-    nothing the player bought with coins.
-    """
-    delta = (grade - 45.0) / 10.0          # ~ -4.5 .. +5.5 a season
-    delta = max(-4.0, min(5.0, delta))
-    return _set_story_rating(career, career["story"]["rating"] + delta)
-
-
-def _apply_ageing(career):
-    """Past the decline age the STORY rating erodes each season.
-
-    Explicitly NOT the career's attributes: the real career is what the player
-    paid coins for and must never be taken away by the storyline. Ageing is a
-    story about this club career ending, not about losing your progress.
-    """
-    age = story_age(career)
-    if age < DECLINE_AGE:
-        return 0
-    steps = 1 + (age - DECLINE_AGE) // 3
-    before = career["story"]["rating"]
-    _set_story_rating(career, before - steps)
-    return round(before - career["story"]["rating"], 1)
-
-
 def retire(career):
-    """End the career. Everything is kept - the document becomes a record."""
     ensure(career)
     career["retired"] = True
     career["retired_at"] = int(time.time())
-    career["contract"] = None
-    career["offers"] = []
     return legacy(career)
 
 
 def legacy(career):
-    """Career-long summary for the retirement card and the hall of fame."""
+    """Career-long summary for the retirement card."""
     ensure(career)
     bat = (career.get("stats") or {}).get("bat", {})
     bowl = (career.get("stats") or {}).get("bowl", {})
     outs = bat.get("outs", 0)
+    peak_lvl = level_by_id(career["story"].get("peak_level")) or current_level(career)
     return {
         "name": career.get("username", ""),
         "seasons": max(0, career.get("season_no", 1) - 1),
         "age": story_age(career),
         "peak_rating": career["story"].get("peak", STORY_START_RATING),
         "story_rating": story_rating(career),
-        "peak_ovr": career.get("peak_ovr", career.get("ovr", 60)),
+        "peak_level": peak_lvl["name"],
+        "peak_tournament": peak_lvl["tournament"],
         "ovr": career.get("ovr", 60),
         "tier": career.get("tier", "Bronze"),
         "matches": bat.get("matches", 0),
@@ -369,12 +378,12 @@ def legacy(career):
         "avg": (bat.get("runs", 0) / outs) if outs else None,
         "wickets": bowl.get("wickets", 0),
         "trophies": list(career.get("trophies", [])),
-        "clubs": sorted({s.get("club") for s in career.get("season_log", []) if s.get("club")}),
+        "tournaments": sorted({s.get("tournament") for s in career.get("season_log", [])
+                               if s.get("tournament")}),
     }
 
 
 def track_peak(career):
-    """Remember the highest OVR ever reached, for the legacy card."""
     ensure(career)
     if career.get("ovr", 0) > career.get("peak_ovr", 0):
         career["peak_ovr"] = career["ovr"]

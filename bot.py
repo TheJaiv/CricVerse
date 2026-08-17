@@ -100,6 +100,7 @@ try:
         from career import season as career_season
         from career import attributes as _career_attrs
         from career import fielding as career_fielding
+        from career import clubs as career_clubs
         CAREER_GUI_ENABLED = os.environ.get("CAREER_GUI", "1") == "1"
     except Exception as _gui_err:
         print(f"Career broadcast GUI not loaded ({_gui_err}); using text scoreboards.")
@@ -109,6 +110,7 @@ try:
         career_season = None
         _career_attrs = None
         career_fielding = None
+        career_clubs = None
         CAREER_GUI_ENABLED = False
 except Exception as _career_err:
     print(f"Career module not loaded ({_career_err}); Career Mode disabled.")
@@ -120,6 +122,7 @@ except Exception as _career_err:
     career_season = None
     _career_attrs = None
     career_fielding = None
+    career_clubs = None
     CAREER_GUI_ENABLED = False
     def load_careers():  # no-op fallback
         pass
@@ -4506,6 +4509,9 @@ async def _maybe_send_tbecs_ads(channel, match):
 
 
 async def handle_innings_end(interaction_context, match: CricketMatch):
+    # The wicket that ended the innings still set this; clearing it here stops a
+    # stale "send in the next batter" prompt leaking into the next innings.
+    match.pending_next_batter = False
     if getattr(match, "is_debut", False):   # Career debut: never start innings 2 - score the trial.
         await handle_debut_end(interaction_context, match)
         return
@@ -5532,7 +5538,7 @@ class BattingView(discord.ui.View):
                 if not career_drs.can_review(self.match, "batting"):
                     await interaction.channel.send(
                         f"🚨 **{self.match.drs_dismissal.upper()} GIVEN!** — no reviews left, the batter has to walk.")
-                    if getattr(self.match, "pending_next_batter", False):
+                    if getattr(self.match, "pending_next_batter", False) and not _innings_is_over(self.match):
                         self.match.pending_next_batter = False
                         await _send_wicket_summary(interaction.channel, self.match)
                         await prompt_next_batter(interaction, self.match)
@@ -5555,7 +5561,7 @@ class BattingView(discord.ui.View):
         if await _maybe_fielding_chance(interaction.channel, self.match, interaction):
             return
 
-        if getattr(self.match, "pending_next_batter", False):
+        if getattr(self.match, "pending_next_batter", False) and not _innings_is_over(self.match):
             self.match.pending_next_batter = False
             await _send_scoreboard(interaction.channel, self.match, force=True)
             await _send_wicket_summary(interaction.channel, self.match)
@@ -5578,7 +5584,7 @@ class DRSView(discord.ui.View):
         try:
             await self.message.edit(view=None)
             await self.message.channel.send("⏱️ **DRS Timer Expired.** The batter accepts the decision and walks.")
-            if getattr(self.match, "pending_next_batter", False):
+            if getattr(self.match, "pending_next_batter", False) and not _innings_is_over(self.match):
                 self.match.pending_next_batter = False
                 await _send_scoreboard(self.message.channel, self.match, force=True)
                 await _send_wicket_summary(self.message.channel, self.match)
@@ -5610,7 +5616,7 @@ class DRSView(discord.ui.View):
         # umpire's-call band and a clip. Every other match keeps the old flat roll.
         if _is_career_match(self.match) and career_drs is not None:
             await _run_career_review(interaction.channel, self.match, "batting")
-            if getattr(self.match, "pending_next_batter", False):
+            if getattr(self.match, "pending_next_batter", False) and not _innings_is_over(self.match):
                 self.match.pending_next_batter = False
                 await _send_scoreboard(interaction.channel, self.match, force=True)
                 await _send_wicket_summary(interaction.channel, self.match)
@@ -5627,7 +5633,7 @@ class DRSView(discord.ui.View):
             innings = self.match.current_innings
             innings.wickets -= 1
 
-            if getattr(self.match, "pending_next_batter", False):
+            if getattr(self.match, "pending_next_batter", False) and not _innings_is_over(self.match):
                 self.match.pending_next_batter = False
                 # No replacement was promoted yet - the reprieved batter still holds
                 # his crease end (after a last-ball wicket the end-change moved him to
@@ -5654,7 +5660,7 @@ class DRSView(discord.ui.View):
             else:
                 await interaction.channel.send("📺 **DRS REVIEW:** Three Reds! **UMPIRING DECISION UPHELD!** 🔴")
             self.match.last_commentary += "\n📺 **DRS:** Decision Upheld (Out)."
-            if getattr(self.match, "pending_next_batter", False):
+            if getattr(self.match, "pending_next_batter", False) and not _innings_is_over(self.match):
                 self.match.pending_next_batter = False
                 await _send_scoreboard(interaction.channel, self.match, force=True)
                 await _send_wicket_summary(interaction.channel, self.match)
@@ -5670,7 +5676,7 @@ class DRSView(discord.ui.View):
         await interaction.response.defer()
         await self.message.edit(view=None)
         await interaction.channel.send("🚶 Batter accepts the decision and walks off.")
-        if getattr(self.match, "pending_next_batter", False):
+        if getattr(self.match, "pending_next_batter", False) and not _innings_is_over(self.match):
             self.match.pending_next_batter = False
             await _send_scoreboard(interaction.channel, self.match, force=True)
             await _send_wicket_summary(interaction.channel, self.match)
@@ -5847,7 +5853,7 @@ async def _resolve_fielding(channel, match, chance, action, origin_inter):
             print(f"fielding rewind failed: {e}")
         match.pending_next_batter = False
 
-    if getattr(match, "pending_next_batter", False):
+    if getattr(match, "pending_next_batter", False) and not _innings_is_over(match):
         match.pending_next_batter = False
         await _send_wicket_summary(channel, match)
         await prompt_next_batter(origin_inter, match)
@@ -5901,10 +5907,18 @@ async def _maybe_fielding_chance(channel, match, origin_inter):
         return False
 
     rec = getattr(match, "last_ball", None) or {}
+    owner = chance.get("owner_id")
+
+    # A bot fielder decides for itself. Prompting one would hang the match waiting
+    # on a click that can never come.
+    if owner is None or _is_bot_uid(owner):
+        action = career_fielding.ai_action(chance["kind"], chance.get("player"), rec)
+        await _resolve_fielding(channel, match, chance, action, origin_inter)
+        return True
+
     kind_txt = ("🧤 **CATCH!**" if chance["kind"] == "catch" else "🎯 **RUN OUT CHANCE!**")
-    who = f"<@{chance['owner_id']}> " if chance.get("owner_id") else ""
     prompt = (f"{kind_txt} It goes to **{chance['fielder']}**.\n"
-              f"{who}25 seconds — how do you take it?")
+              f"<@{owner}> 25 seconds — how do you take it?")
     view = FieldingView(match, chance, origin_inter)
     msg = await channel.send(prompt, view=view)
     view.message = msg
@@ -5980,14 +5994,32 @@ async def _send_career_commentary(channel, match):
             pass
 
 
-async def run_interactive_delivery_sequence(interaction, match: CricketMatch):
+def _innings_is_over(match) -> bool:
+    """True when the current innings has actually finished.
+
+    The engine sets `pending_next_batter` on EVERY wicket, including the one that
+    ends the innings - so the wicket paths would ask the captain to send in a new
+    batter, and that prompt landed before (or instead of) the innings scorecard.
+    Checking this first is what stops that.
+    """
     innings = match.current_innings
-    
-    max_w = _match_max_wickets(match)
-    _scenario_done = getattr(match, "is_scenario", False) and innings.total_runs >= getattr(match, "scenario_target", 10**9)
-    if innings.wickets >= max_w or innings.total_balls >= match.max_balls or _scenario_done or (match.current_innings_num == 2 and innings.total_runs >= getattr(match, "target", match.innings1.total_runs + 1)):
+    if innings is None:
+        return False
+    if innings.wickets >= _match_max_wickets(match) or innings.total_balls >= match.max_balls:
+        return True
+    if getattr(match, "is_scenario", False) and innings.total_runs >= getattr(match, "scenario_target", 10**9):
+        return True
+    if match.current_innings_num == 2 and innings.total_runs >= getattr(
+            match, "target", match.innings1.total_runs + 1):
+        return True
+    return False
+
+
+async def run_interactive_delivery_sequence(interaction, match: CricketMatch):
+    if _innings_is_over(match):
         await handle_innings_end(interaction, match)
         return
+    innings = match.current_innings
 
     if getattr(match, "over_completed", False):
         match.over_completed = False
@@ -6062,7 +6094,7 @@ async def prompt_batter_shot(channel, match: CricketMatch, prev=None):
                         await channel.send("📺 **DRS REVIEW:** Pitching... Impact... Wickets Missing! **DECISION OVERTURNED!** 🟢")
                     innings = match.current_innings
                     innings.wickets -= 1
-                    if getattr(match, "pending_next_batter", False):
+                    if getattr(match, "pending_next_batter", False) and not _innings_is_over(match):
                         match.pending_next_batter = False
                         # reprieved batter still holds his crease end (see DRS view note)
                     else:
@@ -6111,7 +6143,7 @@ async def prompt_batter_shot(channel, match: CricketMatch, prev=None):
         # sets pending_next_batter instead of auto-advancing, so we MUST hand off to the
         # next-batter flow here - otherwise the dismissed bot keeps facing balls and the
         # captain is never asked to send a replacement.
-        if getattr(match, "pending_next_batter", False):
+        if getattr(match, "pending_next_batter", False) and not _innings_is_over(match):
             match.pending_next_batter = False
             await _send_wicket_summary(channel, match)
             await prompt_next_batter(d, match)
@@ -6506,6 +6538,130 @@ def _build_club_team(players, name, color):
     return {"name": name, "players": eng, "subs": [], "color": color}
 
 
+_SEASON_FIRST = ["A.", "R.", "S.", "M.", "K.", "D.", "V.", "J.", "P.", "N.", "T.", "G."]
+_SEASON_LAST = ["Rao", "Bhatt", "Nayar", "Doshi", "Kohli", "Menon", "Sethi", "Ahuja",
+                "Rawat", "Jadeja", "Pillai", "Chopra", "Iyer", "Bose", "Grewal"]
+
+
+def _season_ai_player(rating, rng, role, idx):
+    """One AI teammate or opponent as an engine player dict.
+
+    Built straight in engine shape rather than as a fake career: nothing about
+    these players needs to persist, and they never earn anything.
+    """
+    spread = rng.randint(-8, 8)
+    bat = max(35, min(97, rating + spread + (6 if "Batter" in role else -6)))
+    bowl = max(30, min(97, rating - spread + (8 if "Bowler" in role else -4)))
+    name = f"{rng.choice(_SEASON_FIRST)} {rng.choice(_SEASON_LAST)}"
+    return {
+        "name": name, "bat": bat, "bowl": bowl, "role": role,
+        "archetype": rng.choice(["Aggressor", "Anchor", "Standard", "Finisher"]),
+        "is_bot": True, "owner_id": -(2000 + idx),
+        "field_rating": max(35, min(95, rating + rng.randint(-10, 10))),
+        "catch_rating": max(35, min(95, rating + rng.randint(-10, 10))),
+        "throw_rating": max(35, min(95, rating + rng.randint(-10, 10))),
+    }
+
+
+def _season_squad(rating, rng, n, start_idx):
+    roles = ["Batter", "All-Rounder_Pace", "Bowler_Pace", "All-Rounder_Spin",
+             "Bowler_Spin_Off", "Batter", "Bowler_Pace"]
+    out, seen = [], {}
+    for i in range(n):
+        p = _season_ai_player(rating, rng, roles[i % len(roles)], start_idx + i)
+        # engine stats key on name, so keep them unique within the match
+        if p["name"] in seen:
+            seen[p["name"]] += 1
+            p["name"] = f"{p['name']} ({seen[p['name']]})"
+        else:
+            seen[p["name"]] = 1
+        out.append(p)
+    return out
+
+
+async def start_story_match(channel, author, career, fixture, mode="pathway"):
+    """Play one solo fixture against an AI side.
+
+    Shared by both single-player systems - `mode="pathway"` for a selection-ladder
+    fixture and `mode="club"` for a club-contract fixture. Either way it is you
+    plus AI team-mates against an AI opponent, driven by the same interactive
+    machinery as a PvP club match (toss, openers, DRS, fielding, payout), so
+    nothing is reimplemented and `cv cm` is not involved.
+    """
+    _end_career_broadcast(getattr(channel, "id", None))
+    if channel.id in active_games or channel.id in active_setups:
+        await channel.send("❌ A match is already running in this channel. Finish it (or `cv endmatch`) first.")
+        return
+
+    is_club_fixture = (mode == "club")
+    season_no = (career.get("club_career", {}).get("season_no", 1) if is_club_fixture
+                 else career.get("season_no", 1))
+    rng = random.Random(f"{career.get('_id')}:{mode}:{season_no}:{fixture['round']}")
+    per_side = int(fixture.get("per_side", 4))
+    overs = int(fixture.get("overs", 5))
+    club_name = ((career_clubs.current_club(career) if is_club_fixture else
+                  career_season.squad_name(career)) or "Club XI")
+
+    you = CM.career_to_engine(career)
+    you["owner_id"] = author.id
+    if career_fielding is not None:
+        try:
+            career_fielding.attach_ratings(you, career)
+        except Exception:
+            pass
+
+    mate_rating = max(40, min(95, fixture["strength"] - 3))
+    team_you = {"name": club_name, "subs": [], "color": "#3BA55D",
+                "players": [you] + _season_squad(mate_rating, rng, per_side - 1, 0)}
+    team_opp = {"name": fixture["opponent"], "subs": [], "color": "#ED4245",
+                "players": _season_squad(fixture["strength"], rng, per_side, 50)}
+
+    opp_cap_id = team_opp["players"][0]["owner_id"]
+    pitch = rng.choice(["Flat", "Hard", "Green", "Dry", "Dusty", "Bouncy"])
+    match = ClubMatch(career.get("username", author.display_name), fixture["opponent"],
+                      author.id, opp_cap_id, team_you, team_opp,
+                      format_overs=overs, pitch=pitch, weather="Clear")
+    match.is_club = True
+    match.is_season = not is_club_fixture      # pathway fixture
+    match.is_club_fixture = is_club_fixture    # club-contract fixture
+    match.story_fixture = fixture
+    match.manager_id = author.id
+    match._caps = {team_you["name"]: author.id, team_opp["name"]: opp_cap_id}
+    match._cap_a_id = author.id
+    match._cap_b_id = opp_cap_id
+    match.max_wickets = per_side
+    match.bowler_quota = max(1, -(-overs // per_side))
+    match._club_per_side = per_side
+
+    if career_fielding is not None:
+        try:
+            career_fielding.setup(match, per_side >= career_fielding.MIN_PLAYERS_FOR_FIELDING)
+        except Exception as _fe:
+            print(f"season fielding setup failed: {_fe}")
+
+    active_games[channel.id] = match
+    _touch_channel(channel.id)
+
+    venue = "home" if fixture.get("home") else "away"
+    total = (career_clubs.SEASON_FIXTURES if is_club_fixture
+             else career_season.season_length(career))
+    fee = (career_clubs.match_fee(career) if is_club_fixture
+           else career_season.match_fee(career))
+    await channel.send(
+        f"🏆 **{fixture['tournament'].upper()}**  ·  Season {season_no} · "
+        f"Match {fixture['round']}/{total}\n"
+        f"🏟️ **{club_name}** vs **{fixture['opponent']}** ({venue})\n"
+        f"🌱 {pitch}  ·  ⏱️ {overs} overs  ·  {per_side}-a-side  ·  "
+        f"opposition rated **{fixture['strength']}**  ·  fee **{fee}** 🪙")
+    # The opposition captain is a bot, so the toss auto-resolves.
+    await _club_begin_toss(channel, match)
+
+
+async def start_season_match(channel, author, career, fixture):
+    """Backwards-compatible alias for a pathway fixture."""
+    return await start_story_match(channel, author, career, fixture, mode="pathway")
+
+
 async def _club_match_payout(channel, match):
     """Phase 4.3 - pay coins + record lifetime stats for every HUMAN player after a
     club match. Bots earn nothing. Winner's side gets the victory bonus."""
@@ -6577,28 +6733,62 @@ async def _club_match_payout(channel, match):
             except Exception:
                 pass
 
-            # Season: wage, season stats, match history, and the rollover with its
-            # awards and contract offers.
-            if career_season is not None:
+            # Route the result to whichever system this fixture belongs to. A plain
+            # PvP club match (cv cm) belongs to neither: it pays coins and lifetime
+            # stats only, and must not quietly advance someone's season.
+            opp = match.team2["name"] if team is match.team1 else match.team1["name"]
+            if career_clubs is not None and getattr(match, "is_club_fixture", False):
                 try:
-                    opp = match.team2["name"] if team is match.team1 else match.team1["name"]
+                    res = career_clubs.record_match(
+                        career, runs=runs, balls=balls, wickets=wkts,
+                        balls_bowled=b_balls, won=won, opponent=opp,
+                        fifties=fifties, hundreds=hundreds, coins=coins)
+                    if res.get("wage"):
+                        lines.append(f"💼 **{career.get('username','')}** — club wage "
+                                     f"**{res['wage']}** 🪙 from "
+                                     f"**{career_clubs.current_club(career) or 'their club'}**.")
+                    if res.get("season_done"):
+                        lines.append(
+                            f"🏁 Club season {res['season']} done (grade {res['grade']}) — "
+                            f"standing **{res['standing_before']} → {res['standing_after']}**. "
+                            f"`cv offers` for next season's contracts.")
+                except Exception as _club_err:
+                    print(f"club season update failed: {_club_err}")
+
+            if career_season is not None and getattr(match, "is_season", False):
+                try:
                     res = career_season.record_match(
                         career, runs=runs, balls=balls, wickets=wkts,
                         balls_bowled=b_balls, won=won, opponent=opp,
                         fifties=fifties, hundreds=hundreds, coins=coins)
                     career_season.track_peak(career)
-                    if res.get("wage"):
-                        lines.append(f"💼 **{career.get('username','')}** earned a "
-                                     f"**{res['wage']}** 🪙 match wage from "
-                                     f"**{career_season.current_club(career) or 'their club'}**.")
+                    if res.get("fee"):
+                        lines.append(f"💼 **{career.get('username','')}** — match fee "
+                                     f"**{res['fee']}** 🪙 "
+                                     f"({res.get('level', {}).get('tournament', '')}).")
                     if res.get("season_done"):
                         aw = ", ".join(res.get("awards") or []) or "no awards"
                         lines.append(
-                            f"🏁 **{career.get('username','')}** completed **Season {res['season']}** "
-                            f"(grade {res['grade']}) — {aw}. `cv offers` to see who wants them.")
+                            f"🏁 **{career.get('username','')}** finished "
+                            f"**{res['from_level']['tournament']}** season {res['season']} "
+                            f"(grade {res['grade']}) — {aw}.")
+                        verdict = res.get("verdict")
+                        if verdict == "promoted":
+                            lines.append(f"📈 **SELECTED!** {career.get('username','')} moves up to "
+                                         f"**{res['to_level']['tournament']}**.")
+                        elif verdict == "dropped":
+                            lines.append(f"📉 **Dropped.** Back to "
+                                         f"**{res['to_level']['tournament']}** for next season.")
+                        elif verdict == "knocking":
+                            lines.append(f"👀 Selectors noticed — but "
+                                         f"**{res['to_level']['tournament']}** wants a reputation of "
+                                         f"**{res['to_level'].get('min_rep')}** "
+                                         f"(you're on {res.get('rating_after')}).")
+                        else:
+                            lines.append(f"➡️ Retained in **{res['to_level']['tournament']}**.")
                         if res.get("retire_due"):
-                            lines.append(f"🕰️ **{career.get('username','')}** is "
-                                         f"{career.get('age')} — `cv retire` when ready.")
+                            lines.append(f"🕰️ Age {career_season.story_age(career)} — "
+                                         f"`cv retire` when ready.")
                 except Exception as _season_err:
                     print(f"season update failed: {_season_err}")
 
@@ -12961,7 +13151,7 @@ class PrefixCog(commands.Cog):
             return await handle_innings_end(channel, match)
 
         # A wicket was waiting on the next-batter pick.
-        if getattr(match, "pending_next_batter", False):
+        if getattr(match, "pending_next_batter", False) and not _innings_is_over(match):
             return await prompt_next_batter(channel, match)
 
         # Headless / full-sim flows: re-enter the sim loop where it stopped.
@@ -14016,24 +14206,38 @@ class PrefixCog(commands.Cog):
             return await ctx.send("❌ You have no career yet — `cv start_career`.")
         career_season.ensure(career)
         ss = career["season_stats"]
-        c = career.get("contract")
+        lvl = career_season.current_level(career)
         played = ss.get("played", 0)
+        rep = career_season.story_rating(career)
 
         e = discord.Embed(
             title=f"📅 Season {career['season_no']} — {career.get('username','')}",
-            description=("*Your club career is a separate storyline. Its reputation is "
-                         "its own — coins you earn here upgrade your real career.*"),
+            description=(f"🏆 **{lvl['tournament']}**  ·  {lvl.get('format','')}  ·  "
+                         f"playing for **{career_season.squad_name(career)}**\n"
+                         "*The pathway is its own storyline — reputation is separate from your "
+                         "career OVR, and the coins you earn here upgrade the real career.*"),
             color=_tier_embed_color(career.get("tier", "Bronze")))
         e.add_field(name="Reputation",
-                    value=f"**{career_season.story_rating(career)}** (career OVR {career.get('ovr', 60)})",
-                    inline=True)
+                    value=f"**{rep}** (career OVR {career.get('ovr', 60)})", inline=True)
         e.add_field(name="Age", value=f"**{career_season.story_age(career)}**", inline=True)
-        e.add_field(name="Club", value=f"**{c['club']}**" if c else "*free agent*", inline=True)
-        e.add_field(name="Wage", value=f"**{c['wage']}** 🪙/match" if c else "—", inline=True)
-        if c:
-            e.add_field(name="Contract", value=f"**{c.get('matches_left', 0)}** match(es) left", inline=True)
+        e.add_field(name="Match fee",
+                    value=f"**{career_season.match_fee(career)}** 🪙", inline=True)
+        retainer = career_season.contract_retainer(career)
+        if retainer:
+            e.add_field(name="Central contract",
+                        value=f"Grade **{lvl.get('contract_grade')}** · {retainer:,} 🪙/season",
+                        inline=True)
+        idx = career_season.level_index(lvl["id"])
+        nxt = (career_season.levels()[idx + 1] if idx + 1 < len(career_season.levels()) else None)
+        if nxt:
+            gap = max(0, nxt.get("min_rep", 0) - rep)
+            e.add_field(name="Next step",
+                        value=(f"**{nxt['tournament']}**\n"
+                               + ("reputation is there — now deliver a season"
+                                  if gap == 0 else f"needs **{gap}** more reputation")),
+                        inline=True)
         e.add_field(name="Fixtures",
-                    value=f"**{played}**/{career_season.SEASON_FIXTURES}", inline=True)
+                    value=f"**{played}**/{career_season.season_length(career)}", inline=True)
         e.add_field(name="Won", value=f"**{ss.get('won', 0)}**", inline=True)
         sr = (ss.get("runs", 0) / ss["balls"] * 100) if ss.get("balls") else 0.0
         e.add_field(name="Batting",
@@ -14048,6 +14252,67 @@ class PrefixCog(commands.Cog):
                         value="\n".join(f"S{t['season']} · {t['name']}" for t in last), inline=False)
         if career.get("retired"):
             e.set_footer(text="This career is retired.")
+        await ctx.send(embed=e)
+
+    @commands.command(name="play", aliases=["fixture", "nextmatch", "playmatch"],
+                      help="Play your next season fixture (solo, vs an AI club).\nUsage: play")
+    async def play_cmd(self, ctx):
+        if not _can_use_career(ctx):
+            return await ctx.send(_CAREER_SOON)
+        if career_season is None:
+            return await ctx.send("❌ Seasons are not available.")
+        career = self._career_or_none(ctx)
+        if not career:
+            return await ctx.send("❌ You have no career yet — `cv start_career`.")
+        if not career.get("debut_done"):
+            return await ctx.send("❌ Pass your `cv debut` before playing for a club.")
+        if career.get("retired"):
+            return await ctx.send("🕰️ This career is retired.")
+
+        career_season.ensure(career)
+        fixture = career_season.next_fixture(career)
+        if not fixture:
+            lvl = career_season.current_level(career)
+            return await ctx.send(
+                f"🏁 Your **{lvl['tournament']}** season is done — `cv season` for the summary. "
+                f"The selectors have already had their say.")
+        if career_condition is not None and career_condition.is_injured(career):
+            inj = career_condition.injury_label(career)
+            await ctx.send(f"🩹 Playing through a **{inj}** — you'll be below your best. `cv rest` to recover.")
+        await start_season_match(ctx.channel, ctx.author, career, fixture)
+
+    @commands.command(name="schedule", aliases=["fixtures"],
+                      help="Your season's fixture list.\nUsage: schedule")
+    async def schedule_cmd(self, ctx):
+        if not _can_use_career(ctx):
+            return await ctx.send(_CAREER_SOON)
+        if career_season is None:
+            return await ctx.send("❌ Seasons are not available.")
+        career = self._career_or_none(ctx)
+        if not career:
+            return await ctx.send("❌ You have no career yet — `cv start_career`.")
+        career_season.ensure(career)
+        sched = career_season.fixtures(career)
+        played = career["season_stats"].get("played", 0)
+        hist = {h.get("o"): h for h in career.get("history", []) if h.get("s") == career["season_no"]}
+
+        rows = []
+        for f in sched:
+            if f["round"] <= played:
+                h = hist.get(f["opponent"][:24])
+                mark = ("✅ won" if h and h.get("won") else "❌ lost") if h else "· played"
+            elif f["round"] == played + 1:
+                mark = "▶️ next"
+            else:
+                mark = "· to play"
+            rows.append(f"`{f['round']:>2}` **{f['opponent']:<20}** rated {f['strength']:>2}  {mark}")
+        lvl = career_season.current_level(career)
+        e = discord.Embed(
+            title=f"📅 {lvl['tournament']} — Season {career['season_no']} "
+                  f"({career_season.squad_name(career)})",
+            description="\n".join(rows),
+            color=_tier_embed_color(career.get("tier", "Bronze")))
+        e.set_footer(text=f"{played}/{len(sched)} played · cv play to start the next one")
         await ctx.send(embed=e)
 
     @commands.command(name="clubs", aliases=["clublist"],
@@ -14072,9 +14337,135 @@ class PrefixCog(commands.Cog):
                           f"separate from your career OVR) · cv sign <club_id>")
         await ctx.send(embed=e)
 
+    # ---------------- CLUB CAREER (separate from the pathway) ----------------
+    @commands.command(name="clubs", aliases=["clublist"],
+                      help="Clubs willing to sign you.\nUsage: clubs")
+    async def clubs_cmd(self, ctx):
+        if not _can_use_career(ctx):
+            return await ctx.send(_CAREER_SOON)
+        if career_clubs is None:
+            return await ctx.send("❌ Club cricket is not available.")
+        career = self._career_or_none(ctx)
+        if not career:
+            return await ctx.send("❌ You have no career yet — `cv start_career`.")
+        career_clubs.ensure(career)
+        st = career_clubs.standing(career)
+        cur = career_clubs.current_club(career)
+        rows = []
+        for c in career_clubs.clubs():
+            ok = "✅" if c["min_ovr"] <= st else "🔒"
+            here = " ← **your club**" if cur == c["name"] else ""
+            rows.append(f"{ok} `{c['id']:<11}` **{c['name']}** · {c['tier']} · "
+                        f"needs {c['min_ovr']} · {c['wage']} 🪙/match{here}")
+        e = discord.Embed(title="🏟️ Club Cricket", description="\n".join(rows),
+                          color=_tier_embed_color(career.get("tier", "Bronze")))
+        e.set_footer(text=f"Club standing {st} · separate from your pathway reputation "
+                          f"and your career OVR · cv sign <club_id>")
+        await ctx.send(embed=e)
+
+    @commands.command(name="sign", help="Sign a club contract.\nUsage: sign <club_id>")
+    async def sign_cmd(self, ctx, club_id: str = None):
+        if not _can_use_career(ctx):
+            return await ctx.send(_CAREER_SOON)
+        if career_clubs is None:
+            return await ctx.send("❌ Club cricket is not available.")
+        career = self._career_or_none(ctx)
+        if not career:
+            return await ctx.send("❌ You have no career yet — `cv start_career`.")
+        if not club_id:
+            return await ctx.send("Usage: `cv sign <club_id>` — see `cv clubs` or `cv offers`.")
+        offer = next((o for o in (career.get("club_career", {}).get("offers") or [])
+                      if o["club_id"] == club_id.lower()), None)
+        contract, err = career_clubs.sign(career, club_id.lower())
+        if err:
+            return await ctx.send(f"❌ {err}")
+        if offer:
+            contract["wage"] = offer["wage"]        # honour the offered terms
+        CM.async_save_career(career)
+        await ctx.send(f"✍️ **Signed for {contract['club']}** — **{contract['wage']}** 🪙 per match, "
+                       f"{contract['matches_left']} matches. `cv clubplay` to turn out for them.")
+
     @commands.command(name="offers", aliases=["contracts"],
-                      help="Contract offers after a season.\nUsage: offers")
+                      help="Club contract offers.\nUsage: offers")
     async def offers_cmd(self, ctx):
+        if not _can_use_career(ctx):
+            return await ctx.send(_CAREER_SOON)
+        if career_clubs is None:
+            return await ctx.send("❌ Club cricket is not available.")
+        career = self._career_or_none(ctx)
+        if not career:
+            return await ctx.send("❌ You have no career yet — `cv start_career`.")
+        career_clubs.ensure(career)
+        offers = career["club_career"].get("offers") or []
+        if not offers:
+            return await ctx.send("📭 No club offers right now. Finish a club season to attract "
+                                  "them, or `cv clubs` to sign as a free agent.")
+        rows = [f"`{o['club_id']:<11}` **{o['club']}** · {o['tier']} · "
+                f"**{o['wage']}** 🪙/match · {o['matches']} matches" for o in offers]
+        e = discord.Embed(title="📨 Club Offers", description="\n".join(rows),
+                          color=discord.Color.gold())
+        e.set_footer(text="Accept with: cv sign <club_id>")
+        await ctx.send(embed=e)
+
+    @commands.command(name="clubplay", aliases=["cplay", "clubfixture"],
+                      help="Play your next club fixture (solo, vs an AI club).\nUsage: clubplay")
+    async def clubplay_cmd(self, ctx):
+        if not _can_use_career(ctx):
+            return await ctx.send(_CAREER_SOON)
+        if career_clubs is None:
+            return await ctx.send("❌ Club cricket is not available.")
+        career = self._career_or_none(ctx)
+        if not career:
+            return await ctx.send("❌ You have no career yet — `cv start_career`.")
+        if not career.get("debut_done"):
+            return await ctx.send("❌ Pass your `cv debut` first.")
+        career_clubs.ensure(career)
+        if not career_clubs.contract(career):
+            return await ctx.send("📭 You have no club. `cv clubs` then `cv sign <club_id>`.")
+        fixture = career_clubs.next_fixture(career)
+        if not fixture:
+            return await ctx.send("🏁 Your club season is done — `cv clubseason` for the summary, "
+                                  "`cv offers` for next season's contracts.")
+        await start_story_match(ctx.channel, ctx.author, career, fixture, mode="club")
+
+    @commands.command(name="clubseason", aliases=["myclub", "contract"],
+                      help="Your club season and contract.\nUsage: clubseason")
+    async def clubseason_cmd(self, ctx):
+        if not _can_use_career(ctx):
+            return await ctx.send(_CAREER_SOON)
+        if career_clubs is None:
+            return await ctx.send("❌ Club cricket is not available.")
+        career = self._career_or_none(ctx)
+        if not career:
+            return await ctx.send("❌ You have no career yet — `cv start_career`.")
+        career_clubs.ensure(career)
+        cc = career["club_career"]
+        ss = cc["season"]
+        c = cc.get("contract")
+        e = discord.Embed(
+            title=f"🏟️ Club Season {cc['season_no']} — {career.get('username','')}",
+            description=("*Club cricket is its own system: club standing is separate from "
+                         "pathway reputation and from your career OVR. Only the coins cross over.*"),
+            color=_tier_embed_color(career.get("tier", "Bronze")))
+        e.add_field(name="Club", value=f"**{c['club']}**" if c else "*free agent*", inline=True)
+        e.add_field(name="Standing", value=f"**{career_clubs.standing(career)}**", inline=True)
+        e.add_field(name="Wage", value=f"**{c['wage']}** 🪙/match" if c else "—", inline=True)
+        if c:
+            e.add_field(name="Contract", value=f"**{c.get('matches_left',0)}** match(es) left", inline=True)
+        e.add_field(name="Fixtures",
+                    value=f"**{ss.get('played',0)}**/{career_clubs.SEASON_FIXTURES}", inline=True)
+        e.add_field(name="Won", value=f"**{ss.get('won',0)}**", inline=True)
+        sr = (ss.get("runs", 0) / ss["balls"] * 100) if ss.get("balls") else 0.0
+        e.add_field(name="Batting",
+                    value=f"**{ss.get('runs',0)}** runs · HS **{ss.get('hs',0)}** · SR **{sr:.1f}**",
+                    inline=False)
+        e.add_field(name="Bowling", value=f"**{ss.get('wickets',0)}** wickets", inline=True)
+        e.add_field(name="Wages earned", value=f"**{ss.get('wages',0):,}** 🪙", inline=True)
+        await ctx.send(embed=e)
+
+    @commands.command(name="ladder", aliases=["pathway", "levels"],
+                      help="The selection pathway and where you are on it.\nUsage: ladder")
+    async def ladder_cmd(self, ctx):
         if not _can_use_career(ctx):
             return await ctx.send(_CAREER_SOON)
         if career_season is None:
@@ -14083,41 +14474,24 @@ class PrefixCog(commands.Cog):
         if not career:
             return await ctx.send("❌ You have no career yet — `cv start_career`.")
         career_season.ensure(career)
-        offers = career.get("offers") or []
-        if not offers:
-            return await ctx.send("📭 No offers on the table. Finish a season to attract clubs "
-                                  "— or `cv clubs` to sign as a free agent.")
-        rows = [f"`{o['club_id']:<11}` **{o['club']}** · {o['tier']} · "
-                f"**{o['wage']}** 🪙/match · {o['matches']} matches" for o in offers]
-        e = discord.Embed(title="📨 Contract Offers", description="\n".join(rows),
-                          color=discord.Color.gold())
-        e.set_footer(text="Accept with: cv sign <club_id>")
+        rep = career_season.story_rating(career)
+        here = career_season.current_level(career)
+
+        rows = []
+        for lvl in career_season.levels():
+            if lvl["id"] == here["id"]:
+                mark = "🟢 **YOU ARE HERE**"
+            elif rep >= lvl.get("min_rep", 0):
+                mark = "· in reach"
+            else:
+                mark = f"🔒 needs {lvl['min_rep']} rep"
+            rows.append(f"**{lvl['tournament']}** · {lvl.get('format','')} · "
+                        f"{lvl.get('match_fee',0)} 🪙/match — {mark}")
+        e = discord.Embed(title="🪜 The Pathway", description="\n".join(rows),
+                          color=_tier_embed_color(career.get("tier", "Bronze")))
+        e.set_footer(text=f"Reputation {rep} · you are SELECTED, not signed — "
+                          f"play well and the selectors move you up.")
         await ctx.send(embed=e)
-
-    @commands.command(name="sign", help="Sign for a club.\nUsage: sign <club_id>")
-    async def sign_cmd(self, ctx, club_id: str = None):
-        if not _can_use_career(ctx):
-            return await ctx.send(_CAREER_SOON)
-        if career_season is None:
-            return await ctx.send("❌ Seasons are not available.")
-        career = self._career_or_none(ctx)
-        if not career:
-            return await ctx.send("❌ You have no career yet — `cv start_career`.")
-        if career.get("retired"):
-            return await ctx.send("🕰️ This career is retired.")
-        if not club_id:
-            return await ctx.send("Usage: `cv sign <club_id>` — see `cv clubs` or `cv offers`.")
-
-        offer = next((o for o in (career.get("offers") or [])
-                      if o["club_id"] == club_id.lower()), None)
-        contract, err = career_season.sign(career, club_id.lower())
-        if err:
-            return await ctx.send(f"❌ {err}")
-        if offer:                       # honour the offered wage, not the base one
-            contract["wage"] = offer["wage"]
-        CM.async_save_career(career)
-        await ctx.send(f"✍️ **Signed for {contract['club']}** — **{contract['wage']}** 🪙 per match, "
-                       f"{contract['matches_left']} matches.")
 
     @commands.command(name="history", aliases=["matches", "log"],
                       help="Your recent matches.\nUsage: history [count=10]")
@@ -14162,6 +14536,7 @@ class PrefixCog(commands.Cog):
                           color=_tier_embed_color(leg["tier"]))
         e.add_field(name="Seasons", value=str(leg["seasons"]), inline=True)
         e.add_field(name="Peak reputation", value=str(leg["peak_rating"]), inline=True)
+        e.add_field(name="Highest level", value=leg["peak_tournament"], inline=True)
         e.add_field(name="Age", value=str(leg["age"]), inline=True)
         e.add_field(name="Runs", value=f"{leg['runs']:,} (HS {leg['hs']})", inline=True)
         e.add_field(name="Wickets", value=str(leg["wickets"]), inline=True)
@@ -14171,8 +14546,8 @@ class PrefixCog(commands.Cog):
             e.add_field(name="🏆 Honours",
                         value="\n".join(f"S{t['season']} · {t['name']}" for t in leg["trophies"][:8]),
                         inline=False)
-        if leg["clubs"]:
-            e.add_field(name="Clubs", value=", ".join(leg["clubs"]), inline=False)
+        if leg["tournaments"]:
+            e.add_field(name="Played in", value=", ".join(leg["tournaments"]), inline=False)
         await ctx.send(embed=e)
 
     @commands.command(name="fitness", aliases=["form", "condition", "fit"],
