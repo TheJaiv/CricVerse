@@ -8,6 +8,11 @@ both of the others:
   CLUBS    you sign for a club, play its season, draw a wage  (this module)
   PATHWAY  selectors move you up Ranji / IPL / India          (season.py)
 
+There are no separate "club fixtures". Your club contract is what pays you for
+the NORMAL PvP club matches (`cv cm`): sign for a club, then every real match you
+play with other people draws that club's wage and counts toward your club season.
+The pathway, by contrast, has its own solo fixtures (`cv play`).
+
 Real cricketers have both at once: you turn out for your club side AND you are
 picked - or not - for representative cricket. So club standing and pathway
 reputation are independent numbers. Playing well for your club earns you wages
@@ -132,45 +137,11 @@ def sign(career, club_id, matches=SEASON_FIXTURES):
     return cc["contract"], None
 
 
-# Fixtures
-_OPPONENTS = [
-    "Shivaji Park CC", "Dadar Union", "Fort Vijay CC", "Payyade SC", "Karnatak SA",
-    "Islam Gymkhana", "Parsee Gymkhana", "New Hind SC", "Jolly Cricketers",
-    "Sassanian CC", "Bombay Gymkhana", "Cricket Club of India",
-]
-
-
-def fixtures(career):
-    """This club season's schedule. Deterministic per player and season."""
-    ensure(career)
-    cc = career["club_career"]
-    season = cc.get("season_no", 1)
-    club = cc.get("contract") or {}
-    rng = random.Random(f"{career.get('_id', '?')}:club{season}")
-    base = standing(career) + club.get("prestige", 1) * 2 - 6
-
-    names = [n for n in _OPPONENTS if n != club.get("club")]
-    rng.shuffle(names)
-    return [{
-        "round": i + 1,
-        "opponent": names[i % len(names)],
-        "strength": max(42, min(94, int(base + rng.randint(-7, 9)))),
-        "home": i % 2 == 0,
-        "tournament": f"{club.get('tier', 'Club')} Club League",
-        "overs": FIXTURE_OVERS,
-        "per_side": FIXTURE_PER_SIDE,
-        "fee": int(club.get("wage", 22)),
-    } for i in range(SEASON_FIXTURES)]
-
-
-def next_fixture(career):
-    ensure(career)
-    played = career["club_career"]["season"].get("played", 0)
-    sched = fixtures(career)
-    return sched[played] if played < len(sched) else None
+SEASON_MATCHES = SEASON_FIXTURES     # cv cm matches that make up a club season
 
 
 def match_fee(career):
+    """What one PvP club match pays you, from your contract."""
     c = contract(career)
     return int(c.get("wage", 0)) if c else 0
 
@@ -178,7 +149,12 @@ def match_fee(career):
 # Results
 def record_match(career, *, runs=0, balls=0, wickets=0, balls_bowled=0, won=False,
                  opponent="", fifties=0, hundreds=0, coins=0, when=None):
-    """Fold a club appearance into the club season, pay the wage, burn a contract match."""
+    """Fold a PvP club match (`cv cm`) into the club season and pay the wage.
+
+    This is the ONLY way club wages are earned - there is no separate club fixture
+    to play. No contract means no wage: you still played the match and it still
+    pays its normal match earnings, you just have no club paying you on top.
+    """
     ensure(career)
     cc = career["club_career"]
     ss = cc["season"]

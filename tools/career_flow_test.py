@@ -974,17 +974,17 @@ async def part6_broadcast():
 
     # forced updates must still honour the edit window (a per-ball edit storm
     # during bot-vs-bot stretches is what earns a 429)
-    sess = CLIVE.session_for(ch)
-    _saved = CLIVE.EDIT_INTERVAL
-    CLIVE.EDIT_INTERVAL = 0.4
-    await sess.push(match)          # establish the card - only an EDIT is throttled
-    check("session holds a card message after the first push", sess.message is not None)
-    sess.last_edit = time.time()
+    # Bot-resolved deliveries must be PACED, or several land at once and the score
+    # appears to jump. (The old edit-throttle test went with the edit-in-place
+    # card: every delivery now posts its own message instead.)
+    pace_ch = FChannel(9617)
+    match.last_ball = dict(match.last_ball, ball_index=900)
     t0 = time.time()
-    await sess.push(match, force=True)
+    await CLIVE.ball_card(pace_ch, match, delay=0.3)
     waited = time.time() - t0
-    CLIVE.EDIT_INTERVAL = _saved
-    check("forced card update waits out the edit window", waited >= 0.3, f"{waited:.2f}s")
+    check("a bot delivery's card is paced so it can be read", waited >= 0.25,
+          f"{waited:.2f}s")
+    CLIVE.end(9617)
 
     # a failing renderer must fall back to the text embed, not kill the match
     ch2 = FChannel(9601)
@@ -1056,6 +1056,23 @@ async def part7_access_and_admin():
                if f"async def {n}" in src
                and "_can_use_career" not in src.split(f"async def {n}", 1)[1][:900]]
     check("every sampled career command calls the gate", not missing, f"ungated: {missing}")
+
+    # No duplicate command names or aliases anywhere in the prefix cog.
+    # discord.py only raises CommandRegistrationError when the cog is ADDED, which
+    # the harness never does - so a duplicate slipped through every test and would
+    # have taken the whole bot down at startup.
+    import re as _re
+    _src = inspect.getsource(B.PrefixCog)
+    _pat = _re.compile(r'@commands\.command\(\s*name="(\w+)"(?:,\s*aliases=(\[[^\]]*\]))?', _re.S)
+    _names, _dupes = {}, []
+    for _m in _pat.finditer(_src):
+        _all = [_m.group(1)] + (eval(_m.group(2)) if _m.group(2) else [])
+        for _n in _all:
+            if _n in _names:
+                _dupes.append(_n)
+            _names[_n] = True
+    check("no command name or alias is registered twice", not _dupes,
+          f"duplicates: {sorted(set(_dupes))}")
 
     # owner ratings dump
     fresh(701, name="DumpA", coins=500)
@@ -1673,13 +1690,12 @@ async def part11c_clubs():
     _, err2 = CL.sign(c, CL.clubs()[1]["id"])
     check("you cannot walk out mid-contract", err2 is not None)
 
-    sched = CL.fixtures(c)
-    check("a club season has its own fixture list",
-          len(sched) == CL.SEASON_FIXTURES)
-    check("club fixtures are deterministic",
-          [f["opponent"] for f in CL.fixtures(c)] == [f["opponent"] for f in sched])
-    check("club opponents are club sides, not state teams",
-          all(f["opponent"] in CL._OPPONENTS for f in sched))
+    # Clubs have NO fixtures of their own: your contract pays you for the normal
+    # PvP matches (cv cm). That is the whole point of the system.
+    check("club cricket has no fixtures to play",
+          not hasattr(CL, "fixtures") and not hasattr(CL, "next_fixture"))
+    check("a club season is measured in cv cm matches", CL.SEASON_MATCHES > 0)
+    check("the wage comes from the contract", CL.match_fee(c) == contract["wage"])
 
     def snap(car):
         return (car.get("ovr"), car.get("tier"), dict(car["attributes"]))
@@ -1721,32 +1737,27 @@ async def part11c_clubs():
           c["club_career"]["season"].get("played", 0) == club_played_before)
     check("both systems still leave the real career alone", snap(c) == before)
 
-    # a solo club fixture end to end
+    # A PvP club match (cv cm) is what pays the club wage.
     uid = 981
-    career = fresh(uid, name="ClubSolo", coins=0)
-    career["debut_done"] = True
+    career = fresh(uid, name="ClubPvP", coins=0)
     CL.ensure(career)
     CL.sign(career, CL.clubs()[0]["id"])
     CM.async_save_career(career)
-    user = FUser(uid, "ClubSolo")
-    ch = FChannel(9800)
-    await B.start_story_match(ch, user, career, CL.next_fixture(career), mode="club")
-    m = B.active_games.get(9800)
-    check("a club fixture starts a solo match", m is not None)
-    check("it is flagged as a club fixture, not a pathway one",
-          getattr(m, "is_club_fixture", False) and not getattr(m, "is_season", True))
-    await drive_match(ch, [user], seed=981)
-    after = CM.get_career(uid)
-    check("the club fixture completes", 9800 not in B.active_games)
-    check("the club fixture paid a wage",
-          after["club_career"]["season"]["wages"] > 0)
-    check("the club fixture counted for the CLUB season",
-          after["club_career"]["season"]["played"] == 1)
-    # A club fixture must not even bring the pathway into existence, let alone
-    # advance it.
-    check("the club fixture did NOT count for the pathway",
-          after.get("season_stats", {}).get("played", 0) == 0)
-    B.active_games.pop(9800, None)
+    wage_before = career["coins"]
+    played_before = career["club_career"]["season"]["played"]
+    res2 = CL.record_match(career, runs=30, balls=20, wickets=1, won=True, opponent="Rivals")
+    check("a PvP club match pays the club wage", res2["wage"] > 0)
+    check("it advances the club season",
+          career["club_career"]["season"]["played"] == played_before + 1)
+    check("it burns a contract match",
+          career["club_career"]["contract"]["matches_left"] == CL.SEASON_MATCHES - 1)
+
+    # no club, no wage - but the match still happened
+    free = fresh(982, name="FreeAgent", coins=0)
+    CL.ensure(free)
+    res3 = CL.record_match(free, runs=20, balls=15, won=False, opponent="Rivals")
+    check("no contract means no wage", res3["wage"] == 0)
+    check("the match is still recorded", free["club_career"]["season"]["played"] == 1)
 
 
 def part12_economy():

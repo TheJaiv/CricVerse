@@ -40,7 +40,7 @@ from engine.test_image import (
 from league.tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_ccodi_round_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, revert_tournament_match, rebuild_tournament_stats, repair_tournament_schedule, _tm_next_mid, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS, SquadConfirmView, build_squad_confirm_text, build_squad_confirm_embed, match_order_gate, MATCH_ORDER_LABELS, build_tournament_summary_embeds, generate_round_robin_schedule, generate_ipl_schedule, ipl_try_advance, build_standings_message, compress_logo_bytes, sanitize_stored_logos, rename_team
 from league.custom_tournament import (
     CustomSetupView, custom_try_advance, custom_start_error, custom_generate_first_stage,
-    build_custom_standings_message, custom_config_summary_lines,
+    build_custom_standings_message, custom_config_summary_lines, custom_repair_schedule,
     stage_letters as custom_stage_letters,
 )
 from league import rating_league
@@ -6582,25 +6582,23 @@ def _season_squad(rating, rng, n, start_idx):
 async def start_story_match(channel, author, career, fixture, mode="pathway"):
     """Play one solo fixture against an AI side.
 
-    Shared by both single-player systems - `mode="pathway"` for a selection-ladder
-    fixture and `mode="club"` for a club-contract fixture. Either way it is you
-    plus AI team-mates against an AI opponent, driven by the same interactive
-    machinery as a PvP club match (toss, openers, DRS, fielding, payout), so
-    nothing is reimplemented and `cv cm` is not involved.
+    This is the PATHWAY's match system: you plus AI team-mates against an AI
+    opponent, driven by the same interactive machinery as a PvP club match (toss,
+    openers, DRS, fielding, payout) so nothing is reimplemented.
+
+    Club cricket has no fixtures of its own - a club contract pays you for the
+    normal `cv cm` matches instead - so this is only ever called for the pathway.
     """
     _end_career_broadcast(getattr(channel, "id", None))
     if channel.id in active_games or channel.id in active_setups:
         await channel.send("❌ A match is already running in this channel. Finish it (or `cv endmatch`) first.")
         return
 
-    is_club_fixture = (mode == "club")
-    season_no = (career.get("club_career", {}).get("season_no", 1) if is_club_fixture
-                 else career.get("season_no", 1))
+    season_no = career.get("season_no", 1)
     rng = random.Random(f"{career.get('_id')}:{mode}:{season_no}:{fixture['round']}")
     per_side = int(fixture.get("per_side", 4))
     overs = int(fixture.get("overs", 5))
-    club_name = ((career_clubs.current_club(career) if is_club_fixture else
-                  career_season.squad_name(career)) or "Club XI")
+    club_name = career_season.squad_name(career) or "Club XI"
 
     you = CM.career_to_engine(career)
     you["owner_id"] = author.id
@@ -6622,8 +6620,7 @@ async def start_story_match(channel, author, career, fixture, mode="pathway"):
                       author.id, opp_cap_id, team_you, team_opp,
                       format_overs=overs, pitch=pitch, weather="Clear")
     match.is_club = True
-    match.is_season = not is_club_fixture      # pathway fixture
-    match.is_club_fixture = is_club_fixture    # club-contract fixture
+    match.is_season = True          # a pathway fixture
     match.story_fixture = fixture
     match.manager_id = author.id
     match._caps = {team_you["name"]: author.id, team_opp["name"]: opp_cap_id}
@@ -6643,10 +6640,8 @@ async def start_story_match(channel, author, career, fixture, mode="pathway"):
     _touch_channel(channel.id)
 
     venue = "home" if fixture.get("home") else "away"
-    total = (career_clubs.SEASON_FIXTURES if is_club_fixture
-             else career_season.season_length(career))
-    fee = (career_clubs.match_fee(career) if is_club_fixture
-           else career_season.match_fee(career))
+    total = career_season.season_length(career)
+    fee = career_season.match_fee(career)
     await channel.send(
         f"🏆 **{fixture['tournament'].upper()}**  ·  Season {season_no} · "
         f"Match {fixture['round']}/{total}\n"
@@ -6737,7 +6732,9 @@ async def _club_match_payout(channel, match):
             # PvP club match (cv cm) belongs to neither: it pays coins and lifetime
             # stats only, and must not quietly advance someone's season.
             opp = match.team2["name"] if team is match.team1 else match.team1["name"]
-            if career_clubs is not None and getattr(match, "is_club_fixture", False):
+            # A PvP club match (`cv cm`) IS the club season: it is the only thing
+            # that draws a club wage. Pathway fixtures never touch club cricket.
+            if career_clubs is not None and not getattr(match, "is_season", False):
                 try:
                     res = career_clubs.record_match(
                         career, runs=runs, balls=balls, wickets=wkts,
@@ -6747,6 +6744,9 @@ async def _club_match_payout(channel, match):
                         lines.append(f"💼 **{career.get('username','')}** — club wage "
                                      f"**{res['wage']}** 🪙 from "
                                      f"**{career_clubs.current_club(career) or 'their club'}**.")
+                    elif not career_clubs.contract(career):
+                        lines.append(f"-# 💤 {career.get('username','')} has no club — "
+                                     f"`cv clubs` then `cv sign <club_id>` to get paid a wage.")
                     if res.get("season_done"):
                         lines.append(
                             f"🏁 Club season {res['season']} done (grade {res['grade']}) — "
@@ -13790,34 +13790,6 @@ class PrefixCog(commands.Cog):
         await ctx.send(embed=embed)
 
     # ============================= CAREER MODE =============================
-    @commands.command(name="career", aliases=["careerhelp"], help="Career Mode help menu.\nUsage: career")
-    async def career_help(self, ctx):
-        if not _can_use_career(ctx):
-            return await ctx.send(_CAREER_SOON)
-        e = discord.Embed(
-            title="🏏 Career Mode",
-            description=("Build your own all-rounder and climb **Bronze → Diamond**.\n"
-                         "**The loop:** `start_career` → `debut` → earn → `upgrade` → `create_match` 🏆"),
-            color=discord.Color.blurple())
-        e.add_field(name="🚀 Your Player",
-                    value="`start_career` · `debut` · `profile` · `stats` · `leaderboard` · `rename`", inline=False)
-        e.add_field(name="💰 Earn Coins",
-                    value=("`daily` (🔥 streak bonus!) · `quests` (3/day) · `scenario` (solo practice)\n"
-                           "Premium: `weekly` · `monthly`  ·  *bots/AI never pay*"), inline=False)
-        e.add_field(name="📈 Improve",
-                    value="`upgrade <power|control|bowling|stamina> [n]` · `balance`", inline=False)
-        e.add_field(name="⚔️ Club Matches (PvP)",
-                    value=("`create_match [overs]` · `joinmatch` · `addbot` · `lobby` · `swap` · `startmatch`\n"
-                           "*Each player bats & bowls their own turn; captains pick openers/bowler.*"), inline=False)
-        e.add_field(name="🏅 Tiers",
-                    value=("Bronze 60 · Silver 69 · Gold 77 · Platinum 85 · Diamond 93\n"
-                           "Auto Discord roles on promotion · `synctier` to re-apply"), inline=False)
-        if ctx.author.id == ADMIN_DISCORD_ID or (ctx.guild and ctx.author.guild_permissions.administrator):
-            e.add_field(name="🛠️ Admin",
-                        value="`grant_premium @user [days]` · `delete_career [@user]`", inline=False)
-        e.set_footer(text="Tip: prefix every command with cv  ·  e.g. cv start_career")
-        await ctx.send(embed=e)
-
     @commands.command(name="start_career", aliases=["startcareer"], help="Create your career all-rounder.\nUsage: start_career")
     async def start_career(self, ctx):
         if not _can_use_career(ctx):
@@ -14315,26 +14287,94 @@ class PrefixCog(commands.Cog):
         e.set_footer(text=f"{played}/{len(sched)} played · cv play to start the next one")
         await ctx.send(embed=e)
 
-    @commands.command(name="clubs", aliases=["clublist"],
-                      help="Clubs you're good enough to sign for.\nUsage: clubs")
-    async def clubs_cmd(self, ctx):
+    @commands.command(name="chelp", aliases=["career", "careerhelp", "cguide", "howto"],
+                      help="Everything Career Mode can do, grouped.\nUsage: chelp [section]")
+    async def chelp_cmd(self, ctx, section: str = None):
         if not _can_use_career(ctx):
             return await ctx.send(_CAREER_SOON)
-        if career_season is None:
-            return await ctx.send("❌ Seasons are not available.")
-        career = self._career_or_none(ctx)
-        if not career:
-            return await ctx.send("❌ You have no career yet — `cv start_career`.")
-        rep = career_season.story_rating(career)
-        rows = []
-        for c in career_season.clubs():
-            ok = "✅" if c["min_ovr"] <= rep else "🔒"
-            rows.append(f"{ok} `{c['id']:<11}` **{c['name']}** · {c['tier']} · "
-                        f"needs {c['min_ovr']} rep · {c['wage']} 🪙/match")
-        e = discord.Embed(title="🏟️ Club Ladder", description="\n".join(rows),
-                          color=_tier_embed_color(career.get("tier", "Bronze")))
-        e.set_footer(text=f"Your reputation {rep} (earned by playing seasons, "
-                          f"separate from your career OVR) · cv sign <club_id>")
+
+        SECTIONS = {
+            "start": ("🌱 Getting started", [
+                ("cv start_career", "Create your player — pick a bowling type and batting mindset"),
+                ("cv debut", "Your academy trial. Pass it before anything else unlocks"),
+                ("cv profile", "Your player card"),
+                ("cv stats", "Lifetime batting, bowling and fielding numbers"),
+                ("cv daily", "Daily coins (build a streak)"),
+                ("cv quests", "Today's 3 quests and their rewards"),
+            ]),
+            "career": ("🏋️ Your player (the core career)", [
+                ("cv upgrade", "List all 10 attributes and what the next point costs"),
+                ("cv upgrade <attr> [n]", "Spend coins. Names can be shortened: `tech`, `var`, `catch`"),
+                ("cv fitness", "Form, fitness, injuries and your current rating effect"),
+                ("cv rest", "Take a day off to recover fitness and heal an injury"),
+                ("cv balance", "Coins"),
+                ("cv rename", "Change your player's name (costs coins)"),
+            ]),
+            "clubs": ("🏟️ Club cricket (contracts & wages)", [
+                ("cv clubs", "Clubs willing to sign you, by club standing"),
+                ("cv sign <club_id>", "Sign a contract"),
+                ("cv offers", "Contract offers after a club season"),
+                ("cv clubseason", "Your club, wage, contract and club season so far"),
+                ("—", "**Your club pays you for normal `cv cm` matches.** "
+                      "There are no separate club fixtures — sign a club, then go play with people."),
+            ]),
+            "pathway": ("🪜 The pathway (single-player storyline)", [
+                ("cv ladder", "The whole path: club → Ranji → IPL → India → World Cup"),
+                ("cv play", "Play your next fixture, solo against an AI side"),
+                ("cv schedule", "This tournament's fixture list"),
+                ("cv season", "Tournament, reputation, match fee, what the next level wants"),
+                ("cv history", "Your recent matches"),
+                ("cv retire", "End the career and get your legacy card"),
+                ("—", "You are **selected, not signed**. Play well and selectors move you up; "
+                      "fail and you're dropped a level."),
+            ]),
+            "matches": ("🏏 Playing with people", [
+                ("cv cm [overs]", "Create a club-match lobby (this is what your club wage pays for)"),
+                ("cv joinmatch / leavematch", "Join or leave the lobby"),
+                ("cv lobby", "Show the lobby and the two sides"),
+                ("cv addbot", "Fill a slot with a bot"),
+                ("cv swap <a> <b>", "Re-order the roster (slot 1 each side is captain)"),
+                ("cv sm", "Start the match"),
+                ("cv fielding on|off", "Catches and run-outs (needs 3+ a side)"),
+                ("cv scenario", "Solo practice challenges"),
+            ]),
+        }
+
+        key = (section or "").lower().strip()
+        alias = {"club": "clubs", "path": "pathway", "ladder": "pathway",
+                 "core": "career", "player": "career", "match": "matches",
+                 "pvp": "matches", "begin": "start"}
+        key = alias.get(key, key)
+
+        if key in SECTIONS:
+            title, rows = SECTIONS[key]
+            e = discord.Embed(title=f"{title}", color=discord.Color.blurple(),
+                              description="\n".join(
+                                  (f"**`{c}`** — {d}" if c != "—" else f"-# {d}") for c, d in rows))
+            return await ctx.send(embed=e)
+
+        e = discord.Embed(
+            title="🏏 Career Mode — Help",
+            description=("Three separate systems. Coins are the only thing that crosses between them.\n"
+                         "-# `cv chelp <section>` for detail — start · career · clubs · pathway · matches"),
+            color=discord.Color.blurple())
+        e.add_field(name="🌱 start",
+                    value="`cv start_career` · `cv debut` · `cv profile` · `cv daily`", inline=False)
+        e.add_field(name="🏋️ career — your player's ratings",
+                    value="`cv upgrade` · `cv fitness` · `cv rest`\n"
+                          "-# 10 attributes: batting, bowling, fielding, physical", inline=False)
+        e.add_field(name="🏟️ clubs — contracts & wages",
+                    value="`cv clubs` · `cv sign <id>` · `cv offers` · `cv clubseason`\n"
+                          "-# Your club pays you for normal `cv cm` matches", inline=False)
+        e.add_field(name="🪜 pathway — the storyline",
+                    value="`cv ladder` · `cv play` · `cv schedule` · `cv season`\n"
+                          "-# Solo fixtures. Selected, not signed", inline=False)
+        e.add_field(name="🏏 matches — with other people",
+                    value="`cv cm` · `cv joinmatch` · `cv sm` · `cv fielding`", inline=False)
+        if ctx.author.id == ADMIN_DISCORD_ID:
+            e.add_field(name="🔧 owner",
+                        value="`cv allratings [min_ovr]` · `cv grant_premium` · `cv delete_career`",
+                        inline=False)
         await ctx.send(embed=e)
 
     # ---------------- CLUB CAREER (separate from the pathway) ----------------
@@ -14406,27 +14446,6 @@ class PrefixCog(commands.Cog):
                           color=discord.Color.gold())
         e.set_footer(text="Accept with: cv sign <club_id>")
         await ctx.send(embed=e)
-
-    @commands.command(name="clubplay", aliases=["cplay", "clubfixture"],
-                      help="Play your next club fixture (solo, vs an AI club).\nUsage: clubplay")
-    async def clubplay_cmd(self, ctx):
-        if not _can_use_career(ctx):
-            return await ctx.send(_CAREER_SOON)
-        if career_clubs is None:
-            return await ctx.send("❌ Club cricket is not available.")
-        career = self._career_or_none(ctx)
-        if not career:
-            return await ctx.send("❌ You have no career yet — `cv start_career`.")
-        if not career.get("debut_done"):
-            return await ctx.send("❌ Pass your `cv debut` first.")
-        career_clubs.ensure(career)
-        if not career_clubs.contract(career):
-            return await ctx.send("📭 You have no club. `cv clubs` then `cv sign <club_id>`.")
-        fixture = career_clubs.next_fixture(career)
-        if not fixture:
-            return await ctx.send("🏁 Your club season is done — `cv clubseason` for the summary, "
-                                  "`cv offers` for next season's contracts.")
-        await start_story_match(ctx.channel, ctx.author, career, fixture, mode="club")
 
     @commands.command(name="clubseason", aliases=["myclub", "contract"],
                       help="Your club season and contract.\nUsage: clubseason")
@@ -16411,6 +16430,18 @@ class PrefixCog(commands.Cog):
         _changed, msg = repair_tournament_schedule(tourney)
         await ctx.send(msg)
 
+    @tournament.command(name="repair_custom", aliases=["fix_custom", "custom_repair", "rebuild_custom"], help="[MANAGER] Custom tournaments: strip matches a foreign generator added (e.g. generate_knockouts) and rebuild the schedule from the custom config.\nUsage: tournament repair_custom")
+    async def t_repair_custom(self, ctx):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (tourney and str(ctx.author.id) in tourney.get("managers", []))
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+        if tourney.get("tournament_type") != "custom":
+            return await ctx.send("❌ This command is for **Custom** tournaments only.")
+        _ok, msg = custom_repair_schedule(tourney)
+        await ctx.send(msg)
+
     @tournament.command(name="generate_knockouts", help="[MANAGER] Generate Knockouts (Semi-Finals) for Top 4 teams.\nUsage: tournament generate_knockouts")
     async def t_generate_knockouts(self, ctx):
         server_id = str(ctx.guild.id)
@@ -18370,6 +18401,8 @@ class PrefixCog(commands.Cog):
             if DSL_CONFIG["auto_playoffs"]:
                 dsl_generate_playoffs(tourney)
             _dsl_try_advance(tourney)
+        elif t_type == "custom":
+            custom_try_advance(tourney)
         else:
             tc = self.bot.cogs.get("TournamentCog")
             if t_type == "t20_world_cup" and tc:

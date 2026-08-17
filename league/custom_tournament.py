@@ -645,6 +645,93 @@ def custom_revert_cleanup(tourney, m):
 
 
 # ---------------------------------------------------------------------------
+# repair
+
+def _is_foreign_match(cfg, m):
+    """True if a match was NOT produced by this engine. Every custom league
+    match carries stage "group"/"stageN" for a stage the config declares, and
+    every custom playoff match carries a bracket_n. Anything else (Semi-Final 1
+    from generate_knockouts, a Final from `gf`, an ACL/DSL playoff slot) is a
+    stray another format's generator stamped onto this tournament."""
+    st = m.get("stage")
+    if st in {stage_key(i) for i in range(len(cfg["stages"]))}:
+        return False
+    return not (st == "knockout" and m.get("bracket_n") is not None)
+
+
+def custom_repair_schedule(tourney):
+    """Undo a foreign generator that was run against a custom tournament, then
+    rebuild whatever the config actually asks for.
+
+    Strays are reverted (a completed one gives its player stats back) and
+    dropped, the derived crowns/seeds are cleared, and custom_try_advance runs
+    once to regenerate the real next stage / bracket. Safe to run when nothing
+    is broken - it then just re-fires the advance, which is otherwise only ever
+    triggered by a match completing. Returns (ok, message)."""
+    from league.tournament_manager import (assign_tournament_conditions, revert_tournament_match,
+                                           save_tournament, _tm_round_label)
+    cfg = tourney.get("custom_config")
+    if not cfg:
+        return False, "❌ This isn't a Custom tournament — nothing to repair here."
+
+    sched = tourney["schedule"]
+    removed, notes = [], []
+
+    # Completed strays first: revert_tournament_match reverses their player stats
+    # and the current_match_idx bump before the match itself is thrown away.
+    # Highest id first so a stray never blocks the revert of an earlier one.
+    while True:
+        done = sorted((m for m in sched if _is_foreign_match(cfg, m) and m.get("status") == "completed"),
+                      key=lambda m: m.get("match_id", 0), reverse=True)
+        if not done:
+            break
+        m = done[0]
+        ok, msg = revert_tournament_match(tourney, m["match_id"])
+        if not ok:
+            return False, (f"❌ Couldn't reopen stray match #{m['match_id']} "
+                           f"({_tm_round_label(m)}) — repair aborted.\n{msg}")
+        notes.append(f"#{m['match_id']} {_tm_round_label(m)} (stats reversed)")
+
+    for m in [x for x in sched if _is_foreign_match(cfg, x)]:
+        sched.remove(m)
+        removed.append(f"#{m['match_id']} {_tm_round_label(m)}")
+
+    # Crowns/seeds re-derive from the repaired schedule; the foreign keys are
+    # whatever the ACL/DSL/rating generators may have stamped on the way past.
+    for k in ("custom_champion", "custom_runner_up", "custom_seeds",
+              "playoff_seeds", "league_shield", "acl_trophy_winner",
+              "acl_runner_up", "acl_champion", "rating_champion", "rating_runner_up"):
+        tourney.pop(k, None)
+    if tourney.get("status") == "completed":
+        tourney["status"] = "active"
+
+    before = {m.get("match_id") for m in sched}
+    custom_try_advance(tourney)
+    added = [m for m in sched if m.get("match_id") not in before]
+    assign_tournament_conditions(tourney)
+    save_tournament(tourney)
+
+    lines = []
+    if notes:
+        lines.append("♻️ Reopened completed stray(s): " + ", ".join(notes))
+    if removed:
+        lines.append(f"🗑️ Removed **{len(removed)}** foreign match(es): " + ", ".join(removed))
+    if added:
+        by_stage = {}
+        for m in added:
+            by_stage.setdefault(m.get("stage"), []).append(m)
+        for skey, ms in by_stage.items():
+            idx = stage_index_of(skey)
+            label = stage_name(cfg, idx) if idx is not None else "Playoffs"
+            lines.append(f"✅ Generated **{label}** — {len(ms)} match(es).")
+    if not lines:
+        return True, ("✅ Nothing foreign in the schedule, and the config has nothing new to "
+                      "generate yet. Finish the current stage's matches first.")
+    lines.append("Run `cv tournament status` to check the rebuilt schedule.")
+    return True, "🛠️ **Custom tournament repaired.**\n" + "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # start validation
 
 def custom_start_error(tourney):

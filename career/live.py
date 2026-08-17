@@ -66,39 +66,51 @@ class Session:
         return await asyncio.to_thread(BC.render_live_card, state)
 
     async def push(self, match, career=None, force=False):
-        """Redraw the card. Returns True if the card is carrying the scoreboard."""
+        """Show the ball that just happened.
+
+        This used to EDIT the current card in place, which meant it fought with
+        turn(): the last ball of an over went through here and overwrote the
+        previous prompt's card instead of getting one of its own, so that
+        delivery's card simply never appeared. Both paths now post a card per
+        delivery and agree on what a card is.
+        """
         if self.failed:
             return False
-        now = time.time()
-        gap = now - self.last_edit
-        if self.message is not None and gap < EDIT_INTERVAL:
-            if not force:
-                return True                 # card is live and current enough
-            # A forced update is one the viewer must see (a ball resolved), so it
-            # waits out the rest of the window rather than skipping the guard.
-            # Human turns are slower than this anyway; it only paces the stretches
-            # where bot batters resolve balls back to back, which is exactly where
-            # an unthrottled edit loop would earn a 429.
-            await asyncio.sleep(EDIT_INTERVAL - gap)
+        return (await self.post_ball_card(match, career, delay=0)) is not None
+
+
+    async def post_ball_card(self, match, career=None, delay=None):
+        """One card for the delivery just played. Never edits an existing card."""
+        if self.failed:
+            return None
+        rec = getattr(match, "last_ball", None)
+        key = self._key(rec) if rec else None
+        if key is not None and key == self.card_ball:
+            return None                      # already shown (a prompt drew it)
+        await self.highlight(match)
         try:
             state = SNAP.build_broadcast_state(match, career)
-            buf = await self._render(state)
-            file = discord.File(buf, filename="live.png")
-            if self.message is None or self.innings_num != match.current_innings_num:
-                # New innings gets its own card so the first innings stays readable
-                # in the channel history instead of being overwritten.
-                self.message = await self.channel.send(file=file)
-                self.innings_num = match.current_innings_num
-            else:
-                # Editing a message that carries a file requires resending it via
-                # attachments - passing only `file` silently keeps the old image.
-                await self.message.edit(attachments=[file])
+            buf = await asyncio.to_thread(BC.render_live_card, state)
+            old = self.message
+            msg = await self.channel.send(file=discord.File(buf, filename="live.png"))
+            self.message = msg
+            self.card_ball = key
+            self.card_kind = "ball"      # already played - a later prompt must not edit it
+            self.card_over = (match.current_innings_num, state.get("over_no", 0))
+            self.innings_num = match.current_innings_num
             self.last_edit = time.time()
-            return True
+            if old is not None:
+                try:
+                    await old.edit(content=None, view=None)
+                except Exception:
+                    pass
+            if delay is None or delay > 0:
+                await asyncio.sleep(AI_BALL_DELAY if delay is None else delay)
+            return msg
         except Exception as e:
-            print(f"career live card failed: {e}")
+            print(f"career ball card failed: {e}")
             self.failed = True
-            return False
+            return None
 
     @staticmethod
     def _key(rec):
@@ -312,48 +324,16 @@ async def ball_card(channel, match, career=None, delay=None):
     several balls at once. This gives every ball its own image, paced so it can
     be read.
     """
-    s = session_for(channel)
-    if s.failed:
-        return None
-    rec = getattr(match, "last_ball", None)
-    key = s._key(rec) if rec else None
-    if key is not None and key == s.card_ball:
-        return None                      # already shown (a human prompt drew it)
-    await s.highlight(match)
-    try:
-        state = SNAP.build_broadcast_state(match, career)
-        buf = await asyncio.to_thread(BC.render_live_card, state)
-        old = s.message
-        msg = await channel.send(file=discord.File(buf, filename="live.png"))
-        s.message = msg
-        s.card_ball = key
-        s.card_kind = "ball"        # already played - a later prompt must not edit it
-        s.card_over = (match.current_innings_num, state.get("over_no", 0))
-        s.last_edit = time.time()
-        if old is not None:
-            try:
-                await old.edit(content=None, view=None)
-            except Exception:
-                pass
-        await asyncio.sleep(AI_BALL_DELAY if delay is None else delay)
-        return msg
-    except Exception as e:
-        print(f"career ball card failed: {e}")
-        s.failed = True
-        return None
+    return await session_for(channel).post_ball_card(match, career, delay)
 
 
 async def push(channel, match, career=None, force=False):
-    """Update the live card and post any replay the ball earned.
+    """Show the ball that just happened, and any replay it earned.
 
     Returns True when the card is carrying the scoreboard, so the caller can skip
-    the text embed; False means the caller should fall back.
+    the text embed; False means it should fall back.
     """
-    s = session_for(channel)
-    ok = await s.push(match, career, force=force)
-    if ok:
-        await s.highlight(match)
-    return ok
+    return await session_for(channel).push(match, career, force=force)
 
 
 async def drs_clip(channel, match, verdict):
