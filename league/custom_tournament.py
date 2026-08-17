@@ -731,6 +731,72 @@ def custom_repair_schedule(tourney):
     return True, "🛠️ **Custom tournament repaired.**\n" + "\n".join(lines)
 
 
+def adopt_league_as_custom(tourney, qualify, ko_qualify, *, carry_points=False, stage2_name=None):
+    """Retro-fit a plain (double) round robin into a custom tournament: its
+    played league becomes custom stage 1, the top `qualify` go into a fresh
+    single round robin, and the top `ko_qualify` of THAT enter a seeded
+    knockout. For the "picked Round Robin at create, wanted a multi-stage
+    event" mistake - no result is replayed, the league matches are only tagged
+    with the stage/group the custom standings code reads.
+
+    Returns (ok, message). On success the repair pass has already run, so any
+    matches a foreign generator added are gone and stage 2 exists. Nothing is
+    mutated until every check below has passed."""
+    if tourney.get("custom_config"):
+        return False, "❌ This is already a Custom tournament — use `cv tournament repair_custom`."
+    if tourney.get("tournament_type") not in ("round_robin", "double_round_robin"):
+        return False, ("❌ Only a **Round Robin** / **Double Round Robin** tournament can be "
+                       "adopted — its league is one flat table, which is what stage 1 needs.")
+
+    league = [m for m in tourney.get("schedule", []) if isinstance(m.get("round"), int)]
+    if not league:
+        return False, "❌ No league matches found — nothing to adopt."
+    names = [t["name"] for t in tourney.get("teams", []) if t.get("name") != "BYE"]
+    if qualify < 2 or qualify >= len(names):
+        return False, f"❌ Qualifiers must be between 2 and {len(names) - 1} — got {qualify}."
+    if ko_qualify < 2 or ko_qualify > qualify:
+        return False, f"❌ Knockout qualifiers must be between 2 and {qualify} — got {ko_qualify}."
+    bracket = default_knockout_bracket(ko_qualify)
+    if not bracket:
+        return False, (f"❌ No standard bracket for **{ko_qualify}** teams — use a power of two "
+                       "(2, 4, 8, 16).")
+
+    legs = 2 if tourney.get("tournament_type") == "double_round_robin" else 1
+    tourney["custom_config"] = {
+        "stages": [
+            {"name": "League Stage", "groups": 1, "teams_per_group": len(names),
+             "legs": legs, "qualify": qualify, "assignment": "manual"},
+            {"name": stage2_name or f"Super {qualify}", "groups": 1, "legs": 1,
+             "qualify": ko_qualify, "regroup": "seeded", "carry_points": bool(carry_points)},
+        ],
+        "playoff": {"mode": "bracket", "matches": default_bracket_labels(bracket)},
+    }
+    # custom_stage_standings reads stage+group off each match; a plain round robin
+    # stamps neither, so tag the played league as stage 1, group A.
+    for m in league:
+        m["stage"] = stage_key(0)
+        m["group"] = "A"
+    for t in tourney["teams"]:
+        t["group"] = "A"
+    tourney.setdefault("custom_groups", {})[stage_key(0)] = {"A": list(names)}
+    tourney["tournament_type"] = "custom"
+
+    ok, msg = custom_repair_schedule(tourney)
+    if not ok:
+        return False, msg
+    pending = [m for m in league if m.get("status") != "completed"]
+    head = (f"🔁 **Converted to a Custom tournament.**\n"
+            f"• Stage 1: the league you've already played ({len(league)} matches) — "
+            f"**top {qualify}** advance\n"
+            f"• Stage 2: **{tourney['custom_config']['stages'][1]['name']}** — fresh single "
+            f"round robin, **top {ko_qualify}** advance\n"
+            f"• Playoffs: seeded knockout ({len(bracket)} matches)\n")
+    if pending:
+        head += (f"⏳ **{len(pending)}** league match(es) are still pending — stage 2 generates "
+                 "itself the moment the last one is done.\n")
+    return True, head + msg
+
+
 # ---------------------------------------------------------------------------
 # start validation
 

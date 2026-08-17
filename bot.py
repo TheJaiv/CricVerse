@@ -41,6 +41,7 @@ from league.tournament_manager import get_server_tournament, save_tournament, ge
 from league.custom_tournament import (
     CustomSetupView, custom_try_advance, custom_start_error, custom_generate_first_stage,
     build_custom_standings_message, custom_config_summary_lines, custom_repair_schedule,
+    adopt_league_as_custom,
     stage_letters as custom_stage_letters,
 )
 from league import rating_league
@@ -16441,6 +16442,38 @@ class PrefixCog(commands.Cog):
             return await ctx.send("❌ This command is for **Custom** tournaments only.")
         _ok, msg = custom_repair_schedule(tourney)
         await ctx.send(msg)
+
+    @tournament.command(name="convert_custom", aliases=["adopt_custom", "make_custom", "add_stage"], help="[MANAGER] Turn a played Round Robin into a Custom tournament: top <N> go to a fresh round robin, top <K> of that to a seeded knockout.\nUsage: tournament convert_custom <qualifiers> [knockout_qualifiers] [carry]\nAdd `carry` to bring each qualifier's league points into stage 2 instead of starting at zero.")
+    async def t_convert_custom(self, ctx, qualify: int, ko_qualify: int = 4, carry: str = ""):
+        server_id = str(ctx.guild.id)
+        tourney = get_server_tournament(server_id)
+        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (tourney and str(ctx.author.id) in tourney.get("managers", []))
+        if not tourney: return await ctx.send("❌ No tournament exists.")
+        if not is_mgr: return await ctx.send("❌ Managers only.")
+
+        carry_points = carry.strip().lower() in ("carry", "carry_points", "keep", "true", "yes")
+        n_teams = len([t for t in tourney.get("teams", []) if t.get("name") != "BYE"])
+        strays = [m for m in tourney.get("schedule", []) if not isinstance(m.get("round"), int)]
+        view = SquadConfirmView(ctx.author.id)
+        warn = f"\n• 🗑️ Deletes **{len(strays)}** already-generated knockout match(es): " + \
+               ", ".join(f"**{m.get('round')}**" for m in strays) if strays else ""
+        prompt = await ctx.send(
+            f"⚠️ Convert **{tourney['name']}** into a **Custom tournament**?\n"
+            f"• Your played league becomes **Stage 1** — no result is touched or replayed\n"
+            f"• Top **{qualify}** of {n_teams} go into a fresh single round robin\n"
+            f"• Top **{ko_qualify}** of those enter a seeded knockout{warn}\n"
+            f"\nStage 2 " + ("**carries** each qualifier's league points forward."
+                             if carry_points else
+                             "starts on **zero points** (add `carry` to bring them forward)."), view=view)
+        await view.wait()
+        if not view.value:
+            return await prompt.edit(content="❌ Conversion cancelled — tournament left as-is.", view=None)
+
+        ok, msg = adopt_league_as_custom(tourney, qualify, ko_qualify, carry_points=carry_points)
+        await prompt.edit(content=msg if len(msg) <= 2000 else msg[:1990] + " …", view=None)
+        if not ok:
+            return
+        await ctx.send("▶️ `cv tournament status` for the new schedule · `cv tournament play_next` to start Stage 2.")
 
     @tournament.command(name="generate_knockouts", help="[MANAGER] Generate Knockouts (Semi-Finals) for Top 4 teams.\nUsage: tournament generate_knockouts")
     async def t_generate_knockouts(self, ctx):
