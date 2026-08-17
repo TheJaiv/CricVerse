@@ -137,6 +137,23 @@ def _crease(img, d, state):
         T.rtext(d, W - M - 24, top + 100, f"ECON {bw['econ']:.2f}", f_ov, T.INK_SOFT)
 
 
+def _plain_prompt(prompt):
+    """Strip Discord markup so a prompt can be drawn on the card.
+
+    Prompts carry mentions and bold markers for the chat message; neither means
+    anything to Pillow, and a raw <@1234> is worse than no text at all.
+    """
+    if not prompt:
+        return None
+    import re
+    txt = re.sub(r"<@!?\d+>", "", str(prompt))
+    txt = txt.replace("**", "").replace("`", "").replace("*", "")
+    # DejaVu has no emoji coverage, so an emoji in the prompt draws as a tofu box.
+    txt = "".join(ch for ch in txt if ord(ch) < 0x2010 or ch in "·—–")
+    txt = re.sub(r"\s+", " ", txt).strip(" -·—")
+    return txt.strip() or None
+
+
 def _last_ball_banner(img, d, state, y):
     """What just happened, drawn ON the card.
 
@@ -281,9 +298,16 @@ def _rail(img, d, state):
         d.text((ox + 20, top + 18), obj["text"], font=f_o, fill=col)
         d.text((ox + 20, top + 44), obj["detail"], font=T.font(17, "cond"), fill=T.INK_SOFT)
 
-    toss = state.get("toss")
-    if toss:
-        T.ctext(d, W / 2, bot + 16, toss, T.font(15, "cond"), T.INK_DIM)
+    # Whose turn it is, on the card. The chat message carries the same line in an
+    # embed footer; having it on the graphic means the image is self-contained
+    # when someone scrolls back through the match.
+    prompt = _plain_prompt(state.get("prompt"))
+    if prompt:
+        T.ctext(d, W / 2, bot + 12, prompt.upper(), T.font(17, "cond"), T.ACCENT)
+    else:
+        toss = state.get("toss")
+        if toss:
+            T.ctext(d, W / 2, bot + 16, toss, T.font(15, "cond"), T.INK_DIM)
 
 
 def render_live_card(state):
@@ -488,7 +512,7 @@ def render_wagon_wheel(history, batter):
 
 
 # Player card
-PC_W, PC_H = 1020, 600
+PC_W, PC_H = 1020, 660
 _PC_PANEL = 372          # width of the left identity panel
 
 
@@ -539,18 +563,8 @@ def render_player_card(state):
 
     _pc_condition(d, state, PC_W - 36)
 
-    f_lab = T.font(17, "cond")
-    f_val = T.font(26, "bold")
-    y = 128
-    bar_x2 = PC_W - 110
-    for label, v in state.get("attributes", []):
-        col = T.rating_color(v)
-        d.text((nx, y), label, font=f_lab, fill=T.INK_SOFT)
-        T.rtext(d, PC_W - 40, y - 6, str(v), f_val, col)
-        T.bar(d, [nx, y + 26, bar_x2, y + 36], max(2, v) / 99.0, col, T.PANEL_2)
-        y += 54
-
-    _pc_stats(d, state, nx, y + 16)
+    y = _pc_attributes(d, state, nx)
+    _pc_stats(d, state, nx, y + 10)
 
     T.rrect(d, [nx, PC_H - 62, nx + 234, PC_H - 22], 20, fill=(44, 36, 14))
     d.text((nx + 20, PC_H - 54), f"COINS  {state.get('coins', 0):,}",
@@ -559,6 +573,50 @@ def render_player_card(state):
         T.chip(d, [nx + 252, PC_H - 62, nx + 372, PC_H - 22], "PREMIUM",
                T.font(16, "cond"), T.mix(T.ACCENT_2, T.BG, 0.55), T.ACCENT_2)
     return T.save_png(img)
+
+
+def _pc_attributes(d, state, nx):
+    """Ten attributes in two labelled columns.
+
+    A single column of ten bars is a wall of numbers; grouped by discipline it
+    reads as a build - which is the point of widening the tree in the first place.
+    Falls back to the flat list for any state built before groups existed.
+    """
+    groups = state.get("attr_groups")
+    if not groups:
+        y = 128
+        for label, v in state.get("attributes", []):
+            col = T.rating_color(v)
+            d.text((nx, y), label, font=T.font(17, "cond"), fill=T.INK_SOFT)
+            T.rtext(d, PC_W - 40, y - 6, str(v), T.font(26, "bold"), col)
+            T.bar(d, [nx, y + 26, PC_W - 110, y + 36], max(2, v) / 99.0, col, T.PANEL_2)
+            y += 54
+        return y
+
+    col_w = (PC_W - nx - 36) / 2
+    columns = [[], []]
+    for i, g in enumerate(groups):
+        columns[0 if i % 2 == 0 else 1].append(g)
+
+    f_g = T.font(14, "cond")
+    f_l = T.font(15, "cond")
+    f_v = T.font(20, "bold")
+    bottom = 128
+    for ci, col_groups in enumerate(columns):
+        x = nx + ci * col_w
+        y = 120
+        for gname, rows in col_groups:
+            d.text((x, y), gname, font=f_g, fill=T.ACCENT_2)
+            y += 20
+            for label, v in rows:
+                c = T.rating_color(v)
+                d.text((x, y), label, font=f_l, fill=T.INK_SOFT)
+                T.rtext(d, x + col_w - 30, y - 3, str(v), f_v, c)
+                T.bar(d, [x, y + 20, x + col_w - 34, y + 27], max(2, v) / 99.0, c, T.PANEL_2)
+                y += 36
+            y += 10
+        bottom = max(bottom, y)
+    return bottom
 
 
 def _pc_condition(d, state, rx):

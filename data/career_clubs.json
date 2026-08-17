@@ -1,0 +1,15 @@
+{
+  "_comment": "Career Mode club ladder. Tiers gate who will sign you; wage is per match played. Kept as data so the economy can be rebalanced without touching code.",
+  "clubs": [
+    {"id": "riverside",  "name": "Riverside CC",     "tier": "Bronze",   "min_ovr": 0,  "wage": 22,  "prestige": 1, "city": "Riverside"},
+    {"id": "oldmill",    "name": "Old Mill XI",      "tier": "Bronze",   "min_ovr": 0,  "wage": 25,  "prestige": 1, "city": "Old Mill"},
+    {"id": "eastvale",   "name": "Eastvale Rovers",  "tier": "Bronze",   "min_ovr": 63, "wage": 30,  "prestige": 2, "city": "Eastvale"},
+    {"id": "northline",  "name": "Northline CC",     "tier": "Silver",   "min_ovr": 69, "wage": 42,  "prestige": 3, "city": "Northline"},
+    {"id": "harbour",    "name": "Harbour XI",       "tier": "Silver",   "min_ovr": 72, "wage": 50,  "prestige": 3, "city": "Harbour"},
+    {"id": "kingsford",  "name": "Kingsford Park",   "tier": "Gold",     "min_ovr": 77, "wage": 68,  "prestige": 4, "city": "Kingsford"},
+    {"id": "summit",     "name": "Summit Cricket",   "tier": "Gold",     "min_ovr": 81, "wage": 82,  "prestige": 4, "city": "Summit"},
+    {"id": "meridian",   "name": "Meridian Stars",   "tier": "Platinum", "min_ovr": 85, "wage": 104, "prestige": 5, "city": "Meridian"},
+    {"id": "crownpoint", "name": "Crownpoint SC",    "tier": "Platinum", "min_ovr": 89, "wage": 124, "prestige": 5, "city": "Crownpoint"},
+    {"id": "apex",       "name": "Apex Invitational","tier": "Diamond",  "min_ovr": 93, "wage": 158, "prestige": 6, "city": "Apex"}
+  ]
+}

@@ -258,7 +258,9 @@ def build_player_state(career):
     with no Mongo driver in the picture.
     """
     from career import career_manager as CM
+    from career import attributes as _AT
 
+    CM.migrate(career)
     a = career.get("attributes", {})
     bt = CM.BOWLING_TYPES.get(career.get("bowling_type", "pace"), {})
     ms = CM.MINDSETS.get(career.get("mindset", "standard"), {})
@@ -281,6 +283,15 @@ def build_player_state(career):
         "chips": [f"{ms.get('label', '')} BAT".strip().upper(),
                   f"{bt.get('label', '')} BOWL".strip().upper()],
         "attributes": [(k.upper(), int(a.get(k, 0))) for k in CM.ATTRS],
+        # Grouped for the card: ten bars in one column is unreadable, four labelled
+        # groups is not.
+        "attr_groups": [
+            (g.upper(), [(CM.ATTR_INFO[k][0].upper(), int(a.get(k, 0))) for k in keys])
+            for g, keys in _AT.by_group().items() if keys
+        ],
+        "bat_skill": CM.bat_skill(a),
+        "bowl_skill": CM.bowl_skill(a),
+        "field_skill": CM.field_skill(a),
         "coins": career.get("coins", 0),
         "debut_done": bool(career.get("debut_done")),
         "premium": CM.career_is_premium(career),

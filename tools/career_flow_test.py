@@ -299,12 +299,16 @@ class FMessage:
     async def edit(self, **kw):
         if "view" in kw: self.view = kw["view"]
         if "content" in kw: self.content = kw["content"]
+        if "embed" in kw: self.embed = kw["embed"]
         if "attachments" in kw and kw["attachments"]:
             self.file = kw["attachments"][0]
             self.edits += 1
         return self
     async def delete(self):
         self.deleted = True
+    def footer(self):
+        f = getattr(getattr(self, "embed", None), "footer", None)
+        return getattr(f, "text", None) or ""
 
 class FChannel:
     def __init__(self, cid):
@@ -328,6 +332,7 @@ class FChannel:
             e = getattr(m, "embed", None)
             if e is not None:
                 parts.append(f"{getattr(e, 'title', '') or ''}\n{getattr(e, 'description', '') or ''}")
+                parts.append(m.footer())
         return "\n".join(parts)
 
 class FResponse:
@@ -770,18 +775,34 @@ async def part6_broadcast():
     check("superseded cards have their buttons stripped",
           all(m.view is None for m in card_msgs[:-1]),
           f"{sum(1 for m in card_msgs[:-1] if m.view is not None)} still clickable")
-    check("every card message carries its prompt text",
-          all(m.content for m in card_msgs))
+    # Cards posted for a bot-resolved ball carry no prompt (nobody is being asked
+    # to act); every card that DOES ask for input must show it under the image.
+    asked = [m for m in card_msgs if m.view is not None or m.edits]
+    check("every card that asks for input shows the prompt under the image",
+          asked and all(m.footer() for m in asked),
+          f"{sum(1 for m in asked if not m.footer())} of {len(asked)} with no footer")
 
     # The feed must read as images, not text: every ball prompt rides on a card,
     # and the old per-ball commentary lines are gone.
-    prompts = [m for m in ch.log if m.content and "pick your" in str(m.content)]
+    prompts = [m for m in ch.log if "pick your" in (m.footer() or "")]
     check("every ball prompt is posted on a card image",
           prompts and all(m.file is not None for m in prompts),
           f"{sum(1 for m in prompts if m.file is None)} bare prompts of {len(prompts)}")
+    check("the prompt sits BELOW the image (embed footer, not content)",
+          prompts and all(not m.content for m in prompts),
+          f"{sum(1 for m in prompts if m.content)} prompts still use message content")
     txt = ch.text()
     check("no per-ball commentary lines are posted", "🎙️" not in txt)
     check("no 'Select your shot' text prompts remain", "Select your shot" not in txt)
+
+    # ONE image per ball: a ball needing both a bowling and a batting prompt must
+    # edit its card, not post a second one.
+    balls = len(match.innings1.ball_history or []) + len(getattr(match.innings2, "ball_history", None) or [])
+    check("no more than one card per ball", len(card_msgs) <= balls + 4,
+          f"{len(card_msgs)} cards for {balls} balls")
+    check("some cards were edited in place (two prompts, one ball)",
+          any(m.edits > 0 for m in card_msgs),
+          f"edits={[m.edits for m in card_msgs][:12]}")
 
     hist = (match.innings1.ball_history or []) + (getattr(match.innings2, "ball_history", None) or [])
     check("ball history captured for the match", len(hist) > 10, f"{len(hist)} balls")
@@ -864,8 +885,9 @@ async def part6_broadcast():
     turn_ch = FChannel(9613)
     match.last_ball = dict((match.innings1.ball_history or [{}])[-1])
     msg = await CLIVE.turn(turn_ch, match, "pick your shot", None)
-    check("turn posts the card with the prompt",
-          msg.file is not None and msg.content == "pick your shot")
+    check("turn posts the card with the prompt below it",
+          msg.file is not None and msg.footer() == "pick your shot",
+          f"footer={msg.footer()!r} content={msg.content!r}")
     check("turn posts no text-only message (result is on the card)",
           all(m.file is not None for m in turn_ch.log),
           f"{sum(1 for m in turn_ch.log if m.file is None)} text-only of {len(turn_ch.log)}")
@@ -873,13 +895,47 @@ async def part6_broadcast():
           CLIVE.SNAP.build_broadcast_state(match).get("last_ball") is not None)
     CLIVE.end(9613)
 
-    # 5. consecutive balls: both cards survive, only the newest keeps its buttons
+    # 5. ONE image per ball: a second prompt for the same ball edits that card;
+    #    a new ball posts a new one, and the old card survives.
     ov_ch = FChannel(9614)
-    m1 = await CLIVE.turn(ov_ch, match, "a", None)
-    m2 = await CLIVE.turn(ov_ch, match, "b", None)
-    check("previous ball's card is not deleted", not m1.deleted)
-    check("a fresh card is posted for the next ball", m2 is not m1)
+    m1 = await CLIVE.turn(ov_ch, match, "pick your pace variation", None)
+    m2 = await CLIVE.turn(ov_ch, match, "pick your shot", None)
+    check("the second prompt for a ball edits that ball's card", m2 is m1,
+          f"{len(ov_ch.log)} messages posted")
+    check("the edited card shows the new prompt", m1.footer() == "pick your shot")
+    match.last_ball = dict(match.last_ball, ball_index=match.last_ball["ball_index"] + 1)
+    m3 = await CLIVE.turn(ov_ch, match, "pick your shot", None)
+    check("a new ball posts a new card", m3 is not m1)
+    check("the previous ball's card is not deleted", not m1.deleted)
+    check("the previous ball's card loses its buttons", m1.view is None)
     CLIVE.end(9614)
+
+    # 6. bot-resolved balls get their own paced card
+    ai_ch = FChannel(9615)
+    match.last_ball = dict(match.last_ball, ball_index=match.last_ball["ball_index"] + 1)
+    got = await CLIVE.ball_card(ai_ch, match, delay=0)
+    check("a bot-resolved ball posts its own card", got is not None and got.file is not None)
+    again = await CLIVE.ball_card(ai_ch, match, delay=0)
+    check("the same ball is not carded twice", again is None)
+    CLIVE.end(9615)
+
+    # 7. A stale session must never leak into the next match in the same channel.
+    #    It did: turn() edited the FINISHED match's card, so the new match's
+    #    buttons were posted somewhere nobody was looking and it softlocked.
+    old_ch = FChannel(9620)
+    s_old = CLIVE.session_for(old_ch)
+    await CLIVE.turn(old_ch, match, "old match prompt", None)
+    check("the old match holds a card message", s_old.message is not None)
+    new_ch = FChannel(9620)                       # same id, new match/channel object
+    s_new = CLIVE.session_for(new_ch)
+    check("a new match in the same channel starts a clean session",
+          s_new is not s_old and s_new.message is None)
+    before_new = len(new_ch.log)
+    await CLIVE.turn(new_ch, match, "new match prompt", None)
+    check("the new match posts its card in ITS OWN channel",
+          len(new_ch.log) > before_new,
+          f"{len(new_ch.log) - before_new} messages in the new channel")
+    CLIVE.end(9620)
 
     # forced updates must still honour the edit window (a per-ball edit storm
     # during bot-vs-bot stretches is what earns a 429)
@@ -1379,6 +1435,326 @@ def part10_condition():
     check("a career with no condition fields still converts", e["bat"] > 0 and e["bowl"] > 0)
 
 
+def part11_season():
+    """Phase 4: the club storyline - and the wall between it and the real career."""
+    section("PART 11 · seasons, clubs, contracts (storyline is SEPARATE)")
+    from career import season as SEA
+
+    c = CM.new_career("950", "Story", "pace", "standard")
+    SEA.ensure(c)
+    check("season fields default on a fresh career",
+          c["season_no"] == 1 and c["story"]["rating"] == SEA.STORY_START_RATING)
+    check("storyline has its own rating, not the career OVR",
+          "story" in c and SEA.story_rating(c) == SEA.STORY_START_RATING)
+
+    # THE WALL: nothing in the storyline may touch career ratings.
+    def snapshot(car):
+        return (car.get("ovr"), car.get("tier"), dict(car["attributes"]))
+
+    before = snapshot(c)
+
+    # clubs are gated on reputation, not OVR
+    top = SEA.clubs()[-1]
+    _, err = SEA.sign(c, top["id"])
+    check("a top club refuses a low reputation", err is not None, str(err))
+    check("the refusal talks about reputation, not OVR", "reputation" in (err or "").lower())
+    entry = SEA.clubs()[0]
+    contract, err = SEA.sign(c, entry["id"])
+    check("an entry club signs you", err is None and contract["club"] == entry["name"])
+    check("contract records the wage and length",
+          contract["wage"] == entry["wage"] and contract["matches_left"] == SEA.SEASON_FIXTURES)
+
+    # play a full season
+    coins_before = c.get("coins", 0)
+    res = None
+    for i in range(SEA.SEASON_FIXTURES):
+        res = SEA.record_match(c, runs=45, balls=30, wickets=1, balls_bowled=18,
+                               won=(i % 2 == 0), opponent=f"Club{i}")
+    check("wages are paid per match", c["coins"] > coins_before,
+          f"{coins_before} -> {c['coins']}")
+    check("the season rolls over after its fixtures", res and res.get("season_done"))
+    check("a new season starts clean",
+          c["season_no"] == 2 and c["season_stats"]["played"] == 0)
+    check("the season is graded", isinstance(res.get("grade"), float))
+    check("a good season raises the storyline rating",
+          SEA.story_rating(c) > SEA.STORY_START_RATING,
+          f"rating={SEA.story_rating(c)}")
+    check("the player ages a year per season", SEA.story_age(c) == SEA.START_AGE + 1)
+    check("contract offers are generated", isinstance(res.get("offers"), list) and res["offers"])
+    check("match history is kept", len(c["history"]) == SEA.SEASON_FIXTURES)
+    check("history entries carry the season", all(h["s"] == 1 for h in c["history"]))
+
+    check("A FULL SEASON CHANGED NOTHING ABOUT THE REAL CAREER",
+          snapshot(c) == before, f"{before} -> {snapshot(c)}")
+
+    # ageing hits the storyline only, never the attributes the player paid for
+    old = CM.new_career("951", "Veteran", "pace", "standard")
+    SEA.ensure(old)
+    old["story"]["age"] = SEA.DECLINE_AGE + 6
+    old["story"]["rating"] = 85
+    before_old = snapshot(old)
+    dropped = SEA._apply_ageing(old)
+    check("ageing erodes the storyline rating", dropped > 0 and SEA.story_rating(old) < 85)
+    check("AGEING NEVER TOUCHES CAREER ATTRIBUTES OR OVR",
+          snapshot(old) == before_old, f"{before_old} -> {snapshot(old)}")
+
+    # a bad season pushes the storyline rating back down
+    slump = CM.new_career("952", "Slump", "pace", "standard")
+    SEA.ensure(slump)
+    slump["story"]["rating"] = 75
+    SEA._apply_progression(slump, grade=5.0)
+    check("a poor season lowers the storyline rating", SEA.story_rating(slump) < 75)
+
+    # history is capped so one career document cannot grow without bound
+    cap = CM.new_career("953", "Logger", "pace", "standard")
+    SEA.ensure(cap)
+    for i in range(SEA.HISTORY_CAP + 40):
+        SEA.record_match(cap, runs=5, balls=5, opponent="x")
+    check("match history is capped", len(cap["history"]) == SEA.HISTORY_CAP,
+          f"{len(cap['history'])} entries")
+
+    # retirement keeps the record
+    leg = SEA.retire(c)
+    check("retirement produces a legacy summary",
+          leg["seasons"] >= 1 and "peak_rating" in leg)
+    check("a retired career is flagged", c.get("retired") is True)
+    check("retirement leaves the real career intact", snapshot(c) == before)
+
+
+def part12_economy():
+    """Phase 5 groundwork: economy.py is NOT wired to the live game yet, so these
+    check the proposed model AND that the live numbers are untouched."""
+    section("PART 12 · economy groundwork (not wired to live balance)")
+    from career import economy as E
+
+    # The live economy must be exactly as it was: this phase is deferred.
+    check("live upgrade curve is unchanged", CM.upgrade_cost(60) == 28
+          and CM.upgrade_cost(90) == 2404,
+          f"v60={CM.upgrade_cost(60)} v90={CM.upgrade_cost(90)}")
+    check("live daily payout is unchanged",
+          (CM.DAILY_MIN, CM.DAILY_MAX) == (25, 55))
+    check("live OVR blend is unchanged",
+          CM.compute_ovr({"attributes": {k: 80 for k in CM.ATTRS}}) == 80)
+    probe = CM.new_career("960", "Econ", "pace", "standard")
+    check("a fresh career still starts at exactly OVR 60", probe["ovr"] == 60)
+
+    # the upgrade curve must stay strictly increasing and expensive at the top
+    costs = [E.upgrade_cost(v) for v in range(60, 99)]
+    check("upgrade cost rises with every point",
+          all(b > a for a, b in zip(costs, costs[1:])))
+    check("the 90s are a real grind", E.upgrade_cost(90) > 10 * E.upgrade_cost(60),
+          f"v60={E.upgrade_cost(60)} v90={E.upgrade_cost(90)}")
+
+    # playing must out-earn logging in
+    lo, hi = E.daily_amount(10)
+    login = (lo + hi) / 2
+    play = 2 * (E.match_payout(runs=28, wickets=1) + 42)
+    check("playing earns more than logging in",
+          play / (play + login) >= E.PLAY_INCOME_SHARE,
+          f"share={play/(play+login):.2f}")
+
+    # every tier climb should land in a sane band around its target
+    profile = dict(matches_per_day=2.0, avg_runs=28, avg_wickets=1.0, wage=42)
+    for lo_o, hi_o, key in ((60, 69, "bronze_to_silver"), (69, 77, "silver_to_gold"),
+                            (77, 85, "gold_to_platinum"), (85, 93, "platinum_to_diamond")):
+        days = E.days_to_climb(lo_o, hi_o, **profile)
+        target = E.TARGETS[key]
+        check(f"climb {lo_o}->{hi_o} is within 2x of its {target}-day target",
+              0.5 <= days / target <= 2.0, f"{days} days vs target {target}")
+
+    # No daily ceiling by decision - grinding must stay worth it.
+    check("there is no daily earn cap", not hasattr(E, "DAILY_EARN_CAP"))
+    check("a heavy day earns proportionally more",
+          E.project(1, matches_per_day=8) > E.project(1, matches_per_day=2) * 2)
+    check("AI matches still pay nothing", E.AI_MATCH_PAYS is False)
+
+    # sinks exist and scale
+    check("injury treatment costs more the longer the layoff",
+          E.treatment_cost(4) > E.treatment_cost(1) > 0)
+    check("an agent takes a cut of a contract", E.agent_fee(42, 14) > 0)
+
+    # rating blend: a specialist is no longer taxed for their weak suit
+    spec = E.blend_ovr(90, 60)
+    allr = E.blend_ovr(75, 75)
+    check("a specialist out-rates a mediocre all-rounder", spec > allr,
+          f"90/60 -> {spec}, 75/75 -> {allr}")
+    check("the blend is symmetric", E.blend_ovr(90, 60) == E.blend_ovr(60, 90))
+    check("equal suits give that rating back", E.blend_ovr(80, 80) == 80)
+    check("the discipline label reads from the gap",
+          E.discipline(90, 60) == "BATTING ALL-ROUNDER"
+          and E.discipline(60, 90) == "BOWLING ALL-ROUNDER"
+          and E.discipline(75, 74) == "ALL-ROUNDER")
+
+
+def part13_attributes():
+    """Phase 5: the widened attribute tree and its migration."""
+    section("PART 13 · attribute tree (10 attributes · migration)")
+    from career import attributes as AT
+
+    check("ten attributes across four groups",
+          len(AT.ATTRS) == 10 and set(AT.by_group()) == set(AT.GROUPS),
+          f"{len(AT.ATTRS)} attrs")
+    check("every attribute has a label, group and blurb",
+          all(len(v) == 3 and all(v) for v in AT.ATTR_INFO.values()))
+    check("fielding attributes exist", set(AT.FIELDING_ATTRS) ==
+          {"catching", "throwing", "agility"})
+
+    # name resolution: the whole point is you can type `tech`
+    check("exact names resolve", AT.resolve("technique") == "technique")
+    check("prefixes resolve", AT.resolve("tech") == "technique")
+    check("the old `control` still resolves", AT.resolve("control") == "timing")
+    check("ambiguous or unknown names refuse",
+          AT.resolve("zzz") is None)
+
+    # migration preserves the player's rating exactly
+    for ovr in (60, 71, 84, 95):
+        legacy = {"_id": f"m{ovr}", "username": "Old", "bowling_type": "pace",
+                  "mindset": "standard", "ovr": ovr, "tier": CM.tier_for_ovr(ovr),
+                  "attributes": {"power": ovr + 2, "control": ovr + 5,
+                                 "bowling": ovr - 5, "stamina": ovr - 7},
+                  "stats": CM._blank_stats()}
+        CM.migrate(legacy)
+        check(f"legacy career at OVR {ovr} keeps its rating",
+              legacy["ovr"] == ovr, f"became {legacy['ovr']}")
+        check(f"legacy career at OVR {ovr} gains all ten attributes",
+              all(k in legacy["attributes"] for k in AT.ATTRS))
+        check(f"legacy career at OVR {ovr} drops the old key",
+              "control" not in legacy["attributes"])
+
+    fresh_c = CM.new_career("m2", "New", "pace", "standard")
+    check("a fresh career still starts at exactly OVR 60", fresh_c["ovr"] == 60)
+    before = dict(fresh_c["attributes"])
+    CM.migrate(fresh_c)
+    check("migrating an already-current career changes nothing",
+          fresh_c["attributes"] == before)
+
+    # the new attributes are real coin sinks
+    poor = fresh("m3", coins=10_000)
+    bought, spent, _ = CM.upgrade_attribute(poor, "catching", 3)
+    check("fielding attributes can be upgraded", bought == 3 and spent > 0)
+    bought2, _, _ = CM.upgrade_attribute(poor, "var", 2)
+    check("abbreviated names can be upgraded", bought2 == 2)
+    check("upgrading fielding does NOT change the engine ratings",
+          CM.bat_skill(poor["attributes"]) == CM.bat_skill(
+              dict(poor["attributes"], catching=1, throwing=1, agility=1)))
+
+
+def part14_fielding():
+    """Phase 6: catches and run-outs the player takes part in."""
+    section("PART 14 · fielding (catches · run-outs · the 3-player rule)")
+    from career import fielding as FL
+
+    check("fielding needs three a side", FL.can_enable([3, 3]) is True
+          and FL.can_enable([2, 3]) is False)
+
+    def team(name, n):
+        return {"name": name, "players": [
+            {"name": f"{name}{i}", "bat": 70, "bowl": 60, "role": "Batter",
+             "archetype": "Standard", "field_rating": 50 + i * 8,
+             "catch_rating": 50 + i * 8, "throw_rating": 45 + i * 8,
+             "owner_id": 1000 + i} for i in range(n)]}
+
+    class M:
+        current_innings_num = 1
+        max_wickets = 10
+
+    # under three a side it must refuse, whatever was asked for
+    small = M()
+    small.team1, small.team2 = team("A", 2), team("B", 2)
+    on, why = FL.setup(small, True)
+    check("fielding refuses below three a side", on is False and why)
+    check("is_enabled reflects the refusal", FL.is_enabled(small) is False)
+
+    m = M()
+    m.team1, m.team2 = team("A", 5), team("B", 5)
+    on, why = FL.setup(m, True)
+    check("fielding enables at three or more a side", on is True, str(why))
+    check("three fielders are assigned per side",
+          all(len(v) == FL.FIELDERS_PER_SIDE for v in m.fielders.values()),
+          str(m.fielders))
+    check("the best fielders are picked",
+          m.fielders["A"][0] == "A4", str(m.fielders["A"]))
+    check("fielding can be turned back off", FL.setup(m, False)[0] is False)
+    FL.setup(m, True)
+
+    class Inn:
+        pass
+    inn = Inn()
+    inn.batting_team, inn.bowling_team = m.team1, m.team2
+    m.current_innings = inn
+
+    def rec(**kw):
+        base = {"innings": 1, "ball_index": 7, "over": 1, "ball": 2, "bowler": "B0",
+                "striker": "A0", "delivery": "Slow Full", "shot": "Loft",
+                "runs_off_bat": 0, "extras": 0, "is_wide": False, "is_no_ball": False,
+                "is_bye": False, "dismissal": "Caught", "dismissal_desc": "c. B1 b. B0"}
+        base.update(kw)
+        return base
+
+    ch = FL.opportunity(m, rec())
+    check("a caught dismissal creates a chance", ch and ch["kind"] == "catch")
+    check("the chance names an assigned fielder",
+          ch["fielder"] in m.fielders[m.team2["name"]], ch["fielder"])
+    check("the same ball always falls to the same fielder",
+          FL.opportunity(m, rec())["fielder"] == ch["fielder"])
+
+    ro = FL.opportunity(m, rec(dismissal="Run Out", dismissal_desc="run out (B2)"))
+    check("a run out creates a throw chance", ro and ro["kind"] == "run_out")
+    for d in ("Bowled", "LBW", "Stumped", None):
+        check(f"{d or 'a non-dismissal'} creates no fielding chance",
+              FL.opportunity(m, rec(dismissal=d)) is None)
+
+    off = M()
+    off.team1, off.team2 = team("A", 5), team("B", 5)
+    FL.setup(off, False)
+    off.current_innings = inn
+    check("no chances at all when fielding is off",
+          FL.opportunity(off, rec()) is None)
+
+    # skill has to matter, and the action has to matter
+    good = {"catch_rating": 95, "field_rating": 95, "throw_rating": 95}
+    poor = {"catch_rating": 25, "field_rating": 25, "throw_rating": 25}
+    check("a better fielder holds more catches",
+          FL.catch_chance(good, rec()) > FL.catch_chance(poor, rec()) + 0.15,
+          f"{FL.catch_chance(good, rec()):.2f} vs {FL.catch_chance(poor, rec()):.2f}")
+    # The action must be a real decision, not a strictly-better button:
+    hard, easy = rec(shot="Scoop"), rec(shot="Drive")
+    check("diving wins on a hard chance",
+          FL.catch_chance(good, hard, "dive") > FL.catch_chance(good, hard, "steady"))
+    check("diving at a regulation catch is worse than taking it cleanly",
+          FL.catch_chance(good, easy, "dive") < FL.catch_chance(good, easy, "steady"))
+    check("a smashed shot is a harder chance",
+          FL.catch_chance(good, rec(runs_off_bat=6)) < FL.catch_chance(good, rec()))
+    check("a direct hit is riskier than throwing to the keeper",
+          FL.run_out_chance(poor, rec(), "direct") < FL.run_out_chance(poor, rec(), "keeper"))
+    check("chances stay probabilities",
+          all(0.0 < FL.catch_chance(p, rec(), a) < 1.0
+              for p in (good, poor) for a in FL.CATCH_ACTIONS))
+
+    # resolution and stat credit
+    random.seed(5)
+    held = [FL.resolve("catch", good, rec(), "steady")["success"] for _ in range(200)]
+    dropped = [FL.resolve("catch", poor, rec(), "dive")["success"] for _ in range(200)]
+    check("an elite fielder holds most chances", sum(held) > 140, f"{sum(held)}/200")
+    check("a poor fielder diving spills plenty", sum(dropped) < 150, f"{sum(dropped)}/200")
+
+    career = CM.new_career("f1", "Fielder", "pace", "standard")
+    FL.credit(career, {"kind": "catch", "success": True})
+    FL.credit(career, {"kind": "catch", "success": False})
+    FL.credit(career, {"kind": "run_out", "success": True})
+    fld = career["stats"]["field"]
+    check("catches, drops and run-outs are all recorded",
+          fld["catches"] == 1 and fld["drops"] == 1 and fld["run_outs"] == 1, str(fld))
+
+    # fielding ratings ride on the engine player without the engine caring
+    eng = CM.career_to_engine(career)
+    FL.attach_ratings(eng, career)
+    check("fielding ratings attach to the engine player",
+          eng.get("catch_rating") and eng.get("throw_rating"))
+    check("the engine player still has only the keys the engine reads",
+          {"name", "bat", "bowl", "role", "archetype"} <= set(eng))
+
+
 def main():
     random.seed(42)
     part1()
@@ -1391,6 +1767,10 @@ def main():
     part9_drs()
     asyncio.run(part9b_drs_live())
     part10_condition()
+    part11_season()
+    part12_economy()
+    part13_attributes()
+    part14_fielding()
     if os.environ.get("STRESS", "1") == "1":
         asyncio.run(part5_stress(int(os.environ.get("STRESS_N", "8"))))
 

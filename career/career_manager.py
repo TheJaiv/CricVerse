@@ -20,12 +20,16 @@ import datetime
 from threading import Thread
 
 from core.subscription_manager import _get_db
+from career import economy as _EC
+from career import attributes as _AT
 
 CAREER_CACHE = {}   # user_id(str) -> career dict
 
-# Four upgradeable attributes (pace/spin merged into one "bowling" stat - your
-# chosen bowling type decides HOW you bowl, this is HOW WELL).
-ATTRS = ("power", "control", "bowling", "stamina")
+# The attribute tree lives in career/attributes.py: ten attributes across
+# batting / bowling / fielding / physical. Careers written against the old four
+# are migrated on read, so nothing needs resetting.
+ATTRS = _AT.ATTRS
+ATTR_INFO = _AT.ATTR_INFO
 
 # Bowling type -> sim engine role (all All-Rounder_* since everyone bats+bowls)
 BOWLING_TYPES = {
@@ -46,7 +50,7 @@ MINDSETS = {
 
 # Rookie starts at a clean OVR 60 (normalised exactly at creation) - a raw prospect
 # below the sim's pro floor, with a long climb through the tiers to the 90s legends.
-BASE_ATTRS = {"power": 58, "control": 62, "bowling": 56, "stamina": 60}
+BASE_ATTRS = dict(_AT.BASE_ATTRS)
 BASE_OVR = 60
 
 # Tiers spread across the full 60->99 career range.
@@ -79,14 +83,23 @@ def _clamp(v, lo=0, hi=99):
 
 
 def bat_skill(a):
-    return _clamp(0.45 * a["control"] + 0.35 * a["power"] + 0.20 * a["stamina"])
+    return _AT.bat_skill(a)
 
 
 def bowl_skill(a):
-    return _clamp(0.55 * a["bowling"] + 0.25 * a["control"] + 0.20 * a["stamina"])
+    return _AT.bowl_skill(a)
+
+
+def field_skill(a):
+    """Career-side only: fielding never reaches the simulation engine."""
+    return _AT.field_skill(a)
 
 
 def compute_ovr(career: dict) -> int:
+    # NOTE: career/economy.py proposes a primary-weighted blend (0.72 strong /
+    # 0.28 weak) so specialists stop being taxed for their weak suit. It is NOT
+    # wired in - changing this moves every existing career's OVR and tier, so it
+    # belongs with the deferred economy revamp, not on its own.
     a = career["attributes"]
     return round(0.55 * bat_skill(a) + 0.45 * bowl_skill(a))
 
@@ -126,7 +139,10 @@ def upgrade_cost(v: int) -> int:
     """Coin cost to raise an attribute from v to v+1 - EXPONENTIAL: every point is
     dearer than the last, so the higher tiers get punishingly hard (you can't sprint
     to 95). Each +1 costs ~16% more than the one before:
-      v60≈28  v68≈92  v77≈365  v85≈1146  v90≈2403  v95≈5045  v98≈7876  v99≈9136."""
+      v60≈28  v68≈92  v77≈365  v85≈1146  v90≈2403  v95≈5045  v98≈7876  v99≈9136.
+
+    A re-solved curve lives in career/economy.py but is deliberately not wired -
+    see the note on compute_ovr."""
     return int(round(28 * (1.16 ** (max(0, v - 60)))))
 
 
@@ -135,7 +151,9 @@ def _blank_stats():
         "bat": {"matches": 0, "innings": 0, "not_outs": 0, "runs": 0, "hs": 0,
                 "balls": 0, "fours": 0, "sixes": 0, "fifties": 0, "hundreds": 0, "outs": 0},
         "bowl": {"balls": 0, "runs": 0, "wickets": 0, "maidens": 0, "best_w": 0, "best_r": 999},
-        "field": {"catches": 0, "stumpings": 0},
+        # catches/run-outs are filled by career mode's own fielding system - the
+        # engine has never tracked them, which is why they sat at 0 forever.
+        "field": {"catches": 0, "stumpings": 0, "run_outs": 0, "drops": 0},
     }
 
 
@@ -147,9 +165,11 @@ def _normalize_to_ovr(career: dict, target: int = BASE_OVR):
         for k in ATTRS:
             career["attributes"][k] = _clamp(career["attributes"][k] * f, 1, 99)
     guard = 0
-    while compute_ovr(career) != target and guard < 30:
+    while compute_ovr(career) != target and guard < 40:
         a = career["attributes"]
-        a["control"] = _clamp(a["control"] + (1 if compute_ovr(career) < target else -1), 1, 99)
+        # Timing is the single biggest contributor to the batting rating, so it is
+        # the cleanest dial for pinning a new career to exactly OVR 60.
+        a["timing"] = _clamp(a["timing"] + (1 if compute_ovr(career) < target else -1), 1, 99)
         guard += 1
     career["ovr"] = compute_ovr(career)
 
@@ -188,7 +208,7 @@ def load_careers():
         col = _get_db()["careers"]
         CAREER_CACHE.clear()
         for doc in col.find({}):
-            CAREER_CACHE[doc["_id"]] = doc
+            CAREER_CACHE[doc["_id"]] = migrate(doc)
         print(f"Loaded {len(CAREER_CACHE)} career(s) from MongoDB!")
     except Exception as e:
         print(f"Career load error: {e}")
@@ -199,21 +219,44 @@ def all_careers():
     try:
         docs = list(_get_db()["careers"].find({}))
         for d in docs:
-            CAREER_CACHE[d["_id"]] = d
+            CAREER_CACHE[d["_id"]] = migrate(d)
         return docs
     except Exception as e:
         print(f"all_careers error: {e}")
         return list(CAREER_CACHE.values())
 
 
+def migrate(career):
+    """Bring a career document up to the current shape.
+
+    Runs on every read, so a career written against the old four-attribute model
+    keeps working without anyone having to reset anything. Cheap and idempotent.
+    """
+    if not career:
+        return career
+    was_legacy = _AT.migrate(career)
+    if was_legacy and career.get("ovr"):
+        # Widening the tree changes how bat/bowl are derived, which would move an
+        # existing player's OVR by several points through no fault of theirs.
+        # Re-normalise onto the rating they already had: nobody gains or loses
+        # progress on the migration, they just gain places to spend coins.
+        _normalize_to_ovr(career, int(career["ovr"]))
+        career["tier"] = tier_for_ovr(career["ovr"])
+    st = career.setdefault("stats", _blank_stats())
+    fld = st.setdefault("field", {})
+    for k in ("catches", "stumpings", "run_outs", "drops"):
+        fld.setdefault(k, 0)
+    return career
+
+
 def get_career(user_id):
     uid = str(user_id)
     if uid in CAREER_CACHE:
-        return CAREER_CACHE[uid]
+        return migrate(CAREER_CACHE[uid])
     try:
         doc = _get_db()["careers"].find_one({"_id": uid})
         if doc:
-            CAREER_CACHE[uid] = doc
+            CAREER_CACHE[uid] = migrate(doc)
             return doc
     except Exception as e:
         print(f"get_career error: {e}")
@@ -264,8 +307,12 @@ def create_career(user_id, username, bowling_type, mindset):
 def upgrade_attribute(career: dict, attr: str, want: int = 1):
     """Spend coins to raise `attr` by up to `want` points (as many as affordable).
     Returns (bought:int, spent:int, msg:str)."""
+    # Accept abbreviations and the old `control` name, so both the command and any
+    # caller can use whatever the player typed.
+    attr = _AT.resolve(attr) or attr
     if attr not in ATTRS:
         return 0, 0, f"Unknown attribute. Choose: {', '.join(ATTRS)}."
+    migrate(career)
     bought = spent = 0
     while bought < want:
         v = career["attributes"][attr]

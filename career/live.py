@@ -31,6 +31,10 @@ from career.ui import motion as MO
 # not forced to sit out a real rate-limit window per delivery.
 EDIT_INTERVAL = float(os.environ.get("CAREER_GUI_EDIT_INTERVAL", "1.5"))
 
+# Pause after a bot-resolved ball's card so the feed can be followed. Without it
+# several deliveries land at once and the score appears to jump.
+AI_BALL_DELAY = float(os.environ.get("CAREER_AI_BALL_DELAY", "1.3"))
+
 # Replay budget per match, and the minimum gap between two clips. A six-fest
 # would otherwise bury the card under GIFs.
 MAX_GIFS_PER_MATCH = 25
@@ -45,6 +49,7 @@ class Session:
         self.message = None
         self.innings_num = None
         self.card_over = None       # (innings, over) the live card belongs to
+        self.card_ball = None       # (innings, ball_index) the live card belongs to
         self.last_edit = 0.0
         self.gifs_sent = 0
         self.last_gif_ball = (0, -99)   # (innings, ball_index) of the last replay
@@ -150,7 +155,18 @@ def session_for(channel):
     s = _SESSIONS.get(channel.id)
     if s is None:
         s = _SESSIONS[channel.id] = Session(channel)
+    elif s.channel is not channel:
+        # A new match object in the same channel: the stored message belongs to
+        # the finished match, and editing it would put the new prompt somewhere
+        # nobody is looking - which softlocks the new match, because the buttons
+        # never appear where the players are. Start clean instead.
+        s = _SESSIONS[channel.id] = Session(channel)
     return s
+
+
+def reset(channel_id):
+    """Drop any session for a channel so the next match starts clean."""
+    _SESSIONS.pop(channel_id, None)
 
 
 def end(channel_id):
@@ -198,16 +214,30 @@ def result_line(rec):
     return "  ·  ".join(bits)
 
 
+def _card_embed(prompt):
+    """Wrap the card so the instruction sits BELOW the image.
+
+    Discord renders a message's `content` above its attachment, which put "the
+    bowler bowled a Knuckle" above the graphic. An embed footer renders under the
+    embed image, so the card reads first and the instruction follows it.
+    """
+    e = discord.Embed(color=0x0E1220)
+    e.set_image(url="attachment://live.png")
+    if prompt:
+        e.set_footer(text=prompt)
+    return e
+
+
 async def turn(channel, match, prompt, view=None, career=None):
-    """Post one turn: the ball that just happened, then the card + the prompt.
+    """Post or update the card for the CURRENT ball.
 
-    The card is DELETED and re-posted rather than edited in place. Editing kept
-    the graphic pinned wherever it was first sent, so after a few balls of
-    prompts it had scrolled far above the action and players were looking at a
-    scoreboard they had to hunt for. Re-posting keeps it as the newest message,
-    directly above the buttons the player is about to press.
+    One image per ball. A ball can need two prompts (the bowler picks a variation,
+    then the batter picks a shot) and posting a card for each produced two images
+    per delivery. The second prompt of the same ball therefore EDITS the card in
+    place; only a new ball posts a new image. Ball identity comes from the ball
+    feed, so this needs no extra bookkeeping from the callers.
 
-    Returns the new message (views that need `.message` can hold onto it).
+    Returns the message (views that need `.message` can hold onto it).
     """
     s = session_for(channel)
 
@@ -225,19 +255,26 @@ async def turn(channel, match, prompt, view=None, career=None):
     if not s.failed:
         await s.highlight(match)
 
-    # 3. a fresh card for this ball
+    # 3. the card for this ball - edited if this is a second prompt for the SAME
+    #    ball, posted fresh when the ball has changed
+    ball_key = s._key(rec) if rec else None
+    same_ball = s.message is not None and s.card_ball == ball_key
     old = s.message
-    old_over = s.card_over
-    state = None
     msg = None
     if not s.failed:
         try:
             state = SNAP.build_broadcast_state(match, career)
+            state["prompt"] = prompt
             buf = await asyncio.to_thread(BC.render_live_card, state)
-            msg = await channel.send(content=prompt,
-                                     file=discord.File(buf, filename="live.png"),
-                                     view=view)
+            file = discord.File(buf, filename="live.png")
+            embed = _card_embed(prompt)
+            if same_ball:
+                await old.edit(attachments=[file], embed=embed, view=view)
+                msg = old
+            else:
+                msg = await channel.send(embed=embed, file=file, view=view)
             s.message = msg
+            s.card_ball = ball_key
             s.card_over = (match.current_innings_num, state.get("over_no", 0))
             s.innings_num = match.current_innings_num
             s.last_edit = time.time()
@@ -251,17 +288,55 @@ async def turn(channel, match, prompt, view=None, career=None):
         s.message = msg
 
     # A CARD PER BALL, all kept.
-    # Every ball posts its own image and none are deleted, so the channel reads as
-    # a continuous run of graphics and scrolling back through them IS the match
-    # history - which is what was lost when a single card was edited in place.
-    # Only the previous message's BUTTONS are stripped, so old cards can't be
-    # clicked and the only live controls are the ones on the newest image.
-    if old is not None and old.id != msg.id:
+    # Nothing is deleted, so scrolling back through the images IS the match
+    # history - which is what was lost when a single card was edited in place all
+    # match. Only the superseded message's BUTTONS are stripped, so old cards
+    # cannot be clicked and the only live controls are on the newest image.
+    if old is not None and msg is not None and old.id != msg.id:
         try:
             await old.edit(view=None)
         except Exception:
             pass
     return msg
+
+
+async def ball_card(channel, match, career=None, delay=None):
+    """Post the card for a ball that resolved without a human prompt.
+
+    When bots are batting or bowling, deliveries resolve back to back and no
+    prompt is sent, so the next human prompt used to jump the score forward
+    several balls at once. This gives every ball its own image, paced so it can
+    be read.
+    """
+    s = session_for(channel)
+    if s.failed:
+        return None
+    rec = getattr(match, "last_ball", None)
+    key = s._key(rec) if rec else None
+    if key is not None and key == s.card_ball:
+        return None                      # already shown (a human prompt drew it)
+    await s.highlight(match)
+    try:
+        state = SNAP.build_broadcast_state(match, career)
+        buf = await asyncio.to_thread(BC.render_live_card, state)
+        old = s.message
+        msg = await channel.send(embed=_card_embed(None),
+                                 file=discord.File(buf, filename="live.png"))
+        s.message = msg
+        s.card_ball = key
+        s.card_over = (match.current_innings_num, state.get("over_no", 0))
+        s.last_edit = time.time()
+        if old is not None:
+            try:
+                await old.edit(view=None)
+            except Exception:
+                pass
+        await asyncio.sleep(AI_BALL_DELAY if delay is None else delay)
+        return msg
+    except Exception as e:
+        print(f"career ball card failed: {e}")
+        s.failed = True
+        return None
 
 
 async def push(channel, match, career=None, force=False):
