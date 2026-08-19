@@ -37,7 +37,7 @@ from engine.test_image import (
     generate_test_summary_image as _ti_summary,
     generate_test_scorecard_image as _ti_scorecard,
 )
-from league.tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_ccodi_round_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, revert_tournament_match, rebuild_tournament_stats, repair_tournament_schedule, _tm_next_mid, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS, SquadConfirmView, build_squad_confirm_text, build_squad_confirm_embed, match_order_gate, MATCH_ORDER_LABELS, build_tournament_summary_embeds, generate_round_robin_schedule, generate_ipl_schedule, ipl_try_advance, build_standings_message, compress_logo_bytes, sanitize_stored_logos, rename_team
+from league.tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_ccodi_round_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, revert_tournament_match, rebuild_tournament_stats, repair_tournament_schedule, _tm_next_mid, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS, SquadConfirmView, build_squad_confirm_text, build_squad_confirm_embed, match_order_gate, MATCH_ORDER_LABELS, build_tournament_summary_embeds, generate_round_robin_schedule, generate_ipl_schedule, ipl_try_advance, build_standings_message, compress_logo_bytes, sanitize_stored_logos, rename_team, EVENT_THEMES, event_theme, event_theme_key, theme_logo_file, generate_theme_points_table
 from league.custom_tournament import (
     CustomSetupView, custom_try_advance, custom_start_error, custom_generate_first_stage,
     build_custom_standings_message, custom_config_summary_lines, custom_repair_schedule,
@@ -2617,15 +2617,20 @@ def generate_t20wc_scorecard(data: dict) -> io.BytesIO:
     return buf
 
 
-def _acl_font(size):
+def _tpl_font(size):
+    """Bold TrueType at `size`, shared by every scorecard template renderer."""
     for p in ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",      # Linux deploy host
               "/System/Library/Fonts/Supplemental/Arial Bold.ttf",         # macOS
-              "C:/Windows/Fonts/arialbd.ttf"):                             # Windows
+              "C:/Windows/Fonts/arialbd.ttf",                              # Windows
+              "assets/fonts/DejaVuSans-Bold.ttf"):                         # bundled fallback
         try:
             return ImageFont.truetype(p, size)
         except Exception:
             continue
     return ImageFont.load_default()
+
+
+_acl_font = _tpl_font   # the ACL renderer's original name
 
 
 def generate_acl_match_summary(data: dict) -> io.BytesIO:
@@ -2807,13 +2812,162 @@ def generate_acl_match_summary(data: dict) -> io.BytesIO:
     return buf
 
 
+def generate_ica_match_summary(data: dict) -> io.BytesIO:
+    """Render the ICA 'MATCH SUMMARY' card by filling assets/ICA_scorecard.png with live
+    match data. Coordinates pixel-scanned from the template (1508×1043):
+      • two team bands (y 256-395 / 578-722): logo cap x51-179, name + overs on the navy,
+        score in the gold wedge (its left edge slopes, so the score sits at x≈1338)
+      • two white panels (y 396-576 / 722-906) split by the baked divider at x≈962:
+        top-3 batters on the left, top-3 bowlers on the right
+      • MATCH No box: x1161-1463, label ends at x1310, so the id goes at x≈1388
+    The template has no result strip, so the canvas is extended by RESULT_BAND px and the
+    result + POTM bar is drawn there - none of the artwork is painted over."""
+    NAVY, WHITE, GOLD = (10, 22, 60), (255, 255, 255), (245, 199, 74)
+    BG, LINE = (0, 7, 25), (224, 226, 234)
+    RESULT_BAND = 112
+
+    tpl = Image.open("assets/ICA_scorecard.png").convert("RGBA")
+    W, H = tpl.size
+    img = Image.new("RGBA", (W, H + RESULT_BAND), BG + (255,))
+    img.paste(tpl, (0, 0), tpl)
+    d = ImageDraw.Draw(img)
+
+    f_name, f_overs, f_score = _tpl_font(46), _tpl_font(26), _tpl_font(54)
+    f_bname, f_runs, f_balls = _tpl_font(28), _tpl_font(30), _tpl_font(22)
+
+    def tw(t, f): return d.textbbox((0, 0), str(t), font=f)[2]
+    def th(f):    bb = d.textbbox((0, 0), "Ag", f); return bb[3] - bb[1], bb[1]
+    def fit(s, max_w, base, floor=17):
+        sz = base; f = _tpl_font(sz)
+        while tw(s, f) > max_w and sz > floor:
+            sz -= 1; f = _tpl_font(sz)
+        return f
+    def text(x, y, s, f, anchor="lm", color=WHITE):
+        s = str(s); w = tw(s, f); h, off = th(f)
+        dx = x - w / 2 if anchor[0] == "m" else (x - w if anchor[0] == "r" else x)
+        d.text((dx, y - h / 2 - off), s, fill=color, font=f)
+    def _hex(c):
+        try:
+            c = (c or "").lstrip("#"); return tuple(int(c[i:i+2], 16) for i in (0, 2, 4))
+        except Exception:
+            return (107, 114, 128)
+    def _readable(rgb):
+        """Team colours are picked for Discord embeds, so some are too pale to read on
+        white - darken anything above the luminance the panel can carry."""
+        lum = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]
+        if lum <= 135:
+            return rgb
+        k = 135 / max(lum, 1)
+        return tuple(int(c * k) for c in rgb)
+    def paste_logo(emoji, cx, cy, size, fb):
+        logo = _fetch_emoji_img(emoji, size) if emoji else None
+        if logo is None:
+            logo = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+            ImageDraw.Draw(logo).ellipse([2, 2, size - 2, size - 2], fill=fb)
+        img.paste(logo, (int(cx - size / 2), int(cy - size / 2)), logo)
+    def _overs(b): return str(b // 6) if b % 6 == 0 else f"{b//6}.{b%6}"
+    def _score(t):
+        if t.get("yet_to_bat"): return "—"
+        w = t.get("wickets", 0)
+        return str(t.get("runs", 0)) if w >= 10 else f"{t.get('runs', 0)}-{w}"
+    def ip_badge(x, y, fsize=18):
+        """Small orange 'IP' badge marking an impact-sub player; returns the width drawn."""
+        f = _tpl_font(fsize)
+        bw_px, bh_px = tw("IP", f) + 12, th(f)[0] + 10
+        d.rounded_rectangle([(x, y - bh_px / 2), (x + bw_px, y + bh_px / 2)], radius=4, fill=(196, 75, 26))
+        text(x + 6, y, "IP", f, "lm", WHITE)
+        return bw_px + 8
+
+    # Match number into the template's "MATCH No :" box.
+    _mid = str(data.get("match_id") or "").strip()
+    if _mid and _mid != "?":
+        text(1388, 164, _mid, fit(_mid, 130, 32), "mm", GOLD)
+
+    rows = {
+        "t1": dict(band_y=325, logo_cy=324, panel=(396, 576), wedge_x=1338, other="t2"),
+        "t2": dict(band_y=650, logo_cy=646, panel=(722, 906), wedge_x=1338, other="t1"),
+    }
+    NAME_X, OVERS_R, LOGO_SZ = 200, 1150, 96
+    BAT_NAME_X, BAT_RUNS_X, BAT_BALLS_R = 70, 790, 935
+    BOWL_NAME_X, BOWL_FIG_X, BOWL_OV_R = 1000, 1285, 1460
+
+    for key in ("t1", "t2"):
+        t = data.get(key) or {}
+        cfg = rows[key]
+        col = _readable(_hex(t.get("color")))
+        bowl_col = _readable(_hex((data.get(cfg["other"]) or {}).get("color")))
+        paste_logo(t.get("logo_emoji"), 115, cfg["logo_cy"], LOGO_SZ, _hex(t.get("color")))
+
+        nm = (t.get("name") or "")[:30]
+        _toss_on = data.get("toss_team") and data["toss_team"] == t.get("name")
+        _nm_max_w = (OVERS_R - 170) - NAME_X - (100 if _toss_on else 0)
+        f_nm = fit(nm, _nm_max_w, 46)
+        text(NAME_X, cfg["band_y"], nm, f_nm, "lm", WHITE)
+        if _toss_on:
+            text(NAME_X + tw(nm, f_nm) + 20, cfg["band_y"], "TOSS", _tpl_font(24), "lm", GOLD)
+        text(OVERS_R, cfg["band_y"], f"{_overs(t.get('balls', 0))} OVERS", f_overs, "rm", WHITE)
+        text(cfg["wedge_x"], cfg["band_y"], _score(t), f_score, "mm", NAVY)
+
+        # Panel: 3 evenly-spaced rows, with the same divider grey as the baked centre line.
+        y0, y1 = cfg["panel"]
+        rh = (y1 - y0) / 3
+        for i in (1, 2):
+            gy = y0 + rh * i
+            d.line([(60, gy), (935, gy)], fill=LINE, width=2)
+            d.line([(990, gy), (1460, gy)], fill=LINE, width=2)
+        rows_y = [int(y0 + rh / 2 + rh * i) for i in range(3)]
+
+        ip_name = (t.get("impact_sub") or "").upper()
+        for i, b in enumerate((t.get("batters") or [])[:3]):
+            y = rows_y[i]
+            nm = b["name"].upper()
+            bf = fit(nm, BAT_RUNS_X - BAT_NAME_X - 60, 28)
+            text(BAT_NAME_X, y, nm, bf, "lm", col)
+            if ip_name and nm == ip_name:
+                ip_badge(BAT_NAME_X + tw(nm, bf) + 10, y)
+            text(BAT_RUNS_X, y, f"{b['runs']}{'*' if b.get('not_out') else ''}", f_runs, "lm", NAVY)
+            text(BAT_BALLS_R, y, f"({b['balls']})", f_balls, "rm", (120, 126, 145))
+
+        for i, bw in enumerate((t.get("bowlers") or [])[:3]):
+            y = rows_y[i]
+            nm = bw["name"].upper()
+            wf = fit(nm, BOWL_FIG_X - BOWL_NAME_X - 30, 28)
+            text(BOWL_NAME_X, y, nm, wf, "lm", bowl_col)
+            if ip_name and nm == ip_name:
+                ip_badge(BOWL_NAME_X + tw(nm, wf) + 10, y)
+            text(BOWL_FIG_X, y, f"{bw['wickets']}-{bw['runs']}", f_runs, "lm", NAVY)
+            text(BOWL_OV_R, y, f"({str(bw.get('overs', '')).split('.')[0]})", f_balls, "rm", (120, 126, 145))
+
+    # Result bar in the added band - the template itself ends at the sponsor strip.
+    bar_top, bar_bot = H + 10, H + RESULT_BAND - 10
+    d.rounded_rectangle([44, bar_top, W - 44, bar_bot], radius=16,
+                        fill=(8, 20, 58), outline=(212, 164, 60), width=3)
+    res = (data.get("result_str") or "").upper()
+    if res:
+        text(W / 2, bar_top + 34, res[:56], fit(res[:56], W - 160, 40, 20), "mm", GOLD)
+    sub = " • ".join(x for x in (
+        (data.get("round_label") or "").upper(),
+        (data.get("stadium") or "").upper(),
+        f"POTM — {str(data['potm']).upper()}" if data.get("potm") else "",
+    ) if x)
+    if sub:
+        text(W / 2, bar_top + 72, sub[:80], fit(sub[:80], W - 160, 24, 14), "mm", WHITE)
+
+    out = Image.new("RGB", img.size, BG)
+    out.paste(img, mask=img.split()[3])
+    buf = io.BytesIO(); out.save(buf, format="PNG"); buf.seek(0)
+    return buf
+
+
 def generate_scorecard_from_data(data: dict) -> io.BytesIO:
     """Generate a scorecard image from pre-serialized match display data."""
-    if data.get("tournament_type") == "acl":
+    # Themed template packs first: an explicit theme wins, else the tournament type's own.
+    _theme = event_theme_key(data.get("theme"), data.get("tournament_type"))
+    if _theme:
         try:
-            return generate_acl_match_summary(data)
+            return (generate_ica_match_summary if _theme == "ica" else generate_acl_match_summary)(data)
         except Exception as e:
-            print(f"ACL match-summary render failed, using default scorecard: {e}")
+            print(f"{_theme.upper()} match-summary render failed, using default scorecard: {e}")
     if data.get("tournament_type") == "t20_world_cup" or data.get("theme") == "T20 World Cup":
         try:
             return generate_t20wc_scorecard(data)
@@ -5118,6 +5272,23 @@ def _overcard_batter_id(match):
             return cand
     return match.p1_id
 
+_THEME_LOGO_CACHE = {}
+
+
+def _theme_logo_bytes(path, size=256):
+    """Thumbnail-sized copy of a theme logo, rendered once and reused. The over hub
+    posts it every over, and the source art is full resolution (the ICA logo alone is
+    1254px / 2.5 MB), so uploading the file as-is would burn bandwidth each time."""
+    key = (path, size)
+    if key not in _THEME_LOGO_CACHE:
+        im = Image.open(path).convert("RGBA")
+        if max(im.size) > size:
+            im.thumbnail((size, size), Image.LANCZOS)
+        _b = io.BytesIO(); im.save(_b, format="PNG")
+        _THEME_LOGO_CACHE[key] = _b.getvalue()
+    return io.BytesIO(_THEME_LOGO_CACHE[key])
+
+
 async def prompt_over_pacing_hub(interaction, match: CricketMatch, open_control=False):
     view = OverControlHubView(match, open_control=open_control)
     embed = render_embed_scoreboard(match)
@@ -5139,16 +5310,15 @@ async def prompt_over_pacing_hub(interaction, match: CricketMatch, open_control=
     _tid = getattr(match, "tournament_server_id", None)
     if _tid:
         _tv = get_server_tournament(_tid)
-        _tt = _tv.get("tournament_type") if _tv else None
-        if _tt == "t20_world_cup":
+        _logo_file = theme_logo_file(_tv)
+        if not _logo_file and _tv and _tv.get("tournament_type") == "t20_world_cup":
             _logo_file = "assets/t20_logo.png"
-        elif _tt == "acl":
-            _logo_file = "assets/acl_logo.png"
 
     if _logo_file:
         _fname = os.path.basename(_logo_file)
         embed.set_thumbnail(url=f"attachment://{_fname}")
-        sent = await channel.send(msg, embed=embed, view=view, file=discord.File(_logo_file))
+        sent = await channel.send(msg, embed=embed, view=view,
+                                  file=discord.File(_theme_logo_bytes(_logo_file), filename=_fname))
     else:
         sent = await channel.send(msg, embed=embed, view=view)
 
@@ -17194,19 +17364,24 @@ class PrefixCog(commands.Cog):
         save_tournament_data_to_bin()
         await ctx.send(f"🗑️ Tournament deleted ({removed} removed).")
 
-    @tournament.command(name="set_theme", help="[ADMIN] Set the scorecard theme.\nUsage: tournament set_theme <Default|Crimson Cricket>")
+    @tournament.command(name="set_theme", help="[ADMIN] Set the tournament theme - scorecard style, and for ACL/ICA the fixtures, points table and over-hub logo templates too.\nUsage: tournament set_theme <Default|Crimson Cricket|T20 World Cup|ACL|ICA>")
     async def t_set_theme(self, ctx, *, theme_name: str):
         if not ctx.author.guild_permissions.administrator and ctx.author.id != ADMIN_DISCORD_ID:
             return await ctx.send("❌ Server Admins only.")
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney: return await ctx.send("❌ No tournament exists.")
-        valid = ["Default", "Crimson Cricket"]
+        # "Default"/"Crimson Cricket"/"T20 World Cup" only restyle the scorecard; the
+        # EVENT_THEMES names swap the whole template pack (fixtures, points table,
+        # match summary, over-hub logo) onto ANY tournament type.
+        valid = ["Default", "Crimson Cricket", "T20 World Cup"] + [v["label"] for v in EVENT_THEMES.values()]
         match_theme = next((v for v in valid if v.lower() == theme_name.lower()), None)
         if not match_theme: return await ctx.send(f"❌ Invalid theme. Options: {', '.join(valid)}")
         tourney["theme"] = match_theme
         save_tournament(tourney)
-        await ctx.send(f"✅ Theme set to `{match_theme}`.")
+        _pack = event_theme_key(match_theme)
+        _extra = " — fixtures, points table, match summary and the over-hub logo now use this pack." if _pack else ""
+        await ctx.send(f"✅ Theme set to `{match_theme}`.{_extra}")
 
     @tournament.command(name="set_home_pitch", aliases=["sethome", "home_pitch"], help="[MANAGER] Set a team's home pitch (used by Home-Pitch conditions mode).\nUsage: tournament set_home_pitch \"<team>\" <pitch>")
     async def t_set_home_pitch(self, ctx, team_name: str, *, pitch: str):
@@ -19046,13 +19221,14 @@ class PrefixCog(commands.Cog):
             embed.set_footer(text="-> marks teams that advance to the next stage")
             return await ctx.send(embed=embed)
 
-        # ACL: bespoke 14-team points table (Shield #1 + Top-6 playoff highlights)
-        if tourney.get("tournament_type") == "acl":
+        # Themed points table (ACL: Shield #1 + Top-6 playoff highlights · ICA: top 10)
+        _theme = event_theme(tourney)
+        if _theme:
             try:
-                buf = generate_acl_points_table(tourney)
-                return await ctx.send(file=discord.File(fp=buf, filename="acl_points_table.png"))
+                buf = generate_theme_points_table(tourney)
+                return await ctx.send(file=discord.File(fp=buf, filename=f"{_theme}_points_table.png"))
             except Exception as e:
-                print(f"ACL points table failed, using default: {e}")
+                print(f"{_theme.upper()} points table failed, using default: {e}")
 
         # Custom: per-stage/group text tables with the configured qualifying cutoffs.
         if tourney.get("tournament_type") == "custom":

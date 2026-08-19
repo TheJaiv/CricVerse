@@ -981,15 +981,22 @@ def build_standings_message(tourney):
     return embed
 
 
-def _acl_pt_font(size):
+def _tpl_font(size):
+    """Bold TrueType at `size` - first path that loads across the deploy host, macOS
+    and Windows, with the repo's bundled DejaVu as the last resort before the PIL
+    bitmap default (which ignores `size`)."""
     for p in ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
               "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-              "C:/Windows/Fonts/arialbd.ttf"):
+              "C:/Windows/Fonts/arialbd.ttf",
+              "assets/fonts/DejaVuSans-Bold.ttf"):
         try:
             return ImageFont.truetype(p, size)
         except Exception:
             continue
     return ImageFont.load_default()
+
+
+_acl_pt_font = _tpl_font   # the ACL renderers' original name
 
 
 def generate_acl_points_table(tourney) -> io.BytesIO:
@@ -1212,9 +1219,247 @@ def generate_acl_fixtures_image(tourney, team_name) -> io.BytesIO:
     return buf
 
 
+# ─────────────────────────── Event themes (template packs) ───────────────────────────
+# A theme is a pack of image templates - fixtures, standings, match summary and the
+# over-hub logo - that a tournament wears. It is independent of tournament_type: any
+# tournament (round robin, IPL, custom, ...) can be set to any theme with
+# `cvt set_theme <name>`. Scorecard-only themes ("Default", "Crimson Cricket") have no
+# pack here; they keep restyling the generic scorecard as before.
+EVENT_THEMES = {
+    "acl": {"label": "ACL",  "logo": "assets/acl_logo.png"},
+    "ica": {"label": "ICA",  "logo": "assets/ICA_logo.png"},
+}
+# Tournament types that carry their own pack when no pack theme is set explicitly.
+_TYPE_THEME = {"acl": "acl"}
+
+
+def event_theme_key(theme=None, tournament_type=None):
+    """Theme pack key ('acl' / 'ica') for a theme name + tournament type, else None.
+    An explicit pack theme always wins; a scorecard-only theme falls through to the
+    tournament type's own pack so nothing that worked before changes."""
+    key = str(theme or "").strip().lower()
+    if key in EVENT_THEMES:
+        return key
+    return _TYPE_THEME.get(tournament_type)
+
+
+def event_theme(tourney):
+    """Theme pack key for a tournament dict, or None if it has no image pack."""
+    if not tourney:
+        return None
+    return event_theme_key(tourney.get("theme"), tourney.get("tournament_type"))
+
+
+def theme_logo_file(tourney):
+    """Path to the theme's over-hub logo, or None."""
+    key = event_theme(tourney)
+    return EVENT_THEMES[key]["logo"] if key else None
+
+
+def generate_ica_points_table(tourney) -> io.BytesIO:
+    """Fill assets/ICA_standings.png with the live standings (top 10 - the template
+    has 10 numbered rows). Coordinates pixel-scanned from the template (1536×1024):
+      • column separators x: 77 | 194 | 583 | 728 | 875 | 1018 | 1160 | 1314 | 1457
+        -> POS (numbers baked in) | TEAM | P | W | L | N/R | PTS | NRR
+      • 10 row bands between y = 326 … 931
+    N/R shows ties/no-results, which is what the league table's tie column holds."""
+    WHITE = (238, 242, 252)
+    GOLD  = (245, 199, 74)
+    ROW_BOUNDS = [326, 389, 451, 512, 572, 633, 694, 754, 813, 872, 931]
+    ROW_Y = [(ROW_BOUNDS[i] + ROW_BOUNDS[i + 1]) // 2 for i in range(10)]
+    LOGO_CX, LOGO_SZ, NAME_X = 232, 38, 272
+    P_X, W_X, L_X, NR_X, PTS_X, NRR_X = 655, 801, 946, 1089, 1237, 1385
+
+    standings = get_tournament_standings(tourney)[:10]
+    team_logos = {t["name"]: (t.get("logo_match") or t.get("logo_standings")) for t in tourney.get("teams", [])}
+
+    img = Image.open("assets/ICA_standings.png").convert("RGBA")
+    d = ImageDraw.Draw(img)
+    f_stat = _tpl_font(28)
+
+    def tw(t, f):
+        return d.textbbox((0, 0), str(t), font=f)[2]
+
+    def th(f):
+        bb = d.textbbox((0, 0), "Ag", f)
+        return bb[3] - bb[1], bb[1]
+
+    def ctext(cx, y, s, f, fill=WHITE):
+        h, off = th(f)
+        d.text((cx - tw(s, f) / 2, y - h / 2 - off), str(s), fill=fill, font=f)
+
+    def fit(s, max_w, base):
+        sz = base
+        f = _tpl_font(sz)
+        while tw(s, f) > max_w and sz > 14:
+            sz -= 1
+            f = _tpl_font(sz)
+        return f
+
+    for i, (name, st) in enumerate(standings):
+        y = ROW_Y[i]
+        logo = _fetch_emoji_img(team_logos.get(name), LOGO_SZ)
+        if logo is not None:
+            img.paste(logo, (int(LOGO_CX - LOGO_SZ / 2), int(y - LOGO_SZ / 2)), logo)
+            d = ImageDraw.Draw(img)
+        nm = name[:30].upper()
+        f_nm = fit(nm, 583 - NAME_X - 16, 30)
+        hh, off = th(f_nm)
+        d.text((NAME_X, y - hh / 2 - off), nm, fill=WHITE, font=f_nm)
+        ctext(P_X,   y, st["P"], f_stat)
+        ctext(W_X,   y, st["W"], f_stat)
+        ctext(L_X,   y, st["L"], f_stat)
+        ctext(NR_X,  y, st.get("T", 0), f_stat)
+        ctext(PTS_X, y, st["Pts"], f_stat, GOLD)
+        ctext(NRR_X, y, f"{st['NRR']:+.2f}", f_stat)
+
+    out = Image.new("RGB", img.size, (0, 7, 25))
+    out.paste(img, mask=img.split()[3])
+    buf = io.BytesIO()
+    out.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
+def generate_ica_fixtures_image(tourney, team_name) -> io.BytesIO:
+    """Fill assets/ICA_fixtures.png with one team's fixtures (up to 14 league rows).
+    Coordinates pixel-scanned from the template (1024×1536):
+      • column separators x: 30 | 137 | 316 | 393 | 549 | 650 | 761 | 880 | 993
+        -> MATCH NO. | TEAM | VS | TEAM | PITCH | WEATHER | STADIUM | STATUS
+      • 14 row bands between y = 362 … 1327; the VS badges and the status pills are
+        part of the template, so only text goes in.
+    The template bakes match numbers 1-14 into the first column, but a team's fixtures
+    carry the tournament's own match ids - so each number cell is repainted with the
+    flat cell navy before the real id is drawn."""
+    CELL_BG = (0, 9, 30)
+    WHITE   = (235, 238, 248)
+    GREEN   = (46, 204, 113)
+    RED     = (231, 76, 60)
+    GOLD    = (245, 199, 74)
+    GREY    = (150, 155, 170)
+
+    COL_MATCH, COL_T1, COL_T2 = 83, 226, 471
+    COL_PITCH, COL_WEA, COL_STAD, COL_STAT = 599, 705, 820, 936
+    W_TEAM1, W_TEAM2, W_PITCH, W_WEA, W_STAD, W_STAT = 165, 145, 92, 102, 110, 100
+    ROW_BOUNDS = [362, 433, 503, 572, 641, 710, 779, 848, 917, 986, 1055, 1123, 1190, 1259, 1327]
+    ROW_Y = [(ROW_BOUNDS[i] + ROW_BOUNDS[i + 1]) // 2 for i in range(14)]
+    NUM_BOX = (36, 131)   # x span repainted before the real match id is drawn
+
+    img = Image.open("assets/ICA_fixtures.png").convert("RGBA")
+    d = ImageDraw.Draw(img)
+
+    def tw(s, f):
+        return d.textbbox((0, 0), str(s), font=f)[2]
+
+    def th(f):
+        bb = d.textbbox((0, 0), "Ag", font=f)
+        return bb[3] - bb[1], bb[1]
+
+    def _wrap(words, f, max_w):
+        """Greedily pack words into lines each ≤max_w; None if a single word overflows."""
+        lines, cur = [], ""
+        for w in words:
+            if tw(w, f) > max_w:
+                return None
+            trial = w if not cur else cur + " " + w
+            if tw(trial, f) <= max_w:
+                cur = trial
+            else:
+                lines.append(cur); cur = w
+        if cur:
+            lines.append(cur)
+        return lines
+
+    def _draw_lines(lines, f, cx, cy, fill):
+        h, off = th(f); gap = 4; lh = h + gap
+        total = len(lines) * lh - gap
+        y0 = cy - total / 2
+        for i, ln in enumerate(lines):
+            d.text((cx - tw(ln, f) / 2, y0 + i * lh - off), ln, font=f, fill=fill)
+
+    CELL_SZ = 21   # ONE constant font size for every data cell - uniform look
+
+    def cell(cx, cy, s, max_w, fill=WHITE, max_lines=3):
+        """Centred cell value at the constant CELL_SZ, word-wrapped at the same size
+        when it doesn't fit, shrinking only as a fallback and ellipsizing as the last."""
+        s = str(s)
+        f = _tpl_font(CELL_SZ)
+        words = s.split()
+        if tw(s, f) <= max_w:
+            return _draw_lines([s], f, cx, cy, fill)
+        if len(words) > 1:
+            lines = _wrap(words, f, max_w)
+            if lines and len(lines) <= max_lines:
+                return _draw_lines(lines, f, cx, cy, fill)
+        for sz in range(CELL_SZ - 1, 12, -1):
+            f = _tpl_font(sz)
+            if tw(s, f) <= max_w:
+                return _draw_lines([s], f, cx, cy, fill)
+            if len(words) > 1:
+                lines = _wrap(words, f, max_w)
+                if lines and len(lines) <= max_lines:
+                    return _draw_lines(lines, f, cx, cy, fill)
+        f = _tpl_font(13)
+        while len(s) > 1 and tw(s + "…", f) > max_w:
+            s = s[:-1]
+        _draw_lines([s + "…"], f, cx, cy, fill)
+
+    mine = [m for m in tourney.get("schedule", [])
+            if m.get("team1") == team_name or m.get("team2") == team_name]
+    mine.sort(key=lambda m: m.get("match_id", 0))
+
+    f_num = _tpl_font(30)
+    for m, y, (y0, y1) in zip(mine[:len(ROW_Y)], ROW_Y, zip(ROW_BOUNDS, ROW_BOUNDS[1:])):
+        d.rectangle([NUM_BOX[0], y0 + 3, NUM_BOX[1], y1 - 3], fill=CELL_BG)
+        _draw_lines([str(m.get("match_id", "?"))], f_num, COL_MATCH, y, WHITE)
+        t1, t2 = m.get("team1", "TBD"), m.get("team2", "TBD")
+        # locked knockout slots store a source label instead of a resolved team
+        if m.get("status") == "locked":
+            t1 = t1 if t1 != "TBD" else (m.get("team1_src") or "TBD")
+            t2 = t2 if t2 != "TBD" else (m.get("team2_src") or "TBD")
+        cell(COL_T1, y, t1.upper(), W_TEAM1)
+        cell(COL_T2, y, t2.upper(), W_TEAM2)
+        cell(COL_PITCH, y, m.get("pitch") or "—", W_PITCH)
+        cell(COL_WEA,   y, m.get("weather") or "—", W_WEA)
+        cell(COL_STAD,  y, m.get("stadium") or "—", W_STAD)
+
+        status = m.get("status")
+        if status == "completed" and m.get("result"):
+            w = m["result"].get("winner")
+            if w == "TIE":            stat_txt, stat_col = "TIE", GOLD
+            elif w == team_name:      stat_txt, stat_col = "WON", GREEN
+            else:                     stat_txt, stat_col = "LOST", RED
+        elif status == "locked":      stat_txt, stat_col = "TBD", GREY
+        else:                         stat_txt, stat_col = "READY", GREEN
+        cell(COL_STAT, y, stat_txt, W_STAT, fill=stat_col, max_lines=1)
+
+    out = Image.new("RGB", img.size, (0, 7, 25))
+    out.paste(img, mask=img.split()[3])
+    buf = io.BytesIO()
+    out.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
+def generate_theme_fixtures_image(tourney, team_name) -> io.BytesIO:
+    """Fixtures image in whichever theme the tournament wears."""
+    key = event_theme(tourney)
+    if key == "ica":
+        return generate_ica_fixtures_image(tourney, team_name)
+    return generate_acl_fixtures_image(tourney, team_name)
+
+
+def generate_theme_points_table(tourney) -> io.BytesIO:
+    """Points table image in whichever theme the tournament wears."""
+    key = event_theme(tourney)
+    if key == "ica":
+        return generate_ica_points_table(tourney)
+    return generate_acl_points_table(tourney)
+
+
 class FixturesView(discord.ui.View):
     """Adds a button under `cv fixtures` to toggle between the text embed and the
-    ACL fixtures image. Only attached for ACL tournaments (the template is ACL)."""
+    fixtures image. Only attached when the tournament wears a theme with a template."""
     def __init__(self, tourney, team_name, *, timeout=300):
         super().__init__(timeout=timeout)
         self.tourney = tourney
@@ -1226,7 +1471,7 @@ class FixturesView(discord.ui.View):
         await interaction.response.defer()
         if not self.showing_image:
             try:
-                buf = generate_acl_fixtures_image(self.tourney, self.team_name)
+                buf = generate_theme_fixtures_image(self.tourney, self.team_name)
             except Exception as e:
                 print(f"Fixtures image render failed: {e}")
                 return await interaction.followup.send(f"⚠️ Couldn't render the fixtures image: {e}", ephemeral=True)
@@ -1244,8 +1489,9 @@ class FixturesView(discord.ui.View):
 
 
 def build_fixtures_view(tourney, team_name):
-    """Return a FixturesView for ACL tournaments, else None (no image template)."""
-    if tourney.get("tournament_type") == "acl":
+    """Return a FixturesView when the tournament's theme has a fixtures template,
+    else None (nothing to toggle to)."""
+    if event_theme(tourney):
         return FixturesView(tourney, team_name)
     return None
 
@@ -4363,13 +4609,14 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             embed.set_footer(text="-> marks teams that advance to the next stage")
             return await interaction.followup.send(embed=embed)
 
-        # ACL: bespoke 14-team points table (Shield #1 + Top-6 playoff highlights)
-        if t_type == "acl":
+        # Themed points table (ACL: Shield #1 + Top-6 playoff highlights · ICA: top 10)
+        _theme = event_theme(tourney)
+        if _theme:
             try:
-                buf = generate_acl_points_table(tourney)
-                return await interaction.followup.send(file=discord.File(fp=buf, filename="acl_points_table.png"))
+                buf = generate_theme_points_table(tourney)
+                return await interaction.followup.send(file=discord.File(fp=buf, filename=f"{_theme}_points_table.png"))
             except Exception as e:
-                print(f"ACL points table failed, using default: {e}")
+                print(f"{_theme.upper()} points table failed, using default: {e}")
             # fall through to the generic renderer below on failure
 
         # Custom: per-stage/group text tables with the configured qualifying cutoffs.
