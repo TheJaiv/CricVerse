@@ -9,26 +9,6 @@ from engine.ball_record import record_ball
 # Exponential skill scale: a 90->95 jump is worth far more than 75->80, so
 # legends dominate and rating gaps translate into a real per-ball edge.
 T20_SKILL_SCALE = 15.0
-# DSL LEAGUE-REALISM MODE (matches with tournament_type == "dsl" ONLY)
-# Real T20 gaps are odds, not certainties: an elite batter is dismissed ~3.5-4%
-# per ball (he fails to reach 15 in ~40% of innings), and a modest bowler's over
-# against a star averages ~9-10, not 20. The normal engine intentionally rigs
-# this ("legends dominate" + the T20_CONS star-protection layer) - right for
-# one-off matches, wrong for a 22-game league. DSL mode therefore:
-#   1. uses this FLATTER skill curve (bigger scale = smaller per-ball edge), and
-#   2. disables the T20_CONS consistency shield (cons forced to 0),
-# so ratings still decide averages and the season table, while single overs and
-# innings keep cricket's natural per-ball variance. NO randomness is added
-# the engine's existing dice simply stop being suppressed for stars.
-DSL_SKILL_SCALE = 26.0
-# Flat wicket trim for DSL: removing the cons shield raises everyone's dismissal
-# rate, which sank par ~20 runs (Monte Carlo). This rating-INDEPENDENT trim
-# restores most of the scoring environment without re-rigging star vs youngster.
-DSL_WKT_TRIM = 0.75
-# DSL innings run a little lower than the engine's assumed par rate; scale the
-# 2nd-innings total-based chase difficulty to DSL's own par so bat/bowl-first
-# stays ~50/50 (without this, every DSL total looks "below par" -> chaser edge).
-DSL_PAR_ADJ = 0.92
 # Base outcome weights at a neutral (edge=0) contest, and how strongly the
 # skill edge pushes them. Tuned low so the downstream phase/pitch multipliers
 # land scores in a realistic band instead of inflating to 200+.
@@ -622,13 +602,10 @@ def execute_ball_math_t20(match):
     b_stats = innings.batting_stats[striker["name"]]
     bow_stats = innings.bowling_stats[bowler["name"]]
 
-    # Rating-scaled consistency applies to EVERY match (casual + all tournaments)
-    # EXCEPT the DSL league: there the star-protection shield is what makes a 93
-    # score 20+ literally every innings, so DSL runs with cons=0 (full natural
-    # variance) and a flatter skill curve. See DSL_SKILL_SCALE note up top.
-    _is_dsl = getattr(match, "tournament_type", None) == "dsl"
-    _cons_bat  = 0.0 if _is_dsl else t20_cons(striker["bat"])
-    _cons_bowl = 0.0 if _is_dsl else t20_cons(bowler["bowl"])
+    # Rating-scaled consistency applies to EVERY match (casual + all tournaments):
+    # high-rated players are steadier, low-rated ones carry the full variance.
+    _cons_bat  = t20_cons(striker["bat"])
+    _cons_bowl = t20_cons(bowler["bowl"])
 
     # Form wobble: shrink the ±4% random form toward ±2% for high-rated players
     # (low-rated keep the full wobble). Mean-neutral; just steadies a star's rating.
@@ -833,10 +810,8 @@ def execute_ball_math_t20(match):
     # "share of control" is bat_eff / (bat_eff + bowl_eff). This is a logistic
     # response: equal ratings -> 0.5, and the gap between elite ratings matters
     # disproportionately more than the gap between poor ones.
-    # DSL league matches use the flatter DSL_SKILL_SCALE (realistic odds).
-    _scale = DSL_SKILL_SCALE if _is_dsl else T20_SKILL_SCALE
-    bat_eff  = math.exp((bat_rating  - 80.0) / _scale)
-    bowl_eff = math.exp((bowl_rating - 80.0) / _scale)
+    bat_eff  = math.exp((bat_rating  - 80.0) / T20_SKILL_SCALE)
+    bowl_eff = math.exp((bowl_rating - 80.0) / T20_SKILL_SCALE)
     dominance = bat_eff / (bat_eff + bowl_eff)   # 0..1
     edge = dominance - 0.5                          # ~[-0.45, +0.45]
     diff = edge * 100.0  # legacy scale, kept for any downstream heuristics
@@ -927,9 +902,6 @@ def execute_ball_math_t20(match):
     single_weight   = T20_BASE_SINGLE
     boundary_weight = max(1.0,  T20_BASE_BND  + edge * T20_BND_SENS)
     wicket_weight   = max(0.6,  T20_BASE_WKT  - edge * T20_WKT_SENS)
-    if _is_dsl:
-        wicket_weight *= DSL_WKT_TRIM   # flat par-restore for league-realism mode (see constant)
-    
     if b_stats.balls_faced > 45:
         wicket_weight *= (1.0 + 0.5 * _grind)   # archetype-scaled - see T20_ARCH_GRIND
 
@@ -1059,8 +1031,6 @@ def execute_ball_math_t20(match):
     _chase_attr = 1.0
     if match.current_innings_num == 2:
         _par_rate = T20_PAR_RATE_FLAT - T20_PITCH_DIFFICULTY.get(match.pitch, 0.20) * T20_PAR_RATE_SLOPE
-        if _is_dsl:
-            _par_rate *= DSL_PAR_ADJ   # judge DSL chases against DSL's own (lower) par
         _tgt = getattr(match, "target", match.innings1.total_runs + 1)
         _tgt_rate = _tgt / (match.max_balls / 6.0)
         _excess = max(-T20_TGT_EASE_CAP, min(T20_PAR_EXCESS_CAP, _tgt_rate - _par_rate))

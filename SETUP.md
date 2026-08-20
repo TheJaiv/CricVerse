@@ -130,7 +130,6 @@ None of these need Discord or a database:
 ```bash
 python3 tools/career_flow_test.py
 python3 tools/ipl_flow_test.py
-python3 tools/dsl_flow_test.py
 python3 tools/rating_league_test.py
 python3 tools/sim_harness.py        # engine calibration report (slow)
 ```

@@ -64,7 +64,7 @@ def sim_innings_instrumented(m, innings, stats):
 
 
 # 1. CHASE STRENGTH vs fixed target
-def chase_test(pitch, target, n, dsl=False):
+def chase_test(pitch, target, n):
     wins = 0
     balls_left_on_win = []
     wkts_on_win = []
@@ -72,8 +72,6 @@ def chase_test(pitch, target, n, dsl=False):
         a = build_team("A", 85, 85, noise=0)
         b = build_team("B", 85, 85, noise=0)
         m = CricketMatch(a, b, format_overs=20, pitch=pitch, weather="Clear")
-        if dsl:
-            m.tournament_type = "dsl"
         m.innings1 = InningsState(a, b)
         m.innings1.total_runs = target          # pretend team A made `target`
         m.innings2 = InningsState(b, a)

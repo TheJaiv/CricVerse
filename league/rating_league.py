@@ -373,7 +373,7 @@ def rating_board_embed(tourney):
     return e
 
 
-# ---- PLAYOFFS - top-4 eligible -> SF1 (1v4) · SF2 (2v3) -> Final (clone of DSL) ----
+# ---- PLAYOFFS - top-4 eligible -> SF1 (1v4) · SF2 (2v3) -> Final ----
 def _rating_get(tourney, round_name):
     return next((m for m in tourney.get("schedule", [])
                  if m.get("stage") in RATING_KO_STAGES and m.get("round") == round_name), None)

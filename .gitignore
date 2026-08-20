@@ -31,6 +31,7 @@ match_counts.json
 
 # global player stats live in a local json backed up via owner DMs - never in git
 data/global_stats.json
+data/global_stats.test.json
 data/global_stats.json.tmp
 
 # throwaway preview renders from local test/preview scripts

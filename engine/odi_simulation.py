@@ -7,16 +7,6 @@ from engine.ball_record import record_ball
 # Neutral 85v85 target: par ~285, ~7 wkts, ~50/50. Big rating gaps separate
 # teams decisively (≤1% upset at 14pt gap, ~0.1% at 24pt gap).
 ODI_SKILL_SCALE = 12.8
-# DSL LEAGUE-REALISM MODE (matches with tournament_type == "dsl" ONLY)
-# Mirror of the T20 engine's DSL mode, for the ODI-format Dominators Super League:
-# stars keep natural innings-to-innings variance (the consistency shield is off)
-# and rating gaps become realistic odds instead of certainties (flatter skill
-# curve). Upsets breathe; ratings still decide the season table. Non-DSL matches
-# are completely unaffected.
-DSL_ODI_SKILL_SCALE = 24.5
-# Flat wicket trim for DSL: removing the cons shield raises dismissal rates a
-# touch; this rating-independent trim restores the scoring environment.
-DSL_ODI_WKT_TRIM = 0.89
 # CHASE BALANCE
 # Innings 2 inherits innings 1's pitch wear (a real 100-over feature worth keeping),
 # but unbalanced it made batting first win ~55-58% - a toss-decided format. Real
@@ -362,11 +352,9 @@ def execute_ball_math_odi(match):
     bat_rating = striker["bat"]
     bowl_rating = bowler["bowl"]
 
-    # Rating-scaled consistency applies to every match (high-rated steadier, low-rated
-    # full variance) EXCEPT the DSL league: there the star shield is off and the skill
-    # curve is flatter, so stars can fail like humans - see DSL_ODI_SKILL_SCALE note.
-    _is_dsl = getattr(match, "tournament_type", None) == "dsl"
-    _cons_bat = 0.0 if _is_dsl else odi_cons(striker["bat"])
+    # Rating-scaled consistency applies to every match: high-rated batters are
+    # steadier innings to innings, low-rated ones carry full variance.
+    _cons_bat = odi_cons(striker["bat"])
 
     # 2.0 PITCH DETERIORATION
     # Surface roughens across the match (innings 2 inherits innings 1's wear),
@@ -536,9 +524,8 @@ def execute_ball_math_odi(match):
     # Logistic response: each rating mapped to an exponential curve, then the
     # batter's share of control = bat_eff / (bat_eff + bowl_eff). Equal ratings
     # > 0.5; gaps between elite ratings matter far more than between poor ones.
-    _scale = DSL_ODI_SKILL_SCALE if _is_dsl else ODI_SKILL_SCALE
-    bat_eff  = math.exp((bat_rating  - 80.0) / _scale)
-    bowl_eff = math.exp((bowl_rating - 80.0) / _scale)
+    bat_eff  = math.exp((bat_rating  - 80.0) / ODI_SKILL_SCALE)
+    bowl_eff = math.exp((bowl_rating - 80.0) / ODI_SKILL_SCALE)
     dominance = bat_eff / (bat_eff + bowl_eff)   # 0..1
     edge = dominance - 0.5                          # ~[-0.45, +0.45]
     diff = edge * 100.0  # legacy scale, kept for any downstream heuristics
@@ -663,30 +650,22 @@ def execute_ball_math_odi(match):
     # skill-driven baseline (not the flat ODI_BASE_WKT - that crushed an elite
     # bowler's edge by ×0.34 while leaving a weak bowler's discount untouched,
     # so a 76 could out-bowl a 93 on helpful decks). Equal ratings -> identical
-    # behavior to the old flat anchor. Mode-level flat trims (DSL, chase relief)
-    # apply AFTER compression so they scale the result without moving the anchor.
+    # behavior to the old flat anchor. The flat chase-relief trim applies AFTER
+    # compression so it scales the result without moving the anchor.
     # Mismatch restraint, TAIL-ONLY: an elite-vs-frontline contest (97v85 ->
     # anchor ~5.8) rides the skill edge in full - a 97 must FEEL like a 97
     # but a bowler-vs-TAIL mismatch (bat 40 -> anchor ~7.1) would slaughter
     # tails ~40% faster than the calibrated all-out levels (measured: Cracked
     # all-out 67->85%), so only tail anchors are capped.
-    # DSL keeps the original FLAT anchor: the league is calibrated for
-    # "rating gaps are odds, not certainties" (star P(<20) ~51%, gap ~92.5%),
-    # and the skill anchor re-rigged that by shielding dominant batters from
-    # environmental wicket inflation. Normal/casual/other tournaments get the
-    # full skill-anchored compressor.
-    if _is_dsl:
-        _wkt_anchor = ODI_BASE_WKT
-    else:
-        _wkt_anchor = wicket_weight
-        if float(striker.get("bat", 50)) < 65:
-            # The tail cap SCALES with the bowler's class: at 85-bowl it sits at
-            # the calibrated 1.22 (all-out levels untouched), but a 95+ spearhead
-            # blows through it - a 48-bat tailender must not survive an elite
-            # attack longer than an average one (measured pre-fix: 15.2 balls vs
-            # 96-attack, 11.9 vs 80 - backwards).
-            _cap = 1.22 + max(0.0, float(bowler.get("bowl", 80)) - 85.0) * 0.035
-            _wkt_anchor = min(_wkt_anchor, ODI_BASE_WKT * _cap)
+    _wkt_anchor = wicket_weight
+    if float(striker.get("bat", 50)) < 65:
+        # The tail cap SCALES with the bowler's class: at 85-bowl it sits at
+        # the calibrated 1.22 (all-out levels untouched), but a 95+ spearhead
+        # blows through it - a 48-bat tailender must not survive an elite
+        # attack longer than an average one (measured pre-fix: 15.2 balls vs
+        # 96-attack, 11.9 vs 80 - backwards).
+        _cap = 1.22 + max(0.0, float(bowler.get("bowl", 80)) - 85.0) * 0.035
+        _wkt_anchor = min(_wkt_anchor, ODI_BASE_WKT * _cap)
     
     # Pitch Extreme Modifiers (Balanced)
     if match.pitch == "Green" and "Pace" in bowler["role"]:
@@ -858,8 +837,6 @@ def execute_ball_math_odi(match):
     # collapse) comes AFTER this line and keeps its full effect.
     if wicket_weight > _wkt_anchor:
         wicket_weight = _wkt_anchor + (wicket_weight - _wkt_anchor) * ODI_WKT_COMPRESS
-    if _is_dsl:
-        wicket_weight *= DSL_ODI_WKT_TRIM   # par-restore for league-realism mode (see constant)
     if match.current_innings_num == 2:
         # toss-neutrality counterweight, proportional to how much the deck wears (see constants)
         wicket_weight *= max(0.75, 1.0 - ODI_CHASE_RELIEF_K * WEAR_SUSCEPT.get(match.pitch, 1.0))
@@ -914,9 +891,9 @@ def execute_ball_math_odi(match):
         boundary_weight *= 1.4; wicket_weight *= 0.5; dot_weight *= 0.85
 
     # BIG-SCORE BRAKE past 120 the double-hundred watch begins: fatigue,
-    # fields set for him, every bowler targeting him. Rating-independent (DSL
-    # included) - real ODI 200s are once-in-thousands rare; the engine posted a
-    # 230 inside 600 innings. Negligible run mass above 110 -> par untouched.
+    # fields set for him, every bowler targeting him. Rating-independent - real
+    # ODI 200s are once-in-thousands rare; the engine posted a 230 inside 600
+    # innings. Negligible run mass above 110 -> par untouched.
     if b_stats.runs_scored > 110:
         wicket_weight *= 1.0 + 0.05 * (b_stats.runs_scored - 110)
 

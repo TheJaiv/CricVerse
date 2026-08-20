@@ -103,7 +103,7 @@ tournament, `cvd` = draft).
 ```
 bot.py         Discord client, commands, interactive flows, image rendering
 engine/        Ball-by-ball simulation: t20, odi, test + test scorecard images
-league/        Tournaments, DSL league, rating ladder, stadiums, draft mode
+league/        Tournaments, rating ladder, stadiums, draft mode
 career/        Career mode: progression, club matches, UI views
 core/          MongoDB persistence, tiers/quotas, keep-alive server
 data/          Player database (CSV), ratings dump, curated draft pool
@@ -124,7 +124,6 @@ database connection needed:
 ```bash
 python3 tools/career_flow_test.py    # 170 checks
 python3 tools/ipl_flow_test.py       # 79 checks incl. 300 fuzzed seasons
-python3 tools/dsl_flow_test.py       # 34 checks
 python3 tools/rating_league_test.py  # 21 checks
 ```
 

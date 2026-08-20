@@ -51,9 +51,8 @@ def sim_inn(m, inn, agg=None):
             if hasattr(inn, "mystery_bowled_this_over"): inn.mystery_bowled_this_over = 0
 
 
-def full(a, b, pitch, dsl=False):
+def full(a, b, pitch):
     m = CricketMatch(a, b, format_overs=50, pitch=pitch, weather="Clear")
-    if dsl: m.tournament_type = "dsl"
     agg = {"wides": 0, "noballs": 0}
     m.innings1 = InningsState(a, b); m.current_innings = m.innings1; m.current_innings_num = 1
     sim_inn(m, m.innings1, agg)
@@ -64,8 +63,7 @@ def full(a, b, pitch, dsl=False):
 
 
 def main():
-    dsl = "dsl" in sys.argv
-    print(f"n={N}/pitch · 85v85 · Clear{' · DSL MODE' if dsl else ''}\n")
+    print(f"n={N}/pitch · 85v85 · Clear\n")
     print("━━ PAR / WICKETS / EXTRAS / SPIN-STRIKE ━━")
     print(f"{'pitch':<9}{'par':>6}{'std':>5}{'wkts':>6}{'allout':>8}{'wides':>7}{'nb':>5}"
           f"{'spin wkt%':>10}{'spin ball%':>11}")
@@ -74,7 +72,7 @@ def main():
         sw = pw = sb = pb = 0
         for _ in range(N):
             a = build_team("A", 85, 85, noise=0); b = build_team("B", 85, 85, noise=0)
-            m, agg = full(a, b, pitch, dsl)
+            m, agg = full(a, b, pitch)
             pars.append(m.innings1.total_runs); wk.append(m.innings1.wickets)
             if m.innings1.wickets >= 10: allout += 1
             wides.append(agg["wides"] / 2); nbs.append(agg["noballs"] / 2)
@@ -96,7 +94,7 @@ def main():
         tail_balls = []
         for _ in range(N):
             a = build_team("A", 85, 85, noise=0); b = build_team("B", 85, 85, noise=0)
-            m, _ = full(a, b, pitch, dsl)
+            m, _ = full(a, b, pitch)
             i1, i2 = m.innings1, m.innings2
             tb = sum(bs.balls_faced for inn in (i1, i2) for bs in inn.batting_stats.values() if _is_tail(bs.profile))
             tail_balls.append(tb)

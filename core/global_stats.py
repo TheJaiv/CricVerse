@@ -1,9 +1,18 @@
 """Global career stats for every player, split by format (t20 / odi / test / custom).
 
-Stored in a LOCAL json file (data/global_stats.json), not MongoDB, and the file is
-gitignored. Render wipes the disk on every deploy/restart, so persistence works via
-Discord instead of git: the owner gets the file DM'd on SIGTERM + every few hours
-(see bot.py), and re-uploads it with the importstats command after a restart.
+Stored in MongoDB (doc `global_stats_data` in the `main` collection) with the local
+json file (data/global_stats.json, gitignored) kept as a warm cache. Render wipes the
+disk on every deploy/restart, so Mongo is the SOURCE OF TRUTH: _load() reads Mongo
+first and only falls back to the file, and every save mirrors to Mongo on a debounced
+background thread. The owner can force a write with `cv syncstats`.
+
+Player names are dict KEYS and ~a third of them contain a dot ("R. Bose"), which is a
+hazard as Mongo field names - so the whole store goes in as ONE json string field
+("blob") rather than a name-keyed sub-document. It is read whole into memory anyway,
+so nothing is lost by not making it queryable.
+
+The DM backup (SIGTERM + the periodic loop) and importstats still work as an offline
+escape hatch, but are no longer how the stats survive a restart.
 
 Player-test matches (cv testplayer), super overs and GOAT XIs never reach the recorders.
 
@@ -20,9 +29,18 @@ import hashlib
 import json
 import os
 import threading
+import time
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-STATS_PATH = os.path.join(_REPO_ROOT, "data", "global_stats.json")
+
+# TEST ISOLATION. The flow harnesses drive real matches through bot.py's finalize path,
+# which records into this module - so without a switch they append synthetic players
+# ("BcastA", "Bot 2", ...) to the real stats. With CRICVERSE_STATS_LOCAL_ONLY=1 this
+# process touches NEITHER production store: no MongoDB at all, and the cache file moves
+# aside to global_stats.test.json. Set it in any harness that plays matches.
+LOCAL_ONLY = os.environ.get("CRICVERSE_STATS_LOCAL_ONLY") == "1"
+STATS_PATH = os.path.join(_REPO_ROOT, "data",
+                          "global_stats.test.json" if LOCAL_ONLY else "global_stats.json")
 
 FORMATS = ("t20", "odi", "test", "custom")
 _TEAM_RECORD_CAP = 10   # keep this many high + low team totals per format
@@ -32,6 +50,117 @@ _stats = None              # the v2 wrapper dict (see module docstring)
 _dirty = False             # something recorded since the last owner backup DM
 _defer_save = False        # when True, recorders aggregate in memory but skip the
                            # per-match disk write (bulk dummy runs flush() once)
+
+# ---- MongoDB persistence ----
+# The store lives in ONE document as a json string (see the module docstring for why
+# it is a blob and not a name-keyed sub-document).
+MONGO_DOC_ID = "global_stats_data"
+MONGO_COLLECTION = "main"
+_PUSH_DEBOUNCE = 2.0       # seconds; coalesces a burst of saves into a single write
+_push_lock = threading.Lock()
+_push_pending = False
+_push_thread = None
+_last_push_error = None    # surfaced by `cv syncstats status`
+
+
+def _mongo_col():
+    """The collection holding the stats doc. Reuses subscription_manager's pooled
+    client so this module never opens a second connection. Raises if MONGO_URI is
+    unset - every caller here treats that as "Mongo unavailable", not as fatal."""
+    from core.subscription_manager import _get_db
+    return _get_db()[MONGO_COLLECTION]
+
+
+def pull_from_mongo():
+    """Read the store from Mongo. Returns the migrated store, or None if the doc is
+    missing / Mongo is unreachable (the caller then falls back to the local file)."""
+    global _last_push_error
+    if LOCAL_ONLY:
+        return None
+    try:
+        doc = _mongo_col().find_one({"_id": MONGO_DOC_ID})
+    except Exception as e:
+        _last_push_error = f"load failed: {e}"
+        print(f"global_stats: Mongo load failed ({e}) - falling back to {STATS_PATH}")
+        return None
+    if not doc or not doc.get("blob"):
+        return None
+    try:
+        store = _migrate(json.loads(doc["blob"]))
+    except Exception as e:
+        _last_push_error = f"stored blob is not valid json: {e}"
+        print(f"global_stats: Mongo doc unreadable ({e}) - falling back to {STATS_PATH}")
+        return None
+    ok, msg = _validate_store(store)
+    if not ok:
+        _last_push_error = f"stored blob rejected: {msg}"
+        print(f"global_stats: Mongo doc rejected ({msg}) - falling back to {STATS_PATH}")
+        return None
+    return store
+
+
+def push_to_mongo():
+    """Write the in-memory store to Mongo NOW (synchronous). Safe from any thread -
+    it snapshots under _lock before touching the network. Returns (ok, message)."""
+    global _last_push_error
+    if LOCAL_ONLY:
+        return False, "CRICVERSE_STATS_LOCAL_ONLY=1 - refusing to write to MongoDB"
+    with _lock:
+        if _stats is None:
+            return False, "nothing loaded yet - play a match first"
+        blob = json.dumps(_stats, separators=(",", ":"))
+        n_players = len(_stats.get("players", {}))
+    try:
+        _mongo_col().replace_one(
+            {"_id": MONGO_DOC_ID},
+            {"_id": MONGO_DOC_ID, "blob": blob, "players": n_players,
+             "bytes": len(blob), "updated": int(time.time())},
+            upsert=True)
+    except Exception as e:
+        _last_push_error = str(e)
+        return False, f"Mongo write failed: {e}"
+    _last_push_error = None
+    return True, f"{n_players} players ({len(blob) / 1024:.1f} KB) written to MongoDB"
+
+
+def mongo_status():
+    """What Mongo currently holds vs what is in memory - for `cv syncstats status`."""
+    with _lock:
+        mem_players = len(_stats.get("players", {})) if _stats else 0
+    try:
+        doc = _mongo_col().find_one({"_id": MONGO_DOC_ID}, {"blob": 0})
+    except Exception as e:
+        return {"ok": False, "error": str(e), "memory_players": mem_players}
+    return {"ok": True, "memory_players": mem_players, "doc": doc,
+            "last_error": _last_push_error}
+
+
+def _push_worker():
+    """Debounced background writer: sleeps, then writes once for the whole burst.
+    Errors are printed and left for the next save (or a manual `cv syncstats`)."""
+    global _push_pending
+    while True:
+        time.sleep(_PUSH_DEBOUNCE)
+        with _push_lock:
+            if not _push_pending:
+                return
+            _push_pending = False
+        ok, msg = push_to_mongo()
+        if not ok:
+            print(f"global_stats: background Mongo push failed - {msg}")
+
+
+def _schedule_mongo_push():
+    """Mark the store dirty for Mongo and make sure a writer thread is running.
+    Never blocks the caller - the per-match save path stays as fast as the local
+    file write it already was."""
+    global _push_pending, _push_thread
+    with _push_lock:
+        _push_pending = True
+        if _push_thread is not None and _push_thread.is_alive():
+            return
+        _push_thread = threading.Thread(target=_push_worker, daemon=True)
+        _push_thread.start()
 
 
 def _blank():
@@ -70,11 +199,25 @@ def _migrate(data):
 
 
 def _load():
+    """Mongo is the source of truth; the local file is only a warm cache for when
+    Mongo is unreachable (and for exportstats). Render wipes the disk on restart, so
+    in production the Mongo read is the one that actually restores the history."""
     global _stats
     if _stats is None:
+        store = pull_from_mongo()
+        if store is not None:
+            _stats = store
+            print(f"global_stats: loaded {len(store['players'])} players from MongoDB")
+            try:
+                _save_file()   # refresh the local cache so exportstats matches Mongo
+            except OSError:
+                pass
+            return _stats
         try:
             with open(STATS_PATH, "r", encoding="utf-8") as f:
                 _stats = _migrate(json.load(f))
+            print(f"global_stats: MongoDB empty/unreachable - loaded {len(_stats['players'])} "
+                  f"players from the local file")
         except FileNotFoundError:
             _stats = _empty_store()
         except (json.JSONDecodeError, OSError) as e:
@@ -91,13 +234,21 @@ def _teams():
     return _load()["teams"]
 
 
-def _save():
+def _save_file():
     # temp file + os.replace so a crash mid-write can't corrupt the real file
     os.makedirs(os.path.dirname(STATS_PATH), exist_ok=True)
     tmp = STATS_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(_stats, f)
     os.replace(tmp, STATS_PATH)
+
+
+def _save():
+    """Persist: local file immediately (fast, and keeps exportstats working), Mongo on
+    a debounced background thread so a match never waits on the network."""
+    _save_file()
+    if not LOCAL_ONLY:
+        _schedule_mongo_push()
 
 
 def set_defer_save(on):
@@ -642,6 +793,22 @@ def import_raw(raw, mode="merge"):
         _save()
     return True, (f"merged backup into current stats - **{n_players}** players in file, "
                   f"**{new_players}** of them new, matches played since the restart kept")
+
+
+def replace_store(store):
+    """Swap the in-memory store for `store` (already migrated + validated) and refresh
+    the local cache file. Used by `cv syncstats pull` to adopt what Mongo holds -
+    deliberately does NOT push back, so a pull can never overwrite Mongo."""
+    global _stats, _dirty, _last_import_digest
+    with _lock:
+        _stats = store
+        _dirty = False
+        _last_import_digest = None   # a different store: the old merge guard is meaningless
+        try:
+            _save_file()
+        except OSError as e:
+            print(f"global_stats: local cache refresh failed after pull ({e})")
+        return len(_stats.get("players", {}))
 
 
 def is_dirty():

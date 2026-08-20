@@ -13,6 +13,12 @@ import csv
 import random
 from collections import Counter
 
+# Isolate the global stats: this harness drives real matches through bot.py's finalize
+# path, which records into core.global_stats. Without this it appends synthetic players
+# ("BcastA", "Bot 2", ...) to the real data/global_stats.json - and, since stats now
+# persist to MongoDB, would push them to production on a machine with MONGO_URI set.
+os.environ["CRICVERSE_STATS_LOCAL_ONLY"] = "1"
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from league.dummy_run import (

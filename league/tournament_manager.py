@@ -64,9 +64,8 @@ def assign_tournament_conditions(tourney):
       manual  -> leave unset (each match asks interactively)
       auto    -> weighted pools (group 90% / knockout 100%)
       home    -> pitch = home team's (team1) home_pitch; weather = pooled
-      stadium -> (DSL) pitch drawn from the match venue's weighted profile
     """
-    assign_stadiums(tourney)   # venue labels (ACL random / DSL home-ground; no-op otherwise) - before pitch draw
+    assign_stadiums(tourney)   # venue labels (ACL random; no-op otherwise) - before pitch draw
     mode = tourney.get("conditions_mode", "manual")
     if mode == "manual":
         return
@@ -75,10 +74,7 @@ def assign_tournament_conditions(tourney):
         if m.get("pitch") and m.get("weather"):
             continue
         ko = _match_is_knockout(m)
-        if mode == "stadium":
-            from league.dsl_manager import pick_dsl_conditions   # lazy - avoids circular import
-            m["pitch"], m["weather"] = pick_dsl_conditions(m.get("stadium"), ko)
-        elif mode == "home":
+        if mode == "home":
             hp = canonical_pitch(homes.get(m.get("team1"))) or random.choice(GROUP_PITCHES)
             _, w = pick_conditions(ko)
             m["pitch"], m["weather"] = hp, w
@@ -266,7 +262,7 @@ def rename_team(tourney, team_name, new_name):
     every schedule entry (team1/team2/result winner/loser/batted_first + that
     match's stats_delta), the tournament-wide player stats table, and the handful
     of tournament-type trackers that reference teams by name (TBECS seeds, custom
-    group rosters, ACL/DSL/rating trophy + playoff-seed fields). Fields living ON
+    group rosters, ACL/rating trophy + playoff-seed fields). Fields living ON
     the team dict (rating, credits, colour, logo, squad, home ground...) need no
     change - the same dict just gets relabelled.
     Returns (ok, message)."""
@@ -312,7 +308,7 @@ def rename_team(tourney, team_name, new_name):
             grp_map[letter] = [new_name if n == old else n for n in names]
 
     for f in ("league_shield", "acl_trophy_winner", "acl_runner_up", "acl_champion",
-              "dsl_champion", "dsl_runner_up", "rating_champion", "rating_runner_up",
+              "rating_champion", "rating_runner_up",
               "custom_champion", "custom_runner_up"):
         if tourney.get(f) == old:
             tourney[f] = new_name
@@ -906,7 +902,7 @@ def generate_ccodi_points_table(tourney) -> io.BytesIO:
 
 # Default points table (every format without a bespoke one - incl. IPL)
 # How many top rows are flagged as qualifying for the knockouts.
-_STANDINGS_CUTOFF = {"ipl": 4, "dsl": 4, "acl": 6}
+_STANDINGS_CUTOFF = {"ipl": 4, "acl": 6}
 
 
 def _standings_table(standings, cutoff=None):
@@ -2109,8 +2105,8 @@ class TournamentLeaderboardView(discord.ui.View):
 
 def build_player_stats_embed(stats, pname, tname, overall=None, season_label=None):
     """Shared tournament player-stats embed (slash + prefix, after the team is resolved).
-    `overall` (DSL): merged all-season totals dict (same keys + 'seasons'/'teams') -
-    rendered as an extra field. `season_label` retitles the current block (e.g. 'Season 3')."""
+    `overall`: merged all-season totals dict (same keys + 'seasons'/'teams') - rendered
+    as an extra field. `season_label` retitles the current block (e.g. 'Season 3')."""
     sr = (stats["runs"] / stats["balls_faced"] * 100) if stats["balls_faced"] > 0 else 0.0
     bat_avg = (stats["runs"] / stats["outs"]) if stats["outs"] > 0 else float(stats["runs"])
     bowl_avg = (stats["runs_conceded"] / stats["wickets"]) if stats["wickets"] > 0 else 0.0
@@ -2754,17 +2750,17 @@ def build_tournament_summary_embeds(tourney):
     t_type = tourney.get("tournament_type", "round_robin")
     type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup",
                   "acl": "Akatsuki Cricket League", "ccodi": "CCODI",
-                  "dsl": "Dominators Super League", "rating": "Conquest League",
+                  "rating": "Conquest League",
                   "ipl": "Indian Premier League", "custom": CUSTOM_TYPE_LABEL}.get(t_type, "Round Robin")
     gold = discord.Color.gold()
     embeds = []
 
     # 1. OVERVIEW
-    champion = (tourney.get("acl_champion") or tourney.get("dsl_champion")
+    champion = (tourney.get("acl_champion")
                 or tourney.get("custom_champion")
                 or next((m["result"]["winner"] for m in done
                          if str(m.get("round")) in ("Final", "Grand Final")), None))
-    runner = tourney.get("acl_runner_up") or tourney.get("dsl_runner_up") or tourney.get("custom_runner_up")
+    runner = tourney.get("acl_runner_up") or tourney.get("custom_runner_up")
     if champion and not runner:
         fin = next((m for m in done if str(m.get("round")) in ("Final", "Grand Final")), None)
         if fin:
@@ -2970,8 +2966,6 @@ def _match_bracket_rank(tourney, m):
         return {"Qualifier": 1, "Eliminator 1": 1, "Eliminator 2": 1,
                 "The Knockout": 2, "Qualifier 2": 3,
                 "Grand Final": 4, "Super League Qualifier": 4, "Super Cup": 5}.get(m.get("round"), 1)
-    if t_type == "dsl":
-        return {"Semi-Final 1": 1, "Semi-Final 2": 1, "Final": 2}.get(m.get("round"), 1)
     if t_type == "ccodi":
         return {"Knockout 1": 1, "Knockout 2": 1, "Qualifier 1": 2, "Eliminator": 2,
                 "Qualifier 2": 3, "Final": 4,
@@ -3203,27 +3197,6 @@ def revert_tournament_match(tourney, match_id):
             for k in ("acl_trophy_winner", "acl_runner_up", "acl_champion"):
                 tourney.pop(k, None)
             _acl_try_advance(tourney)
-    elif t_type == "dsl":
-        from league.dsl_manager import DSL_KO_STAGES, _dsl_try_advance
-        if m.get("stage") == "league":
-            # A changed league result reshuffles the seeding -> the generated bracket is stale.
-            ko = [x for x in sched if x.get("stage") in DSL_KO_STAGES]
-            for x in ko:
-                sched.remove(x)
-            removed = ko
-            for k in ("playoff_seeds", "dsl_champion", "dsl_runner_up"):
-                tourney.pop(k, None)
-        else:
-            # A playoff result: reset only the LATER derived matches (the blockers guard
-            # above ensures those are still pending/locked), then re-derive the slots.
-            for x in sched:
-                if x is m or x.get("stage") not in DSL_KO_STAGES:
-                    continue
-                if x.get("round") == "Final" and _match_bracket_rank(tourney, x) > rank:
-                    x["team1"] = None; x["team2"] = None; x["status"] = "locked"; x["result"] = None
-            for k in ("dsl_champion", "dsl_runner_up"):
-                tourney.pop(k, None)
-            _dsl_try_advance(tourney)
     elif t_type == "rating":
         from league.rating_league import RATING_KO_STAGES, _rating_try_advance
         if m.get("stage") == "ladder":
@@ -3343,7 +3316,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         if max_squad < min_squad: return await interaction.response.send_message("❌ Max squad size cannot be less than Min squad size.", ephemeral=True)
 
         t_type = event_type.value if event_type else "round_robin"
-        type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League", "ipl": "Indian Premier League", "custom": CUSTOM_TYPE_LABEL}.get(t_type, "Round Robin")
+        type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "rating": "Conquest League", "ipl": "Indian Premier League", "custom": CUSTOM_TYPE_LABEL}.get(t_type, "Round Robin")
 
         stadium_mode = stadiums.value if stadiums else "random"
         cond_mode = conditions.value if conditions else "manual"
@@ -3604,7 +3577,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         # Registration phase - no schedule yet
         if tourney["status"] == "registration":
             t_type = tourney.get("tournament_type", "round_robin")
-            type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League", "ipl": "Indian Premier League", "custom": "Custom Tournament"}.get(t_type, "Round Robin")
+            type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "rating": "Conquest League", "ipl": "Indian Premier League", "custom": "Custom Tournament"}.get(t_type, "Round Robin")
             embed = discord.Embed(title=f"🏆 {tourney['name']}", color=discord.Color.gold())
             embed.description = f"📝 **Registration Phase** · {type_label}"
             team_lines = []
@@ -3651,8 +3624,6 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             return await interaction.response.send_message("❌ This is a T20 World Cup tournament. Use `/tournament generate_super8` instead.", ephemeral=True)
         if tourney.get("tournament_type") == "acl":
             return await interaction.response.send_message("❌ This is an ACL tournament. Use `/tournament generate_playoffs` instead.", ephemeral=True)
-        if tourney.get("tournament_type") == "dsl":
-            return await interaction.response.send_message("❌ This is a DSL season — its Top-4 Playoffs generate automatically when the league ends (or `cvt gp`).", ephemeral=True)
         if tourney.get("tournament_type") == "custom":
             return await interaction.response.send_message("❌ This is a Custom tournament — its stages and playoffs generate automatically from your config.", ephemeral=True)
 
@@ -3682,7 +3653,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         if not self.is_manager(interaction, tourney): return await interaction.response.send_message("❌ Managers only.", ephemeral=True)
         if tourney["status"] != "active": return await interaction.response.send_message("❌ Tournament is not active.", ephemeral=True)
         if tourney.get("tournament_type") != "double_round_robin":
-            return await interaction.response.send_message("❌ This command is for **Double Round Robin** tournaments only. Use `/tournament generate_knockouts` for Round Robin, or `/tournament generate_playoffs` for ACL/DSL.", ephemeral=True)
+            return await interaction.response.send_message("❌ This command is for **Double Round Robin** tournaments only. Use `/tournament generate_knockouts` for Round Robin, or `/tournament generate_playoffs` for ACL.", ephemeral=True)
 
         gs_matches = [m for m in tourney["schedule"] if isinstance(m.get("round"), int)]
         if any(m["status"] == "pending" for m in gs_matches):
@@ -3765,22 +3736,9 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         tourney = get_server_tournament(server_id)
         if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
         if not self.is_manager(interaction, tourney): return await interaction.response.send_message("❌ Managers only.", ephemeral=True)
-        if tourney.get("tournament_type") not in ("acl", "dsl"):
-            return await interaction.response.send_message("❌ This command is for **ACL/DSL** tournaments only.", ephemeral=True)
+        if tourney.get("tournament_type") != "acl":
+            return await interaction.response.send_message("❌ This command is for **ACL** tournaments only.", ephemeral=True)
         if tourney["status"] != "active": return await interaction.response.send_message("❌ Tournament is not active.", ephemeral=True)
-
-        if tourney.get("tournament_type") == "dsl":
-            from league.dsl_manager import dsl_generate_playoffs, dsl_bracket_embed, DSL_CONFIG
-            ok, msg = dsl_generate_playoffs(tourney)
-            if not ok:
-                return await interaction.response.send_message(msg, ephemeral=True)
-            seeds = tourney.get("playoff_seeds", [])
-            return await interaction.response.send_message(
-                content=(f"🏆 **{DSL_CONFIG['short_name']} PLAYOFFS ARE SET!**\n"
-                         f"Top 4: {' · '.join(f'**{s}**' for s in seeds)}\n"
-                         f"Owners: `/tournament fixtures` to find your match."),
-                embed=dsl_bracket_embed(tourney),
-            )
 
         ok, msg = acl_generate_playoffs(tourney)
         if not ok:
@@ -3796,13 +3754,8 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         server_id = str(interaction.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney: return await interaction.response.send_message("❌ No tournament exists.", ephemeral=True)
-        if tourney.get("tournament_type") == "dsl":
-            from league.dsl_manager import _dsl_get, dsl_bracket_embed
-            if not _dsl_get(tourney, "Semi-Final 1"):
-                return await interaction.response.send_message("ℹ️ The Playoffs haven't been generated yet — they appear automatically once every league match is done.", ephemeral=True)
-            return await interaction.response.send_message(embed=dsl_bracket_embed(tourney))
         if tourney.get("tournament_type") != "acl":
-            return await interaction.response.send_message("❌ The bracket view is for **ACL/DSL** tournaments. Use `/tournament standings` or `/tournament status`.", ephemeral=True)
+            return await interaction.response.send_message("❌ The bracket view is for **ACL** tournaments. Use `/tournament standings` or `/tournament status`.", ephemeral=True)
         if not _acl_get(tourney, "Qualifier"):
             return await interaction.response.send_message("ℹ️ The Playoffs haven't been generated yet. A Manager runs `/tournament generate_playoffs` once all 91 league games are done.", ephemeral=True)
         await interaction.response.send_message(embed=acl_bracket_embed(tourney))
@@ -4201,7 +4154,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         else: winner = match.innings1.batting_team["name"]
 
         # Knockouts can't end in a draw - break a tie toward team1 (the higher seed / home slot)
-        if winner == "TIE" and not isinstance(m_data.get("round"), int) and m_data.get("stage") in ("knockout", None, "acl_playoff", "acl_supercup", "dsl_playoff"):
+        if winner == "TIE" and not isinstance(m_data.get("round"), int) and m_data.get("stage") in ("knockout", None, "acl_playoff", "acl_supercup"):
             winner = m_data["team1"]
 
         # Loser is meaningful for knockout progression (e.g. ACL Semi = Qualifier loser)
@@ -4219,7 +4172,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             # know which results are the LATEST for the status dashboard.
             "ts": int(datetime.datetime.now().timestamp()),
             # Context snapshot (all formats): who batted first + where/on what it was
-            # played - feeds the DSL all-time venue stats and survives schedule edits.
+            # played - feeds the all-time venue stats and survives schedule edits.
             "batted_first": match.innings1.batting_team["name"],
             "stadium": m_data.get("stadium"),
             "pitch": m_data.get("pitch") or match.pitch,
@@ -4456,17 +4409,6 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             # bracket the manager generated (ladder games simply save the rating update).
             from league.rating_league import _rating_try_advance
             _rating_try_advance(tourney)
-            assign_tournament_conditions(tourney)
-            save_tournament(tourney)
-            return
-
-        if t_type == "dsl":
-            # DSL: auto-generate the Top-4 playoffs the moment the league finishes,
-            # then resolve bracket slots as feeder results come in.
-            from league.dsl_manager import DSL_CONFIG, dsl_generate_playoffs, _dsl_try_advance
-            if DSL_CONFIG["auto_playoffs"]:
-                dsl_generate_playoffs(tourney)   # refuses (no-op) unless the league just completed
-            _dsl_try_advance(tourney)
             assign_tournament_conditions(tourney)
             save_tournament(tourney)
             return

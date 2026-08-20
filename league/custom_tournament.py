@@ -651,7 +651,7 @@ def _is_foreign_match(cfg, m):
     """True if a match was NOT produced by this engine. Every custom league
     match carries stage "group"/"stageN" for a stage the config declares, and
     every custom playoff match carries a bracket_n. Anything else (Semi-Final 1
-    from generate_knockouts, a Final from `gf`, an ACL/DSL playoff slot) is a
+    from generate_knockouts, a Final from `gf`, an ACL playoff slot) is a
     stray another format's generator stamped onto this tournament."""
     st = m.get("stage")
     if st in {stage_key(i) for i in range(len(cfg["stages"]))}:
@@ -697,7 +697,7 @@ def custom_repair_schedule(tourney):
         removed.append(f"#{m['match_id']} {_tm_round_label(m)}")
 
     # Crowns/seeds re-derive from the repaired schedule; the foreign keys are
-    # whatever the ACL/DSL/rating generators may have stamped on the way past.
+    # whatever the ACL/rating generators may have stamped on the way past.
     for k in ("custom_champion", "custom_runner_up", "custom_seeds",
               "playoff_seeds", "league_shield", "acl_trophy_winner",
               "acl_runner_up", "acl_champion", "rating_champion", "rating_runner_up"):

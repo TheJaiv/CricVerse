@@ -14,7 +14,6 @@
 #   • Managers can override a single match's venue with cvt set_stadium.
 #
 # Stadiums are ON for EVERY tournament type. How a venue gets picked still varies:
-# • "dsl" - NOT random: each team has a home ground (see dsl_manager.py).
 # • "ccodi", "ipl" - ROUND-AWARE: a venue is used at most once per round.
 # • linked mode - every fixture at the HOME (team1) team's ground.
 # • everything else - a random venue from the pool.
@@ -96,14 +95,14 @@ def default_stadium_pool(tournament_type):
         return list(DEFAULT_CCODI_STADIUMS)
     if tournament_type == "ipl":
         return list(DEFAULT_IPL_STADIUMS)
-    if tournament_type in ("acl", "dsl"):
+    if tournament_type == "acl":
         return list(DEFAULT_ACL_STADIUMS)
     return list(DEFAULT_STADIUMS)
 
 
 def ensure_stadium_pool(tourney):
     """Seed the default pool onto a tournament that hasn't got one - which covers every
-    tournament created back when stadiums were gated to ACL/DSL/CCODI. A manager who
+    tournament created back when stadiums were gated to ACL/CCODI. A manager who
     deliberately ran `stadium_clear` keeps their empty pool. Returns the pool."""
     pool = tourney.get("stadiums") or []
     if pool or tourney.get("stadiums_cleared"):
@@ -165,10 +164,6 @@ def assign_stadiums(tourney):
     Safe to call repeatedly (alongside assign_tournament_conditions)."""
     if not stadiums_enabled(tourney):
         return
-    if tourney.get("tournament_type") == "dsl":
-        # DSL: league matches at the home (team1) team's ground, playoffs per policy.
-        from league.dsl_manager import assign_dsl_stadiums   # lazy - avoids circular import
-        return assign_dsl_stadiums(tourney)
     if tourney.get("tournament_type") in ROUND_AWARE_STADIUM_TYPES and not linked_stadiums(tourney):
         return _assign_round_aware_stadiums(tourney)
     if linked_stadiums(tourney):
@@ -200,7 +195,7 @@ def reroll_stadiums(tourney):
     Returns the number of matches reassigned (0 if disabled / empty pool)."""
     if not stadiums_enabled(tourney):
         return 0
-    if tourney.get("tournament_type") == "dsl" or linked_stadiums(tourney):
+    if linked_stadiums(tourney):
         return 0   # home-ground based venues - a random reroll would break the mapping
     pool = get_stadium_pool(tourney)
     if not pool:

@@ -11,6 +11,7 @@ import io
 import os
 import time
 import json
+import hashlib
 from PIL import Image, ImageDraw, ImageFont, ImageStat
 import math
 from core.keep_alive import keep_alive
@@ -51,18 +52,10 @@ from league.rating_league import (
     generate_rating_playoffs, apply_tournament_boosts, apply_boost,
     BOOST_COST, BOOST_MAX_PER_PLAYER, BOOST_MAX_PER_TEAM,
 )
-from league import dsl_manager
-from league.dsl_manager import (
-    DSL_CONFIG, is_dsl_enabled, set_dsl_enabled, dsl_enabled_servers,
-    create_dsl_tournament, is_dsl_tournament, canonical_venue, set_home_stadium,
-    dsl_generate_league_schedule, dsl_generate_playoffs, dsl_bracket_embed,
-    write_season_archive, save_uploaded_archive,
-    aggregate_player_stats, aggregate_venue_stats, season_history,
-    get_season_summary, season_detail_embed, reset_dsl_server, player_season_history,
-)
 from core.subscription_manager import (
     load_data_from_bin, load_tournament_data_from_bin,
     save_data_to_bin, save_tournament_data_to_bin,
+    get_command_digest, set_command_digest,
     check_potential_quota, consume_quota,
     update_user_tier, update_server_tier, get_auth_admins, toggle_auth_admin,
     bulk_grant_tier, list_expiring_subs, list_all_subs, remove_subs_by_indexes,
@@ -374,13 +367,52 @@ class CricketBot(commands.Bot):
         intents.message_content = True
         super().__init__(command_prefix=commands.when_mentioned_or("cv ", "Cv ", "CV ", "cv", "Cv", "CV"), case_insensitive=True, intents=intents, help_command=None)
     
+    def _command_signature(self):
+        """A stable fingerprint of everything Discord would receive from tree.sync().
+        Changing a name, description, parameter or choice changes the hash; restarting
+        with identical commands does not."""
+        def describe(cmd):
+            if isinstance(cmd, app_commands.Group):
+                return {"g": cmd.name, "d": cmd.description,
+                        "c": sorted((describe(c) for c in cmd.commands),
+                                    key=lambda x: json.dumps(x, sort_keys=True))}
+            params = [{"n": p.name, "d": p.description, "r": p.required,
+                       "t": str(p.type),
+                       "ch": [str(c.value) for c in (p.choices or [])]}
+                      for p in getattr(cmd, "parameters", [])]
+            return {"n": cmd.name, "d": cmd.description, "p": params}
+        payload = sorted((describe(c) for c in self.tree.get_commands()),
+                         key=lambda x: json.dumps(x, sort_keys=True))
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+    async def _sync_commands_if_changed(self, force=False):
+        """Global tree.sync() is one of the most rate-limited routes Discord exposes,
+        and it used to run on EVERY boot - so a Render restart loop hammered it while
+        uploading a command list that had not changed. Sync only on a real change (the
+        last synced hash lives in Mongo, since Render wipes the disk). Returns a status
+        string for `cv sync`."""
+        try:
+            digest = self._command_signature()
+        except Exception as e:
+            print(f"command signature failed ({e}) - syncing to be safe")
+            await self.tree.sync()
+            return "synced (could not fingerprint commands)"
+        stored = None if force else await asyncio.to_thread(get_command_digest)
+        if stored == digest and stored is not None:
+            print("Slash commands unchanged - skipping global sync.")
+            return "unchanged - no sync needed"
+        await self.tree.sync()
+        await asyncio.to_thread(set_command_digest, digest)
+        why = "forced" if force else ("first run" if stored is None else "commands changed")
+        print(f"Slash commands synchronized globally ({why}).")
+        return f"synced ({why})"
+
     async def setup_hook(self):
         from league.tournament_manager import TournamentCog
         await self.add_cog(TournamentCog(self))
         
         await self.add_cog(PrefixCog(self))
-        await self.tree.sync()
-        print("Slash commands synchronized globally.")
+        await self._sync_commands_if_changed()
         print("Prefix commands loaded.")
 
         # Catch Render's SIGTERM so the global stats file can be DM'd out before the
@@ -565,11 +597,17 @@ def _may_control_channel(user, cid) -> bool:
 # ---- Cloud database & security ----
 @tasks.loop(hours=1)
 async def auto_sync_db():
-    """Refresh in-memory cache from MongoDB every hour (picks up manual edits)"""
-    load_data_from_bin()
-    load_tournament_data_from_bin()
+    """Refresh in-memory cache from MongoDB every hour (picks up manual edits).
+
+    Every loader here is a BLOCKING pymongo call. Run straight on the event loop they
+    froze the whole bot for as long as Mongo took to answer - which expired every
+    queued Discord interaction (10062 "Unknown interaction") and released a burst of
+    backed-up REST calls straight into the rate limiter. This fires hourly regardless
+    of traffic, which is why it bit at 6am with nobody playing. Off-thread now."""
+    await asyncio.to_thread(load_data_from_bin)
+    await asyncio.to_thread(load_tournament_data_from_bin)
     if CAREER_MODE_ENABLED:
-        try: load_careers()
+        try: await asyncio.to_thread(load_careers)
         except Exception as e: print(f"⚠️ load_careers failed (ignored): {e}")
 
 @tasks.loop(hours=6)
@@ -640,10 +678,18 @@ async def _stats_shutdown_backup():
 @bot.event
 async def on_ready():
     print(f"Logged in successfully as {bot.user.name}")
-    load_data_from_bin()
-    load_tournament_data_from_bin()
+    await asyncio.to_thread(load_data_from_bin)
+    await asyncio.to_thread(load_tournament_data_from_bin)
+    # Warm the global stats from Mongo HERE. _load() is lazy, and letting it fire
+    # for the first time mid-match would put a blocking Mongo read on the event
+    # loop (see the 10062 "Unknown interaction" class of bug). At boot it is free.
+    try:
+        _n = await asyncio.to_thread(gstats.player_count)
+        print(f"Global stats ready — {_n} players.")
+    except Exception as e:
+        print(f"⚠️ global stats load failed (ignored): {e}")
     if CAREER_MODE_ENABLED:
-        try: load_careers()
+        try: await asyncio.to_thread(load_careers)
         except Exception as e: print(f"⚠️ load_careers failed (ignored): {e}")
     if not auto_sync_db.is_running():
         auto_sync_db.start()
@@ -4638,7 +4684,7 @@ async def trigger_super_over(channel, match: CricketMatch):
     so_match.tournament_match_id = getattr(match, "tournament_match_id", None)
     so_match.manager_id = getattr(match, "manager_id", None)
     so_match.tournament_name = getattr(match, "tournament_name", "TOURNAMENT")
-    so_match.tournament_type = getattr(match, "tournament_type", None)   # DSL realism carries into super overs
+    so_match.tournament_type = getattr(match, "tournament_type", None)
     active_games[channel.id] = so_match
     
     await channel.send("🚨 **SCORES ARE TIED!** 🚨\nGet ready for the **SUPER OVER!**\n*The team that batted second will bat first. Max 2 wickets.*")
@@ -4801,12 +4847,15 @@ async def handle_innings_end(interaction_context, match: CricketMatch):
                 and not getattr(match_to_finalize, 'is_player_test', False)):
             _base = getattr(match_to_finalize, 'original_format_overs', match_to_finalize.format_overs)
             _increment_match_count("odi" if _base == 50 else "t20")
+            # Off-thread: conditions_stats does a Mongo upsert per match and global
+            # stats may push to Mongo - neither belongs on the event loop at the exact
+            # moment a match ends and everyone is clicking buttons.
             try:
-                gstats.record_limited_overs_match(match_to_finalize)
+                await asyncio.to_thread(gstats.record_limited_overs_match, match_to_finalize)
             except Exception as _gs_err:
                 print(f"Global stats record failed: {_gs_err}")
             try:
-                cstats.record_limited_overs_match(match_to_finalize)
+                await asyncio.to_thread(cstats.record_limited_overs_match, match_to_finalize)
             except Exception as _cs_err:
                 print(f"Conditions stats record failed: {_cs_err}")
 
@@ -8141,7 +8190,7 @@ async def start_match(channel, state):
     match.tournament_match_id = getattr(state, "tournament_match_id", None)
     match.manager_id = getattr(state, "manager_id", None)
     match.tournament_name = getattr(state, "tournament_name", "TOURNAMENT")
-    match.tournament_type = getattr(state, "tournament_type", None)   # "dsl" flips the engine's league-realism mode
+    match.tournament_type = getattr(state, "tournament_type", None)
     # Draft mode: carry the result-recording info so the leaderboard updates on finish
     if getattr(state, "is_draft", False):
         match.is_draft = True
@@ -8968,11 +9017,11 @@ async def _test_finish_match(match: TestMatchObj, channel_id: int, channel):
     if not getattr(match, "is_player_test", False):
         _increment_match_count("test")
         try:
-            gstats.record_test_match(match)
+            await asyncio.to_thread(gstats.record_test_match, match)
         except Exception as _gs_err:
             print(f"Global stats record failed (test): {_gs_err}")
         try:
-            cstats.record_test_match(match)
+            await asyncio.to_thread(cstats.record_test_match, match)
         except Exception as _cs_err:
             print(f"Conditions stats record failed (test): {_cs_err}")
     result_text = match.result or "Match Drawn"
@@ -9884,7 +9933,7 @@ async def on_start_tournament_match(channel, manager_id, tourney, match_data):
     # toss and pick the opponent's bowler by launching their own match.
     state.manager_id = manager_id if str(manager_id) in tourney.get("managers", []) else None
     state.tournament_name = tourney["name"]
-    state.tournament_type = tourney.get("tournament_type", "round_robin")   # engine reads this (DSL realism mode)
+    state.tournament_type = tourney.get("tournament_type", "round_robin")
 
     # Default XIs (resolved against the FIT squad - an injured/missing player
     # invalidates the default and the owner types the XI instead).
@@ -12032,6 +12081,46 @@ class PrefixCog(commands.Cog):
         if ctx.guild:
             await ctx.send("📬 Backup sent to your DMs.")
 
+    @commands.command(name="syncstats", aliases=["gssync", "pushstats", "syncgs"],
+                      help="[OWNER] Push the global stats to MongoDB now (they also save there automatically after every match).\n"
+                           "`syncstats` — write memory → MongoDB\n"
+                           "`syncstats pull` — reload memory ← MongoDB (discards unsaved memory state)\n"
+                           "`syncstats status` — what MongoDB is holding right now\n"
+                           "Usage: syncstats [pull|status]")
+    async def syncstats(self, ctx, mode: str = "push"):
+        if ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("❌ Owner only.")
+        mode = mode.lower()
+        if mode not in ("push", "pull", "status"):
+            return await ctx.send("❌ Mode must be `pull` or `status` — or leave it out to push.")
+
+        if mode == "status":
+            info = await asyncio.to_thread(gstats.mongo_status)
+            if not info.get("ok"):
+                return await ctx.send(f"❌ Couldn't reach MongoDB: `{info.get('error')}`")
+            doc = info.get("doc")
+            if not doc:
+                return await ctx.send(f"📭 MongoDB holds **no** stats doc yet — **{info['memory_players']}** "
+                                      f"players in memory. Run `cv syncstats` to write them.")
+            ts = doc.get("updated")
+            when = f"<t:{int(ts)}:R>" if ts else "unknown"
+            warn = f"\n⚠️ last error: `{info['last_error']}`" if info.get("last_error") else ""
+            return await ctx.send(
+                f"🗄️ **MongoDB global stats**\n"
+                f"• stored: **{doc.get('players', '?')}** players · {doc.get('bytes', 0) / 1024:.1f} KB\n"
+                f"• in memory: **{info['memory_players']}** players\n"
+                f"• last written: {when}{warn}")
+
+        if mode == "pull":
+            store = await asyncio.to_thread(gstats.pull_from_mongo)
+            if store is None:
+                return await ctx.send("❌ Nothing to pull — MongoDB has no valid stats doc (or is unreachable).")
+            n = gstats.replace_store(store)
+            return await ctx.send(f"⬇️ Pulled **{n}** players from MongoDB into memory (and refreshed the local cache).")
+
+        ok, msg = await asyncio.to_thread(gstats.push_to_mongo)
+        await ctx.send(f"⬆️ {msg}." if ok else f"❌ {msg}.")
+
     @commands.command(name="importstats", aliases=["imps"],
                       help="[OWNER] Fold an exported json backup into the global stats. MERGES by default, so matches recorded after a restart survive; add `replace` to overwrite everything with the file instead.\nUsage: importstats [replace] (attach global_stats.json to the message)")
     async def importstats(self, ctx, mode: str = "merge"):
@@ -13007,8 +13096,8 @@ class PrefixCog(commands.Cog):
         if ctx.author.id != ADMIN_DISCORD_ID:
             return await ctx.send("❌ Owner only.")
         try:
-            res = save_data_to_bin()
-            res_t = save_tournament_data_to_bin()
+            res = await asyncio.to_thread(save_data_to_bin)
+            res_t = await asyncio.to_thread(save_tournament_data_to_bin)
             lines = []
             if res is None:
                 lines.append("❌ Main DB skipped — MONGO_URI missing.")
@@ -13026,13 +13115,25 @@ class PrefixCog(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ Error during sync: {e}")
 
+    @commands.command(name="sync", aliases=["synccmds", "force_sync_commands"],
+                      help="[OWNER] Force a global slash-command sync. Normally automatic: the bot only syncs when the command list actually changed, because a sync on every restart is heavily rate-limited.\nUsage: sync")
+    async def sync_commands(self, ctx):
+        if ctx.author.id != ADMIN_DISCORD_ID:
+            return await ctx.send("❌ Owner only.")
+        async with ctx.typing():
+            try:
+                status = await self.bot._sync_commands_if_changed(force=True)
+            except Exception as e:
+                return await ctx.send(f"❌ Sync failed: `{e}`")
+        await ctx.send(f"✅ Slash commands {status}. (Global syncs can take a few minutes to appear.)")
+
     @commands.command(name="force_load", aliases=["fl"], help="[OWNER] Reload in-memory cache from MongoDB.\nUsage: force_load")
     async def force_load(self, ctx):
         if ctx.author.id != ADMIN_DISCORD_ID:
             return await ctx.send("❌ Owner only.")
         try:
-            load_data_from_bin()
-            load_tournament_data_from_bin()
+            await asyncio.to_thread(load_data_from_bin)
+            await asyncio.to_thread(load_tournament_data_from_bin)
             await ctx.send(
                 f"✅ Cache reloaded from MongoDB — {len(DB_CACHE['players'])} players, "
                 f"{len(DB_CACHE['tournaments'])} tournament(s)."
@@ -13244,7 +13345,7 @@ class PrefixCog(commands.Cog):
         if not incoming:
             return await ctx.send("❌ Backup contained no tournaments.")
         try:
-            load_tournament_data_from_bin()  # pull current state first (don't clobber other servers)
+            await asyncio.to_thread(load_tournament_data_from_bin)  # pull current state first (don't clobber other servers)
             tours = DB_CACHE.get("tournaments", []) or []
             lines = []
             for td in incoming:
@@ -13254,7 +13355,7 @@ class PrefixCog(commands.Cog):
                 done = sum(1 for m in td.get("schedule", []) if m.get("status") == "completed")
                 lines.append(f"• **{name}** (server `{sid}`) — {done}/{len(td.get('schedule', []))} matches")
             DB_CACHE["tournaments"] = tours
-            ok = save_tournament_data_to_bin()
+            ok = await asyncio.to_thread(save_tournament_data_to_bin)
             if not ok:
                 return await ctx.send("❌ Wrote to memory but **MongoDB save failed** — check MONGO_URI / logs.")
             await ctx.send("✅ Restored & saved to MongoDB (also live in memory now):\n" + "\n".join(lines) +
@@ -13336,95 +13437,6 @@ class PrefixCog(commands.Cog):
             match.over_completed = False                                  # over just ended (or fresh over, no bowler)
             return await prompt_bowler_then_hub(channel, match)
         return await run_interactive_delivery_sequence(channel, match)    # mid-over -> bowl the next ball
-
-    # DSL (Dominators Super League) owner controls
-    @commands.command(name="enable_dsl", help="[OWNER] Grant a server access to the Dominators Super League.\nUsage: enable_dsl [server_id]  (defaults to this server)")
-    async def enable_dsl(self, ctx, server_id: str = None):
-        if ctx.author.id != ADMIN_DISCORD_ID:
-            return await ctx.send("❌ Owner only.")
-        sid = str(server_id or ctx.guild.id)
-        set_dsl_enabled(sid, True)
-        await ctx.send(f"✅ **{DSL_CONFIG['display_name']}** enabled for server `{sid}`. Admins there can now run `cvt start dsl`.")
-
-    @commands.command(name="disable_dsl", help="[OWNER] Revoke a server's Dominators Super League access.\nUsage: disable_dsl [server_id]")
-    async def disable_dsl(self, ctx, server_id: str = None):
-        if ctx.author.id != ADMIN_DISCORD_ID:
-            return await ctx.send("❌ Owner only.")
-        sid = str(server_id or ctx.guild.id)
-        set_dsl_enabled(sid, False)
-        await ctx.send(f"🚫 **{DSL_CONFIG['display_name']}** disabled for server `{sid}`. (An in-progress season is untouched.)")
-
-    @commands.command(name="dsl_servers", help="[OWNER] List servers with DSL access.\nUsage: dsl_servers")
-    async def dsl_servers_cmd(self, ctx):
-        if ctx.author.id != ADMIN_DISCORD_ID:
-            return await ctx.send("❌ Owner only.")
-        rows = dsl_enabled_servers()
-        if not rows:
-            return await ctx.send("ℹ️ No servers have DSL access yet. `cv enable_dsl <server_id>` to grant one.")
-        lines = []
-        for sid, last in rows:
-            g = self.bot.get_guild(int(sid)) if sid.isdigit() else None
-            lines.append(f"• `{sid}`{f' — {g.name}' if g else ''} · last archived season: **{last or '—'}**")
-        await ctx.send(f"🔵 **{DSL_CONFIG['display_name']} servers:**\n" + "\n".join(lines))
-
-    @commands.command(name="dsl_reset", help="[OWNER] Factory-reset a server's DSL data (wipe TEST seasons): deletes its DSL tournament, archive files, and season counter. Access grant stays.\nUsage: dsl_reset [server_id]")
-    async def dsl_reset_cmd(self, ctx, server_id: str = None):
-        if ctx.author.id != ADMIN_DISCORD_ID:
-            return await ctx.send("❌ Owner only.")
-        sid = str(server_id or ctx.guild.id)
-        from league.dsl_manager import list_season_archives
-        n_arch = len(list_season_archives(sid))
-        has_t = any(str(t.get("server_id")) == sid and t.get("tournament_type") == "dsl"
-                    for t in DB_CACHE.get("tournaments", []))
-        if not n_arch and not has_t:
-            return await ctx.send(f"ℹ️ No DSL data found for server `{sid}` — already clean. Next `cvt start dsl` will be Season 1.")
-        view = SquadConfirmView(ctx.author.id)
-        prompt = await ctx.send(
-            f"⚠️ **Factory-reset DSL for server `{sid}`?** This wipes:\n"
-            f"• current DSL tournament: {'**yes**' if has_t else 'none'}\n"
-            f"• archive files on this host: **{n_arch}**\n"
-            f"• the Mongo season counter → next season becomes **S1**\n"
-            f"(The access grant stays. Archives already committed to GitHub must be deleted from the repo separately!)",
-            view=view)
-        await view.wait()
-        if not view.value:
-            return await prompt.edit(content="❌ Reset cancelled — nothing touched.", view=None)
-        removed_t, removed_a = reset_dsl_server(sid)
-        await prompt.edit(content=(f"🧹 **DSL reset for `{sid}`** — removed {removed_t} tournament(s) and {removed_a} archive file(s); "
-                                   f"season counter zeroed. Next `cvt start dsl` = a fresh **Season 1**.\n"
-                                   f"⚠️ If test archives were committed to GitHub (`dsl_archive/{sid}_s*.json`), delete them from the repo too "
-                                   f"or they'll come back on the next deploy."), view=None)
-
-    @commands.command(name="upload_archive", aliases=["dsl_upload"], help="[OWNER] Restore a DSL season archive JSON (attach it, or reply to it).\nUsage: attach <server>_s<N>.json + upload_archive")
-    async def upload_archive(self, ctx):
-        if ctx.author.id != ADMIN_DISCORD_ID:
-            return await ctx.send("❌ Owner only.")
-        att = None
-        if ctx.message.attachments:
-            att = ctx.message.attachments[0]
-        elif ctx.message.reference and ctx.message.reference.message_id:
-            try:
-                ref = await ctx.channel.fetch_message(ctx.message.reference.message_id)
-                if ref.attachments:
-                    att = ref.attachments[0]
-            except Exception:
-                pass
-        if att is None:
-            try:
-                async for _m in ctx.channel.history(limit=25):
-                    _js = [a for a in _m.attachments if a.filename.lower().endswith(".json")]
-                    if _js:
-                        att = _js[0]; break
-            except Exception:
-                pass
-        if att is None:
-            return await ctx.send("❌ No JSON file found — attach the archive with the command, or reply to the message carrying it.")
-        try:
-            raw = await att.read()
-        except Exception as e:
-            return await ctx.send(f"❌ Could not read `{att.filename}`: {e}")
-        ok, msg = save_uploaded_archive(raw)
-        await ctx.send(msg)
 
     @commands.command(name="sync_csv", aliases=["scsv"], help="[OWNER] Sync players from players_master.csv to DB.\nShows the new players first — toggle off any you don't want, then confirm.\nUsage: sync_csv")
     async def sync_csv(self, ctx):
@@ -15256,7 +15268,7 @@ class PrefixCog(commands.Cog):
             return
 
         save_tournament(t_data)
-        type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League", "ipl": "Indian Premier League", "custom": "Custom Tournament"}.get(t_type, "Round Robin")
+        type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "rating": "Conquest League", "ipl": "Indian Premier League", "custom": "Custom Tournament"}.get(t_type, "Round Robin")
         extra = ""
         if t_type == "acl":
             extra = "\n🔴 **ACL needs exactly 14 teams** — each plays every other once (91 matches) → Top 6 Playoffs → Super Cup."
@@ -15629,35 +15641,10 @@ class PrefixCog(commands.Cog):
         else:
             await ctx.send(embed=embed)
 
-    @tournament.command(name="start", help="[MANAGER] Lock registration and generate schedule.\nUsage: tournament start [dsl]\n`cvt start dsl` creates a preconfigured Dominators Super League season (owner-granted servers only).")
+    @tournament.command(name="start", help="[MANAGER] Lock registration and generate schedule.\nUsage: tournament start")
     async def t_start(self, ctx, league: str = None):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
-
-        # `cvt start dsl` with no tournament -> create the preconfigured DSL season.
-        if league and league.strip().lower() in ("dsl", DSL_CONFIG["display_name"].lower()):
-            if not tourney:
-                if not is_dsl_enabled(server_id):
-                    return await ctx.send(f"❌ **{DSL_CONFIG['display_name']}** is not enabled for this server. Contact the bot owner for access.")
-                if not ctx.author.guild_permissions.administrator and ctx.author.id != ADMIN_DISCORD_ID:
-                    return await ctx.send("❌ Only Server Admins can start a DSL season.")
-                tourney = create_dsl_tournament(server_id, ctx.author.id)
-                save_tournament(tourney)
-                venues = " · ".join(DSL_CONFIG["venues"])
-                return await ctx.send(
-                    f"🔵 **{tourney['name']} — REGISTRATION OPEN!**\n"
-                    f"Predecided format: **{DSL_CONFIG['format_overs']} overs** · **{DSL_CONFIG['team_count']} teams** · "
-                    f"{'double' if DSL_CONFIG['double_round_robin'] else 'single'} round robin → Playoffs (2 Semi-Finals → Final)\n"
-                    f"🏟️ **Venues:** {venues}\n\n"
-                    f"**Next steps:**\n"
-                    f"1️⃣ `cvt add_team \"<name>\" <@owner>` ×{DSL_CONFIG['team_count']}\n"
-                    f"2️⃣ owners `cvt ss` to submit squads ({DSL_CONFIG['min_squad']}–{DSL_CONFIG['max_squad']} players)\n"
-                    f"3️⃣ `cvt set_home_stadium \"<team>\" <venue>` for every team (home games use that ground's pitch!)\n"
-                    f"4️⃣ `cvt start` to generate the fixtures"
-                )
-            elif not is_dsl_tournament(tourney):
-                return await ctx.send("❌ A different tournament already exists in this server. Finish or `cvt force_delete` it first.")
-            # DSL tournament already exists -> fall through to the normal start validation.
 
         # `cvt start rating` / `cvt start conquest` -> create the Conquest (rating) League.
         if league and league.strip().lower() in ("rating", "conquest", "cql", RATING_CONFIG["display_name"].lower()):
@@ -15681,7 +15668,7 @@ class PrefixCog(commands.Cog):
                 return await ctx.send("❌ A different tournament already exists in this server. Finish or `cvt force_delete` it first.")
 
         is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or (ctx.author.guild_permissions.administrator) or (tourney and str(ctx.author.id) in tourney.get("managers", []))
-        if not tourney: return await ctx.send("❌ No tournament exists. (DSL servers: `cvt start dsl` to open a season.)")
+        if not tourney: return await ctx.send("❌ No tournament exists.")
         if not is_mgr: return await ctx.send("❌ Managers only.")
         if tourney["status"] == "configuring":
             return await ctx.send("❌ The custom-format setup wizard wasn't finished — complete it (or `cvt force_delete` and recreate).")
@@ -15727,22 +15714,6 @@ class PrefixCog(commands.Cog):
         elif t_type == "rating":
             if len(tourney["teams"]) < RATING_CONFIG["playoff_teams"]:
                 return f"❌ **{RATING_CONFIG['short_name']} needs at least {RATING_CONFIG['playoff_teams']} teams** (currently {len(tourney['teams'])})."
-        elif t_type == "dsl":
-            want = DSL_CONFIG["team_count"]
-            if len(tourney["teams"]) != want:
-                return f"❌ **{DSL_CONFIG['short_name']} requires exactly {want} teams** (currently {len(tourney['teams'])})."
-            missing = [t["name"] for t in tourney["teams"] if not canonical_venue(t.get("home_stadium"))]
-            if missing:
-                return ("❌ **Every team needs a home stadium** before the season can start.\n"
-                        "Missing: " + ", ".join(f"**{m}**" for m in missing) +
-                        "\nUse `cvt set_home_stadium \"<team>\" <venue>` · `cvt home_stadiums` to review.")
-            if DSL_CONFIG["require_unique_venues"]:
-                seen = {}
-                for t in tourney["teams"]:
-                    v = canonical_venue(t.get("home_stadium"))
-                    if v in seen:
-                        return f"❌ **{t['name']}** and **{seen[v]}** share **{v}** — every team needs its own home ground."
-                    seen[v] = t["name"]
         else:
             if len(tourney["teams"]) < 2:
                 return "❌ Need at least 2 teams."
@@ -15750,7 +15721,7 @@ class PrefixCog(commands.Cog):
             if len(t.get("squad", [])) < min_s:
                 return f"❌ Team **{t['name']}** does not have a valid squad yet."
         # Linked stadiums: every team needs a home ground (which carries its fixed pitch).
-        if tourney.get("stadium_mode") == "linked" and t_type != "dsl":
+        if tourney.get("stadium_mode") == "linked":
             missing = [t["name"] for t in tourney["teams"]
                        if not t.get("home_stadium") or not canonical_pitch(t.get("home_pitch"))]
             if missing:
@@ -15946,24 +15917,6 @@ class PrefixCog(commands.Cog):
                 f"`cv tournament status` for the round-wise fixtures · `cv tournament standings` for the tables."
             )
 
-        # DSL - Dominators Super League (home/away league on home grounds -> Top-4 Playoffs)
-        if t_type == "dsl":
-            tourney["schedule"] = dsl_generate_league_schedule(tourney)
-            tourney["status"] = "active"
-            tourney["current_match_idx"] = 0
-            assign_tournament_conditions(tourney)   # venues (home grounds) + venue-profile pitches
-            save_tournament(tourney)
-            per_team = sum(1 for m in tourney["schedule"]
-                           if m["team1"] == tourney["teams"][0]["name"] or m["team2"] == tourney["teams"][0]["name"])
-            return await channel.send(
-                f"🔵 **{tourney['name'].upper()} IS UNDERWAY!**\n"
-                f"Generated **{len(tourney['schedule'])} league matches** ({per_team} per team, "
-                f"{'home & away' if DSL_CONFIG['double_round_robin'] else 'single round robin'}) — "
-                f"every home game is played at the home team's ground, and **the venue decides the pitch**.\n"
-                f"📋 Owners: `cvt fixtures` to see your matches · `cvt play <id>` to launch them.\n"
-                f"🏆 When the league ends, the **Top-4 Playoffs** (Semi-Final 1: 1v4 · Semi-Final 2: 2v3 → Final) generate automatically."
-            )
-
         # ACL - Akatsuki Cricket League (14-team single round robin -> Playoffs -> Super Cup)
         if t_type == "acl":
             teams = [t["name"] for t in tourney["teams"]]
@@ -16041,7 +15994,7 @@ class PrefixCog(commands.Cog):
 
         if tourney["status"] == "registration":
             t_type = tourney.get("tournament_type", "round_robin")
-            type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "dsl": "Dominators Super League", "rating": "Conquest League", "ipl": "Indian Premier League", "custom": "Custom Tournament"}.get(t_type, "Round Robin")
+            type_label = {"double_round_robin": "Double Round Robin", "t20_world_cup": "T20 World Cup", "acl": "Akatsuki Cricket League", "ccodi": "CCODI", "rating": "Conquest League", "ipl": "Indian Premier League", "custom": "Custom Tournament"}.get(t_type, "Round Robin")
             embed = discord.Embed(title=f"🏆 {tourney['name']}", color=discord.Color.gold())
             cmode = tourney.get("conditions_mode", "manual")
             cmode_txt = {"auto": "🎲 Auto conditions", "home": "🏟️ Home-Pitch conditions"}.get(cmode, "🎛️ Manual conditions")
@@ -16691,7 +16644,7 @@ class PrefixCog(commands.Cog):
         if not is_mgr: return await ctx.send("❌ Managers only.")
         if tourney["status"] != "active": return await ctx.send("❌ Tournament is not active.")
         if tourney.get("tournament_type") != "double_round_robin":
-            return await ctx.send("❌ This command is for **Double Round Robin** tournaments only. Use `cvt generate_knockouts` for Round Robin, or `cvt generate_playoffs` for ACL/DSL.")
+            return await ctx.send("❌ This command is for **Double Round Robin** tournaments only. Use `cvt generate_knockouts` for Round Robin, or `cvt generate_playoffs` for ACL.")
 
         gs_matches = [m for m in tourney["schedule"] if isinstance(m.get("round"), int)]
         if any(m["status"] == "pending" for m in gs_matches):
@@ -16714,7 +16667,7 @@ class PrefixCog(commands.Cog):
 
         await ctx.send(f"🏆 **The Final is Set!**\n**{top2[0]}** (1st) vs **{top2[1]}** (2nd)\n\nUse `cv tournament play_next` to begin!")
 
-    @tournament.command(name="generate_playoffs", aliases=["gp", "playoffs"], help="[MANAGER] Generate the Playoffs (ACL Top-6 / DSL Top-4).\nUsage: tournament generate_playoffs")
+    @tournament.command(name="generate_playoffs", aliases=["gp", "playoffs"], help="[MANAGER] Generate the ACL Top-6 Playoffs.\nUsage: tournament generate_playoffs")
     async def t_generate_playoffs(self, ctx):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
@@ -16722,21 +16675,9 @@ class PrefixCog(commands.Cog):
         if not tourney: return await ctx.send("❌ No tournament exists.")
         if not is_mgr: return await ctx.send("❌ Managers only.")
         t_type = tourney.get("tournament_type")
-        if t_type not in ("acl", "dsl"):
-            return await ctx.send("❌ This command is for **ACL** or **DSL** tournaments only.")
+        if t_type != "acl":
+            return await ctx.send("❌ This command is for **ACL** tournaments only.")
         if tourney["status"] != "active": return await ctx.send("❌ Tournament is not active.")
-
-        if t_type == "dsl":
-            ok, msg = dsl_generate_playoffs(tourney)
-            if not ok:
-                return await ctx.send(msg)
-            seeds = tourney.get("playoff_seeds", [])
-            return await ctx.send(
-                content=(f"🏆 **{DSL_CONFIG['short_name']} PLAYOFFS ARE SET!**\n"
-                         f"Top 4: {' · '.join(f'**{s}**' for s in seeds)}\n"
-                         f"Owners: `cvt fixtures` to find your match."),
-                embed=dsl_bracket_embed(tourney),
-            )
 
         ok, msg = acl_generate_playoffs(tourney)
         if not ok:
@@ -16747,24 +16688,19 @@ class PrefixCog(commands.Cog):
             embed=acl_bracket_embed(tourney),
         )
 
-    @tournament.command(name="bracket", aliases=["br"], help="View the Playoffs bracket (ACL / DSL).\nUsage: tournament bracket")
+    @tournament.command(name="bracket", aliases=["br"], help="View the Playoffs bracket (ACL / Conquest).\nUsage: tournament bracket")
     async def t_bracket(self, ctx):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney: return await ctx.send("❌ No tournament exists.")
         t_type = tourney.get("tournament_type")
-        if t_type == "dsl":
-            from league.dsl_manager import _dsl_get
-            if not _dsl_get(tourney, "Semi-Final 1"):
-                return await ctx.send("ℹ️ The Playoffs haven't been generated yet — they appear automatically once every league match is done.")
-            return await ctx.send(embed=dsl_bracket_embed(tourney))
         if t_type == "rating":
             from league.rating_league import _rating_get
             if not _rating_get(tourney, "Semi-Final 1"):
                 return await ctx.send("ℹ️ Playoffs not generated yet — a manager runs `cvt end_league` once teams have played enough games.")
             return await ctx.send(embed=rating_bracket_embed(tourney))
         if t_type != "acl":
-            return await ctx.send("❌ The bracket view is for **ACL/DSL/Conquest** tournaments. Use `cv tournament standings` or `cv tournament status`.")
+            return await ctx.send("❌ The bracket view is for **ACL/Conquest** tournaments. Use `cv tournament standings` or `cv tournament status`.")
         if not _acl_get(tourney, "Qualifier"):
             return await ctx.send("ℹ️ The Playoffs haven't been generated yet. A Manager runs `cv tournament generate_playoffs` once all 91 league games are done.")
         await ctx.send(embed=acl_bracket_embed(tourney))
@@ -17361,7 +17297,7 @@ class PrefixCog(commands.Cog):
         removed = len(before) - len(DB_CACHE["tournaments"])
         if removed == 0:
             return await ctx.send("❌ No tournament exists for this server.")
-        save_tournament_data_to_bin()
+        await asyncio.to_thread(save_tournament_data_to_bin)
         await ctx.send(f"🗑️ Tournament deleted ({removed} removed).")
 
     @tournament.command(name="set_theme", help="[ADMIN] Set the tournament theme - scorecard style, and for ACL/ICA the fixtures, points table and over-hub logo templates too.\nUsage: tournament set_theme <Default|Crimson Cricket|T20 World Cup|ACL|ICA>")
@@ -17441,18 +17377,15 @@ class PrefixCog(commands.Cog):
         await ctx.send(embed=e)
 
     # Stadiums (cosmetic ACL venue labels)
-    @tournament.command(name="stadiums", aliases=["venues", "stadium_list", "stadium"], help="List the stadium pool — or one venue's all-time stats (DSL).\nUsage: tournament stadiums [venue]")
+    @tournament.command(name="stadiums", aliases=["venues", "stadium_list", "stadium"], help="List the stadium pool.\nUsage: tournament stadiums")
     async def t_stadiums(self, ctx, *, name: str = None):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney: return await ctx.send("❌ No tournament exists.")
         if name:
-            # `cvt stadium <name>` -> full all-time venue stats (DSL); cosmetic label elsewhere.
-            if is_dsl_tournament(tourney):
-                return await self.t_venue_stats.callback(self, ctx, venue=name)
-            return await ctx.send("🏟️ ACL stadiums are cosmetic labels — per-venue stats are a **DSL** feature (`cvt venue_stats`).")
+            return await ctx.send("🏟️ Stadiums are cosmetic labels — there are no per-venue stats.")
         from league.stadium_manager import linked_stadiums
-        if linked_stadiums(tourney) and not is_dsl_tournament(tourney):
+        if linked_stadiums(tourney):
             # Linked mode: the "pool" is the teams' home grounds - show those.
             return await self.t_home_stadiums.callback(self, ctx)
         pool = get_stadium_pool(tourney)
@@ -17462,22 +17395,6 @@ class PrefixCog(commands.Cog):
             s = m.get("stadium")
             if s: counts[s] = counts.get(s, 0) + 1
         assigned = sum(counts.values())
-        if is_dsl_tournament(tourney):
-            # DSL: fixed venue list, each with its ONE pitch + home team
-            homes = {}
-            for t in tourney.get("teams", []):
-                v = canonical_venue(t.get("home_stadium"))
-                if v: homes[v] = t["name"]
-            lines = []
-            for i, (v, pitch) in enumerate(DSL_CONFIG["venues"].items()):
-                c = counts.get(v, 0)
-                tail = f" · {c} fixture{'s' if c != 1 else ''}" if c else ""
-                home = f" · 🏠 **{homes[v]}**" if v in homes else ""
-                lines.append(f"`{i+1:>2}` 📍 **{v}** — 🏟️ *{pitch}*{home}{tail}")
-            e = discord.Embed(title=f"🏟️ {tourney['name']} — Venues",
-                              description="\n".join(lines), color=discord.Color.from_rgb(20, 60, 160))
-            e.set_footer(text=f"{len(DSL_CONFIG['venues'])} venues · every ground has ONE fixed pitch — same stadium, same pitch, every match · cvt stadium <name> for its all-time stats")
-            return await ctx.send(embed=e)
         e = discord.Embed(title=f"🏟️ {tourney['name']} — Stadiums",
                           color=discord.Color.from_rgb(200, 30, 40))
         if pool:
@@ -17502,8 +17419,6 @@ class PrefixCog(commands.Cog):
         if not tourney: return await ctx.send("❌ No tournament exists.")
         is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
         if not is_mgr: return await ctx.send("❌ Managers only.")
-        if is_dsl_tournament(tourney):
-            return await ctx.send(f"🔒 **{DSL_CONFIG['short_name']}** venues are fixed by the league config — the pool can't be edited.")
         nm = name.strip().strip('"').strip()
         if not nm: return await ctx.send("❌ Provide a stadium name.")
         pool = tourney.setdefault("stadiums", [])
@@ -17521,8 +17436,6 @@ class PrefixCog(commands.Cog):
         if not tourney: return await ctx.send("❌ No tournament exists.")
         is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
         if not is_mgr: return await ctx.send("❌ Managers only.")
-        if is_dsl_tournament(tourney):
-            return await ctx.send(f"🔒 **{DSL_CONFIG['short_name']}** venues are fixed by the league config — the pool can't be edited.")
         pool = tourney.get("stadiums", [])
         cs = canonical_stadium(name, pool)
         if not cs: return await ctx.send(f"❌ **{name.strip()}** isn't in the pool. `cvt stadiums` to view.")
@@ -17539,8 +17452,6 @@ class PrefixCog(commands.Cog):
         if not tourney: return await ctx.send("❌ No tournament exists.")
         is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
         if not is_mgr: return await ctx.send("❌ Managers only.")
-        if is_dsl_tournament(tourney):
-            return await ctx.send(f"🔒 **{DSL_CONFIG['short_name']}** venues are fixed by the league config — the pool can't be edited.")
         tourney["stadiums"] = []
         tourney["stadiums_cleared"] = True   # don't reseed the defaults behind their back
         save_tournament(tourney)
@@ -17554,7 +17465,7 @@ class PrefixCog(commands.Cog):
         is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
         if not is_mgr: return await ctx.send("❌ Managers only.")
         from league.stadium_manager import linked_stadiums
-        if is_dsl_tournament(tourney) or linked_stadiums(tourney):
+        if linked_stadiums(tourney):
             return await ctx.send("🔒 Matches are played at the **home team's ground** — venues can't be rerolled.")
         pool = get_stadium_pool(tourney)
         if not pool: return await ctx.send("❌ The stadium pool is empty. Add venues with `cvt stadium_add` first.")
@@ -17584,15 +17495,14 @@ class PrefixCog(commands.Cog):
         save_tournament(tourney)
         await ctx.send(f"🏟️ Match **#{match_id}** ({m['team1']} vs {m['team2']}) → 📍 **{m['stadium']}**{note}")
 
-    # DSL (Dominators Super League) - home venues, venue stats & seasons
-    @tournament.command(name="set_home_stadium", aliases=["sethomestadium", "home_stadium", "shs"], help="[MANAGER/OWNER] Set a team's home ground.\nDSL: tournament set_home_stadium \"<team>\" <venue>\nLinked-stadium tournaments: tournament set_home_stadium \"<team>\" <stadium name> <pitch>")
+    @tournament.command(name="set_home_stadium", aliases=["sethomestadium", "home_stadium", "shs"], help="[MANAGER/OWNER] Set a team's home ground (linked-stadium tournaments).\nUsage: tournament set_home_stadium \"<team>\" <stadium name> <pitch>")
     async def t_set_home_stadium(self, ctx, team_name: str, *, venue: str):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney: return await ctx.send("❌ No tournament exists.")
         from league.stadium_manager import linked_stadiums
-        if not is_dsl_tournament(tourney) and not linked_stadiums(tourney):
-            return await ctx.send("❌ Home stadiums need a **DSL** season or a tournament created with **stadiums=linked**.")
+        if not linked_stadiums(tourney):
+            return await ctx.send("❌ Home stadiums need a tournament created with **stadiums=linked**.")
         if tourney["status"] != "registration":
             return await ctx.send("❌ Home grounds are locked once the tournament starts.")
         team = self._team_by_ref(ctx, tourney, team_name)
@@ -17600,12 +17510,6 @@ class PrefixCog(commands.Cog):
         is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
         if not is_mgr and team.get("owner_id") != str(ctx.author.id):
             return await ctx.send("❌ Only Managers or the Team Owner can set the home stadium.")
-
-        if is_dsl_tournament(tourney):
-            ok, msg = set_home_stadium(tourney, team["name"], venue)
-            if ok:
-                save_tournament(tourney)
-            return await ctx.send(msg)
 
         # Linked mode: free-form stadium name, LAST word must be the fixed home pitch.
         parts = venue.strip().strip('"').rsplit(None, 1)
@@ -17623,25 +17527,20 @@ class PrefixCog(commands.Cog):
         save_tournament(tourney)
         await ctx.send(f"🏟️ **{team['name']}** will play their home games at **{stadium_name}** — a fixed **{cp}** pitch.")
 
-    @tournament.command(name="home_stadiums", aliases=["homestadiums", "venues_home", "hs"], help="List each team's home ground and its pitch (DSL / linked-stadium tournaments).\nUsage: tournament home_stadiums")
+    @tournament.command(name="home_stadiums", aliases=["homestadiums", "venues_home", "hs"], help="List each team's home ground and its pitch (linked-stadium tournaments).\nUsage: tournament home_stadiums")
     async def t_home_stadiums(self, ctx):
         server_id = str(ctx.guild.id)
         tourney = get_server_tournament(server_id)
         if not tourney: return await ctx.send("❌ No tournament exists.")
         from league.stadium_manager import linked_stadiums
-        is_dsl = is_dsl_tournament(tourney)
-        if not is_dsl and not linked_stadiums(tourney):
-            return await ctx.send("❌ Home stadiums need a **DSL** season or a tournament created with **stadiums=linked**.")
+        if not linked_stadiums(tourney):
+            return await ctx.send("❌ Home stadiums need a tournament created with **stadiums=linked**.")
         teams = tourney.get("teams", [])
         if not teams: return await ctx.send("📋 No teams yet.")
         lines = []
         for t in sorted(teams, key=lambda x: x["name"].lower()):
-            if is_dsl:
-                v = canonical_venue(t.get("home_stadium"))
-                pitch = DSL_CONFIG["venues"].get(v) if v else None
-            else:
-                v = t.get("home_stadium")
-                pitch = canonical_pitch(t.get("home_pitch"))
+            v = t.get("home_stadium")
+            pitch = canonical_pitch(t.get("home_pitch"))
             if v and pitch:
                 lines.append(f"• **{t['name']}** — 📍 {v} *({pitch} pitch)*")
             else:
@@ -17869,166 +17768,6 @@ class PrefixCog(commands.Cog):
         save_tournament(tourney)
         filled = sum(len(ps) for ps in plan.values())
         await prompt.edit(content=f"✅ **Auto-fill complete** — added **{filled}** player(s):\n{summary}{short}", view=None)
-
-    @tournament.command(name="venue_stats", aliases=["pitch_stats", "venuestats"], help="[DSL] All-time venue numbers across every season.\nUsage: tournament venue_stats [venue]")
-    async def t_venue_stats(self, ctx, *, venue: str = None):
-        server_id = str(ctx.guild.id)
-        tourney = get_server_tournament(server_id)   # may be None between seasons - that's fine
-        stats = aggregate_venue_stats(server_id, tourney)
-        if not stats:
-            return await ctx.send("📊 No venue data yet — stats build up as DSL matches are completed.")
-
-        def _fmt(v, st, detailed=False):
-            bf = f"{st['bat_first_win_pct']:.0f}%" if st["bat_first_win_pct"] is not None else "—"
-            base = (f"**M:** {st['matches']} · **Avg 1st inn:** {st['avg_1st']:.0f} · **Avg 2nd inn:** {st['avg_2nd']:.0f}\n"
-                    f"**Bat-first wins:** {bf} · **Hi/Lo:** {st['highest']}/{st['lowest']}")
-            if detailed and st["pitch_counts"]:
-                dist = " · ".join(f"{p} ×{c}" for p, c in sorted(st["pitch_counts"].items(), key=lambda kv: -kv[1]))
-                base += f"\n**Pitches seen:** {dist}"
-            return base
-
-        if venue:
-            v = canonical_venue(venue) or next((s for s in stats if s.lower() == venue.strip().lower()), None)
-            if not v:
-                return await ctx.send(f"❌ Unknown venue **{venue}**.\nVenues: " + " · ".join(DSL_CONFIG["venues"]))
-            st = stats.get(v)
-            if not st:
-                return await ctx.send(f"📊 **{v}** hasn't hosted a completed match yet.")
-            e = discord.Embed(title=f"📍 {v} — All-Time Venue Stats",
-                              description=_fmt(v, st, detailed=True),
-                              color=discord.Color.from_rgb(20, 60, 160))
-            pitch = DSL_CONFIG["venues"].get(v)
-            if pitch:
-                e.add_field(name="Pitch", value=f"🏟️ **{pitch}** — fixed (same pitch every match here)", inline=False)
-            e.set_footer(text="All seasons combined (archives + current)")
-            return await ctx.send(embed=e)
-
-        e = discord.Embed(title=f"📊 {DSL_CONFIG['display_name']} — Venue Stats (All-Time)",
-                          color=discord.Color.from_rgb(20, 60, 160))
-        for v, st in sorted(stats.items(), key=lambda kv: -kv[1]["matches"])[:12]:
-            e.add_field(name=f"📍 {v}", value=_fmt(v, st), inline=True)
-        e.set_footer(text="All seasons combined · cvt venue_stats <venue> for detail")
-        await ctx.send(embed=e)
-
-    @tournament.command(name="end_season", aliases=["endseason", "archive_season"], help="[MANAGER/DSL] Archive the finished season to a JSON file and free the slot for the next one.\nUsage: tournament end_season")
-    async def t_end_season(self, ctx):
-        server_id = str(ctx.guild.id)
-        tourney = get_server_tournament(server_id)
-        if not tourney: return await ctx.send("❌ No tournament exists.")
-        if not is_dsl_tournament(tourney):
-            return await ctx.send(f"❌ Seasons are a **{DSL_CONFIG['short_name']}** feature. Other tournaments use `cvt force_delete`.")
-        is_mgr = (ctx.author.id == ADMIN_DISCORD_ID) or ctx.author.guild_permissions.administrator or (str(ctx.author.id) in tourney.get("managers", []))
-        if not is_mgr: return await ctx.send("❌ Managers only.")
-        if tourney.get("status") != "completed" or not tourney.get("dsl_champion"):
-            return await ctx.send("❌ The season isn't finished — the **Final** must be completed first.")
-        if any(m.get("status") == "pending" for m in tourney.get("schedule", [])):
-            return await ctx.send("❌ There are still pending matches — finish or cancel them first.")
-
-        season = tourney.get("season", "?")
-        try:
-            path, blob = write_season_archive(tourney)
-        except Exception as e:
-            return await ctx.send(f"❌ Archive failed — season left untouched: {e}")
-
-        # Free the server's tournament slot (the archive is now the season of record).
-        DB_CACHE["tournaments"] = [t for t in DB_CACHE.get("tournaments", [])
-                                   if str(t.get("server_id")) != server_id]
-        save_tournament_data_to_bin()
-
-        file = discord.File(fp=io.BytesIO(blob), filename=os.path.basename(path))
-        await ctx.send(
-            f"🏁 **{tourney['name']} is in the books!** 👑 Champions: **{tourney.get('dsl_champion')}**\n"
-            f"📦 Season archived to `{path}` — **commit this file to the bot's GitHub repo** so it survives redeploys "
-            f"(it's also attached here as a backup).\n"
-            f"🔵 Season **S{int(season) + 1 if str(season).isdigit() else '?'}** is ready whenever you are: `cvt start dsl`",
-            file=file,
-        )
-
-    @tournament.command(name="seasons", aliases=["history", "champions", "season"], help="[DSL] Honours board · a season's full review · or a player's stats in that season.\nUsage: tournament seasons [number] [player]\n`cvt season 1` → S1 review · `cvt season 1 Kohli` → Kohli's S1 stats + team")
-    async def t_seasons(self, ctx, season: int = None, *, player: str = None):
-        server_id = str(ctx.guild.id)
-        tourney = get_server_tournament(server_id)
-
-        # `cvt season 1 <player>` -> that player's stats IN that season, with his team
-        if season is not None and player:
-            rows = player_season_history(server_id, player, tourney)
-            if not rows:
-                # fuzzy-resolve the name across all seasons, then retry exact
-                agg = aggregate_player_stats(server_id, tourney)
-                close = difflib.get_close_matches(player.strip().lower(), list(agg.keys()), n=1, cutoff=0.5)
-                if close:
-                    rows = player_season_history(server_id, agg[close[0]]["name"], tourney)
-            srows = [r for r in rows if r[0] == season]
-            if not srows:
-                played = sorted({r[0] for r in rows})
-                hint = f" They appear in: {', '.join(f'S{s}' for s in played)}." if played else ""
-                return await ctx.send(f"❌ No stats for **{player}** in **S{season}**.{hint}")
-            for s_no, team, pname, ps in srows:   # usually one; multiple if mid-season transfer
-                await ctx.send(embed=build_player_stats_embed(
-                    ps, pname, team, season_label=f"{DSL_CONFIG['short_name']} Season {s_no}"))
-            return
-
-        # `cvt season 1` -> the full season review (from the archive JSON / live season)
-        if season is not None:
-            data = get_season_summary(server_id, season, tourney)
-            if not data:
-                have = [str(s) for s, *_ in season_history(server_id, tourney)]
-                hint = f" Available: {', '.join('S' + s for s in have)}" if have else ""
-                return await ctx.send(f"❌ No **S{season}** found for this server.{hint}")
-            return await ctx.send(embed=season_detail_embed(data))
-
-        rows = season_history(server_id, tourney)
-        if not rows:
-            return await ctx.send(f"📜 No {DSL_CONFIG['short_name']} seasons yet. `cvt start dsl` begins Season 1!")
-        lines = []
-        for s_no, name, champ, runner in rows:
-            if champ:
-                lines.append(f"`S{s_no}` 👑 **{champ}**" + (f" *(def. {runner})*" if runner else ""))
-            else:
-                lines.append(f"`S{s_no}` ⏳ *in progress*")
-        e = discord.Embed(title=f"📜 {DSL_CONFIG['display_name']} — Honours Board",
-                          description="\n".join(lines), color=discord.Color.gold())
-        e.set_footer(text="cvt season <number> for a season's full review")
-        await ctx.send(embed=e)
-
-    @tournament.command(name="career", aliases=["overall_stats", "alltime"], help="[DSL] A player's all-time stats across every season.\nUsage: tournament career <player>")
-    async def t_career(self, ctx, *, player_name: str):
-        server_id = str(ctx.guild.id)
-        tourney = get_server_tournament(server_id)
-        agg = aggregate_player_stats(server_id, tourney)
-        if not agg:
-            return await ctx.send("📊 No stats yet — they build up as DSL matches are completed.")
-        key = player_name.strip().lower()
-        rec = agg.get(key)
-        if not rec:
-            close = difflib.get_close_matches(key, list(agg.keys()), n=1, cutoff=0.5)
-            if close:
-                rec = agg[close[0]]
-            else:
-                return await ctx.send(f"❌ No DSL stats found for **{player_name}**.")
-        sr   = (rec["runs"] / rec["balls_faced"] * 100) if rec["balls_faced"] > 0 else 0.0
-        avg  = (rec["runs"] / rec["outs"]) if rec["outs"] > 0 else float(rec["runs"])
-        econ = (rec["runs_conceded"] / rec["balls_bowled"] * 6) if rec["balls_bowled"] > 0 else 0.0
-        o, b = rec["balls_bowled"] // 6, rec["balls_bowled"] % 6
-        e = discord.Embed(title=f"🌏 {DSL_CONFIG['short_name']} Career: {rec['name']}",
-                          description=f"**Seasons:** {rec['seasons']} · **Matches:** {rec['matches']} · **Teams:** {', '.join(rec['teams'])}",
-                          color=discord.Color.from_rgb(20, 60, 160))
-        e.add_field(name="🏏 Batting",
-                    value=(f"**Runs:** {rec['runs']}\n**SR:** {sr:.1f} · **Avg:** {avg:.1f}\n"
-                           f"**4s/6s:** {rec['fours']}/{rec['sixes']}\n**50s/100s:** {rec['fifties']}/{rec['hundreds']}"),
-                    inline=True)
-        e.add_field(name="🎯 Bowling",
-                    value=f"**Wickets:** {rec['wickets']}\n**Economy:** {econ:.1f}\n**Overs:** {o}.{b}",
-                    inline=True)
-        # Season-by-season: which team he played for each season, with his headline numbers.
-        rows = player_season_history(server_id, rec["name"], tourney)
-        if rows:
-            hist_lines = []
-            for s_no, team, _pname, ps in sorted(rows, key=lambda r: (r[0] is None, r[0])):
-                hist_lines.append(f"`S{s_no}` **{team}** — {ps.get('runs', 0)} runs · {ps.get('wickets', 0)} wkts ({ps.get('matches', 0)}m)")
-            e.add_field(name="📜 Season history", value="\n".join(hist_lines[:12]), inline=False)
-        e.set_footer(text="All seasons combined (archives + current) · cvt season <n> " + rec["name"] + " for one season's full card")
-        await ctx.send(embed=e)
 
     @tournament.command(name="set_team_color", help="[MANAGER/OWNER] Set a team's scorecard color.\nUsage: tournament set_team_color \"<team_name>\" #RRGGBB")
     async def t_set_team_color(self, ctx, team_name: str, color: str):
@@ -18433,13 +18172,6 @@ class PrefixCog(commands.Cog):
                 ("India", "A"), ("Australia", "A"), ("England", "A"), ("New Zealand", "A"), ("Pakistan", "A"),
                 ("South Africa", "B"), ("Sri Lanka", "B"), ("Bangladesh", "B"), ("West Indies", "B"), ("Afghanistan", "B"),
             ]
-        elif t_type == "dsl":
-            team_config = [
-                ("Mumbai Dominators", None), ("Chennai Chargers", None), ("Bangalore Blasters", None),
-                ("Kolkata Krakens", None), ("Delhi Daredevils", None), ("Hyderabad Hurricanes", None),
-                ("Ahmedabad Avengers", None), ("Jaipur Jaguars", None), ("Punjab Panthers", None),
-                ("Lucknow Legends", None), ("Navi Mumbai Ninjas", None), ("Dharamsala Dragons", None),
-            ][:DSL_CONFIG["team_count"]]
         elif t_type == "tbecs":
             # 54 generated city sides; the 2 GOAT XIs are re-appended after the draft.
             from league.tbecs_manager import TBECS_CONFIG as _TBC
@@ -18513,14 +18245,8 @@ class PrefixCog(commands.Cog):
             for _t in tourney["teams"]:
                 if not canonical_pitch(_t.get("home_pitch")):
                     _t["home_pitch"] = random.choice(["Flat", "Dead", "Hard", "Green", "Dusty"])
-        # DSL: deal each team a distinct home venue so the start validation passes one-shot.
-        if t_type == "dsl":
-            _venues = list(DSL_CONFIG["venues"])
-            for _i, _t in enumerate(tourney["teams"]):
-                if not canonical_venue(_t.get("home_stadium")):
-                    _t["home_stadium"] = _venues[_i % len(_venues)]
         # Linked stadiums: invent a ground + pitch per team so dev_setup stays one-shot.
-        elif tourney.get("stadium_mode") == "linked":
+        if tourney.get("stadium_mode") == "linked":
             _pitches = ["Flat", "Dead", "Hard", "Green", "Dusty", "Slow", "Turning", "Bouncy"]
             for _i, _t in enumerate(tourney["teams"]):
                 if not _t.get("home_stadium"):
@@ -18604,11 +18330,6 @@ class PrefixCog(commands.Cog):
             _acl_try_advance(tourney)
         elif t_type == "ipl":
             ipl_try_advance(tourney)
-        elif t_type == "dsl":
-            from league.dsl_manager import DSL_CONFIG, dsl_generate_playoffs, _dsl_try_advance
-            if DSL_CONFIG["auto_playoffs"]:
-                dsl_generate_playoffs(tourney)
-            _dsl_try_advance(tourney)
         elif t_type == "custom":
             custom_try_advance(tourney)
         else:
@@ -18935,12 +18656,7 @@ class PrefixCog(commands.Cog):
             return await ctx.send(f"❌ Player '{player_name}' not found in any team.")
         if len(matches) == 1:
             t, p = matches[0]
-            overall, season_label = None, None
-            if is_dsl_tournament(tourney):
-                overall = aggregate_player_stats(server_id, tourney).get(p.lower())
-                season_label = f"{DSL_CONFIG['short_name']} Season {tourney.get('season', '?')}"
-            return await ctx.send(embed=build_player_stats_embed(
-                stats_map[t][p], p, t, overall=overall, season_label=season_label))
+            return await ctx.send(embed=build_player_stats_embed(stats_map[t][p], p, t))
         view = PlayerStatsTeamSelectView(stats_map, matches)
         await ctx.send(f"🔎 **{matches[0][1]}** is on multiple teams — pick which one:", view=view)
 
@@ -18951,7 +18667,7 @@ class PrefixCog(commands.Cog):
             title="🏆 Tournament Guide  ·  Quickstarts",
             description=("Event types: **Round Robin** · **Double Round Robin** · **T20 World Cup** (4 groups → Super 8 → KO) · "
                          "**ACL** (14 teams → League → Playoffs → Super Cup) · **CCODI** (10 teams, ODI, "
-                         "2 groups of 5, round-wise double RR → Qualifiers ladder) · **DSL** (recurring seasons) · "
+                         "2 groups of 5, round-wise double RR → Qualifiers ladder) · "
                          "**Conquest** (open Elo ladder).\nFull command list is in the second card below. ⬇️"),
             color=discord.Color.gold(),
         )
@@ -18977,14 +18693,6 @@ class PrefixCog(commands.Cog):
                    "**2.** `cvt add_team \"<team>\" @owner` for every team · owners `cvt ss`\n"
                    "**3.** `cvt start` → everyone plays everyone twice, once each way\n"
                    "**4.** after league matches: mgr `cvt generate_knockouts` for Top-4 semis, **or** `cvt gf` for a direct Top-2 Final"),
-            inline=False,
-        )
-        qs.add_field(
-            name="🔵 DSL (Dominators Super League)",
-            value=("**1.** `cvt start dsl` — opens a preconfigured season (S1, S2, …)\n"
-                   "**2.** `cvt add_team \"<team>\" @owner` ×12 · owners `cvt ss`\n"
-                   "**3.** `cvt set_home_stadium \"<team>\" <venue>` — one fixed pitch per ground\n"
-                   "**4.** `cvt start` → home & away → Top-4 Playoffs · after the Final `cvt end_season`"),
             inline=False,
         )
         qs.add_field(
@@ -19049,7 +18757,7 @@ class PrefixCog(commands.Cog):
             name="🔥 Knockouts (Managers)",
             value=("`generate_knockouts` — Semis for Round Robin / Double RR / T20 WC\n"
                    "`generate_finals`/`gf` — direct Top-2 Final, no semis (Double RR)\n"
-                   "`generate_playoffs`/`gp` — ACL Top-6 / DSL Top-4\n"
+                   "`generate_playoffs`/`gp` — ACL Top-6\n"
                    "`bracket`/`br` — the knockout bracket\n"
                    "*(CCODI semis auto-generate once both groups finish.)*"),
             inline=False,
@@ -19059,7 +18767,6 @@ class PrefixCog(commands.Cog):
             value=("`standings`/`st` — points table / group tables / Elo ladder · `status`/`sched` · `groups`\n"
                    "`leaderboard`/`lb <cat>` (categories in the footer) · `player_stats`/`ps <player>`\n"
                    "`match_scorecard <id>` — a completed match's image\n"
-                   "`career <player>` · `seasons`/`season [n] [player]` · `venue_stats [venue]` — [DSL] all-time\n"
                    "`summary`/`recap` — the COMPLETE report (run & pin before deleting!)"),
             inline=False,
         )

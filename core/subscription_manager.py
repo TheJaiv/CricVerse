@@ -43,7 +43,13 @@ def _get_db():
             _encode_mongo_uri(MONGO_URI),
             tlsAllowInvalidCertificates=True,
             tlsAllowInvalidHostnames=True,
-            serverSelectionTimeoutMS=30000,
+            # 5s, not 30s: every load_* below is a BLOCKING pymongo call, so this
+            # value is the worst case the caller is stuck for. At 30s a sleepy M0
+            # cluster froze the whole bot long enough to expire every queued Discord
+            # interaction (10062 "Unknown interaction" storms).
+            serverSelectionTimeoutMS=5000,
+            connectTimeoutMS=5000,
+            socketTimeoutMS=20000,
         )
         _db = _client[MONGO_DB]
     return _db
@@ -69,11 +75,6 @@ DB_CACHE = {
     # Saved custom XI presets per server (player NAMES - re-resolved against the live DB on load):
     # { server_id: { "<name lower>": {"name": "RCB", "players": ["Virat Kohli", ...]} } }
     "custom_teams": {},
-    # Per-league, per-server access grants (bot-owner only - independent of server tiers,
-    # which update_server_tier() wholesale-replaces). last_season keeps season numbering
-    # monotonic in Mongo even if the on-disk archive files are lost between deploys:
-    # { "dsl": { server_id: {"enabled": True, "last_season": 2} } }
-    "league_access": {},
     # TBECS innings-break ads: { server_id: ["ad text 1", "ad text 2", ...] }. Shown at
     # every innings end of a TBECS match (see bot._maybe_send_tbecs_ads). Lives in the main
     # doc (small) - only the heavy TBECS match scorecards are sharded out (see below).
@@ -122,7 +123,6 @@ def load_data_from_bin():
             DB_CACHE["server_overrides"]    = doc.get("server_overrides", {})
             DB_CACHE["draft_stats"]         = doc.get("draft_stats", {})
             DB_CACHE["custom_teams"]        = doc.get("custom_teams", {})
-            DB_CACHE["league_access"]       = doc.get("league_access", {})
             DB_CACHE["tbecs_ads"]            = doc.get("tbecs_ads", {})
             _migrate_custom_teams()  # flatten any legacy per-server teams into one global pool
             raw_mc = doc.get("match_counts", {})
@@ -142,18 +142,12 @@ def load_tournament_data_from_bin():
         print("MONGO_URI missing! Tournament data will be empty.")
         return
     try:
-        # Regular tournaments and DSL league seasons live in SEPARATE documents so the
-        # recurring league never competes with normal tournaments for Mongo's 16MB
-        # per-document cap. The in-memory cache stays one unified list - nothing
-        # downstream needs to know about the split.
-        # DSL leagues and the Conquest (rating) league each live in their OWN document
-        # so the recurring/open leagues never compete with normal tournaments for
-        # Mongo's 16MB per-doc cap (the open ladder can accumulate many matches). The
-        # in-memory cache stays one unified list - nothing downstream knows about the split.
+        # The Conquest (rating) league and TBECS each live in their OWN document so
+        # they never compete with normal tournaments for Mongo's 16MB per-doc cap
+        # (the open ladder can accumulate many matches). The in-memory cache stays
+        # one unified list - nothing downstream knows about the split.
         doc = _get_db()["tournaments"].find_one({"_id": "tournament_data"})
         tours = list(doc.get("tournaments", [])) if doc else []
-        dsl_doc = _get_db()["tournaments"].find_one({"_id": "dsl_tournament_data"})
-        dsl_tours = list(dsl_doc.get("tournaments", [])) if dsl_doc else []
         rating_doc = _get_db()["tournaments"].find_one({"_id": "rating_tournament_data"})
         rating_tours = list(rating_doc.get("tournaments", [])) if rating_doc else []
         # TBECS lives in its own skeleton doc; its heavy per-match scorecards are sharded
@@ -178,12 +172,12 @@ def load_tournament_data_from_bin():
                     res.update(h)
         # De-dupe on the boundary: a split-type tournament saved into the main doc by an
         # older bot version must not load twice once it also exists in its own doc.
-        split_ids = {(str(t.get("server_id")), t.get("name")) for t in dsl_tours + rating_tours + tbecs_tours}
+        split_ids = {(str(t.get("server_id")), t.get("name")) for t in rating_tours + tbecs_tours}
         if split_ids:
             tours = [t for t in tours if (str(t.get("server_id")), t.get("name")) not in split_ids]
-        DB_CACHE["tournaments"] = tours + dsl_tours + rating_tours + tbecs_tours
-        if doc or dsl_doc or rating_doc or tbecs_doc:
-            print(f"Loaded {len(tours)} tournament(s) + {len(dsl_tours)} DSL + {len(rating_tours)} Conquest + {len(tbecs_tours)} TBECS from MongoDB!")
+        DB_CACHE["tournaments"] = tours + rating_tours + tbecs_tours
+        if doc or rating_doc or tbecs_doc:
+            print(f"Loaded {len(tours)} tournament(s) + {len(rating_tours)} Conquest + {len(tbecs_tours)} TBECS from MongoDB!")
         else:
             print("No tournament document found in MongoDB. Starting with empty cache.")
     except Exception as e:
@@ -212,11 +206,10 @@ def save_tournament_data_to_bin(snapshot=None):
         # Serialize a point-in-time snapshot (taken on the caller's thread) so the
         # background writer never encodes a dict the event loop is mutating mid-save.
         data = snapshot if snapshot is not None else copy.deepcopy(DB_CACHE["tournaments"])
-        # Split by league: DSL seasons and the Conquest (rating) league each get their
-        # own document (own 16MB budget) - see load_tournament_data_from_bin. Matched
-        # on tournament_type, so this module stays a leaf (no manager imports).
-        regular = [t for t in data if t.get("tournament_type") not in ("dsl", "rating", "tbecs")]
-        dsl     = [t for t in data if t.get("tournament_type") == "dsl"]
+        # Split by league: the Conquest (rating) league and TBECS each get their own
+        # document (own 16MB budget) - see load_tournament_data_from_bin. Matched on
+        # tournament_type, so this module stays a leaf (no manager imports).
+        regular = [t for t in data if t.get("tournament_type") not in ("rating", "tbecs")]
         rating  = [t for t in data if t.get("tournament_type") == "rating"]
         tbecs    = [t for t in data if t.get("tournament_type") == "tbecs"]
         db = _get_db()
@@ -252,15 +245,12 @@ def save_tournament_data_to_bin(snapshot=None):
             {"_id": "tournament_data"},
             {"_id": "tournament_data", "tournaments": regular}, upsert=True)
         db["tournaments"].replace_one(
-            {"_id": "dsl_tournament_data"},
-            {"_id": "dsl_tournament_data", "tournaments": dsl}, upsert=True)
-        db["tournaments"].replace_one(
             {"_id": "rating_tournament_data"},
             {"_id": "rating_tournament_data", "tournaments": rating}, upsert=True)
         db["tournaments"].replace_one(
             {"_id": "tbecs_tournament_data"},
             {"_id": "tbecs_tournament_data", "tournaments": tbecs}, upsert=True)
-        print(f"MongoDB Save OK (tournaments: {len(regular)} regular / {len(dsl)} DSL / "
+        print(f"MongoDB Save OK (tournaments: {len(regular)} regular / "
               f"{len(rating)} Conquest / {len(tbecs)} TBECS +{len(new_match_docs)} match docs)")
         return True
     except Exception as e:
@@ -276,6 +266,33 @@ def async_save_tournament_to_bin():
     # iteration" / lost updates when several tournament matches finish near-simultaneously.
     snapshot = copy.deepcopy(DB_CACHE.get("tournaments", []))
     Thread(target=save_tournament_data_to_bin, args=(snapshot,)).start()
+
+_CMD_DIGEST_ID = "command_sync_state"
+
+def get_command_digest():
+    """The app-command signature hash stored at the last successful tree.sync().
+    Returns None if unknown (missing doc, or Mongo unreachable) - the caller then
+    syncs, which is the safe direction to fail in."""
+    try:
+        doc = _get_db()["main"].find_one({"_id": _CMD_DIGEST_ID})
+    except Exception as e:
+        print(f"command digest read failed ({e}) - will sync")
+        return None
+    return (doc or {}).get("digest")
+
+
+def set_command_digest(digest):
+    try:
+        _get_db()["main"].replace_one(
+            {"_id": _CMD_DIGEST_ID},
+            {"_id": _CMD_DIGEST_ID, "digest": digest,
+             "updated": datetime.datetime.now(datetime.timezone.utc).isoformat()},
+            upsert=True)
+        return True
+    except Exception as e:
+        print(f"command digest write failed ({e})")
+        return False
+
 
 def get_today_str():
     return datetime.date.today().isoformat()

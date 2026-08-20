@@ -1,6 +1,5 @@
 # Full T20 pitch realism audit - Monte Carlo every pitch (Clear weather, equal
-# 85v85 teams) in BOTH engine modes (normal + DSL league-realism) and report
-# the numbers that matter for realism:
+# 85v85 teams) and report the numbers that matter for realism:
 #   1st-inn par / spread / run-rate / wickets / all-out% / boundary balls per
 #   innings (4s+6s) / six share / chase-win% / tie%.
 # Run from repo root: python tools/pitch_audit.py [n_per_pitch]
@@ -19,15 +18,13 @@ from league.tournament_manager import ALL_PITCHES
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 500
 
 
-def audit_pitch(pitch, dsl, n):
+def audit_pitch(pitch, n):
     r = {"runs": [], "wkts": [], "balls": [], "bnd4": [], "bnd6": [],
          "allout": 0, "chase_win": 0, "tie": 0, "runs2": [], "wkts2": []}
     for _ in range(n):
         a = build_team("A", 85, 85, noise=0)
         b = build_team("B", 85, 85, noise=0)
         m = CricketMatch(a, b, format_overs=20, pitch=pitch, weather="Clear")
-        if dsl:
-            m.tournament_type = "dsl"
         m.innings1 = InningsState(a, b)
         m.current_innings = m.innings1
         m.current_innings_num = 1
@@ -73,13 +70,11 @@ HDR = (f"{'pitch':<11}{'par':>6} {'':>4} {'range':>9}{'rr':>6}{'wkts':>6}{'allou
 
 def main():
     random.seed(99)
-    print(f"n={N} matches per pitch per mode · 85v85 · Clear weather\n")
-    for label, dsl in (("NORMAL ENGINE", False), ("DSL LEAGUE-REALISM MODE", True)):
-        print(f"━━ {label} ━━")
-        print(HDR)
-        for pitch in ALL_PITCHES:
-            print(line(pitch, audit_pitch(pitch, dsl, N)))
-        print()
+    print(f"n={N} matches per pitch · 85v85 · Clear weather\n")
+    print(HDR)
+    for pitch in ALL_PITCHES:
+        print(line(pitch, audit_pitch(pitch, N)))
+    print()
 
 
 if __name__ == "__main__":
