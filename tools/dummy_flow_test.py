@@ -5,7 +5,10 @@
 # relies on: 70% pool selection, correctly-composed balanced XIs, no player on both
 # sides of a match, even game-time rotation across the pool, participation reaching
 # the whole pool over enough matches, and the pitch x weather schedule covering every
-# surface + sky (and all 170 combos) via the i%17 / i%10 cycle bot.py uses.
+# surface + sky (and all 170 combos) via the i%17 / i%10 cycle bot.py uses - for a
+# single-format run and for the mixed T20+ODI / T20+ODI+Test cycles.
+# Also checks the batched (fast) conditions-stats path matches the per-match (slow)
+# path for both limited-overs and Test matches.
 
 import os
 import sys
@@ -129,20 +132,26 @@ def main():
     short_w = {weathers[i % len(weathers)] for i in range(20)}
     check(len(short_p) >= 15 and len(short_w) == 10, f"even 20 matches span {len(short_p)} pitches / {len(short_w)} weathers")
 
-    # mixed T20+ODI: each format walks its OWN pitch=s%17 / weather=s%10 counter (as the
-    # worker does), so both formats still cover all 170 combos - a shared global index
-    # would only hit even weather slots per format.
-    seq = {20: 0, 50: 0}
-    cells = set()
-    for i in range(2 * len(pitches) * len(weathers)):   # 340 matches, 50/50 mix
-        overs = 20 if i % 2 == 0 else 50
-        s = seq[overs]
-        cells.add((pitches[s % len(pitches)], weathers[s % len(weathers)], overs))
-        seq[overs] += 1
-    t20_cells = {(p, w) for p, w, o in cells if o == 20}
-    odi_cells = {(p, w) for p, w, o in cells if o == 50}
-    check(len(t20_cells) == len(pitches) * len(weathers), f"mixed run covers all T20 combos ({len(t20_cells)})")
-    check(len(odi_cells) == len(pitches) * len(weathers), f"mixed run covers all ODI combos ({len(odi_cells)})")
+    # mixed runs: each format walks its OWN pitch=s%17 / weather=s%10 counter (as the
+    # worker does), so every format still covers all 170 combos - a shared global index
+    # would only hit every 2nd/3rd weather slot per format.
+    def mixed_cells(cycle):
+        seq = {f: 0 for f in cycle}
+        cells = set()
+        for i in range(len(cycle) * len(pitches) * len(weathers)):
+            fkey = cycle[i % len(cycle)]        # bot.py's _format_for
+            s = seq[fkey]
+            cells.add((pitches[s % len(pitches)], weathers[s % len(weathers)], fkey))
+            seq[fkey] += 1
+        return cells
+
+    full = len(pitches) * len(weathers)
+    for cycle in (("t20", "odi"), ("t20", "odi", "test")):
+        cells = mixed_cells(cycle)
+        label = "+".join(cycle)
+        for fkey in cycle:
+            per = {(p, w) for p, w, f in cells if f == fkey}
+            check(len(per) == full, f"{label} run covers all {fkey.upper()} combos ({len(per)}/{full})")
 
     # --- lopsided pool still fields teams (fallback path) ---
     bat_heavy = [p for p in db if bucket_of(p["role"]) in ("BAT", "WK")][:40]
@@ -152,6 +161,7 @@ def main():
 
     # --- fast (batched) PW recording == slow (per-match) PW recording ---
     test_pw_batch_equivalence(rng)
+    test_pw_batch_equivalence_test_format(rng)
 
     print(f"\n{PASS} passed, {FAIL} failed")
     sys.exit(1 if FAIL else 0)
@@ -241,6 +251,75 @@ def test_pw_batch_equivalence(rng):
         check(all(slow[k] == fast[k] for k in slow), "fast batched aggregates == slow per-match aggregates")
         check(sum(d.get("matches", 0) for d in fast.values()) == 300, "all 300 matches folded in")
         print(f"PW batch-equivalence: {len(fast)} combos, aggregates identical to per-match path")
+    finally:
+        cstats._get_db = orig_getdb
+        if had_uo:
+            pymongo.UpdateOne = saved_uo
+
+
+def _rand_test_match(rng, pitch, weather):
+    """Stand-in for a finished TestMatch: innings_list instead of innings1/innings2."""
+    m = _TestMatchStub(pitch, weather)
+    for _ in range(rng.choice([3, 4])):          # a Test can end in 3 completed innings
+        bowlers = ([(f"P{i}", "Bowler_Pace", rng.randint(60, 180), rng.randint(40, 160), rng.randint(0, 6)) for i in range(3)]
+                   + [(f"S{i}", "Bowler_Spin_Off", rng.randint(60, 200), rng.randint(40, 170), rng.randint(0, 6)) for i in range(2)])
+        m.innings_list.append(_Inn(rng.randint(90, 550), rng.randint(3, 10), rng.randint(300, 700), bowlers))
+    return m
+
+
+class _TestMatchStub:
+    def __init__(self, pitch, weather):
+        self.pitch, self.weather = pitch, weather
+        self.innings_list = []
+
+
+def test_pw_batch_equivalence_test_format(rng):
+    """Same equivalence guarantee for Tests: `cv dummyrun ... test` in fast mode routes
+    Tests through cstats.accumulate, which must fold them exactly as record_test_match
+    would - and into the `test` bucket, never the limited-overs one."""
+    try:
+        import pymongo
+        import core.conditions_stats as cstats
+    except Exception as e:
+        print(f"  SKIP: Test PW batch-equivalence ({type(e).__name__}: {e})")
+        return
+
+    fake = {"col": _FakeCol()}
+    orig_getdb = cstats._get_db
+    cstats._get_db = lambda: {cstats.COLLECTION: fake["col"]}
+    # Force flush_batch's per-combo update_one fallback, as the limited-overs check does,
+    # so _FakeCol never has to imitate pymongo's UpdateOne; restored in finally.
+    had_uo = hasattr(pymongo, "UpdateOne")
+    saved_uo = getattr(pymongo, "UpdateOne", None)
+    if had_uo:
+        del pymongo.UpdateOne
+    try:
+        pitches = ["Flat", "Green", "Dusty", "Hard", "Damp"]
+        weathers = ["Clear", "Cloudy", "Humid"]
+        matches = [_rand_test_match(rng, pitches[i % len(pitches)], weathers[i % len(weathers)])
+                   for i in range(120)]
+
+        fake["col"] = _FakeCol()
+        for m in matches:
+            m._conditions_recorded = False
+            cstats.record_test_match(m)
+        slow = fake["col"].store
+
+        fake["col"] = _FakeCol()
+        batch = {}
+        for m in matches:
+            m._conditions_recorded = False
+            cstats.accumulate(m, batch)
+        cstats.flush_batch(batch)
+        fast = fake["col"].store
+
+        check(slow.keys() == fast.keys(), "Test fast + slow touch the same combos")
+        check(all(slow[k] == fast[k] for k in slow), "Test fast batched aggregates == slow per-match aggregates")
+        check(all(k.endswith("|test") for k in fast), "Tests land in the test bucket only")
+        check(sum(d.get("matches", 0) for d in fast.values()) == 120, "all 120 Tests folded in")
+        check(all(d.get("t_inns", 0) >= d.get("matches", 0) * 3 for d in fast.values()),
+              "per-innings Test counters accumulate (>=3 innings per match)")
+        print(f"Test PW batch-equivalence: {len(fast)} combos, aggregates identical to per-match path")
     finally:
         cstats._get_db = orig_getdb
         if had_uo:

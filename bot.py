@@ -1477,8 +1477,10 @@ def _sim_super_over(match: CricketMatch):
 # ---- Dummy data-farm run (owner-only `cv dummyrun`) ----
 # Balanced XIs drafted from the live player DB (league/dummy_run.py), played headless
 # across every pitch x weather combo ONLY to grow global_stats (GS) + conditions_stats
-# (PW). No tournament doc, no scorecard persistence - the two recorders fire inside
-# _run_full_match_sync and the match is discarded, which is what keeps it quick.
+# (PW). No tournament doc, no scorecard persistence - the two recorders fire and the
+# match is discarded, which is what keeps it quick. T20/ODI go through
+# _simulate_dummy_match, Tests through _simulate_dummy_test_match; each format keeps its
+# own conditions counter so a mixed run still covers every cell in every format.
 _DUMMY_RUN = {"active": False}   # live progress; see PrefixCog.dummyrun
 _DUMMY_TEAM_NAMES = [
     "Falcons", "Titans", "Rangers", "Vipers", "Chargers", "Nomads", "Sentinels",
@@ -1509,6 +1511,23 @@ def _simulate_dummy_match(a_players, b_players, pitch, weather, idx, rng, format
     match.innings1 = InningsState(bat, bowl)
     match.current_innings = match.innings1
     _run_full_match_sync(match)
+    return match
+
+
+def _simulate_dummy_test_match(a_players, b_players, pitch, weather, idx, rng):
+    """Play one headless 5-day Test between two pre-drafted balanced XIs and return the
+    finished match. No _defer_stats flag here - the Test engine never records anything
+    itself (the live path records in _test_finish_match), so the caller already owns it.
+    Red ball only: a pink-ball day-night Test plays differently but would land in the
+    same pitch x weather cell, so mixing them in would muddy the conditions tracker."""
+    n = _DUMMY_TEAM_NAMES
+    t1 = {"name": n[(idx * 2) % len(n)], "players": a_players}
+    t2 = {"name": n[(idx * 2 + 1) % len(n)], "players": b_players}
+    # Coin toss: randomise who bats first so the bat/bowl-first split stays unbiased.
+    bat, bowl = (t1, t2) if rng.random() < 0.5 else (t2, t1)
+    match = TestMatchObj(bat, bowl, pitch, weather, pink_ball=False)
+    match.is_player_test = False
+    _test_sim_match(match)
     return match
 
 
@@ -13535,7 +13554,7 @@ class PrefixCog(commands.Cog):
                                       embed=view.build_embed(), view=view)
 
     @commands.command(name="dummyrun", aliases=["datafarm", "dummytourney", "dfarm"],
-                      help="[OWNER] Farm GS + pitch/weather data fast.\nDrafts balanced XIs from ~70% of the player DB and plays N headless matches across every pitch x weather - feeds global stats + the conditions tracker, saves NO scorecards.\nUsage: dummyrun <matches> [pool%] [t20|odi|both] [fast|slow]  ·  dummyrun status  ·  dummyrun stop\nformat (default t20): both = a 50/50 T20+ODI mix, each cycling conditions independently. fast (default) batches writes for large N; slow writes per match.\nExamples: `dummyrun 500` · `dummyrun 5000 0.8 odi` · `dummyrun 4000 both` · `dummyrun 200 slow` · `dummyrun stop`")
+                      help="[OWNER] Farm GS + pitch/weather data fast.\nDrafts balanced XIs from ~70% of the player DB and plays N headless matches across every pitch x weather - feeds global stats + the conditions tracker, saves NO scorecards.\nUsage: dummyrun <matches> [pool%] [t20|odi|test|both|all] [fast|slow]  ·  dummyrun status  ·  dummyrun stop\nformat (default t20): test = 5-day Tests (red ball). both = an even T20+ODI mix, all = an even T20+ODI+Test mix - every format cycles conditions independently. fast (default) batches writes for large N; slow writes per match.\nExamples: `dummyrun 500` · `dummyrun 5000 0.8 odi` · `dummyrun 1000 test` · `dummyrun 4000 both` · `dummyrun 3000 all` · `dummyrun 200 slow` · `dummyrun stop`")
     async def dummyrun(self, ctx, *args):
         if ctx.author.id != ADMIN_DISCORD_ID:
             return await ctx.send("❌ Owner only.")
@@ -13554,7 +13573,7 @@ class PrefixCog(commands.Cog):
             return await ctx.send("⚠️ A dummy run is already in progress. Use `cv dummyrun status` or `cv dummyrun stop`.")
 
         # Parse (order-independent after matches): <matches> [pool% 0-1 or 0-100]
-        # [t20|odi|both] [fast|slow].
+        # [t20|odi|test|both|all] [fast|slow].
         total, frac, mode, fmt = None, 0.70, "fast", "t20"
         for tok in args:
             t = tok.lower()
@@ -13564,8 +13583,12 @@ class PrefixCog(commands.Cog):
                 fmt = "t20"
             elif t in ("odi", "od"):
                 fmt = "odi"
-            elif t in ("both", "mix", "all", "t20+odi", "odi+t20"):
+            elif t in ("test", "tst", "5day"):
+                fmt = "test"
+            elif t in ("both", "mix", "t20+odi", "odi+t20"):
                 fmt = "both"
+            elif t in ("all", "all3", "everything"):
+                fmt = "all"
             elif total is None and tok.isdigit():
                 total = int(tok)
             else:
@@ -13575,7 +13598,7 @@ class PrefixCog(commands.Cog):
                 except ValueError:
                     pass
         if total is None:
-            return await ctx.send("Usage: `cv dummyrun <matches> [pool%] [t20|odi|both] [fast|slow]` · `cv dummyrun status` · `cv dummyrun stop`")
+            return await ctx.send("Usage: `cv dummyrun <matches> [pool%] [t20|odi|test|both|all] [fast|slow]` · `cv dummyrun status` · `cv dummyrun stop`")
         if total <= 0:
             return await ctx.send("❌ Number of matches must be a positive integer.")
         frac = min(max(frac, 0.05), 1.0)
@@ -13594,9 +13617,10 @@ class PrefixCog(commands.Cog):
         buckets = dr.bucketize(pool)
         pitches = list(ALL_PITCHES); rng.shuffle(pitches)
         weathers = list(ALL_WEATHER); rng.shuffle(weathers)
-        n_formats = 2 if fmt == "both" else 1
+        n_formats = {"both": 2, "all": 3}.get(fmt, 1)
         combos_possible = len(pitches) * len(weathers) * n_formats   # PW docs = pitch×weather×format
-        fmt_label = {"t20": "T20", "odi": "ODI", "both": "T20+ODI"}[fmt]
+        fmt_label = {"t20": "T20", "odi": "ODI", "test": "Test",
+                     "both": "T20+ODI", "all": "T20+ODI+Test"}[fmt]
 
         _DUMMY_RUN.clear()
         _DUMMY_RUN.update({
@@ -13624,21 +13648,26 @@ class PrefixCog(commands.Cog):
         play_counts = {}
         featured, combos = _DUMMY_RUN["featured"], _DUMMY_RUN["combos"]
         fast = (mode == "fast")
+        pw_batch = {}
+        # Formats this run deals out, round-robin by match index (a single-format run is
+        # a one-entry cycle).
+        cycle = {"t20": ("t20",), "odi": ("odi",), "test": ("test",),
+                 "both": ("t20", "odi"), "all": ("t20", "odi", "test")}[fmt]
+        # Per-format condition counter: each format walks its own pitch=s%17 / weather=s%10
+        # cycle, so a mixed run still covers every combo IN EACH format (a shared global
+        # index would only hit every 2nd/3rd weather slot per format).
+        seq = {f: 0 for f in cycle}
         # fast: bigger batches + deferred GS save + one bulk PW write per batch, so a
         # few-thousand-match run costs a handful of Mongo round-trips, not thousands.
         CHUNK = 250 if fast else 25
-        pw_batch = {}
-        # Per-format condition counter: each format walks its own pitch=s%17 / weather=s%10
-        # cycle, so a mixed T20+ODI run still covers every combo IN EACH format (a shared
-        # global index would only hit even weather slots per format).
-        seq = {20: 0, 50: 0}
+        if "test" in cycle:
+            # A 5-day Test is ~10x the balls of a T20 (~100/s vs ~1000/s), so shrink the
+            # batch to keep each to_thread hop - and therefore progress edits and `stop` -
+            # around a second.
+            CHUNK = 100 if fast else 10
 
-        def _overs_for(idx):
-            if fmt == "t20":
-                return 20
-            if fmt == "odi":
-                return 50
-            return 20 if idx % 2 == 0 else 50   # both -> 50/50 mix
+        def _format_for(idx):
+            return cycle[idx % len(cycle)]
 
         done, error, last_edit = 0, None, 0.0
         if fast:
@@ -13651,26 +13680,33 @@ class PrefixCog(commands.Cog):
                 def run_chunk():
                     for k in range(count):
                         idx = start + k
-                        overs = _overs_for(idx)
-                        s = seq[overs]
+                        fkey = _format_for(idx)
+                        s = seq[fkey]
                         pitch = pitches[s % len(pitches)]
                         weather = weathers[s % len(weathers)]
-                        seq[overs] = s + 1
+                        seq[fkey] = s + 1
                         a, b, _sa, _sb = dr.draft_match(buckets, play_counts, rng)
-                        m = _simulate_dummy_match(a, b, pitch, weather, idx, rng, overs)
+                        if fkey == "test":
+                            m = _simulate_dummy_test_match(a, b, pitch, weather, idx, rng)
+                            gs_record, pw_record = gstats.record_test_match, cstats.record_test_match
+                        else:
+                            m = _simulate_dummy_match(a, b, pitch, weather, idx, rng,
+                                                      20 if fkey == "t20" else 50)
+                            gs_record, pw_record = (gstats.record_limited_overs_match,
+                                                    cstats.record_limited_overs_match)
                         # Record (deferred inside the match, so we own it here).
                         try:
-                            gstats.record_limited_overs_match(m)   # aggregates; disk write deferred if fast
+                            gs_record(m)                            # aggregates; disk write deferred if fast
                         except Exception as _ge:
                             print(f"[dummyrun] GS record failed: {_ge}")
                         try:
                             if fast:
                                 cstats.accumulate(m, pw_batch)      # in-memory; flushed per batch
                             else:
-                                cstats.record_limited_overs_match(m)  # per-match Mongo upsert
+                                pw_record(m)                        # per-match Mongo upsert
                         except Exception as _ce:
                             print(f"[dummyrun] PW record failed: {_ce}")
-                        combos.add((pitch, weather, overs))
+                        combos.add((pitch, weather, fkey))
                         featured.update(p["name"] for p in a)
                         featured.update(p["name"] for p in b)
                     if fast:

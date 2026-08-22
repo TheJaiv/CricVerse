@@ -155,10 +155,13 @@ def accumulate(match, batch):
     """Merge one match's conditions contribution into an in-memory `batch` dict (keyed
     by combo id) instead of writing to Mongo now. The dummy data-farm collapses
     thousands of matches this way, then flush_batch() writes them in ONE bulk round-trip.
-    Marks the match recorded so it can never be double-counted."""
+    Handles Tests as well as limited-overs. Marks the match recorded so it can never be
+    double-counted."""
     if getattr(match, "_conditions_recorded", False):
         return
-    c = _lo_contribution(match)
+    # A TestMatch carries innings_list (per-innings model); a limited-overs CricketMatch
+    # carries innings1/innings2.
+    c = _test_contribution(match) if hasattr(match, "innings_list") else _lo_contribution(match)
     if c is None:
         return
     pitch, weather, fmt, acc, hi, lo = c
@@ -204,21 +207,21 @@ def flush_batch(batch):
     return n
 
 
-def record_test_match(match):
-    """Fold a finished TestMatch (any number of completed innings) into its
-    pitch*weather*test doc. Test uses a per-INNINGS model (4 innings, no single
-    'chase'), so it tracks avg innings total + wickets + the pace/spin split."""
+def _test_contribution(match):
+    """(pitch, weather, "test", acc, hi, lo) for a finished TestMatch, or None if it must
+    not be recorded (player test / no innings / no conditions). Test uses a per-INNINGS
+    model (4 innings, no single "chase"), so it tracks avg innings total + wickets + the
+    pace/spin split. Split out of record_test_match so a bulk run can accumulate many
+    Tests in memory before touching Mongo (see accumulate)."""
     if getattr(match, "is_player_test", False):
-        return
-    if getattr(match, "_conditions_recorded", False):
-        return
+        return None
     pitch, weather = getattr(match, "pitch", None), getattr(match, "weather", None)
     if not pitch or not weather:
-        return
+        return None
     innings = [i for i in getattr(match, "innings_list", [])
                if getattr(i, "total_balls", 0) > 0 or getattr(i, "wickets", 0) > 0]
     if not innings:
-        return
+        return None
 
     acc = {k: 0 for k in _TEST_FIELDS}
     acc["matches"] = 1
@@ -230,7 +233,19 @@ def record_test_match(match):
         acc["t_balls"] += inn.total_balls
         _fold_bowling(inn, acc)
         totals.append(inn.total_runs)
-    _write(pitch, weather, "test", acc, max(totals), min(totals), match)
+    return (pitch, weather, "test", acc, max(totals), min(totals))
+
+
+def record_test_match(match):
+    """Fold a finished TestMatch (any number of completed innings) into its
+    pitch*weather*test doc. Idempotent per match object."""
+    if getattr(match, "_conditions_recorded", False):
+        return
+    c = _test_contribution(match)
+    if c is None:
+        return
+    pitch, weather, fmt, acc, hi, lo = c
+    _write(pitch, weather, fmt, acc, hi, lo, match)
 
 
 # ---- Read side (conditions command) ----
