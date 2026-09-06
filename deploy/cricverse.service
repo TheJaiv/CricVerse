@@ -1,0 +1,55 @@
+# CricVerse Discord bot - systemd unit.
+# Install:  sudo cp deploy/cricverse.service /etc/systemd/system/
+#           sudo systemctl daemon-reload && sudo systemctl enable --now cricverse
+# See DEPLOY.md for the full runbook.
+
+[Unit]
+Description=CricVerse Discord bot
+# Wait for real network, not just for the interface to exist - the bot opens a
+# gateway connection immediately and a half-ready network makes boot look like a crash.
+After=network-online.target
+Wants=network-online.target
+
+# Crash-loop cap. These MUST live in [Unit], not [Service] - systemd moved them in
+# v230 and silently ignores them if they are in the wrong section, which would quietly
+# remove the protection below. At most 5 starts per hour, then systemd gives up and
+# leaves the service stopped for a human to look at.
+StartLimitBurst=5
+StartLimitIntervalSec=3600
+
+[Service]
+Type=simple
+User=jaiv
+WorkingDirectory=/opt/cricverse
+
+# Secrets live here, root-owned and chmod 600 - never in the repo.
+# Note there is deliberately NO PORT variable: without it bot.py skips the
+# keep-alive web server, which only exists to satisfy PaaS free tiers.
+EnvironmentFile=/etc/cricverse.env
+
+ExecStart=/opt/cricverse/.venv/bin/python bot.py
+
+# Restart on failure, but NEVER in a hot loop. Each restart is a fresh Discord
+# IDENTIFY (cap: 1000/24h) and hammering the login endpoint is exactly how a
+# transient problem becomes a Cloudflare 1015 ban on this machine's IP.
+# The per-hour attempt cap is StartLimit* up in [Unit].
+Restart=on-failure
+RestartSec=60
+
+# Send SIGTERM on stop so the bot's shutdown handler runs before the process dies.
+KillSignal=SIGTERM
+TimeoutStopSec=45
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cricverse
+
+# Light hardening - the bot only needs its own directory and outbound network.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/cricverse
+
+[Install]
+WantedBy=multi-user.target

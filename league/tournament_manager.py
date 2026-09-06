@@ -2700,6 +2700,87 @@ _TM_STAT_KEYS = ("matches", "runs", "balls_faced", "outs", "fours", "sixes",
 _TM_STAT_DEFAULT = {k: 0 for k in _TM_STAT_KEYS}
 
 
+# ---- Test-match adaptation ----
+# A Test plays up to four innings and keeps them in match.innings_list, while every
+# recorder below (result dict, points table, player stats, injury roll) is written
+# against the one-innings-per-side shape a T20/ODI match has. Instead of forking all
+# of that, collapse each side's innings into a single view carrying the same attribute
+# names. Totals sum; the milestone_* counters carry what a merged total can't be asked
+# for afterwards - two 60s are not a hundred, and a batter can be dismissed twice.
+class _MergedBatting:
+    __slots__ = ("balls_faced", "runs_scored", "fours", "sixes", "dismissal",
+                 "milestone_outs", "milestone_hundreds", "milestone_fifties")
+
+    def __init__(self):
+        self.balls_faced = self.runs_scored = self.fours = self.sixes = 0
+        self.dismissal = "not out"
+        self.milestone_outs = self.milestone_hundreds = self.milestone_fifties = 0
+
+
+class _MergedBowling:
+    __slots__ = ("balls_bowled", "runs_conceded", "wickets_taken", "maidens")
+
+    def __init__(self):
+        self.balls_bowled = self.runs_conceded = self.wickets_taken = self.maidens = 0
+
+
+class _TestTeamInnings:
+    """Every innings a team batted in, merged into one InningsState-shaped view.
+
+    Follows the same convention as a limited-overs innings: batting_stats are the
+    batting side's, bowling_stats are the OPPOSING bowlers who operated during those
+    innings. process_team_stats/the injury roll read a team's bowling figures off the
+    other team's view, exactly as they do for T20/ODI.
+    """
+
+    def __init__(self, match, team_name):
+        self.batting_team = None
+        self.bowling_team = None
+        self.total_runs = self.wickets = self.total_balls = self.extras = 0
+        self.batting_stats = {}
+        self.bowling_stats = {}
+        for inn in match.innings_list:
+            if inn.batting_team["name"] != team_name:
+                continue
+            if self.batting_team is None:
+                self.batting_team = inn.batting_team
+                self.bowling_team = inn.bowling_team
+            self.total_runs += inn.total_runs
+            self.wickets += inn.wickets
+            self.total_balls += inn.total_balls
+            self.extras += getattr(inn, "extras", 0)
+            for name, bs in inn.batting_stats.items():
+                m = self.batting_stats.setdefault(name, _MergedBatting())
+                m.balls_faced += bs.balls_faced
+                m.runs_scored += bs.runs_scored
+                m.fours += bs.fours
+                m.sixes += bs.sixes
+                if bs.dismissal != "not out":
+                    m.dismissal = bs.dismissal
+                    m.milestone_outs += 1
+                if bs.runs_scored >= 100:
+                    m.milestone_hundreds += 1
+                elif bs.runs_scored >= 50:
+                    m.milestone_fifties += 1
+            for name, bw in inn.bowling_stats.items():
+                m = self.bowling_stats.setdefault(name, _MergedBowling())
+                m.balls_bowled += bw.balls_bowled
+                m.runs_conceded += bw.runs_conceded
+                m.wickets_taken += bw.wickets_taken
+                m.maidens += bw.maidens
+        # A side that never batted (rain-ruined Test) still needs the team dicts.
+        if self.batting_team is None:
+            first = match.innings_list[0]
+            same = first.batting_team["name"] == team_name
+            self.batting_team = first.batting_team if same else first.bowling_team
+            self.bowling_team = first.bowling_team if same else first.batting_team
+
+
+def is_test_match(match) -> bool:
+    """True for a Test engine match (innings_list) vs a T20/ODI CricketMatch."""
+    return hasattr(match, "innings_list")
+
+
 # Full tournament report (cvt summary) - the keep-before-you-delete record
 def _summary_mvp(s, odi=False):
     """Same MVP formula as the leaderboard command. Format-aware: the SR tiers and
@@ -3854,9 +3935,14 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
         t1, t2 = m["team1"], m["team2"]
         winner = r["winner"]
         round_label = m.get("round", f"Match {m['match_id']}")
+        # A Test result stores both innings summed, so label it as an aggregate and show
+        # the engine's verdict - "TIE" alone would read as a tie on a drawn Test.
+        _rtxt = r.get("result_text")
+        _agg = " *(both innings)*" if _rtxt else ""
+        _verdict = f"🏆 **{_rtxt}**" if _rtxt else f"🏆 Winner: **{winner}**"
         embed = discord.Embed(
             title=f"Match #{match_id} — {round_label}",
-            description=f"**{t1}** {r['t1_runs']}/{r['t1_wickets']}  vs  **{t2}** {r['t2_runs']}/{r['t2_wickets']}\n🏆 Winner: **{winner}**",
+            description=f"**{t1}** {r['t1_runs']}/{r['t1_wickets']}  vs  **{t2}** {r['t2_runs']}/{r['t2_wickets']}{_agg}\n{_verdict}",
             color=discord.Color.orange()
         )
         embed.set_footer(text=tourney["name"])
@@ -4138,20 +4224,40 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             print(f"Duplicate completion event for match {_mid} ignored (already recorded).")
             return
 
-        t1_name, t2_name = match.team1["name"], match.team2["name"]
-        if match.innings1.batting_team["name"] == t1_name:
-            t1_inn, t2_inn = match.innings1, match.innings2
+        result_text = None
+        if is_test_match(match):
+            # The toss decides who bats first, so match.team1 is the batting-first side
+            # here, NOT the fixture's team1 - take the sides from the schedule entry so
+            # the t1_*/t2_* result keys stay aligned with m_data["team1"]/["team2"].
+            t1_name, t2_name = m_data["team1"], m_data["team2"]
+            t1_inn = _TestTeamInnings(match, t1_name)
+            t2_inn = _TestTeamInnings(match, t2_name)
+            result_text = match.result or "Match Drawn"
+            # Engine result strings: "<team> won by ...", "Match Tied", "Match Drawn".
+            # A draw and a tie both take the TIE path (1 point each) - the distinction
+            # only survives in result_text.
+            winner = result_text.split(" won by ")[0] if " won by " in result_text else "TIE"
+            if winner not in (t1_name, t2_name):
+                winner = "TIE"
+            fmt_overs = 90
+            batted_first = match.innings_list[0].batting_team["name"]
         else:
-            t1_inn, t2_inn = match.innings2, match.innings1
+            t1_name, t2_name = match.team1["name"], match.team2["name"]
+            if match.innings1.batting_team["name"] == t1_name:
+                t1_inn, t2_inn = match.innings1, match.innings2
+            else:
+                t1_inn, t2_inn = match.innings2, match.innings1
 
-        target = getattr(match, "target", match.innings1.total_runs + 1)
-        is_tied = (match.innings2.total_runs == target - 1)
+            target = getattr(match, "target", match.innings1.total_runs + 1)
+            is_tied = (match.innings2.total_runs == target - 1)
 
-        if getattr(match, 'tiebreak_winner_name', None):
-            winner = match.tiebreak_winner_name
-        elif is_tied: winner = "TIE"
-        elif match.innings2.total_runs >= target: winner = match.innings2.batting_team["name"]
-        else: winner = match.innings1.batting_team["name"]
+            if getattr(match, 'tiebreak_winner_name', None):
+                winner = match.tiebreak_winner_name
+            elif is_tied: winner = "TIE"
+            elif match.innings2.total_runs >= target: winner = match.innings2.batting_team["name"]
+            else: winner = match.innings1.batting_team["name"]
+            fmt_overs = match.format_overs
+            batted_first = match.innings1.batting_team["name"]
 
         # Knockouts can't end in a draw - break a tie toward team1 (the higher seed / home slot)
         if winner == "TIE" and not isinstance(m_data.get("round"), int) and m_data.get("stage") in ("knockout", None, "acl_playoff", "acl_supercup"):
@@ -4164,7 +4270,7 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
 
         m_data["status"] = "completed"
         m_data["result"] = {
-            "winner": winner, "loser": loser, "format_overs": match.format_overs,
+            "winner": winner, "loser": loser, "format_overs": fmt_overs,
             "t1_runs": t1_inn.total_runs, "t1_wickets": t1_inn.wickets, "t1_balls": t1_inn.total_balls,
             "t2_runs": t2_inn.total_runs, "t2_wickets": t2_inn.wickets, "t2_balls": t2_inn.total_balls,
             "scorecard_players": getattr(match, "_scorecard_players", None),
@@ -4173,11 +4279,16 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
             "ts": int(datetime.datetime.now().timestamp()),
             # Context snapshot (all formats): who batted first + where/on what it was
             # played - feeds the all-time venue stats and survives schedule edits.
-            "batted_first": match.innings1.batting_team["name"],
+            "batted_first": batted_first,
             "stadium": m_data.get("stadium"),
             "pitch": m_data.get("pitch") or match.pitch,
             "weather": m_data.get("weather") or match.weather,
         }
+        # Tests only: the engine's verdict string, the one place a draw is
+        # distinguishable from a tie (both score 1 point) and an innings win from a
+        # runs win. Absent on limited-overs results, where the margin is derivable.
+        if result_text:
+            m_data["result"]["result_text"] = result_text
         tourney["current_match_idx"] += 1
 
         # STATS AGGREGATION
@@ -4205,11 +4316,20 @@ class TournamentCog(commands.GroupCog, group_name="tournament"):
                     b_stat = batting_inn.batting_stats[p_name]
                     _add(team_name, p_name, "runs", b_stat.runs_scored)
                     _add(team_name, p_name, "balls_faced", b_stat.balls_faced)
-                    if b_stat.dismissal != "not out": _add(team_name, p_name, "outs", 1)
                     _add(team_name, p_name, "fours", getattr(b_stat, "fours", 0))
                     _add(team_name, p_name, "sixes", getattr(b_stat, "sixes", 0))
-                    if b_stat.runs_scored >= 100: _add(team_name, p_name, "hundreds", 1)
-                    elif b_stat.runs_scored >= 50: _add(team_name, p_name, "fifties", 1)
+                    # A merged Test view spans two innings, so dismissals and milestones
+                    # are pre-counted there (see _TestTeamInnings); a single limited-overs
+                    # innings derives them from this innings' own total.
+                    _outs = getattr(b_stat, "milestone_outs", None)
+                    if _outs is None:
+                        if b_stat.dismissal != "not out": _add(team_name, p_name, "outs", 1)
+                        if b_stat.runs_scored >= 100: _add(team_name, p_name, "hundreds", 1)
+                        elif b_stat.runs_scored >= 50: _add(team_name, p_name, "fifties", 1)
+                    else:
+                        _add(team_name, p_name, "outs", _outs)
+                        _add(team_name, p_name, "hundreds", b_stat.milestone_hundreds)
+                        _add(team_name, p_name, "fifties", b_stat.milestone_fifties)
             for p_name, bw_stat in bowling_inn.bowling_stats.items():
                 if bw_stat.balls_bowled > 0:
                     tourney["stats"][team_name].setdefault(p_name, dict(_TM_STAT_DEFAULT))

@@ -38,7 +38,7 @@ from engine.test_image import (
     generate_test_summary_image as _ti_summary,
     generate_test_scorecard_image as _ti_scorecard,
 )
-from league.tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_ccodi_round_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, revert_tournament_match, rebuild_tournament_stats, repair_tournament_schedule, _tm_next_mid, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS, SquadConfirmView, build_squad_confirm_text, build_squad_confirm_embed, match_order_gate, MATCH_ORDER_LABELS, build_tournament_summary_embeds, generate_round_robin_schedule, generate_ipl_schedule, ipl_try_advance, build_standings_message, compress_logo_bytes, sanitize_stored_logos, rename_team, EVENT_THEMES, event_theme, event_theme_key, theme_logo_file, generate_theme_points_table
+from league.tournament_manager import get_server_tournament, save_tournament, get_tournament_standings, _build_status_pages, _build_flat_pages, _build_ccodi_round_pages, _build_status_embed, TournamentStatusView, generate_t20wc_points_table, generate_t20wc_super8_table, T20StandingsView, generate_t20wc_knockouts_image, generate_t20wc_match_banner, acl_generate_playoffs, acl_bracket_embed, _acl_get, _acl_try_advance, revert_tournament_match, rebuild_tournament_stats, repair_tournament_schedule, _tm_next_mid, owner_can_launch, build_team_fixtures_embed, generate_acl_points_table, assign_tournament_conditions, canonical_pitch, canonical_weather, ALL_PITCHES, ALL_WEATHER, TournamentLeaderboardView, build_player_stats_embed, find_player_in_tournament, PlayerStatsTeamSelectView, stadiums_enabled, default_stadium_pool, get_stadium_pool, canonical_stadium, reroll_stadiums, DEFAULT_ACL_STADIUMS, SquadConfirmView, build_squad_confirm_text, build_squad_confirm_embed, match_order_gate, MATCH_ORDER_LABELS, build_tournament_summary_embeds, generate_round_robin_schedule, generate_ipl_schedule, ipl_try_advance, build_standings_message, compress_logo_bytes, sanitize_stored_logos, rename_team, EVENT_THEMES, event_theme, event_theme_key, theme_logo_file, generate_theme_points_table, is_test_match as _tm_is_test
 from league.custom_tournament import (
     CustomSetupView, custom_try_advance, custom_start_error, custom_generate_first_stage,
     build_custom_standings_message, custom_config_summary_lines, custom_repair_schedule,
@@ -1430,6 +1430,64 @@ def _run_full_match_sync(match: CricketMatch):
             cstats.record_limited_overs_match(match)
         except Exception as _cs_err:
             print(f"Conditions stats record failed (sim): {_cs_err}")
+
+
+def _run_full_test_sync(match):
+    """Headless Test for `cvt sim` / `simall`. The Test engine records nothing itself
+    (the live path does it in _test_finish_match), so fold in the same global/conditions
+    stats `_run_full_match_sync` does - otherwise a simmed Test would silently skip them."""
+    _test_sim_match(match)
+    try:
+        gstats.record_test_match(match)
+    except Exception as _gs_err:
+        print(f"Global stats record failed (test sim): {_gs_err}")
+    try:
+        cstats.record_test_match(match)
+    except Exception as _cs_err:
+        print(f"Conditions stats record failed (test sim): {_cs_err}")
+
+
+def _test_innings_summary(match, team_name) -> str:
+    """One side's Test innings in scorecard shorthand - '412 & 233/6d'. All-out innings
+    drop the wickets (a Test card writes 412, not 412/10) and a declaration keeps its d."""
+    parts = []
+    for inn in match.innings_list:
+        if inn.batting_team["name"] != team_name:
+            continue
+        s = str(inn.total_runs) if inn.wickets >= 10 else f"{inn.total_runs}/{inn.wickets}"
+        if getattr(inn, "declared", False):
+            s += "d"
+        parts.append(s)
+    return " & ".join(parts) if parts else "did not bat"
+
+
+def _build_tournament_sim_match(tourney, t1, t2, pitch, weather, match_id, manager_id):
+    """Build the headless match object for `cvt sim` / `cvt simall`.
+
+    A Test tournament stores format_overs 90, which is a day's play - not a 90-over
+    innings. Handing that straight to CricketMatch is what made a simmed Test come out
+    as a single 90-over slog, so branch on it here exactly like start_match does and
+    build the Test engine's match instead. Returns (match, runner) where runner is the
+    synchronous simulator to hand to asyncio.to_thread.
+    """
+    fmt = tourney.get("format_overs", 20)
+    t_bat, t_bowl = (t1, t2) if random.random() < 0.5 else (t2, t1)
+    if fmt == 90:
+        match = TestMatchObj(t_bat, t_bowl, pitch, weather, pink_ball=False)
+        match.is_player_test = False
+        runner = _run_full_test_sync
+    else:
+        match = CricketMatch(None, None, 0, 0, t1, t2, fmt, pitch, weather)
+        match.innings1 = InningsState(t_bat, t_bowl)
+        runner = _run_full_match_sync
+    match.tournament_server_id = tourney["server_id"]
+    match.tournament_match_id = match_id
+    match.tournament_type = tourney.get("tournament_type", "round_robin")
+    match.manager_id = manager_id
+    match.tournament_name = tourney["name"]
+    match.sim_only = True
+    match._scorecard_players = None
+    return match, runner
 
 
 def _sim_super_over(match: CricketMatch):
@@ -9084,6 +9142,12 @@ async def _test_finish_match(match: TestMatchObj, channel_id: int, channel):
 
     active_test_matches.pop(channel_id, None)
 
+    # Tournament Test: hand the finished match to the same listener a T20/ODI match
+    # uses, so the fixture is marked completed and stats/points/injuries are recorded.
+    # Dispatched last, after the channel is free, mirroring the limited-overs path.
+    if getattr(match, "tournament_server_id", None):
+        bot.dispatch("tournament_match_complete", match, channel)
+
 
 def _split_text_chunks(text: str, limit: int = 4000) -> list:
     """Break a string into chunks of at most `limit` chars, splitting on newlines."""
@@ -9837,6 +9901,18 @@ async def _begin_test_match(channel, state):
     t2 = {"name": state.t2_name, "players": with_captain(apply_server_overrides(state.t2_roster, _sid)), "color": getattr(state, 't2_color', '#DC2626')}
     weather = state.weather
 
+    def _carry_tournament(m):
+        """Copy the tournament identity off the setup state onto the Test match.
+        Without this a Test launched from `cvt play` finishes as an anonymous match and
+        the fixture is never marked completed - _test_finish_match dispatches the
+        completion event off exactly these attributes."""
+        m.tournament_server_id = getattr(state, "tournament_server_id", None)
+        m.tournament_match_id = getattr(state, "tournament_match_id", None)
+        m.manager_id = getattr(state, "manager_id", None)
+        m.tournament_name = getattr(state, "tournament_name", "TOURNAMENT")
+        m.tournament_type = getattr(state, "tournament_type", None)
+        return m
+
     # sim_only (/simulatematch): fully auto
     if getattr(state, 'sim_only', False):
         winner_team = random.choice([t1, t2])
@@ -9847,7 +9923,7 @@ async def _begin_test_match(channel, state):
         await channel.send(
             f"🪙 **Toss!** **{winner_team['name']}** wins and elects to **{decision}** first!\n"
             f"*Simulating 5-day Test... ⚙️*")
-        match = TestMatchObj(t_bat, t_bowl, state.pitch, weather, pink_ball=getattr(state, "pink_ball", False))
+        match = _carry_tournament(TestMatchObj(t_bat, t_bowl, state.pitch, weather, pink_ball=getattr(state, "pink_ball", False)))
         match.is_player_test = getattr(state, "is_player_test", False)
         active_test_matches[channel.id] = match
         await asyncio.to_thread(_test_sim_match, match)
@@ -9862,7 +9938,7 @@ async def _begin_test_match(channel, state):
     t_bat  = winning_team if state.toss_choice == "Bat" else losing_team
     t_bowl = losing_team  if state.toss_choice == "Bat" else winning_team
 
-    match          = TestMatchObj(t_bat, t_bowl, state.pitch, weather, pink_ball=getattr(state, "pink_ball", False))
+    match          = _carry_tournament(TestMatchObj(t_bat, t_bowl, state.pitch, weather, pink_ball=getattr(state, "pink_ball", False)))
     match.is_player_test = getattr(state, "is_player_test", False)
     match.host_id  = state.p1_id
     match.p2_id    = getattr(state, "p2_id", None)
@@ -17032,20 +17108,11 @@ class PrefixCog(commands.Cog):
             t1 = {"name": m_data["team1"], "players": roster1, "color": t1_data.get("color", "#6B7280")}
             t2 = {"name": m_data["team2"], "players": roster2, "color": t2_data.get("color", "#6B7280")}
 
-            match = CricketMatch(None, None, 0, 0, t1, t2, tourney.get("format_overs", 20), pitch, weather)
-            match.tournament_server_id = tourney["server_id"]
-            match.tournament_match_id = m_data["match_id"]
-            match.tournament_type = tourney.get("tournament_type", "round_robin")
-            match.manager_id = ctx.author.id
-            match.tournament_name = tourney["name"]
-            match.sim_only = True
-            match._scorecard_players = None
-
-            t_bat, t_bowl = (t1, t2) if random.random() < 0.5 else (t2, t1)
-            match.innings1 = InningsState(t_bat, t_bowl)
+            match, _runner = _build_tournament_sim_match(
+                tourney, t1, t2, pitch, weather, m_data["match_id"], ctx.author.id)
 
             try:
-                await asyncio.to_thread(_run_full_match_sync, match)
+                await asyncio.to_thread(_runner, match)
             except Exception as e:
                 errored.add(m_data["match_id"])
                 results.append(f"M{m_data['match_id']} ({r_label}): ❌ Error: {e}")
@@ -17053,11 +17120,14 @@ class PrefixCog(commands.Cog):
 
             # Capture the full scorecard the same way a real match does, so simmed
             # matches also power `cv tournament match_scorecard` (image + text).
-            try:
-                match._scorecard_players = extract_scorecard_players(match)
-            except Exception as _e:
-                print(f"simall scorecard extract failed M{m_data['match_id']}: {_e}")
-                match._scorecard_players = None
+            # Tests are skipped: the extractor is built around two innings, and the
+            # scorecard renderers have no four-innings layout to rebuild into.
+            if not _tm_is_test(match):
+                try:
+                    match._scorecard_players = extract_scorecard_players(match)
+                except Exception as _e:
+                    print(f"simall scorecard extract failed M{m_data['match_id']}: {_e}")
+                    match._scorecard_players = None
 
             # Trigger the existing stats + progression listener directly (sequential, no race)
             from league.tournament_manager import TournamentCog as _TC
@@ -17081,23 +17151,34 @@ class PrefixCog(commands.Cog):
                 injuries_log.extend(_news)
                 injury_suffix = "  🚑 " + ", ".join(f"{it['player']} ({it['team']}, {it['severity']}m)" for it in _news)
 
-            inn1, inn2 = match.innings1, match.innings2
-            if inn2.total_runs >= match.target:
-                win_str = f"{inn2.batting_team['name']} won by {10 - inn2.wickets}W"
+            if _tm_is_test(match):
+                # A Test has no single innings per side, so summarise both and use the
+                # engine's own verdict string (it already distinguishes a draw, a tie,
+                # an innings win and a runs/wickets margin).
+                results.append(
+                    f"**M{m_data['match_id']}** ({r_label}): "
+                    f"{t1['name']} {_test_innings_summary(match, t1['name'])} "
+                    f"vs {t2['name']} {_test_innings_summary(match, t2['name'])} "
+                    f"— **{match.result or 'Match Drawn'}**{injury_suffix}"
+                )
             else:
-                diff = inn1.total_runs - inn2.total_runs
-                win_str = f"{inn1.batting_team['name']} won by {diff}R"
+                inn1, inn2 = match.innings1, match.innings2
+                if inn2.total_runs >= match.target:
+                    win_str = f"{inn2.batting_team['name']} won by {10 - inn2.wickets}W"
+                else:
+                    diff = inn1.total_runs - inn2.total_runs
+                    win_str = f"{inn1.batting_team['name']} won by {diff}R"
 
-            i1o = f"{inn1.total_balls // 6}.{inn1.total_balls % 6}"
-            i2o = f"{inn2.total_balls // 6}.{inn2.total_balls % 6}"
-            results.append(
-                f"**M{m_data['match_id']}** ({r_label}): "
-                f"{t1['name']} {inn1.total_runs if match.innings1.batting_team['name'] == t1['name'] else inn2.total_runs}"
-                f"/{inn1.wickets if match.innings1.batting_team['name'] == t1['name'] else inn2.wickets} "
-                f"vs {t2['name']} {inn2.total_runs if match.innings2.batting_team['name'] == t2['name'] else inn1.total_runs}"
-                f"/{inn2.wickets if match.innings2.batting_team['name'] == t2['name'] else inn1.wickets} "
-                f"— **{win_str}**{injury_suffix}"
-            )
+                i1o = f"{inn1.total_balls // 6}.{inn1.total_balls % 6}"
+                i2o = f"{inn2.total_balls // 6}.{inn2.total_balls % 6}"
+                results.append(
+                    f"**M{m_data['match_id']}** ({r_label}): "
+                    f"{t1['name']} {inn1.total_runs if match.innings1.batting_team['name'] == t1['name'] else inn2.total_runs}"
+                    f"/{inn1.wickets if match.innings1.batting_team['name'] == t1['name'] else inn2.wickets} "
+                    f"vs {t2['name']} {inn2.total_runs if match.innings2.batting_team['name'] == t2['name'] else inn1.total_runs}"
+                    f"/{inn2.wickets if match.innings2.batting_team['name'] == t2['name'] else inn1.wickets} "
+                    f"— **{win_str}**{injury_suffix}"
+                )
 
         header = f"✅ **Simulation Complete! ({len(results)} matches)**\n"
         lines = "\n".join(results)
@@ -17189,28 +17270,23 @@ class PrefixCog(commands.Cog):
         t1 = {"name": m_data["team1"], "players": roster1, "color": t1_data.get("color", "#6B7280")}
         t2 = {"name": m_data["team2"], "players": roster2, "color": t2_data.get("color", "#6B7280")}
 
-        match = CricketMatch(None, None, 0, 0, t1, t2, tourney.get("format_overs", 20), pitch, weather)
-        match.tournament_server_id = tourney["server_id"]
-        match.tournament_match_id = match_id
-        match.tournament_type = tourney.get("tournament_type", "round_robin")
-        match.manager_id = ctx.author.id
-        match.tournament_name = tourney["name"]
-        match.sim_only = True
-        match._scorecard_players = None
-        t_bat, t_bowl = (t1, t2) if random.random() < 0.5 else (t2, t1)
-        match.innings1 = InningsState(t_bat, t_bowl)
+        match, _runner = _build_tournament_sim_match(
+            tourney, t1, t2, pitch, weather, match_id, ctx.author.id)
 
         r_label = f"R{m_data['round']}" if isinstance(m_data['round'], int) else m_data['round']
-        status_msg = await ctx.send(f"⚡ Simulating **Match #{match_id}** ({r_label}) — {t1['name']} ({src1}) vs {t2['name']} ({src2})…")
+        _fmt_note = " · 5-day Test" if _tm_is_test(match) else ""
+        status_msg = await ctx.send(f"⚡ Simulating **Match #{match_id}** ({r_label}){_fmt_note} — {t1['name']} ({src1}) vs {t2['name']} ({src2})…")
         try:
-            await asyncio.to_thread(_run_full_match_sync, match)
+            await asyncio.to_thread(_runner, match)
         except Exception as e:
             return await status_msg.edit(content=f"❌ Simulation failed: {e}")
-        try:
-            match._scorecard_players = extract_scorecard_players(match)
-        except Exception as _e:
-            print(f"cvt sim scorecard extract failed M{match_id}: {_e}")
-            match._scorecard_players = None
+        # Tests keep scorecard_players None - see the same guard in simulate_all.
+        if not _tm_is_test(match):
+            try:
+                match._scorecard_players = extract_scorecard_players(match)
+            except Exception as _e:
+                print(f"cvt sim scorecard extract failed M{match_id}: {_e}")
+                match._scorecard_players = None
 
         tc = self.bot.cogs.get("TournamentCog")
         if tc:
@@ -17241,6 +17317,15 @@ class PrefixCog(commands.Cog):
                 await inj_ch.send("\n".join(rep))
             except Exception as _e:
                 print(f"cvt sim injury report send failed M{match_id}: {_e}")
+
+        if _tm_is_test(match):
+            # Test: both innings per side, and the engine's verdict verbatim. No stored
+            # scorecard to point at, so the card hint is dropped.
+            return await status_msg.edit(content=(
+                f"✅ **Match #{match_id}** ({r_label}) simulated — 5-day Test:\n"
+                f"**{t1['name']}** {_test_innings_summary(match, t1['name'])}  vs  "
+                f"**{t2['name']}** {_test_innings_summary(match, t2['name'])}\n"
+                f"🏆 **{match.result or 'Match Drawn'}**{injury_suffix}"))
 
         inn1, inn2 = match.innings1, match.innings2
         if inn2.total_runs >= match.target:
@@ -18081,9 +18166,14 @@ class PrefixCog(commands.Cog):
         t1_s    = f"{r['t1_runs']}/{r['t1_wickets']}"
         t2_s    = f"{r['t2_runs']}/{r['t2_wickets']}"
         r_label = m.get("round", f"Match {m['match_id']}")
+        # A Test result stores both innings summed, so label it as an aggregate and show
+        # the engine's verdict - "TIE" alone would read as a tie on a drawn Test.
+        _rtxt = r.get("result_text")
+        _agg  = " *(both innings)*" if _rtxt else ""
+        _verdict = f"🏆 **{_rtxt}**" if _rtxt else f"🏆 Winner: **{r['winner']}**"
         embed = discord.Embed(
             title=f"Match #{match_id} — {r_label}",
-            description=f"**{m['team1']}** {t1_s}  vs  **{m['team2']}** {t2_s}\n🏆 Winner: **{r['winner']}**",
+            description=f"**{m['team1']}** {t1_s}  vs  **{m['team2']}** {t2_s}{_agg}\n{_verdict}",
             color=discord.Color.orange()
         )
         embed.set_footer(text=tourney["name"])
@@ -18992,19 +19082,28 @@ class PrefixCog(commands.Cog):
 if __name__ == "__main__":
     import time as _time
 
-    keep_alive()
+    # The keep-alive web server exists ONLY to satisfy PaaS free tiers that kill a
+    # service with no open HTTP port / no inbound traffic (Render, Railway, ...). Those
+    # platforms set PORT; a VPS does not. So: start it when PORT is set, skip it
+    # otherwise. A bot is a long-lived outbound connection, not a web service - on a
+    # VPS under systemd there is nothing to keep awake.
+    if os.environ.get("PORT"):
+        keep_alive()
+    else:
+        print("No PORT set - running as a plain worker process (no keep-alive server).")
 
     TOKEN = os.environ.get("DISCORD_TOKEN")
     if not TOKEN:
-        print("CRITICAL ERROR: DISCORD_TOKEN environment variable is missing from Render!")
+        print("CRITICAL ERROR: DISCORD_TOKEN environment variable is missing!")
     else:
         try:
             bot.run(TOKEN)
         except discord.HTTPException as e:
-            # 429 at login == Cloudflare error 1015 (host IP temporarily rate-limited).
-            # If we exit now, the supervisor (Render) restarts instantly and logs in again,
-            # which KEEPS the ban alive. Instead stay alive and back off ~12 min - the keep_alive
-            # web server keeps the process healthy so Render won't cycle it - letting the ban clear.
+            # 429 at login == Cloudflare error 1015: the HOST'S IP is rate-limited, which
+            # on shared PaaS addresses is usually a neighbour's doing, not ours. Exiting
+            # immediately means the supervisor restarts and logs straight back in, which
+            # keeps the ban alive - so back off first. systemd's RestartSec adds a second
+            # layer of the same protection (see DEPLOY.md).
             if getattr(e, "status", None) == 429:
                 print("429 / Cloudflare 1015 at login: host IP is temporarily rate-limited by Discord.")
                 print("   Backing off ~12 min before exit to avoid a restart storm that sustains the ban.")
